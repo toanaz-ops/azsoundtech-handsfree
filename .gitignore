@@ -1,0 +1,47 @@
+# Build artifacts
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.o
+*.a
+
+# JUCE
+*.jucer
+user.settings
+JUCE/modules/
+
+# IDE / editor
+.vscode/
+.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+
+# Installer output
+installer/output/
+*.msi
+*.exe.manifest
+
+# Secrets & license
+.env
+*.key
+*.lic
+license.key
+
+# Logs & temp
+*.log
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
