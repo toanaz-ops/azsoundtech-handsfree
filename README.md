@@ -9,6 +9,14 @@ Windows standalone audio application for ASIO feedback elimination in live sound
 - CMake 3.22 or later
 - ASIO-compatible audio interface
 
+## ASIO SDK Setup
+
+Due to licensing, ASIO SDK must be downloaded manually:
+
+1. Download ASIO SDK 2.3+ from Steinberg: https://www.steinberg.net/asiosdk
+2. Extract to `external/asiosdk/` (should contain `common/asio.h`)
+3. Re-run CMake configuration
+
 ## Build Instructions
 
 1. Clone the repository with submodules:

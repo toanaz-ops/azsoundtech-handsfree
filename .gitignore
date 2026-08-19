@@ -19,6 +19,9 @@ lib/
 user.settings
 JUCE/modules/
 
+# ASIO SDK (license restriction)
+external/asiosdk/
+
 # IDE / editor
 .vs/
 .vscode/

@@ -9,6 +9,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Add JUCE as subdirectory
 add_subdirectory(external/JUCE)
 
+# ASIO SDK path
+set(JUCE_ASIO_SDK_PATH "${CMAKE_SOURCE_DIR}/external/asiosdk" CACHE PATH "Path to ASIO SDK")
+
+if(EXISTS "${JUCE_ASIO_SDK_PATH}/common/asio.h")
+    message(STATUS "ASIO SDK found at ${JUCE_ASIO_SDK_PATH}")
+    set(JUCE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
+else()
+    message(WARNING "ASIO SDK not found. Download from Steinberg and place in external/asiosdk/")
+endif()
+
 # Create JUCE standalone GUI application
 juce_add_gui_app(HandsFree
     PRODUCT_NAME "AZ Soundtech Hands-free"
