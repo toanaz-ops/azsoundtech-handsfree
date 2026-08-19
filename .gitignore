@@ -20,6 +20,7 @@ user.settings
 JUCE/modules/
 
 # IDE / editor
+.vs/
 .vscode/
 .idea/
 *.sln
@@ -27,6 +28,8 @@ JUCE/modules/
 *.vcxproj.filters
 *.vcxproj.user
 *.user
+*.suo
+*.sln.docstates
 
 # Installer output
 installer/output/
