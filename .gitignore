@@ -45,6 +45,7 @@ license.key
 # Logs & temp
 *.log
 *.tmp
+~*
 *.bak
 Thumbs.db
 .DS_Store
