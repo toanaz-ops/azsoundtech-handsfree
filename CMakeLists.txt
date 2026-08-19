@@ -30,6 +30,12 @@ juce_add_gui_app(HandsFree
 # Source files
 target_sources(HandsFree PRIVATE
     src/main.cpp
+    src/app/MainComponent.cpp
+    src/app/MainComponent.h
+)
+
+target_include_directories(HandsFree PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
 )
 
 # Link JUCE modules
