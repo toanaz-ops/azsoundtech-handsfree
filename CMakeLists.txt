@@ -32,6 +32,11 @@ target_sources(HandsFree PRIVATE
     src/main.cpp
     src/app/MainComponent.cpp
     src/app/MainComponent.h
+    src/dsp/Biquad.cpp
+    src/dsp/Biquad.h
+    src/dsp/NotchChain.cpp
+    src/dsp/NotchChain.h
+    src/dsp/NotchCommand.h
 )
 
 target_include_directories(HandsFree PRIVATE
