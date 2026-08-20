@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 cmake-build-*/
 out/
 bin/
@@ -55,3 +56,4 @@ license.key
 *.bak
 Thumbs.db
 .DS_Store
+.superpowers/
