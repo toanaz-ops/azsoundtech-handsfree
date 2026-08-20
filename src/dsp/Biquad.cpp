@@ -1,0 +1,61 @@
+#include "dsp/Biquad.h"
+
+#include <cmath>
+
+namespace
+{
+    constexpr double kPi = 3.14159265358979323846;
+}
+
+Biquad::Biquad()
+    : b0_(1.0)
+    , b1_(0.0)
+    , b2_(0.0)
+    , a1_(0.0)
+    , a2_(0.0)
+    , z1_(0.0)
+    , z2_(0.0)
+{
+}
+
+void Biquad::setNotchFilter(double freq, double Q, double sampleRate)
+{
+    // RBJ Audio EQ Cookbook -- notch / band-reject.
+    const double omega = 2.0 * kPi * freq / sampleRate;
+    const double alpha = std::sin(omega) / (2.0 * Q);
+    const double cosw  = std::cos(omega);
+
+    const double a0 = 1.0 + alpha;
+
+    // Unnormalised coefficients straight from the cookbook.
+    const double b0 = 1.0;
+    const double b1 = -2.0 * cosw;
+    const double b2 = 1.0;
+    const double a1 = -2.0 * cosw;
+    const double a2 = 1.0 - alpha;
+
+    // Normalise so a0 == 1 -- lets processSample skip one multiply.
+    b0_ = b0 / a0;
+    b1_ = b1 / a0;
+    b2_ = b2 / a0;
+    a1_ = a1 / a0;
+    a2_ = a2 / a0;
+
+    // Filter coefficients changed -- state belongs to the previous design.
+    reset();
+}
+
+double Biquad::processSample(double input)
+{
+    // Direct Form I transposed.
+    const double output = b0_ * input + z1_;
+    z1_ = b1_ * input - a1_ * output + z2_;
+    z2_ = b2_ * input - a2_ * output;
+    return output;
+}
+
+void Biquad::reset()
+{
+    z1_ = 0.0;
+    z2_ = 0.0;
+}

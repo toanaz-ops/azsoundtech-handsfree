@@ -10,7 +10,13 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(HandsFreeTests test_ringbuffer.cpp)
+add_executable(HandsFreeTests
+    test_ringbuffer.cpp
+    test_biquad.cpp
+    test_notchchain.cpp
+    ../src/dsp/Biquad.cpp
+    ../src/dsp/NotchChain.cpp
+)
 
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
