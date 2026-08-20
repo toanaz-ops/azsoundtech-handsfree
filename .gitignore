@@ -57,3 +57,6 @@ license.key
 Thumbs.db
 .DS_Store
 .superpowers/
+
+# Codegraph index (local, regenerable)
+.codegraph/
