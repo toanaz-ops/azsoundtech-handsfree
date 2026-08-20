@@ -45,6 +45,9 @@ installer/output/
 *.lic
 license.key
 
+# Git worktrees (parallel sessions)
+.worktrees/
+
 # Logs & temp
 *.log
 *.tmp
