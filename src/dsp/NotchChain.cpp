@@ -59,6 +59,39 @@ void NotchChain::reset()
     }
 }
 
+void NotchChain::setSampleRate(double sampleRate)
+{
+    // Guard: a non-positive rate is invalid -- leave the chain untouched.
+    if (sampleRate <= 0.0)
+    {
+        return;
+    }
+
+    sampleRate_ = sampleRate;
+
+    // Recompute coefficients for every Active notch from its STORED
+    // NotchInfo (frequency, Q) against the new rate, so an active notch
+    // keeps its intended frequency in Hz across a rate change. Idle notches
+    // need no coefficient work; their stored NotchInfo is retained.
+    for (int i = 0; i < MAX_NOTCHES; ++i)
+    {
+        if (notchInfo_[i].state == NotchState::Active)
+        {
+            filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q, sampleRate_);
+        }
+    }
+
+    // Old filter state is meaningless at a new rate. reset() clears every
+    // filter's state, including Idle ones that may hold stale state from a
+    // previously cleared notch.
+    reset();
+}
+
+double NotchChain::getSampleRate() const
+{
+    return sampleRate_;
+}
+
 const NotchChain::NotchInfo& NotchChain::getNotchInfo(int index) const
 {
     // Out-of-range callers get a reference to a sentinel so we never

@@ -47,6 +47,15 @@ public:
     void   clearNotch(int index);
     void   reset();
 
+    // Sample-rate retarget: recomputes coefficients for every Active notch
+    // against the new rate so each notch keeps its intended frequency in Hz.
+    // Idle notches retain their stored NotchInfo. Called from
+    // audioDeviceAboutToStart() (UI/device thread) BEFORE the audio callback
+    // runs, so it is not real-time critical -- and it never allocates, it
+    // only rewrites the pre-allocated coefficient slots.
+    void   setSampleRate(double sampleRate);
+    double getSampleRate() const;
+
     const NotchInfo& getNotchInfo(int index) const;
     int              getActiveNotchCount() const;
 

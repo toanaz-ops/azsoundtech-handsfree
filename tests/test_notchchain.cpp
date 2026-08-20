@@ -190,3 +190,69 @@ TEST(NotchChain, OutOfRangeIndexIgnored)
     (void)chain.getNotchInfo(-1);
     (void)chain.getNotchInfo(NotchChain::MAX_NOTCHES);
 }
+
+TEST(NotchChain, SetSampleRateKeepsActiveNotchFrequency)
+{
+    // A notch set at 48 kHz must keep its 1000 Hz target after the chain is
+    // retargeted to 96 kHz: setSampleRate() recomputes the coefficients from
+    // the STORED NotchInfo, so a 1000 Hz sine driven at the NEW rate is still
+    // attenuated below the standard threshold, while a control tone one
+    // octave away still passes (the test cannot pass by the filter simply
+    // killing everything).
+    constexpr double kSampleRate48 = 48000.0;
+    constexpr double kSampleRate96 = 96000.0;
+    constexpr double kFreq         = 1000.0;
+
+    NotchChain chain(kSampleRate48);
+    chain.setNotch(0, kFreq, 10.0, -12.0);
+
+    chain.setSampleRate(kSampleRate96);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
+
+    auto atTarget = sineWave(kFreq, kSampleRate96, 8192);
+    for (auto& s : atTarget) s = chain.processSample(s);
+    EXPECT_LT(rms(atTarget, 4096), 0.25);
+
+    auto control = sineWave(2000.0, kSampleRate96, 8192);
+    for (auto& s : control) s = chain.processSample(s);
+    EXPECT_GT(rms(control, 4096) / (1.0 / std::sqrt(2.0)), 0.9);
+
+    EXPECT_EQ(chain.getActiveNotchCount(), 1);
+}
+
+TEST(NotchChain, SetSampleRateIgnoresNonPositive)
+{
+    // A non-positive rate must be a no-op: the stored rate, the active
+    // notches, and the filter behaviour all stay exactly as they were.
+    constexpr double kSampleRate = 48000.0;
+    NotchChain chain(kSampleRate);
+    chain.setNotch(0, 1000.0, 10.0, -12.0);
+
+    chain.setSampleRate(0.0);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate);
+
+    chain.setSampleRate(-96000.0);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate);
+
+    // Behaviour unchanged: 1000 Hz at 48 kHz is still attenuated.
+    auto samples = sineWave(1000.0, kSampleRate, 8192);
+    for (auto& s : samples) s = chain.processSample(s);
+    EXPECT_LT(rms(samples, 4096), 0.25);
+    EXPECT_EQ(chain.getActiveNotchCount(), 1);
+}
+
+TEST(NotchChain, GetSampleRateReflectsConstructorAndSetter)
+{
+    constexpr double kSampleRate44 = 44100.0;
+    constexpr double kSampleRate96 = 96000.0;
+
+    NotchChain chain(kSampleRate44);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate44);
+
+    chain.setSampleRate(kSampleRate96);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
+
+    // Retargeting to the same rate is safe and idempotent.
+    chain.setSampleRate(kSampleRate96);
+    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
+}
