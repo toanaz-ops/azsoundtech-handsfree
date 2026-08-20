@@ -8,11 +8,11 @@ constexpr int kNumChannels = 2;  // stereo in/out
 AudioEngine::AudioEngine()
     : notchChains_ { { NotchChain (48000.0), NotchChain (48000.0) } }
 {
-    // The chains are pre-built at the nominal 48 kHz rate. NotchChain does
-    // not yet expose a way to retarget its sample rate, so if the device
-    // opens at a different rate the coefficients produced by a later
-    // setNotch() call would be computed for 48 kHz. No notches are set in
-    // this task; the fix belongs in NotchChain (see Task 8 report).
+    // The chains are pre-built at the nominal 48 kHz rate.
+    // audioDeviceAboutToStart() retargets each chain to the device's actual
+    // rate via NotchChain::setSampleRate() before any notch is set, so the
+    // coefficients produced by a later setNotch() call always match the
+    // running device (Task 9 Part C).
 }
 
 AudioEngine::~AudioEngine()
@@ -175,14 +175,39 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         for (int n = 0; n < numSamples; ++n)
             output[n] = static_cast<float> (chain.processSample (static_cast<double> (input[n])));
     }
+
+    // Tap the LEFT channel POST-notch -- the signal actually leaving the app
+    // -- in every mode, including Bypass (the detector must still see the
+    // signal when bypassed). Written straight from the already-processed
+    // output buffer in ONE bulk write() per callback: no heap buffer, no
+    // per-sample writes. The detector may be slow or absent: a short write
+    // (or 0) is expected and silently tolerated -- never block, never spin,
+    // never log. If there is no input channel 0, write nothing.
+    if (inputChannelData != nullptr && numInputChannels > 0
+        && inputChannelData[0] != nullptr
+        && outputChannelData != nullptr && outputChannelData[0] != nullptr)
+    {
+        (void) tapBuffer_.write (outputChannelData[0], static_cast<size_t> (numSamples));
+    }
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     if (device != nullptr)
     {
-        currentSampleRate_.store (device->getCurrentSampleRate(), std::memory_order_release);
+        const double sampleRate = device->getCurrentSampleRate();
+        currentSampleRate_.store (sampleRate, std::memory_order_release);
         currentBufferSize_.store (device->getCurrentBufferSizeSamples(), std::memory_order_release);
+
+        // Retarget BOTH notch chains to the device's actual rate. JUCE calls
+        // audioDeviceAboutToStart BEFORE inserting the callback into its
+        // dispatch list, so this runs before the audio thread can touch the
+        // chains -- no synchronization needed. setSampleRate() never
+        // allocates: it only rewrites pre-allocated coefficient slots and
+        // clears filter state. A non-positive rate (should not happen on a
+        // running device) is safely ignored inside setSampleRate().
+        for (auto& chain : notchChains_)
+            chain.setSampleRate (sampleRate);
     }
 
     // Clear any filter state left over from a previous device session so the
