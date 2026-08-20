@@ -30,6 +30,8 @@ juce_add_gui_app(HandsFree
 # Source files
 target_sources(HandsFree PRIVATE
     src/main.cpp
+    src/app/AudioEngine.cpp
+    src/app/AudioEngine.h
     src/app/MainComponent.cpp
     src/app/MainComponent.h
     src/dsp/Biquad.cpp
