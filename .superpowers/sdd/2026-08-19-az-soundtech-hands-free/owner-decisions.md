@@ -312,23 +312,43 @@ thuần. `readCount` chỉ đóng vai trò **cổng chặn**, không phải thư
 
 ## Câu hỏi đang chờ trả lời
 
-### Các câu hỏi thiết kế Lane B còn lại (chưa hỏi)
+### ✅ Năm câu hỏi Lane B — ĐÃ TỰ QUYẾT, không cần ngài
 
-Ghi ra đây để không bị quên, sẽ hỏi lần lượt:
+Kế hoạch parallel execution ghi rõ Lane B phải *"Decide, with reasons, and name
+the alternatives rejected"* — tức là năm câu này là quyết định kỹ thuật, không
+phải quyết định sản phẩm. Đã quyết hết trong design doc
+`docs/superpowers/specs/2026-08-22-audio-detector-bridge-design.md`:
 
-1. **Sức chứa hàng đợi lệnh và xử lý tràn.** Bao nhiêu lệnh notch được drain mỗi
-   callback? `setNotch()` tính lại coefficient (vài phép lượng giác) — drain 64
-   lệnh trong một callback là một đỉnh CPU. Tràn thì đếm như `tapDropCount_` hay
-   xử lý khác?
-2. **Nhịp chạy của detector thread.** Poll theo chu kỳ cố định, hay chờ tín hiệu
-   từ audio thread? (Audio thread không được block, nên signal có rủi ro.)
-3. **Công bố spectrum cho GUI 60 fps (Task 19).** `Spectrum::magnitudes` hiện là
-   con trỏ mượn, hết hạn ngay khi `processLatestBlock()` chạy lần sau. Double
-   buffer, triple buffer, hay seqlock?
-4. **`depthDB` chưa được áp dụng ở đâu cả** — mọi notch hiện là null sâu tối đa.
-   Spec §5.1 yêu cầu 6–24 dB. Sửa toán coefficient trước hay sau khi GUI hiển thị?
-5. **Ngưỡng "tap chết"** (sinh ra từ D-06): bao nhiêu spectrum liên tiếp
-   `readCount == 0` thì đóng băng timer?
+| Câu hỏi cũ | Đã quyết | Ở mục |
+|---|---|---|
+| Sức chứa & drain hàng đợi lệnh | 128 slot, drain tối đa 64/callback (~13 µs / 0.67 ms budget) | §2 |
+| Tràn hàng đợi | **Không mất lệnh.** Producer là detector nên nó *thấy* short write và gửi lại — khác hẳn tap (producer là audio thread, không retry được) | §2 |
+| Nhịp detector thread | Poll `wait(5)`, không cho audio thread signal | §4 |
+| Công bố spectrum | Mutex + copy vào bộ nhớ của caller; **chung một snapshot với notch list** để marker không vẽ đè lên spectrum của thời điểm khác | §5 |
+| Ngưỡng "tap chết" | 250 ms, suy ra từ callback dài nhất hợp lệ (2048 mẫu @ 44.1 kHz = 46.4 ms) | §4 |
+| Thứ tự sửa `depthDB` | **Đã sửa xong** trước GUI — xem mục dưới | §9 |
+
+Cách "đóng băng timer" ngây thơ nhất **là sai**, và đã ghi lại để không ai phát
+minh lại: nếu chỉ cộng thời gian ở những lần poll *có* dữ liệu, thì với poll 5 ms
+và hop 10.67 ms, khoảng một nửa số lần poll khoẻ mạnh cũng không có dữ liệu →
+đồng hồ chạy nửa tốc độ và 30 giây auto-release sẽ mất một phút.
+
+### ⏳ Cần ngài quyết — sáng mai
+
+1. **Duyệt design doc cầu nối** (Lane B). Chưa viết một dòng code cầu nối nào.
+   Ba chỗ đáng phản biện nhất được liệt kê ở §10 của doc:
+   - §1: nguyên tắc "đường GUI không cần lock-free" — mọi thứ phía sau dựa vào nó.
+   - §6: **đi ngược plan Task 13** (không đặt `NotchController` làm member của
+     `AudioEngine`).
+   - §4: hằng số 250 ms và giới hạn buffer size mà nó giả định.
+2. **`CLAUDE.md` chưa được track** và cũng không bị ignore. File xuất hiện trong
+   phiên này (00:51). Commit hay ignore? Lập luận giống hệt D-02.
+3. **Có land 11 method của `AudioEngine`** (Lane C §3) ngay không? Việc này không
+   phụ thuộc Lane B và sẽ mở khoá Task 16/17/18/23 sớm hơn dự kiến.
+4. **Nghe thử `depthDB`.** CLAUDE.md bắt buộc: notch giờ cắt đúng độ sâu yêu cầu
+   thay vì null hoàn toàn. Về mặt toán học đây luôn là **ít suy giảm hơn**, không
+   bao giờ nhiều hơn, nên không tần số nào to hơn bản build cũ — nhưng vẫn cần
+   người nghe ở âm lượng nhỏ trước khi tin.
 
 ---
 
