@@ -1,0 +1,14 @@
+﻿# Re-Review Package - Task 1 Fix Round 1
+
+## Fix Range
+Base: 4a31fb721a51f01c055dfee418030e26181dbfe9
+Head: 833d72cb66409a6572b130b164a88aac674c1abf
+
+## Commit Log
+833d72c fix: add ~* temp file pattern to gitignore
+
+## Diff Stats
+ .gitignore | 1 +  1 file changed, 1 insertion(+)
+
+## Full Diff
+diff --git a/.gitignore b/.gitignore index 2372fdc..974e25b 100644 --- a/.gitignore +++ b/.gitignore @@ -38,13 +38,14 @@ installer/output/    # Secrets & license  .env  *.key  *.lic  license.key    # Logs & temp  *.log  *.tmp +~*  *.bak  Thumbs.db  .DS_Store

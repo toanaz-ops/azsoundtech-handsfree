@@ -56,7 +56,11 @@ license.key
 *.bak
 Thumbs.db
 .DS_Store
-.superpowers/
+
+# .superpowers/ is deliberately TRACKED (owner decision, 2026-08-22).
+# It holds progress.md and every task brief/report -- the project's entire
+# audit trail. Ignoring it meant the record of what was built, verified and
+# disproved lived on one disk and was never pushed. Do not re-add it here.
 
 # Codegraph index (local, regenerable)
 .codegraph/

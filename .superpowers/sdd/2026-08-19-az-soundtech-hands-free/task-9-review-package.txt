@@ -1,0 +1,371 @@
+﻿# Review Package - Task 9
+
+Base: 72dfb94d5da81b65710edf5532a24d41116d833c
+Head: 0f7d48047cb91160cd89eb32e37995bb96a5e47e
+
+## Commit Log
+0f7d480 feat: tap post-notch left channel into lock-free ring buffer
+7c1718a feat: add sample-rate retarget to NotchChain with tests
+
+## Diff Stats
+ src/app/AudioEngine.cpp   | 37 +++++++++++++++++++++-----
+ src/app/AudioEngine.h     | 19 ++++++++++++--
+ src/dsp/NotchChain.cpp    | 33 ++++++++++++++++++++++++
+ src/dsp/NotchChain.h      |  9 +++++++
+ tests/test_notchchain.cpp | 66 +++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 156 insertions(+), 8 deletions(-)
+
+## Full Diff
+diff --git a/src/app/AudioEngine.cpp b/src/app/AudioEngine.cpp
+index 29125b0..3ceee7e 100644
+--- a/src/app/AudioEngine.cpp
++++ b/src/app/AudioEngine.cpp
+@@ -1,25 +1,25 @@
+ #include "app/AudioEngine.h"
+ 
+ namespace
+ {
+ constexpr int kNumChannels = 2;  // stereo in/out
+ }
+ 
+ AudioEngine::AudioEngine()
+     : notchChains_ { { NotchChain (48000.0), NotchChain (48000.0) } }
+ {
+-    // The chains are pre-built at the nominal 48 kHz rate. NotchChain does
+-    // not yet expose a way to retarget its sample rate, so if the device
+-    // opens at a different rate the coefficients produced by a later
+-    // setNotch() call would be computed for 48 kHz. No notches are set in
+-    // this task; the fix belongs in NotchChain (see Task 8 report).
++    // The chains are pre-built at the nominal 48 kHz rate.
++    // audioDeviceAboutToStart() retargets each chain to the device's actual
++    // rate via NotchChain::setSampleRate() before any notch is set, so the
++    // coefficients produced by a later setNotch() call always match the
++    // running device (Task 9 Part C).
+ }
+ 
+ AudioEngine::~AudioEngine()
+ {
+     stop();
+ }
+ 
+ //==============================================================================
+ // Device management
+ 
+@@ -168,28 +168,53 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+             continue;
+         }
+ 
+         // Sample-by-sample processing through the per-channel notch chain.
+         // NotchChain::processSample() never allocates and never locks.
+         NotchChain& chain = notchChains_[static_cast<size_t> (ch)];
+ 
+         for (int n = 0; n < numSamples; ++n)
+             output[n] = static_cast<float> (chain.processSample (static_cast<double> (input[n])));
+     }
++
++    // Tap the LEFT channel POST-notch -- the signal actually leaving the app
++    // -- in every mode, including Bypass (the detector must still see the
++    // signal when bypassed). Written straight from the already-processed
++    // output buffer in ONE bulk write() per callback: no heap buffer, no
++    // per-sample writes. The detector may be slow or absent: a short write
++    // (or 0) is expected and silently tolerated -- never block, never spin,
++    // never log. If there is no input channel 0, write nothing.
++    if (inputChannelData != nullptr && numInputChannels > 0
++        && inputChannelData[0] != nullptr
++        && outputChannelData != nullptr && outputChannelData[0] != nullptr)
++    {
++        (void) tapBuffer_.write (outputChannelData[0], static_cast<size_t> (numSamples));
++    }
+ }
+ 
+ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
+ {
+     if (device != nullptr)
+     {
+-        currentSampleRate_.store (device->getCurrentSampleRate(), std::memory_order_release);
++        const double sampleRate = device->getCurrentSampleRate();
++        currentSampleRate_.store (sampleRate, std::memory_order_release);
+         currentBufferSize_.store (device->getCurrentBufferSizeSamples(), std::memory_order_release);
++
++        // Retarget BOTH notch chains to the device's actual rate. JUCE calls
++        // audioDeviceAboutToStart BEFORE inserting the callback into its
++        // dispatch list, so this runs before the audio thread can touch the
++        // chains -- no synchronization needed. setSampleRate() never
++        // allocates: it only rewrites pre-allocated coefficient slots and
++        // clears filter state. A non-positive rate (should not happen on a
++        // running device) is safely ignored inside setSampleRate().
++        for (auto& chain : notchChains_)
++            chain.setSampleRate (sampleRate);
+     }
+ 
+     // Clear any filter state left over from a previous device session so the
+     // DSP starts from a clean slate.
+     for (auto& chain : notchChains_)
+         chain.reset();
+ }
+ 
+ void AudioEngine::audioDeviceStopped()
+ {
+diff --git a/src/app/AudioEngine.h b/src/app/AudioEngine.h
+index ccc27a2..8470e8c 100644
+--- a/src/app/AudioEngine.h
++++ b/src/app/AudioEngine.h
+@@ -6,27 +6,31 @@
+ // the input is passed straight through.
+ //
+ // Threading model:
+ //   - start()/stop()/setMode()/configuration and query methods: UI/message
+ //     thread.
+ //   - audioDeviceIOCallback(): real-time audio thread. It performs NO heap
+ //     allocation and takes NO locks. All cross-thread state (mode, running
+ //     flag, sample rate, buffer size) is exchanged via std::atomic only, so
+ //     the audio thread never blocks on a mutex.
+ //
+-// The ring-buffer tap for the detector thread is deliberately NOT wired here;
+-// Task 9 ("passthrough with tap") adds it on top of this class.
++// The post-notch left-channel tap (Task 9) is written into tapBuffer_ -- an
++// SPSC lock-free ring buffer -- once per callback, in every mode including
++// Bypass. The audio thread is the sole producer; the detector thread (Task
++// 10) is the sole consumer and reads 1024-sample blocks with a 512-sample
++// hop from it.
+ 
+ #pragma once
+ 
+ #include <JuceHeader.h>
+ 
++#include "dsp/LockFreeRingBuffer.h"
+ #include "dsp/NotchChain.h"
+ 
+ #include <array>
+ #include <atomic>
+ 
+ class AudioEngine : public juce::AudioIODeviceCallback
+ {
+ public:
+     enum class Mode
+     {
+@@ -48,38 +52,49 @@ public:
+     void setAudioDevice(const juce::String& deviceName);
+     juce::String getCurrentDeviceName() const;
+     juce::String getCurrentSampleRate() const;
+     int getCurrentBufferSize() const;
+     double getCurrentLatency() const;
+ 
+     // Mode control
+     void setMode(Mode mode);
+     Mode getMode() const;
+ 
++    // Tap: post-notch LEFT channel, written once per callback into an SPSC
++    // ring buffer. Read side belongs to the detector thread (Task 10).
++    LockFreeRingBuffer<float>& getTapBuffer();
++
+     // AudioIODeviceCallback interface
+     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
+     // audioDeviceIOCallbackWithContext; see Task 8 report.)
+     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
+                                           int numInputChannels,
+                                           float* const* outputChannelData,
+                                           int numOutputChannels,
+                                           int numSamples,
+                                           const juce::AudioIODeviceCallbackContext& context) override;
+ 
+     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
+     void audioDeviceStopped() override;
+     void audioDeviceError(const juce::String& errorMessage) override;
+ 
+ private:
+     juce::AudioDeviceManager deviceManager_;
+     std::array<NotchChain, 2> notchChains_;  // L=0, R=1
+ 
++    // Post-notch left-channel tap (SPSC ring buffer, lock-free). The audio
++    // callback is the single producer; the detector thread is the single
++    // consumer. Pre-allocated at construction; write() never blocks and
++    // silently drops whatever does not fit.
++    static constexpr size_t kTapCapacity = 8192;  // ~170 ms @ 48 kHz, power of 2
++    LockFreeRingBuffer<float> tapBuffer_ { kTapCapacity };
++
+     // Cross-thread state. std::atomic keeps the audio callback lock-free and
+     // allocation-free while still letting the UI thread observe/change mode,
+     // the running flag and the device parameters.
+     std::atomic<Mode>   currentMode_      { Mode::Bypass };
+     std::atomic<double> currentSampleRate_ { 48000.0 };
+     std::atomic<int>    currentBufferSize_ { 64 };
+     std::atomic<bool>   isRunning_        { false };
+ 
+     // Preferences applied on the next start(). Default type is ASIO; if the
+     // driver is not registered, JUCE silently keeps the current type.
+diff --git a/src/dsp/NotchChain.cpp b/src/dsp/NotchChain.cpp
+index 920c864..4a22848 100644
+--- a/src/dsp/NotchChain.cpp
++++ b/src/dsp/NotchChain.cpp
+@@ -52,20 +52,53 @@ void NotchChain::clearNotch(int index)
+ }
+ 
+ void NotchChain::reset()
+ {
+     for (int i = 0; i < MAX_NOTCHES; ++i)
+     {
+         filters_[i].reset();
+     }
+ }
+ 
++void NotchChain::setSampleRate(double sampleRate)
++{
++    // Guard: a non-positive rate is invalid -- leave the chain untouched.
++    if (sampleRate <= 0.0)
++    {
++        return;
++    }
++
++    sampleRate_ = sampleRate;
++
++    // Recompute coefficients for every Active notch from its STORED
++    // NotchInfo (frequency, Q) against the new rate, so an active notch
++    // keeps its intended frequency in Hz across a rate change. Idle notches
++    // need no coefficient work; their stored NotchInfo is retained.
++    for (int i = 0; i < MAX_NOTCHES; ++i)
++    {
++        if (notchInfo_[i].state == NotchState::Active)
++        {
++            filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q, sampleRate_);
++        }
++    }
++
++    // Old filter state is meaningless at a new rate. reset() clears every
++    // filter's state, including Idle ones that may hold stale state from a
++    // previously cleared notch.
++    reset();
++}
++
++double NotchChain::getSampleRate() const
++{
++    return sampleRate_;
++}
++
+ const NotchChain::NotchInfo& NotchChain::getNotchInfo(int index) const
+ {
+     // Out-of-range callers get a reference to a sentinel so we never
+     // dereference past the array. The sentinel is a static so it lives
+     // for the program's lifetime; reading it is always safe.
+     static const NotchInfo kSentinel{};
+     if (index < 0 || index >= MAX_NOTCHES)
+     {
+         return kSentinel;
+     }
+diff --git a/src/dsp/NotchChain.h b/src/dsp/NotchChain.h
+index 8c48911..93cd40d 100644
+--- a/src/dsp/NotchChain.h
++++ b/src/dsp/NotchChain.h
+@@ -40,18 +40,27 @@ public:
+         NotchState state     = NotchState::Idle;
+     };
+ 
+     explicit NotchChain(double sampleRate);
+ 
+     double processSample(double input);
+     void   setNotch(int index, double freq, double Q, double depthDB);
+     void   clearNotch(int index);
+     void   reset();
+ 
++    // Sample-rate retarget: recomputes coefficients for every Active notch
++    // against the new rate so each notch keeps its intended frequency in Hz.
++    // Idle notches retain their stored NotchInfo. Called from
++    // audioDeviceAboutToStart() (UI/device thread) BEFORE the audio callback
++    // runs, so it is not real-time critical -- and it never allocates, it
++    // only rewrites the pre-allocated coefficient slots.
++    void   setSampleRate(double sampleRate);
++    double getSampleRate() const;
++
+     const NotchInfo& getNotchInfo(int index) const;
+     int              getActiveNotchCount() const;
+ 
+ private:
+     double                       sampleRate_;
+     std::array<Biquad,    MAX_NOTCHES> filters_;
+     std::array<NotchInfo, MAX_NOTCHES> notchInfo_;
+ };
+\ No newline at end of file
+diff --git a/tests/test_notchchain.cpp b/tests/test_notchchain.cpp
+index f7c2bf0..545ca4b 100644
+--- a/tests/test_notchchain.cpp
++++ b/tests/test_notchchain.cpp
+@@ -182,11 +182,77 @@ TEST(NotchChain, OutOfRangeIndexIgnored)
+ 
+     chain.clearNotch(-1);
+     chain.clearNotch(NotchChain::MAX_NOTCHES);
+ 
+     EXPECT_EQ(chain.getActiveNotchCount(), 1);
+ 
+     // getNotchInfo on out-of-range must be safe too -- we don't dictate
+     // the return value, only that the call doesn't crash.
+     (void)chain.getNotchInfo(-1);
+     (void)chain.getNotchInfo(NotchChain::MAX_NOTCHES);
++}
++
++TEST(NotchChain, SetSampleRateKeepsActiveNotchFrequency)
++{
++    // A notch set at 48 kHz must keep its 1000 Hz target after the chain is
++    // retargeted to 96 kHz: setSampleRate() recomputes the coefficients from
++    // the STORED NotchInfo, so a 1000 Hz sine driven at the NEW rate is still
++    // attenuated below the standard threshold, while a control tone one
++    // octave away still passes (the test cannot pass by the filter simply
++    // killing everything).
++    constexpr double kSampleRate48 = 48000.0;
++    constexpr double kSampleRate96 = 96000.0;
++    constexpr double kFreq         = 1000.0;
++
++    NotchChain chain(kSampleRate48);
++    chain.setNotch(0, kFreq, 10.0, -12.0);
++
++    chain.setSampleRate(kSampleRate96);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
++
++    auto atTarget = sineWave(kFreq, kSampleRate96, 8192);
++    for (auto& s : atTarget) s = chain.processSample(s);
++    EXPECT_LT(rms(atTarget, 4096), 0.25);
++
++    auto control = sineWave(2000.0, kSampleRate96, 8192);
++    for (auto& s : control) s = chain.processSample(s);
++    EXPECT_GT(rms(control, 4096) / (1.0 / std::sqrt(2.0)), 0.9);
++
++    EXPECT_EQ(chain.getActiveNotchCount(), 1);
++}
++
++TEST(NotchChain, SetSampleRateIgnoresNonPositive)
++{
++    // A non-positive rate must be a no-op: the stored rate, the active
++    // notches, and the filter behaviour all stay exactly as they were.
++    constexpr double kSampleRate = 48000.0;
++    NotchChain chain(kSampleRate);
++    chain.setNotch(0, 1000.0, 10.0, -12.0);
++
++    chain.setSampleRate(0.0);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate);
++
++    chain.setSampleRate(-96000.0);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate);
++
++    // Behaviour unchanged: 1000 Hz at 48 kHz is still attenuated.
++    auto samples = sineWave(1000.0, kSampleRate, 8192);
++    for (auto& s : samples) s = chain.processSample(s);
++    EXPECT_LT(rms(samples, 4096), 0.25);
++    EXPECT_EQ(chain.getActiveNotchCount(), 1);
++}
++
++TEST(NotchChain, GetSampleRateReflectsConstructorAndSetter)
++{
++    constexpr double kSampleRate44 = 44100.0;
++    constexpr double kSampleRate96 = 96000.0;
++
++    NotchChain chain(kSampleRate44);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate44);
++
++    chain.setSampleRate(kSampleRate96);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
++
++    // Retargeting to the same rate is safe and idempotent.
++    chain.setSampleRate(kSampleRate96);
++    EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
+ }
+\ No newline at end of file
+
