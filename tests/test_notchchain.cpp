@@ -9,6 +9,7 @@
 #include "dsp/NotchChain.h"
 #include "dsp/Biquad.h"
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -255,4 +256,121 @@ TEST(NotchChain, GetSampleRateReflectsConstructorAndSetter)
     // Retargeting to the same rate is safe and idempotent.
     chain.setSampleRate(kSampleRate96);
     EXPECT_DOUBLE_EQ(chain.getSampleRate(), kSampleRate96);
+}
+// A2 -- the reviewer's exact divergence case.
+//
+// A notch at 30 kHz is perfectly legal at 96 kHz (Nyquist 48 kHz). Retargeting
+// the chain to 44.1 kHz puts it ABOVE the new Nyquist of 22.05 kHz:
+//
+//   omega = 2*pi*30000/44100 = 4.274276  (> pi)
+//   sin(omega)               = -0.905554
+//   alpha = sin(omega)/(2*10)= -0.0452777
+//   pole radius = sqrt((1 - alpha)/(1 + alpha))
+//               = sqrt(1.0452777/0.9547223) = 1.046351   > 1  -> divergent
+//
+// A double-precision reference run of the UNGUARDED coefficients over an
+// impulse followed by 1000 zeros crosses |y| > 1e3 at sample 208 (4.7 ms at
+// 44.1 kHz -- the reviewer's figure) and peaks at 4.11e18. The guard must
+// deactivate the notch instead, leaving the chain a pass-through whose peak
+// output for a unit impulse is exactly 1.0. The 2.0 bound therefore has
+// eighteen orders of magnitude of headroom and cannot be flaky.
+TEST(NotchChain, RetargetDeactivatesNotchAboveNewNyquist)
+{
+    constexpr double kSampleRate96 = 96000.0;
+    constexpr double kSampleRate44 = 44100.0;
+    constexpr double kFreq         = 30000.0;
+
+    NotchChain chain(kSampleRate96);
+    chain.setNotch(0, kFreq, 10.0, -12.0);
+    ASSERT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+
+    chain.setSampleRate(kSampleRate44);
+
+    // Deactivated, but its parameters are RETAINED so it can come back if the
+    // device rate goes up again.
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Idle);
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).frequency, kFreq);
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).Q, 10.0);
+    EXPECT_EQ(chain.getActiveNotchCount(), 0);
+
+    // The assertion that actually matters: no divergence.
+    double peak = std::abs(chain.processSample(1.0));
+    for (int i = 0; i < 1000; ++i)
+    {
+        peak = std::max(peak, std::abs(chain.processSample(0.0)));
+    }
+    EXPECT_LT(peak, 2.0) << "peak |output| over impulse + 1000 zeros = " << peak;
+}
+
+// The deactivation must be surgical, not a blanket clear: a notch that still
+// fits under the new Nyquist keeps working. 1 kHz at 44.1 kHz gives
+// alpha = sin(2*pi*1000/44100)/(2*10) = 0.0071049, pole radius 0.992932.
+// Reference simulation, 8192 samples, RMS over the second half:
+//   at 1000 Hz -> 3.77e-14  (assert < 0.25)
+//   at 2000 Hz -> ratio to 1/sqrt(2) = 0.99781  (assert > 0.9)
+TEST(NotchChain, RetargetKeepsNotchThatStillFits)
+{
+    constexpr double kSampleRate96 = 96000.0;
+    constexpr double kSampleRate44 = 44100.0;
+    constexpr double kFreq         = 1000.0;
+
+    NotchChain chain(kSampleRate96);
+    chain.setNotch(0, kFreq, 10.0, -12.0);
+
+    chain.setSampleRate(kSampleRate44);
+
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+    EXPECT_EQ(chain.getActiveNotchCount(), 1);
+
+    auto atTarget = sineWave(kFreq, kSampleRate44, 8192);
+    for (auto& s : atTarget) s = chain.processSample(s);
+    EXPECT_LT(rms(atTarget, 4096), 0.25);
+
+    chain.reset();
+    auto control = sineWave(2000.0, kSampleRate44, 8192);
+    for (auto& s : control) s = chain.processSample(s);
+    EXPECT_GT(rms(control, 4096) / (1.0 / std::sqrt(2.0)), 0.9);
+}
+
+// The mixed case, because a real chain holds both kinds at once: the 30 kHz
+// notch goes Idle while the 1 kHz notch in the next slot keeps its frequency.
+TEST(NotchChain, RetargetDeactivatesOnlyTheNotchesThatNoLongerFit)
+{
+    NotchChain chain(96000.0);
+    chain.setNotch(0, 30000.0, 10.0, -12.0);
+    chain.setNotch(1, 1000.0, 10.0, -12.0);
+    ASSERT_EQ(chain.getActiveNotchCount(), 2);
+
+    chain.setSampleRate(44100.0);
+
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Idle);
+    EXPECT_EQ(chain.getNotchInfo(1).state, NotchChain::NotchState::Active);
+    EXPECT_EQ(chain.getActiveNotchCount(), 1);
+
+    auto atTarget = sineWave(1000.0, 44100.0, 8192);
+    for (auto& s : atTarget) s = chain.processSample(s);
+    EXPECT_LT(rms(atTarget, 4096), 0.25);
+}
+
+// setNotch must not accept a frequency the biquad rejects. Without this the
+// slot would go Active while filters_[index] still held whatever coefficients
+// were there before -- a notch reported at 30 kHz that actually filters
+// something else entirely.
+TEST(NotchChain, SetNotchIgnoresParametersTheBiquadRejects)
+{
+    constexpr double kSampleRate = 48000.0;
+    NotchChain chain(kSampleRate);
+
+    chain.setNotch(0, 30000.0, 10.0, -12.0);   // above Nyquist (24 kHz)
+    chain.setNotch(1, 1000.0, 0.0, -12.0);     // Q == 0 -> NaN coefficients
+    EXPECT_EQ(chain.getActiveNotchCount(), 0);
+
+    // Chain is still a clean pass-through, and nothing is NaN.
+    auto samples = sineWave(1000.0, kSampleRate, 8192);
+    for (auto& s : samples)
+    {
+        s = chain.processSample(s);
+        ASSERT_TRUE(std::isfinite(s));
+    }
+    EXPECT_NEAR(rms(samples, 4096), 1.0 / std::sqrt(2.0), 1e-3);
 }

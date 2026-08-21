@@ -43,12 +43,21 @@ public:
     explicit NotchChain(double sampleRate);
 
     double processSample(double input);
+
+    // Installs a notch in `index`. If the biquad rejects the parameters
+    // (sampleRate <= 0, Q <= 0, freq <= 0, or freq >= sampleRate/2 -- see
+    // Biquad.h) the slot is left untouched and stays whatever it was.
     void   setNotch(int index, double freq, double Q, double depthDB);
     void   clearNotch(int index);
     void   reset();
 
     // Sample-rate retarget: recomputes coefficients for every Active notch
     // against the new rate so each notch keeps its intended frequency in Hz.
+    // Any Active notch whose frequency is no longer below the NEW Nyquist is
+    // DEACTIVATED rather than clamped -- its stored NotchInfo is kept so it
+    // can be reinstated if the rate goes back up. Retargeting such a notch
+    // blind would place its poles outside the unit circle and the chain
+    // would diverge (Biquad.h has the derivation and the measured numbers).
     // Idle notches retain their stored NotchInfo. Called from
     // audioDeviceAboutToStart() (UI/device thread) BEFORE the audio callback
     // runs, so it is not real-time critical -- and it never allocates, it

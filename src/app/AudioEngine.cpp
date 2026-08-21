@@ -140,6 +140,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext&)
 {
+    // FTZ/DAZ for the whole callback. Must be the FIRST statement.
+    //
+    // A notch biquad at Q=10 has poles at radius ~0.9935. On digital silence
+    // -- an engineer muting the mic after soundcheck -- the Direct-Form state
+    // decays into the subnormal range after ~108,000 samples and then never
+    // reaches zero: the smallest positive double is 4.94e-324 and
+    // 0.9935 * 4.94e-324 rounds straight back to 4.94e-324, so the feedback
+    // term sustains a permanent subnormal limit cycle. Subnormal SSE
+    // arithmetic traps to microcode.
+    //
+    // Measured here, 16 active notches, Release build, steady state:
+    // 77 ms of CPU per second of audio with denormals enabled versus 0.9 ms
+    // with them flushed -- an ~80x penalty that at a 32-sample ASIO buffer
+    // eats a third of the callback budget and makes xruns likely. The only
+    // other escape is Biquad::reset(), which only happens on device restart.
+    //
+    // ScopedNoDenormals sets FTZ/DAZ in MXCSR for this scope and restores the
+    // previous value on exit. It costs two register writes per callback and
+    // nothing per sample. (Verified 2026-08-21 that the build sets no /fp:fast
+    // and no FTZ flag anywhere: CMAKE_CXX_FLAGS_RELEASE is /O2 /Ob2 /DNDEBUG
+    // and juce_recommended_config_flags adds only /Ox /MP /EHsc.)
+    // tests/test_biquad.cpp SilenceDoesNotLeaveDenormalState pins both halves.
+    const juce::ScopedNoDenormals noDenormals;
+
     // Real-time thread: no allocation, no locking. The only shared state read
     // here is the mode, via a lock-free atomic.
     const bool bypass = (currentMode_.load (std::memory_order_acquire) == Mode::Bypass);

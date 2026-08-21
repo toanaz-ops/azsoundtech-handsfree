@@ -181,7 +181,12 @@ Phần mềm standalone Windows giúp loại bỏ feedback (howling) trong live 
 ## 8. Lỗi & Edge cases
 
 - ASIO device bị ngắt giữa show: app hiển thị banner "Audio device disconnected", audio mute, không crash.
-- Sample rate thay đổi: clear notch, re-init.
+- Sample rate thay đổi: **retarget** các notch đang Active — coefficient được
+  tính lại theo rate mới để mỗi notch giữ nguyên tần số tính bằng Hz. Notch
+  nào có tần số không còn nằm dưới Nyquist mới thì bị **deactivate** (giữ lại
+  tham số đã lưu để có thể khôi phục nếu rate tăng trở lại), không clamp về
+  sát Nyquist. Lý do: khi thiết bị audio đổi rate, môi trường âm học không
+  đổi — một notch đã đúng trước khi đổi rate thì vẫn còn đúng sau đó.
 - CPU overload: hiển thị warning nếu audio thread > 70% (dù JUCE có reporting).
 - License hết hạn / chưa activate: hiển thị dialog ngay khi mở app, không vào main UI cho đến khi activate (offline grace 7 ngày).
 - Không tìm thấy ASIO device: hiển thị hướng dẫn cài driver.

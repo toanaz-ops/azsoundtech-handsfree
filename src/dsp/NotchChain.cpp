@@ -33,7 +33,15 @@ void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
     // (currently unused at the biquad level -- a future revision can
     // apply it as a post-filter gain), but we still record it so callers
     // and tests can see what was requested.
-    filters_[index].setNotchFilter(freq, Q, sampleRate_);
+    //
+    // If the biquad rejects the parameters (see Biquad.h) the slot is left
+    // COMPLETELY untouched. Activating it anyway would mark the slot Active
+    // while filters_[index] still held whatever design was there before, so
+    // the chain would report a notch at one frequency and filter another.
+    if (! filters_[index].setNotchFilter(freq, Q, sampleRate_))
+    {
+        return;
+    }
 
     notchInfo_[index].frequency = freq;
     notchInfo_[index].Q         = Q;
@@ -73,11 +81,30 @@ void NotchChain::setSampleRate(double sampleRate)
     // NotchInfo (frequency, Q) against the new rate, so an active notch
     // keeps its intended frequency in Hz across a rate change. Idle notches
     // need no coefficient work; their stored NotchInfo is retained.
+    //
+    // NYQUIST GUARD. A notch that was legal at the old rate can sit above
+    // the new Nyquist -- 30 kHz is fine at 96 kHz and impossible at 44.1 kHz
+    // -- and replaying it blind would install poles outside the unit circle
+    // and turn the chain into a divergent oscillator feeding the PA (see the
+    // derivation in Biquad.h). Biquad::setNotchFilter refuses those
+    // parameters, and when it does we DEACTIVATE the slot.
+    //
+    // We deliberately do NOT clamp the notch to just under the new Nyquist.
+    // A notch that silently moves to a frequency that never rang is worse
+    // than an absent one: the engineer sees the app filtering something it
+    // never heard and stops trusting it. Anything above ~22 kHz was not
+    // audible feedback in the first place.
+    //
+    // The stored NotchInfo is retained on deactivation, so if the device
+    // goes back to a higher rate the notch can be reinstated as-is.
     for (int i = 0; i < MAX_NOTCHES; ++i)
     {
         if (notchInfo_[i].state == NotchState::Active)
         {
-            filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q, sampleRate_);
+            if (! filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q, sampleRate_))
+            {
+                notchInfo_[i].state = NotchState::Idle;
+            }
         }
     }
 

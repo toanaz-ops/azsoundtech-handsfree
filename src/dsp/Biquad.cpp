@@ -18,8 +18,31 @@ Biquad::Biquad()
 {
 }
 
-void Biquad::setNotchFilter(double freq, double Q, double sampleRate)
+bool Biquad::setNotchFilter(double freq, double Q, double sampleRate)
 {
+    // Parameter validation FIRST -- see the stability derivation in Biquad.h.
+    // Every rejected case produces poles at radius >= 1 or NaN coefficients,
+    // and the filter is left exactly as it was rather than half-written.
+    //
+    // Allocation-free, branch-only, no logging and no exceptions: this may be
+    // reached from the audio thread via NotchChain::setNotch().
+    if (sampleRate <= 0.0)
+    {
+        return false;
+    }
+    if (Q <= 0.0)
+    {
+        return false;
+    }
+    if (freq <= 0.0)
+    {
+        return false;
+    }
+    if (freq >= 0.5 * sampleRate)
+    {
+        return false;
+    }
+
     // RBJ Audio EQ Cookbook -- notch / band-reject.
     const double omega = 2.0 * kPi * freq / sampleRate;
     const double alpha = std::sin(omega) / (2.0 * Q);
@@ -43,6 +66,7 @@ void Biquad::setNotchFilter(double freq, double Q, double sampleRate)
 
     // Filter coefficients changed -- state belongs to the previous design.
     reset();
+    return true;
 }
 
 double Biquad::processSample(double input)
