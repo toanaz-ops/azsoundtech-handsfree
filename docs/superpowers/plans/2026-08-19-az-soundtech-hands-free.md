@@ -123,9 +123,28 @@ _Already fully detailed with tests above._
 
 **Algorithm:**
 ```cpp
-double peakiness = binMag / mean(neighbors ± 2 bins);
+// Neighbourhood is an ANNULUS: the six bins at offsets ±3, ±4, ±5.
+// Offsets 0, ±1, ±2 are the Hann main lobe and are EXCLUDED.
+double peakiness = binMag / mean(bins at ±3, ±4, ±5);
 if (peakiness > 10.0) candidateScore += 0.5;
 ```
+
+**Correction (applied in Task 11).** This task originally specified
+`mean(neighbors ± 2 bins)`, matching spec §5.2 step 4. That is wrong for this
+pipeline: Task 10 applies a Hann window, whose main lobe is **four bins wide**
+(bin ±1 carries ~0.50 of the peak), so the ±2 neighbourhood measures the tone
+against itself and peakiness has a hard ceiling of **4.0**. Measured at the old
+radius: on-bin tone 3.99, 1 kHz tone 3.29, broadband noise up to 3.46 — noise
+outscored the tone and the 10.0 threshold could never fire. With the ±3..±5
+annulus the 1 kHz tone scores **131.7** and the worst noise-only bin over 60
+seeds is **7.35**, with zero false candidates. **`10.0` is unchanged** — the
+radius was the defect, not the constant.
+
+**Known v1 limitation.** The annulus needs five bins of headroom on both sides,
+so the lowest scoreable bin is 5 = **234 Hz at 48 kHz**. The `100 Hz` minimum
+in spec §5.2 step 4 is therefore NOT reached and the detector is blind below
+~234 Hz (~215 Hz at 44.1 kHz, ~469 Hz at 96 kHz). Documented in
+`src/dsp/PeakinessAnalyzer.h`.
 
 ### Task 12: Harmonic-Aware Detection
 

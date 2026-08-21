@@ -37,28 +37,29 @@ float PeakinessAnalyzer::peakinessAt (const float* magnitudes, int numBins, int 
         return 0.0f;
     }
 
-    // A bin without a full +-kNeighbourRadius neighbourhood has no defined
-    // peakiness. Reporting a partial-neighbourhood ratio would make the edges
-    // of the spectrum systematically peakier than the middle.
-    if (bin < kNeighbourRadius || bin > numBins - 1 - kNeighbourRadius)
+    // A bin without a full annulus on BOTH sides has no defined peakiness.
+    // Reporting a partial-neighbourhood ratio would make the edges of the
+    // spectrum systematically peakier than the middle. The OUTER radius is
+    // what binds here -- an annulus is only complete once its farthest bin is
+    // in range.
+    if (bin < kNeighbourOuterRadius || bin > numBins - 1 - kNeighbourOuterRadius)
     {
         return 0.0f;
     }
 
-    // Mean of the FOUR neighbours at -2, -1, +1, +2. The centre bin is
-    // deliberately excluded (spec 5.2 step 4): including it would pull every
-    // result toward 1.0 and flatten the range the threshold discriminates on.
+    // Mean of the SIX bins at offsets -5, -4, -3, +3, +4, +5. Offsets 0, +-1
+    // and +-2 are skipped: a Hann main lobe is four bins wide, so those bins
+    // are the tone itself (bin+-1 carries ~0.50 of the peak) and averaging
+    // them in would measure the tone against itself -- the defect that capped
+    // the original spec formula at 4.0. See PeakinessAnalyzer.h.
     float sum = 0.0f;
-    for (int offset = -kNeighbourRadius; offset <= kNeighbourRadius; ++offset)
+    for (int offset = kNeighbourInnerRadius; offset <= kNeighbourOuterRadius; ++offset)
     {
-        if (offset == 0)
-        {
-            continue;
-        }
+        sum += magnitudes[bin - offset];
         sum += magnitudes[bin + offset];
     }
 
-    const float mean = sum / static_cast<float> (2 * kNeighbourRadius);
+    const float mean = sum / static_cast<float> (kNeighbourCount);
 
     // Silence gives an all-zero spectrum, so this is 0/0 = NaN, and an isolated
     // spike on a silent floor is x/0 = +infinity. NaN compares false against
@@ -87,22 +88,25 @@ PeakinessAnalyzer::Result PeakinessAnalyzer::analyse (const Detector::Spectrum& 
     const float* const mags     = spectrum.magnitudes;
     const double       binWidth = spectrum.sampleRate / static_cast<double> (Detector::kFftSize);
 
-    // The last bin that still has a full neighbourhood.
-    const int lastBin = Detector::kNumBins - 1 - kNeighbourRadius;
+    // The last bin that still has a full annulus.
+    const int lastBin = Detector::kNumBins - 1 - kNeighbourOuterRadius;
 
     // The minimum bin is DERIVED from the spectrum's own sample rate -- the app
     // supports 44.1/48/88.2/96 kHz, so a hardcoded bin index would silently
     // mean a different frequency at every rate.
     const double firstBinExact = std::ceil (minFrequencyHz_ / binWidth);
 
-    int firstBin = kNeighbourRadius;
+    // At every supported rate kNeighbourOuterRadius, not minFrequencyHz_, is
+    // what binds: 5 * 48000/1024 = 234.375 Hz, well above the 100 Hz default.
+    // That blind spot is documented in PeakinessAnalyzer.h.
+    int firstBin = kNeighbourOuterRadius;
     if (firstBinExact > static_cast<double> (lastBin))
     {
         // Nothing in range. Also the guard that keeps the cast below in range;
-        // a NaN or negative ratio falls through to kNeighbourRadius instead.
+        // a NaN or negative ratio falls through to the outer radius instead.
         return { candidates_.data(), 0 };
     }
-    if (firstBinExact > static_cast<double> (kNeighbourRadius))
+    if (firstBinExact > static_cast<double> (kNeighbourOuterRadius))
     {
         firstBin = static_cast<int> (firstBinExact);
     }

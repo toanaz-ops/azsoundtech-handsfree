@@ -112,7 +112,9 @@ Phần mềm standalone Windows giúp loại bỏ feedback (howling) trong live 
 3. FFT 1024 → magnitude spectrum 513 bins.
 4. Với mỗi bin ≥ 100 Hz: tính
    - **Magnitude** so với running average (RMS theo dõi ~3 giây).
-   - **Peakiness** = `bin_mag / mean(neighbors ±2 bins)`. Feedback = peakiness > threshold (vd 8–15×).
+   - **Peakiness** = `bin_mag / mean(neighbors tại offset ±3, ±4, ±5)` — annulus 6 bin, **loại trừ main lobe** (offset 0, ±1, ±2). Feedback = peakiness > threshold (10×, xem plan Task 11).
+     > **Đính chính (Task 11).** Công thức cũ `mean(neighbors ±2 bins)` sai với pipeline này: bước 2 áp Hann window nên main lobe rộng **4 bin** (bin ±1 giữ ~0.50 biên độ đỉnh, bin ±2 chỉ 0.0003), tức vùng ±2 đo tone với chính nó và peakiness bị chặn trên ở **4.0**. Đo thực tế ở radius cũ: tone đúng bin 3.99, tone 1 kHz 3.29, nhiễu broadband tới 3.46 — nhiễu còn cao hơn tone, threshold 10.0 không bao giờ kích hoạt được. Với annulus ±3..±5: tone 1 kHz = **131.7**, nhiễu tệ nhất qua 60 seed = **7.35**, 0 false positive. Threshold giữ nguyên 10.0 — lỗi nằm ở radius, không phải ở hằng số.
+     > **Giới hạn v1.** Annulus cần đủ 5 bin ở cả hai phía nên bin thấp nhất chấm được là bin 5 = **234 Hz @ 48 kHz**; ngưỡng “≥ 100 Hz” ở trên **không đạt được** và detector mù dưới ~234 Hz (tỉ lệ theo sample rate: ~215 Hz @ 44.1 kHz, ~469 Hz @ 96 kHz). Feedback low-mid 200–250 Hz là có thật — xem `src/dsp/PeakinessAnalyzer.h`.
    - **Rise rate** = `mag_now / mag_500ms_ago`. Feedback = rise > 1.5× / 200 ms.
    - **Harmonic test:** nếu freq này là bội số (1.5–4×) của một đỉnh locked khác → giảm score.
 5. **Score** = weighted sum, threshold (vd > 0.7) → candidate.
