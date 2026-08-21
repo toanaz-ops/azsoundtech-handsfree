@@ -197,3 +197,121 @@ stored by NotchChain and applied by nothing, so every notch is a full-depth null
 and spec 5.1's 6-24 dB range is unimplemented. `origin/main` is 18 commits
 behind: the CI in `.github/workflows/build.yml` has NEVER run, which is why the
 missing `juce_generate_juce_header` survived from Task 3 to Task 10.
+
+================================================================================
+SESSION 2026-08-22 -- Lane D infra, Lanes B and C, depth fix, spec 9.1 test
+================================================================================
+
+Suite: 55/55 at session start -> 66/66 at session end. Per this ledger's own
+audit finding, that total is NOT the evidence. The 11 NEW tests and the
+production change that makes each fail are named below.
+
+INFRA (Lane D) -- all four owner decisions taken and executed. Recorded with
+their rejected alternatives in owner-decisions.md (D-01..D-04).
+
+  - main pushed: cabe715..9eabb52, 24 commits. origin was 24 behind, not 22.
+  - .superpowers/ un-ignored and committed. The .gitignore line is replaced by
+    a comment saying why it must not come back.
+  - shared/handoff/ and opencode-harness-diagram.html committed.
+  - Four stale build dirs deleted: 553 MB, not the ~1 GB estimated
+    (build-review 114M, build-task8 2.0M, build-task8-msvc 435M,
+    build-verify 2.0M). build/ kept.
+  - Three fully-merged branches deleted.
+
+CI RAN FOR THE FIRST TIME, AND FAILED IN 27 SECONDS.
+
+    CMake Error: Generator "Visual Studio 17 2022"
+      could not find any instance of Visual Studio.
+
+  windows-latest is now image windows-2025-vs2026. The workflow pinned a
+  toolchain that is not on the runner. Nothing in this repo's code was wrong.
+  Fixed by dropping -G so CMake picks the newest VS present; a comment on the
+  step says why it must not be re-pinned. Second run: SUCCESS in 10m48s -- the
+  first green CI in this project's history. Also bumped checkout v3 -> v4 after
+  the run warned v3 is being force-migrated off Node 20.
+
+  Worth noting against this ledger's own history: the local build was green
+  throughout. Only CI's clean submodule checkout caught this.
+
+LANE C -- GUI interface audit. docs/superpowers/audits/2026-08-22-gui-interface-audit.md
+  21 missing methods across Tasks 16-26. Three are design defects, not merely
+  unwritten code:
+    1. getCurrentSampleRate() returns the display string "48000 Hz". Task 17's
+       ComboBox cannot select from it; Task 25's JSON needs it numeric.
+    2. No setSampleRate/setBufferSize exist at all. Task 17 -- one line in the
+       plan -- is the most blocked task in the GUI lane.
+    3. Task 22's "Locked Time" column has no backing field anywhere.
+  Verified Task 30's artefact path against a real build: it is
+  build/HandsFree_artefacts/Release/AZ Soundtech Hands-free.exe. The plan says
+  build\Release\HandsFree.exe -- wrong folder, wrong stem, and the real name
+  has spaces the plan's NSIS File line does not quote.
+  Conclusion: 11 AudioEngine methods depend on nothing in Lane B and can land
+  now, unblocking Tasks 16/17/18/23 ahead of the bridge.
+
+LANE B -- bridge design. DRAFT, AWAITING OWNER APPROVAL. No bridge code written.
+  docs/superpowers/specs/2026-08-22-audio-detector-bridge-design.md
+  Governing principle: lock-free machinery is a cost paid for the audio
+  thread's benefit; paying it between two non-real-time threads is complexity
+  with no payer. Two lock-free channels total, both touching the audio thread;
+  mutex everywhere else. This contradicts the plan's Task 19 wording.
+  Hole 2 (notch read-back) closes by DELETION: under D-05 the detector is sole
+  command author and needs to remember what it commanded, not read it back.
+  Departs from plan Task 13 (NotchController as an AudioEngine member):
+  ownership cycle, and it would make every behaviour untestable without an
+  audio device.
+
+DEFECT FIXED -- depthDB had no path into the filter.
+  The handoff said "stored and applied by nothing". It was worse:
+  Biquad::setNotchFilter(freq, Q, sampleRate) takes NO depth argument. It is
+  the RBJ pure notch, an infinite-depth null. NotchChain's own comment admitted
+  depth was "a hint (currently unused at the biquad level)".
+  Added the four-argument form: RBJ peakingEQ with negative gain, |H(w0)| = A^2
+  = 10^(dB/20) exactly.
+  EXPECTED LEVEL CHANGE, stated per CLAUDE.md: residual at the notch frequency
+  rises from ~0 to 0.251 of input at the -12.0 dB every caller passes. Strictly
+  LESS attenuation than before, never more, so no frequency can be louder than
+  the previous build. A human should still confirm at low volume.
+  Also refuses positive depthDB: the peaking form is symmetric, so a sign error
+  upstream would BOOST the ringing frequency -- a feedback amplifier.
+
+  NEW TESTS (8), each with the production change that breaks it:
+   1 Biquad.DepthAttenuatesByExactlyTheRequestedDecibels
+       fails if the 4-arg form stops honouring depth
+   2 Biquad.DepthIsHonouredAcrossTheSpecifiedRange (-6/-18/-24)
+       fails if depth is clamped to one constant -- a single-depth test would not
+   3 Biquad.DepthLeavesOffTargetContentAlone
+       fails if the finite-depth form widens the affected band
+   4 Biquad.RejectsPositiveDepthBecauseItWouldBoostTheRingingFrequency
+       fails if the depthDB > 0 guard is removed
+   5 Biquad.DepthFormAppliesTheSameParameterGuardsAsThePureNotch
+       fails if any of the four stability guards is dropped from the new overload
+   6 NotchChain.SetNotchAppliesTheRequestedDepthRatherThanAFullNull
+       fails if setNotch reverts to the 3-arg call
+   7 NotchChain.RetargetingToANewSampleRateKeepsTheDepth
+       fails if setSampleRate retargets through the 3-arg call -- a bug that
+       would only surface after a device reopen
+   8 NotchChain.SetNotchRejectsAPositiveDepthAndLeavesTheSlotIdle
+       fails if the chain activates a slot the biquad refused
+  All 8 watched failing first (C2660: function does not take 4 arguments).
+
+TEST DEBT CLOSED -- spec 9.1's concurrent ring-buffer test now exists in the repo.
+  NEW TESTS (3): ConcurrentSpsc{LosesNothingWithPowerOfTwoCapacity,
+  LosesNothingWithNonPowerOfTwoCapacity, SurvivesACapacityOfOne}.
+  Two threads, monotonic sequence, capacities 64/100/1.
+  Verified the tests CAN fail rather than assuming it: a one-item-drop mutation
+  in the producer was caught by the capacity-100 case ("consumer saw 100 of
+  1000000"). The other two stayed green under the same mutation because a
+  64-item chunk into a 64-slot ring is an all-or-nothing write -- only the
+  non-power-of-two capacity drives partial writes. Recorded in the test.
+  The count assertion is load-bearing: without EXPECT_EQ(consumed, count) the
+  test is vacuous, since the failure flag stays false if the consumer never ran.
+  States plainly what it does NOT prove: on x86-64 weakening the memory
+  orderings would still pass here and fail on ARM.
+
+STILL OPEN AFTER THIS SESSION
+  - Bridge design needs owner approval before any bridge code.
+  - AudioEngine still has no coverage of the passthrough contract (plan Task 9's
+    specified loopback test). Needs the Wave 1 accessors to be testable.
+  - CLAUDE.md is untracked and not ignored; it appeared this session.
+  - Tasks 5, 12-32 remain open. Task 12's stated blocker is dissolved by D-05,
+    pending approval of the design that says so.
