@@ -64,7 +64,42 @@ public:
     // were valid and applied, false if they were rejected -- in which case
     // the filter (coefficients AND state) is left exactly as it was.
     // Valid range: sampleRate > 0, Q > 0, 0 < freq < sampleRate / 2.
+    //
+    // This is the INFINITE-depth null: the response at `freq` is zero. It has
+    // no depth parameter, which is why depthDB used to be storable in
+    // NotchChain::NotchInfo and appliable nowhere. Product code wants the
+    // four-argument form below; this one is retained because it is a real
+    // filter, it is the mathematical parent of the finite-depth form (its
+    // dB -> -inf limit), and the tests above cover it thoroughly.
     bool setNotchFilter(double freq, double Q, double sampleRate);
+
+    // Configures the biquad as a finite-depth notch: an RBJ peaking filter
+    // driven with negative gain. `depthDB` is the attenuation at `freq`,
+    // expressed as a NEGATIVE number of decibels (-12.0 means 12 dB down),
+    // matching the sign convention already used by NotchChain::setNotch, the
+    // preset JSON in plan Task 25, and the GUI mock-up in spec 6.1.
+    //
+    // Magnitude at the centre frequency is exactly A^2, where
+    // A = 10^(depthDB/40) -- that is, 10^(depthDB/20), the requested depth by
+    // construction. Derivation: at omega == omega0 the numerator collapses to
+    // 2j*alpha*A*sin(omega0) and the denominator to 2j*(alpha/A)*sin(omega0),
+    // so H = A / (1/A) = A^2.
+    //
+    // Rejected inputs, all leaving the filter untouched:
+    //   - the same four the pure notch rejects. The pole radius here is
+    //     sqrt((1 - alpha/A) / (1 + alpha/A)), which is the pure-notch
+    //     expression with alpha replaced by alpha/A, so every input that
+    //     made that one diverge does the same to this one.
+    //   - depthDB > 0. The peaking form is symmetric: a positive gain BOOSTS
+    //     the centre frequency by that many dB. In a feedback eliminator a
+    //     sign error upstream would amplify precisely the frequency that is
+    //     already ringing, so a boost is refused rather than trusted.
+    //     depthDB == 0 is accepted and is a mathematical no-op (A == 1 makes
+    //     the numerator and denominator identical, H == 1).
+    //
+    // Branch-only and allocation-free, like its sibling: reachable from the
+    // audio thread via NotchChain::setNotch.
+    bool setNotchFilter(double freq, double Q, double sampleRate, double depthDB);
     double processSample(double input);
     void reset();
 

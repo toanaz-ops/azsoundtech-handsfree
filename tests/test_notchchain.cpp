@@ -374,3 +374,87 @@ TEST(NotchChain, SetNotchIgnoresParametersTheBiquadRejects)
     }
     EXPECT_NEAR(rms(samples, 4096), 1.0 / std::sqrt(2.0), 1e-3);
 }
+
+//==============================================================================
+// depthDB reaches the filter (spec 5.1: depth 6-24 dB).
+//
+// setNotch() used to record depthDB into NotchInfo and then call the
+// three-argument Biquad::setNotchFilter, whose comment said depth was "a hint
+// (currently unused at the biquad level)". Every notch was therefore a full
+// null whatever depth was asked for. These tests pin the wiring, not the
+// filter maths -- Biquad's own tests cover the response.
+
+TEST(NotchChain, SetNotchAppliesTheRequestedDepthRatherThanAFullNull)
+{
+    // The production change that makes this fail: reverting setNotch to call
+    // the three-argument setNotchFilter. The residual would then collapse
+    // towards zero and miss the expected -12 dB band entirely.
+    constexpr double kSampleRate = 48000.0;
+    constexpr double kFreq       = 1000.0;
+    constexpr double kDepthDB    = -12.0;
+
+    NotchChain chain(kSampleRate);
+    chain.setNotch(0, kFreq, 10.0, kDepthDB);
+
+    auto samples = sineWave(kFreq, kSampleRate, 16384);
+    for (auto& s : samples)
+    {
+        s = chain.processSample(s);
+    }
+
+    const double inputRms = 1.0 / std::sqrt(2.0);
+    const double expected = inputRms * std::pow(10.0, kDepthDB / 20.0);
+    EXPECT_NEAR(rms(samples, 8192), expected, expected * 0.02);
+
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, kDepthDB);
+    EXPECT_EQ(chain.getActiveNotchCount(), 1);
+}
+
+TEST(NotchChain, RetargetingToANewSampleRateKeepsTheDepth)
+{
+    // setSampleRate recomputes coefficients for every Active notch. If it
+    // recomputed them through the three-argument form, a rate change would
+    // silently deepen every notch in the chain to a full null -- a bug that
+    // only appears after the device is reopened, which is exactly the kind
+    // this project has shipped before.
+    constexpr double kSampleRate48 = 48000.0;
+    constexpr double kSampleRate96 = 96000.0;
+    constexpr double kFreq         = 1000.0;
+    constexpr double kDepthDB      = -12.0;
+
+    NotchChain chain(kSampleRate48);
+    chain.setNotch(0, kFreq, 10.0, kDepthDB);
+    chain.setSampleRate(kSampleRate96);
+
+    auto samples = sineWave(kFreq, kSampleRate96, 16384);
+    for (auto& s : samples)
+    {
+        s = chain.processSample(s);
+    }
+
+    const double inputRms = 1.0 / std::sqrt(2.0);
+    const double expected = inputRms * std::pow(10.0, kDepthDB / 20.0);
+    EXPECT_NEAR(rms(samples, 8192), expected, expected * 0.02);
+}
+
+TEST(NotchChain, SetNotchRejectsAPositiveDepthAndLeavesTheSlotIdle)
+{
+    // A positive depth would boost the ringing frequency. The chain must
+    // refuse it the same way it refuses an above-Nyquist frequency: leave the
+    // slot untouched rather than activate a notch that amplifies.
+    constexpr double kSampleRate = 48000.0;
+
+    NotchChain chain(kSampleRate);
+    chain.setNotch(0, 1000.0, 10.0, +12.0);
+
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Idle);
+    EXPECT_EQ(chain.getActiveNotchCount(), 0);
+
+    // And the chain is still transparent -- nothing was half-applied.
+    auto samples = sineWave(1000.0, kSampleRate, 8192);
+    for (auto& s : samples)
+    {
+        s = chain.processSample(s);
+    }
+    EXPECT_NEAR(rms(samples, 4096), 1.0 / std::sqrt(2.0), 1e-2);
+}

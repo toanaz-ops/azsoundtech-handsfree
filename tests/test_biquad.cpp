@@ -365,3 +365,137 @@ TEST(Biquad, AcceptsFrequencyJustBelowNyquist)
     }
     EXPECT_GT(rms(control, 4096) / (1.0 / std::sqrt(2.0)), 0.9);
 }
+
+//==============================================================================
+// Finite-depth notch (spec 5.1: depth 6-24 dB).
+//
+// The three-argument setNotchFilter implements the RBJ pure notch, which is an
+// INFINITE-depth null: it has no depth parameter at all, so NotchChain could
+// store depthDB and had nothing to pass it to. Every notch this app placed was
+// therefore a full null regardless of the depth requested, and spec 5.1's
+// 6-24 dB range -- along with Task 26's "Speech" -18 dB and "Music" -10 dB
+// presets -- was not representable.
+//
+// The four-argument form is the RBJ peaking filter driven with negative gain.
+// At the centre frequency its magnitude response is exactly A^2 where
+// A = 10^(dB/40), i.e. 10^(dB/20) -- the requested depth, by construction. The
+// pure notch is its dB -> -inf limit, which is why the three-argument form is
+// kept: it is a real filter, it is well covered by the tests above, and it is
+// the mathematical parent of the new one.
+
+TEST(Biquad, DepthAttenuatesByExactlyTheRequestedDecibels)
+{
+    // A -12 dB notch must attenuate its target by 12 dB -- NOT to silence.
+    // This is the whole defect: before the four-argument form existed, this
+    // filter drove the target to a full null and -12.0 was ignored.
+    constexpr double kSampleRate = 48000.0;
+    constexpr double kFreq       = 1000.0;
+    constexpr double kDepthDB    = -12.0;
+
+    Biquad filter;
+    ASSERT_TRUE(filter.setNotchFilter(kFreq, 10.0, kSampleRate, kDepthDB));
+
+    auto samples = sineWave(kFreq, kSampleRate, 16384);
+    for (auto& s : samples)
+    {
+        s = filter.processSample(s);
+    }
+
+    const double inputRms = 1.0 / std::sqrt(2.0);
+    const double expected = inputRms * std::pow(10.0, kDepthDB / 20.0);
+
+    // 2% tolerance: the residual is a steady-state amplitude measured over a
+    // finite window, so edge effects and the tail of the transient both show up.
+    EXPECT_NEAR(rms(samples, 8192), expected, expected * 0.02);
+}
+
+TEST(Biquad, DepthIsHonouredAcrossTheSpecifiedRange)
+{
+    // Spec 5.1 allows 6-24 dB. Each endpoint must produce its own depth, so a
+    // shallower setting is audibly gentler than a deeper one. A single-depth
+    // test would pass even if the depth were quietly clamped to one constant.
+    constexpr double kSampleRate = 48000.0;
+    constexpr double kFreq       = 1000.0;
+    const double     inputRms    = 1.0 / std::sqrt(2.0);
+
+    for (const double depthDB : { -6.0, -18.0, -24.0 })
+    {
+        Biquad filter;
+        ASSERT_TRUE(filter.setNotchFilter(kFreq, 10.0, kSampleRate, depthDB))
+            << "depth " << depthDB;
+
+        auto samples = sineWave(kFreq, kSampleRate, 16384);
+        for (auto& s : samples)
+        {
+            s = filter.processSample(s);
+        }
+
+        const double expected = inputRms * std::pow(10.0, depthDB / 20.0);
+        EXPECT_NEAR(rms(samples, 8192), expected, expected * 0.02)
+            << "depth " << depthDB;
+    }
+}
+
+TEST(Biquad, DepthLeavesOffTargetContentAlone)
+{
+    // A finite-depth notch is WIDER in effect than a null at the same Q is
+    // deep, so the off-target guarantee has to be re-established rather than
+    // inherited from the pure-notch tests.
+    constexpr double kSampleRate = 48000.0;
+
+    Biquad filter;
+    ASSERT_TRUE(filter.setNotchFilter(1000.0, 10.0, kSampleRate, -12.0));
+
+    auto control = sineWave(2000.0, kSampleRate, 8192);
+    for (auto& s : control)
+    {
+        s = filter.processSample(s);
+    }
+
+    EXPECT_GT(rms(control, 4096) / (1.0 / std::sqrt(2.0)), 0.9);
+}
+
+TEST(Biquad, RejectsPositiveDepthBecauseItWouldBoostTheRingingFrequency)
+{
+    // THE dangerous input for this product. The peaking form is symmetric:
+    // the same coefficients with a POSITIVE gain amplify the centre frequency
+    // by that many dB. A sign error anywhere upstream -- a GUI field, a preset
+    // file, a detector that forgets to negate -- would turn the feedback
+    // killer into a feedback AMPLIFIER, boosting precisely the frequency that
+    // is already ringing.
+    //
+    // Rejected the same way every other invalid parameter is: return false and
+    // leave the filter exactly as it was, rather than half-writing it.
+    constexpr double kSampleRate = 48000.0;
+
+    Biquad filter;
+    ASSERT_TRUE(filter.setNotchFilter(1000.0, 10.0, kSampleRate, -12.0));
+
+    EXPECT_FALSE(filter.setNotchFilter(1000.0, 10.0, kSampleRate, +12.0));
+
+    // Still the -12 dB filter it was before the rejected call.
+    auto samples = sineWave(1000.0, kSampleRate, 16384);
+    for (auto& s : samples)
+    {
+        s = filter.processSample(s);
+    }
+
+    const double expected = (1.0 / std::sqrt(2.0)) * std::pow(10.0, -12.0 / 20.0);
+    EXPECT_NEAR(rms(samples, 8192), expected, expected * 0.02);
+}
+
+TEST(Biquad, DepthFormAppliesTheSameParameterGuardsAsThePureNotch)
+{
+    // The stability derivation in Biquad.h applies unchanged: the pole radius
+    // is sqrt((1 - alpha/A)/(1 + alpha/A)), which is the pure-notch expression
+    // with alpha replaced by alpha/A. Every input that made the pure notch
+    // diverge does the same here and must be refused identically.
+    constexpr double kSampleRate = 48000.0;
+
+    Biquad filter;
+    EXPECT_FALSE(filter.setNotchFilter(1000.0, 10.0, 0.0,   -12.0));  // rate <= 0
+    EXPECT_FALSE(filter.setNotchFilter(1000.0, 0.0,  kSampleRate, -12.0));  // Q <= 0
+    EXPECT_FALSE(filter.setNotchFilter(0.0,    10.0, kSampleRate, -12.0));  // freq <= 0
+    EXPECT_FALSE(filter.setNotchFilter(24000.0, 10.0, kSampleRate, -12.0)); // >= Nyquist
+    EXPECT_FALSE(filter.setNotchFilter(30000.0, 10.0, kSampleRate, -12.0)); // above Nyquist
+}

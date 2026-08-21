@@ -1,8 +1,14 @@
 // NotchChain: per-channel cascade of up to 16 biquad notch filters.
 //
 // Each slot in the chain holds:
-//   - a Biquad (configured for a notch at the requested frequency/Q), and
+//   - a Biquad (configured for a notch at the requested frequency, Q AND
+//     depth -- see Biquad.h's four-argument setNotchFilter), and
 //   - a NotchInfo record (frequency, Q, depth, Idle/Active state).
+//
+// Depth is a NEGATIVE number of dB (-12.0 == 12 dB down), matching the preset
+// JSON in plan Task 25 and the GUI in spec 6.1. Spec 5.1 calls for 6-24 dB.
+// A positive depth is refused by the biquad rather than applied, because in a
+// feedback eliminator it would boost the frequency that is already ringing.
 //
 // Idle slots are bypassed -- processSample passes the sample straight
 // through. Active slots are chained in series so a single input is filtered

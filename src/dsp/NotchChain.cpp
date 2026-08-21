@@ -29,16 +29,19 @@ void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
         return;
     }
 
-    // Configure the biquad for this notch. We treat `depthDB` as a hint
-    // (currently unused at the biquad level -- a future revision can
-    // apply it as a post-filter gain), but we still record it so callers
-    // and tests can see what was requested.
+    // Configure the biquad for this notch, DEPTH INCLUDED. `depthDB` used to
+    // be recorded here and dropped on the floor -- the three-argument
+    // setNotchFilter is an infinite-depth null and has no depth parameter --
+    // so every notch this app placed was a full null no matter what was asked
+    // for, and spec 5.1's 6-24 dB range was unreachable.
     //
     // If the biquad rejects the parameters (see Biquad.h) the slot is left
     // COMPLETELY untouched. Activating it anyway would mark the slot Active
     // while filters_[index] still held whatever design was there before, so
     // the chain would report a notch at one frequency and filter another.
-    if (! filters_[index].setNotchFilter(freq, Q, sampleRate_))
+    // A positive depthDB is among the rejected cases: it would boost the
+    // ringing frequency instead of cutting it.
+    if (! filters_[index].setNotchFilter(freq, Q, sampleRate_, depthDB))
     {
         return;
     }
@@ -101,7 +104,11 @@ void NotchChain::setSampleRate(double sampleRate)
     {
         if (notchInfo_[i].state == NotchState::Active)
         {
-            if (! filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q, sampleRate_))
+            // Depth is replayed along with frequency and Q. Retargeting
+            // through the three-argument form would silently deepen every
+            // notch in the chain to a full null on the first device reopen.
+            if (! filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q,
+                                             sampleRate_, notchInfo_[i].depthDB))
             {
                 notchInfo_[i].state = NotchState::Idle;
             }
