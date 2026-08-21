@@ -130,6 +130,16 @@ AudioEngine::Mode AudioEngine::getMode() const
     return currentMode_.load (std::memory_order_acquire);
 }
 
+LockFreeRingBuffer<float>& AudioEngine::getTapBuffer()
+{
+    return tapBuffer_;
+}
+
+std::uint64_t AudioEngine::getTapDropCount() const
+{
+    return tapDropCount_.load (std::memory_order_relaxed);
+}
+
 //==============================================================================
 // AudioIODeviceCallback -- real-time audio thread.
 
@@ -211,7 +221,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         && inputChannelData[0] != nullptr
         && outputChannelData != nullptr && outputChannelData[0] != nullptr)
     {
-        (void) tapBuffer_.write (outputChannelData[0], static_cast<size_t> (numSamples));
+        const size_t requested = static_cast<size_t> (numSamples);
+        const size_t written   = tapBuffer_.write (outputChannelData[0], requested);
+
+        // Dropping is the right BEHAVIOUR here -- blocking or spinning on the
+        // audio thread is not an option -- but discarding the FACT is not. A
+        // truncated write leaves no gap for the detector to notice; it leaves
+        // a SPLICE, sample N followed immediately by sample N+k. Through a
+        // 1024-point Hann window that step is broadband energy in every bin,
+        // which is exactly the shape the peakiness scorer is built to react
+        // to, and a notch would get placed on a frequency that never fed back.
+        //
+        // One relaxed read-modify-write: lock-free, allocation-free, and no
+        // ordering relationship with anything else, since the count is only
+        // ever read for display.
+        if (written < requested)
+            tapDropCount_.fetch_add (requested - written, std::memory_order_relaxed);
     }
 }
 
@@ -238,6 +263,24 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // DSP starts from a clean slate.
     for (auto& chain : notchChains_)
         chain.reset();
+
+    // Drain the tap. Whatever is still in the ring was captured by the
+    // PREVIOUS device session, possibly at a different sample rate. Leaving it
+    // there splices old audio onto the front of the first analysis windows of
+    // the new session, so the detector's first spectra would be labelled with
+    // the new rate while half their content came from the old one -- every
+    // bin-to-Hz conversion wrong by up to an octave, and the first notches
+    // after a rate change placed on frequencies that never rang.
+    //
+    // clear() requires that neither the producer nor the consumer is running.
+    // This is the one place in the codebase where that holds: JUCE inserts the
+    // callback into its dispatch list only after audioDeviceAboutToStart()
+    // returns, so the audio thread cannot be inside the callback yet.
+    //
+    // Detector::reset() is the consumer-side counterpart. Calling it belongs
+    // to Task 14, which owns the detector instance; the method exists and is
+    // tested here so that wiring is a one-liner.
+    tapBuffer_.clear();
 }
 
 void AudioEngine::audioDeviceStopped()

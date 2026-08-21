@@ -16,6 +16,8 @@ add_executable(HandsFreeTests
     test_notchchain.cpp
     test_detector.cpp
     test_peakiness.cpp
+    test_audioengine.cpp
+    ../src/app/AudioEngine.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
@@ -23,10 +25,21 @@ add_executable(HandsFreeTests
 )
 
 # Detector uses juce::dsp::FFT / WindowingFunction, so the test target needs
-# the juce_dsp module. JUCE modules are INTERFACE libraries and must be linked
-# PRIVATE (see JUCE "CMake API.md": PUBLIC would compile the module twice).
+# the juce_dsp module. AudioEngine needs juce_audio_devices for
+# juce::AudioDeviceManager / AudioIODeviceCallback (it pulls in juce_events and
+# juce_audio_basics transitively, which is where ScopedJuceInitialiser_GUI and
+# ScopedNoDenormals live). JUCE modules are INTERFACE libraries and must be
+# linked PRIVATE (see JUCE "CMake API.md": PUBLIC would compile the module
+# twice).
+#
+# NOTE: AudioEngine.h deliberately includes <juce_audio_devices/...> rather than
+# <JuceHeader.h>. JuceHeader.h only exists for targets created by a juce_add_*
+# function, so a plain add_executable test target could never include it -- and
+# that is exactly why AudioEngine::getTapBuffer() could be declared, never
+# defined, and never noticed.
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
+    juce::juce_audio_devices
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )

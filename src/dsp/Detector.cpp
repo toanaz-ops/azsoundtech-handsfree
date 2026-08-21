@@ -3,6 +3,12 @@
 #include <algorithm>
 #include <cstring>
 
+// A std::atomic<double> that fell back to a mutex would put a lock on the
+// detector's hot path, which is the opposite of the point. Pin it here rather
+// than discovering it on some future target.
+static_assert (std::atomic<double>::is_always_lock_free,
+               "Detector::sampleRate_ must be a lock-free atomic");
+
 Detector::Detector (double sampleRate)
     : sampleRate_ (sampleRate)
     , fft_ (kFftOrder)
@@ -25,12 +31,33 @@ void Detector::setSampleRate (double sampleRate)
         return;
     }
 
-    sampleRate_ = sampleRate;
+    sampleRate_.store (sampleRate, std::memory_order_relaxed);
 }
 
 double Detector::getSampleRate() const
 {
-    return sampleRate_;
+    return sampleRate_.load (std::memory_order_relaxed);
+}
+
+void Detector::reset()
+{
+    // Drop the whole analysis window. Called when the audio timeline is about
+    // to become discontinuous -- a device restart, a sample-rate change -- so
+    // that audio captured at the OLD rate is never transformed into a Spectrum
+    // labelled with the NEW one. Without this the first several blocks after a
+    // rate change report bin-to-Hz conversions that are wrong by up to an
+    // octave, and the notches placed from them land on frequencies that were
+    // never ringing.
+    //
+    // Allocation-free: history_ was sized in the constructor and only its
+    // contents are zeroed. hop_ and fftBuffer_ are fully overwritten before
+    // they are read, so they need no clearing.
+    std::fill (history_.begin(), history_.end(), 0.0f);
+}
+
+const float* Detector::getAnalysisWindowForTest() const
+{
+    return history_.data();
 }
 
 Detector::Spectrum Detector::processLatestBlock (LockFreeRingBuffer<float>& tap)
@@ -66,5 +93,5 @@ Detector::Spectrum Detector::processLatestBlock (LockFreeRingBuffer<float>& tap)
     std::memcpy (magnitudes_.data(), fftBuffer_.data(),
                  static_cast<std::size_t> (kNumBins) * sizeof (float));
 
-    return { magnitudes_.data(), readCount, sampleRate_ };
+    return { magnitudes_.data(), readCount, sampleRate_.load (std::memory_order_relaxed) };
 }

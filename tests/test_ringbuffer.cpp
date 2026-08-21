@@ -131,3 +131,45 @@ TEST(LockFreeRingBuffer, WriteFullStopsAtCapacity)
     // And nothing was committed.
     EXPECT_EQ(rb.getAvailableRead(), kTestCapacity);
 }
+// B2 -- draining the tap across a device restart.
+//
+// stop() at 48 kHz can leave thousands of samples in the ring. If the device
+// restarts at 96 kHz those stale 48 kHz samples are spliced onto the front of
+// the first analysis windows, and every bin-to-Hz conversion downstream is
+// wrong by up to an octave. clear() discards them.
+//
+// Precondition (documented at the declaration): neither thread may be running.
+// audioDeviceAboutToStart() qualifies -- JUCE inserts the callback into its
+// dispatch list only after that call returns.
+TEST(LockFreeRingBuffer, ClearDiscardsPendingData)
+{
+    LockFreeRingBuffer<float> buffer(1024);
+
+    const std::vector<float> stale(400, 1.0f);
+    ASSERT_EQ(buffer.write(stale.data(), stale.size()), 400u);
+    ASSERT_EQ(buffer.getAvailableRead(), 400u);
+
+    buffer.clear();
+
+    EXPECT_EQ(buffer.getAvailableRead(), 0u);
+    EXPECT_EQ(buffer.getAvailableWrite(), buffer.getCapacity());
+
+    // A read after clear() must return nothing, not the discarded samples.
+    float scratch[16] = {};
+    EXPECT_EQ(buffer.read(scratch, 16), 0u);
+
+    // And the buffer must still be usable: fresh data written after the clear
+    // reads back exactly, with no stale prefix in front of it.
+    const std::vector<float> fresh { 7.0f, 8.0f, 9.0f };
+    ASSERT_EQ(buffer.write(fresh.data(), fresh.size()), 3u);
+    float out[3] = {};
+    ASSERT_EQ(buffer.read(out, 3), 3u);
+    EXPECT_FLOAT_EQ(out[0], 7.0f);
+    EXPECT_FLOAT_EQ(out[1], 8.0f);
+    EXPECT_FLOAT_EQ(out[2], 9.0f);
+
+    // Clearing an already-empty buffer is a no-op, not a corruption.
+    buffer.clear();
+    EXPECT_EQ(buffer.getAvailableRead(), 0u);
+    EXPECT_EQ(buffer.getAvailableWrite(), buffer.getCapacity());
+}

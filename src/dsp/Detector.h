@@ -52,6 +52,7 @@
 
 #include "dsp/LockFreeRingBuffer.h"
 
+#include <atomic>
 #include <cstddef>
 #include <vector>
 
@@ -90,8 +91,33 @@ public:
     // then no fresh block to report.
     Spectrum processLatestBlock (LockFreeRingBuffer<float>& tap);
 
+    // Zeroes the analysis window. Call whenever the audio timeline becomes
+    // discontinuous -- a device restart or a sample-rate change -- so audio
+    // captured at the old rate is never folded into a spectrum labelled with
+    // the new one. Allocation-free.
+    void reset();
+
+    // TEST ACCESSOR ONLY -- do not build product behaviour on this.
+    //
+    // A read-only view of the kFftSize-sample analysis window as it stands
+    // after the last processLatestBlock(). It exists because the alternative
+    // was worse: the short-hop path can only be verified by where the samples
+    // LANDED, and asserting that through the magnitude spectrum would need a
+    // signal whose FFT magnitude is position-sensitive -- a shifted sinusoid
+    // has an identical magnitude spectrum, so the obvious probe proves
+    // nothing. One const pointer is a smaller surface than a contrived
+    // spectral assertion, and it makes the mutation in
+    // tests/test_detector.cpp fail on the first element.
+    const float* getAnalysisWindowForTest() const;
+
 private:
-    double                              sampleRate_;
+    // Written by setSampleRate() from the device thread and read by
+    // processLatestBlock() on the detector thread, so it must be atomic --
+    // a plain double here is a data race the moment Task 14 wires the two
+    // together. Relaxed ordering is sufficient: it is a single scalar and no
+    // other state depends on it. (Spectrum::sampleRate exists so consumers
+    // never read a torn pair; the tear was one level further down.)
+    std::atomic<double>                 sampleRate_;
     juce::dsp::FFT                      fft_;
     juce::dsp::WindowingFunction<float> window_;
 

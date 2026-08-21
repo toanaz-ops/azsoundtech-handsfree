@@ -21,13 +21,18 @@
 
 #pragma once
 
-#include <JuceHeader.h>
+// Module include rather than <JuceHeader.h>: JuceHeader.h is generated only
+// for targets created with a juce_add_* function, so including it here made
+// AudioEngine impossible to compile into the plain add_executable test target.
+// juce_audio_devices pulls in juce_audio_basics, juce_events and juce_core.
+#include <juce_audio_devices/juce_audio_devices.h>
 
 #include "dsp/LockFreeRingBuffer.h"
 #include "dsp/NotchChain.h"
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 
 class AudioEngine : public juce::AudioIODeviceCallback
 {
@@ -61,7 +66,28 @@ public:
 
     // Tap: post-notch LEFT channel, written once per callback into an SPSC
     // ring buffer. Read side belongs to the detector thread (Task 10).
+    //
+    // *** CALLER CONTRACT: read() only, and from exactly one thread. ***
+    // This hands out a non-const reference, so nothing in the type system
+    // stops a caller from calling write() and breaking the single-producer
+    // invariant the whole design rests on -- the audio callback is and must
+    // remain the sole producer. A consumer-only wrapper was considered and
+    // rejected for now: Detector::processLatestBlock() takes
+    // LockFreeRingBuffer<float>& directly, so introducing a view type would
+    // mean changing the detector's signature too, which is more churn than
+    // the risk currently justifies. If a second caller ever appears, add the
+    // view then.
     LockFreeRingBuffer<float>& getTapBuffer();
+
+    // Number of tap samples dropped because the ring was full, accumulated
+    // over the lifetime of the engine. Dropping is the correct behaviour on
+    // the audio thread -- blocking or spinning is not -- but a drop splices
+    // sample N onto sample N+k, and through the detector's Hann window that
+    // step is broadband energy in every bin. Without this count nothing
+    // downstream can distinguish a drop-induced false peak from a real howl.
+    // Incremented with memory_order_relaxed: one lock-free RMW per short
+    // write, no allocation, no ordering dependency on anything else.
+    std::uint64_t getTapDropCount() const;
 
     // AudioIODeviceCallback interface
     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
@@ -87,6 +113,7 @@ private:
     // silently drops whatever does not fit.
     static constexpr size_t kTapCapacity = 8192;  // ~170 ms @ 48 kHz, power of 2
     LockFreeRingBuffer<float> tapBuffer_ { kTapCapacity };
+    std::atomic<std::uint64_t> tapDropCount_ { 0 };
 
     // Cross-thread state. std::atomic keeps the audio callback lock-free and
     // allocation-free while still letting the UI thread observe/change mode,

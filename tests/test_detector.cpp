@@ -73,22 +73,112 @@ TEST (Detector, MagnitudeOfSingleTone)
 // than one hop. That MUST surface in readCount rather than being padded up to
 // a full hop: Task 14's auto-release cadence assumes a hop is real elapsed
 // audio.
+//
+// It must ALSO land in the right place. Asserting only on readCount leaves the
+// slide itself untested: changing Detector.cpp to slide by the CONSTANT kHopSize
+// instead of the variable readCount --
+//   std::memmove (history_.data(), history_.data() + kHopSize, retained * ...)
+// -- keeps every readCount assertion green while leaving the window misaligned.
+// So this test feeds a RAMP, where the value of a sample identifies its
+// position, and then checks the whole window through getAnalysisWindowForTest().
+//
+// Geometry, worked out by hand:
+//   history_ starts as 1024 zeros.
+//   Tap holds 712 samples with value i+1, i.e. 1.0 .. 712.0 (1-based so that a
+//   real sample can never be confused with the zero prefix).
+//   Block 1 reads a full hop of 512 -> retained = 512, window becomes
+//     [0]*512  then 1..512            (positions 512..1023)
+//   Block 2 reads the remaining 200  -> retained = 1024 - 200 = 824, so the
+//   window slides left by 200 and the new samples go at [824..1023]:
+//     [0]*312  then 1..712            (positions 312..1023)
+//   i.e. 312 zeros followed by the ramp, contiguous and right-aligned.
+//
+// Under the mutation the second slide would move by 512 rather than 200, so
+// history_[0] would be 1.0 instead of 0.0 and the check fails on the first
+// element. Integers up to 2^24 are exact in float, so these are exact equalities.
 TEST (Detector, PartialReadIsReportedAsPartial)
 {
     constexpr std::size_t kPartial = 200;
     static_assert (kPartial < static_cast<std::size_t> (Detector::kHopSize),
                    "the point of this test is a short hop");
 
+    constexpr std::size_t kTotal = static_cast<std::size_t> (Detector::kHopSize) + kPartial;  // 712
+
     LockFreeRingBuffer<float> tap (kTapCapacity);
-    const std::vector<float> block (kPartial, 0.5f);
-    ASSERT_EQ (tap.write (block.data(), block.size()), kPartial);
+    std::vector<float> ramp (kTotal);
+    for (std::size_t i = 0; i < kTotal; ++i)
+        ramp[i] = static_cast<float> (i + 1);
+    ASSERT_EQ (tap.write (ramp.data(), ramp.size()), kTotal);
 
     Detector detector (48000.0);
+
+    const auto full = detector.processLatestBlock (tap);
+    ASSERT_NE (full.magnitudes, nullptr);
+    ASSERT_EQ (full.readCount, static_cast<std::size_t> (Detector::kHopSize));
+
     const auto spectrum = detector.processLatestBlock (tap);
 
     EXPECT_NE (spectrum.magnitudes, nullptr);
     EXPECT_EQ (spectrum.readCount, kPartial);
     EXPECT_LT (spectrum.readCount, static_cast<std::size_t> (Detector::kHopSize));
+
+    // The window slid by exactly the short hop, not by kHopSize.
+    const float* window = detector.getAnalysisWindowForTest();
+    ASSERT_NE (window, nullptr);
+
+    constexpr std::size_t kZeroPrefix = static_cast<std::size_t> (Detector::kFftSize) - kTotal;  // 312
+    for (std::size_t i = 0; i < kZeroPrefix; ++i)
+        ASSERT_FLOAT_EQ (window[i], 0.0f) << "stale sample at history_[" << i << "]";
+
+    for (std::size_t i = 0; i < kTotal; ++i)
+        ASSERT_FLOAT_EQ (window[kZeroPrefix + i], static_cast<float> (i + 1))
+            << "window not contiguous at history_[" << (kZeroPrefix + i) << "]";
+}
+
+// B2 -- reset() must zero the analysis window, so audio captured before a
+// sample-rate change is never spliced into a spectrum labelled with the new
+// rate. "Same as a freshly constructed detector fed the same hop" is the
+// strongest statement of that, and it is bit-exact: both paths run the same
+// window and the same FFT over the same 1024 floats.
+TEST (Detector, ResetClearsAnalysisWindow)
+{
+    constexpr double sampleRate = 48000.0;
+
+    // Reference: a brand-new detector fed exactly one hop of DC 1.0.
+    LockFreeRingBuffer<float> referenceTap (kTapCapacity);
+    const std::vector<float> oneHop (static_cast<std::size_t> (Detector::kHopSize), 1.0f);
+    ASSERT_EQ (referenceTap.write (oneHop.data(), oneHop.size()), oneHop.size());
+
+    Detector reference (sampleRate);
+    const auto referenceSpectrum = reference.processLatestBlock (referenceTap);
+    ASSERT_NE (referenceSpectrum.magnitudes, nullptr);
+    const std::vector<float> expected (referenceSpectrum.magnitudes,
+                                       referenceSpectrum.magnitudes + Detector::kNumBins);
+
+    // Subject: prime the whole window with DC 1.0 (two full hops), reset, then
+    // feed the same single hop.
+    LockFreeRingBuffer<float> tap (kTapCapacity);
+    const std::vector<float> primer (static_cast<std::size_t> (Detector::kFftSize), 1.0f);
+    ASSERT_EQ (tap.write (primer.data(), primer.size()), primer.size());
+
+    Detector detector (sampleRate);
+    detector.processLatestBlock (tap);
+    const auto primed = detector.processLatestBlock (tap);
+    ASSERT_NE (primed.magnitudes, nullptr);
+
+    // Sanity: a full window of DC really is a different spectrum from one hop
+    // of DC, otherwise the comparison below would prove nothing.
+    ASSERT_GT (std::abs (primed.magnitudes[0] - expected[0]), 1.0f);
+
+    detector.reset();
+
+    ASSERT_EQ (tap.write (oneHop.data(), oneHop.size()), oneHop.size());
+    const auto afterReset = detector.processLatestBlock (tap);
+    ASSERT_NE (afterReset.magnitudes, nullptr);
+    ASSERT_EQ (afterReset.readCount, static_cast<std::size_t> (Detector::kHopSize));
+
+    for (int bin = 0; bin < Detector::kNumBins; ++bin)
+        ASSERT_FLOAT_EQ (afterReset.magnitudes[bin], expected[bin]) << "bin " << bin;
 }
 
 // With nothing in the tap there is no new audio to analyse, so no spectrum is

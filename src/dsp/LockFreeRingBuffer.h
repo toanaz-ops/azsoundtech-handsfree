@@ -126,6 +126,28 @@ public:
         return capacity_ - (writeIndex - readIndex);
     }
 
+    // Discards every pending item.
+    //
+    // *** PRECONDITION: neither the producer nor the consumer may be running.
+    // *** This is the ONE operation on this class that is not SPSC-safe: it
+    // moves the CONSUMER's index from what is normally the producer's side, so
+    // a concurrent read() would race it.
+    //
+    // AudioEngine::audioDeviceAboutToStart() satisfies the precondition. JUCE
+    // inserts a callback into its dispatch list only AFTER that call returns
+    // (confirmed in the Task 8 review), so the audio thread cannot be inside
+    // the callback, and the detector thread is started by the same device
+    // lifecycle.
+    //
+    // Implemented by advancing readPos_ to writePos_ rather than zeroing both,
+    // so the monotonic indices keep increasing and no partially-published
+    // write can be resurrected by a wrap.
+    void clear() noexcept
+    {
+        const std::size_t writeIndex = writePos_.load(std::memory_order_relaxed);
+        readPos_.store(writeIndex, std::memory_order_relaxed);
+    }
+
     std::size_t getCapacity() const noexcept { return capacity_; }
 
 private:
