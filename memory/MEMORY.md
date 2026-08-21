@@ -4,7 +4,8 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 
 ## Notes
 
-_(chưa có — thêm note đầu tiên khi có bài học/decision mới)_
+- [Build verification](build-verification-2026-08-21.md) — "build passed" trong build dir không chứng minh gì về repo; app target hỏng ở HEAD suốt 6 task mà không ai thấy.
+- [Brief verification](brief-verification-2026-08-21.md) — brief v2 "đã sửa" vẫn còn 3 lỗi; kiểm chứng cả tên API, hợp đồng ngữ nghĩa VÀ số học của assertion.
 
 ## Conventions (tóm tắt)
 
