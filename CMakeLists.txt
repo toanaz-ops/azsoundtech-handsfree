@@ -41,6 +41,11 @@ target_sources(HandsFree PRIVATE
     src/dsp/NotchCommand.h
 )
 
+# Generates JuceLibraryCode/JuceHeader.h for this target. Without it the
+# `#include <JuceHeader.h>` in main.cpp / MainComponent.h / AudioEngine.h
+# cannot resolve and the app target fails to compile from a clean configure.
+juce_generate_juce_header(HandsFree)
+
 target_include_directories(HandsFree PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
