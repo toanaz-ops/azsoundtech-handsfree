@@ -28,7 +28,7 @@ xét lại một cách có cơ sở.
 | D-03 | 2026-08-22 | Xoá 4 thư mục build cũ | Xoá cả bốn | ✅ Đã thi hành |
 | D-04 | 2026-08-22 | `shared/` + file diagram | Commit cả hai | ✅ Đã thi hành |
 | D-05 | 2026-08-22 | Notch từ preset khi đang chạy Auto | Detector nhận nuôi (adopt) | 🔵 Đã chốt, chưa code |
-| D-06 | 2026-08-22 | Timer khi mất tín hiệu input | **CHƯA TRẢ LỜI** | ⏳ Đang mở |
+| D-06 | 2026-08-22 | Timer khi mất tín hiệu input | Đóng băng timer khi tap chết | 🔵 Đã chốt, chưa code |
 
 ---
 
@@ -252,23 +252,17 @@ chứ không phải GUI và Detector cùng bắn vào audio thread. Điều này
 
 ---
 
-## D-06 — Timer auto-release khi mất tín hiệu input ⏳ ĐANG MỞ
+## D-06 — Timer auto-release khi mất tín hiệu input
 
-**Ngày hỏi:** 2026-08-22 · **Trạng thái:** ⏳ **CHƯA TRẢ LỜI** (câu hỏi bị bỏ lỡ)
+**Ngày:** 2026-08-22 · **Trạng thái:** 🔵 Đã chốt, chưa code
 
 **Bối cảnh.** Auto-release là "30 giây không còn peakiness" (spec §5.2 bước 7).
 Quy tắc carry-over bắt buộc dùng **thời gian thực (wall-clock)**, không dùng
 `readCount` — vì `AudioEngine` chỉ ghi vào tap khi input channel 0 khác null,
 nên khi mất input, `readCount` **đứng yên trong khi thời gian thật vẫn trôi**.
+Hai đồng hồ này tách nhau ra đúng vào lúc tệ nhất.
 
-Nội dung câu hỏi và các phương án được ghi lại ở phần "Câu hỏi đang chờ" bên
-dưới, để khi trả lời xong thì chuyển lên đây thành D-06 hoàn chỉnh.
-
----
-
-## Câu hỏi đang chờ trả lời
-
-### ⏳ Q-06 (sẽ thành D-06)
+**Câu hỏi nguyên văn:**
 
 > Auto-release is "30 seconds without peakiness" (§5.2 step 7). The carry-over
 > rule says it must use real wall-clock time, not `readCount`. But if the mic
@@ -276,11 +270,47 @@ dưới, để khi trả lời xong thì chuyển lên đây thành D-06 hoàn c
 > advancing while the clock keeps running. After 30 s of dead input, what should
 > the notches do?
 
-| | Phương án | Mô tả |
+**Các phương án:**
+
+| | Phương án | Mô tả đưa ra |
 |---|---|---|
-| ? | **Freeze timers while input is dead** *(khuyến nghị)* | Auto-release đếm thời gian thực, **nhưng chỉ khi tap thực sự có audio**. Mic sống lại → notch vẫn còn nguyên, phòng vẫn được bảo vệ. Chi phí: một phép kiểm tra "tap có sống không"; 30 s là 30 giây audio thật. |
-| ? | Keep counting — clear after 30 s regardless | Đọc spec theo nghĩa đen. Đơn giản nhất. Nhưng một sự cố cáp 30 giây sẽ xoá sạch mọi notch, và ngay khi audio trở lại thì phòng hú không có gì bảo vệ — đúng lúc soundman đang bận sửa cáp. |
-| ? | Freeze, and also clear on device restart | Đóng băng khi mất tín hiệu, nhưng coi một lần stop/start thiết bị hoàn chỉnh là một phiên mới thật sự, xoá các notch do Auto đặt. Phân biệt "sự cố ngắn" với "setup mới". |
+| ✅ | **Đóng băng timer khi input chết** *(khuyến nghị)* | Đếm thời gian thực, nhưng **chỉ khi tap thực sự có audio**. Mic sống lại → notch vẫn còn nguyên, phòng vẫn được bảo vệ. Chi phí: một phép kiểm tra "tap có sống không"; 30 s là 30 giây audio thật. |
+| | Cứ đếm tiếp — 30 s là xóa | Đọc spec theo nghĩa đen, đơn giản nhất. Nhưng một sự cố cáp 30 giây sẽ xóa sạch mọi notch, và ngay khi audio trở lại thì phòng hú không có gì bảo vệ — đúng lúc soundman đang bận sửa cáp. |
+| | Đóng băng, nhưng restart thiết bị thì xóa | Đóng băng khi mất tín hiệu, nhưng coi một lần stop/start thiết bị hoàn chỉnh là phiên mới thật sự → xóa các notch do Auto đặt. Phân biệt "sự cố ngắn" với "setup mới". |
+
+**Đã chọn:** ✅ **Đóng băng timer khi input chết**
+
+**Hệ quả kiến trúc.** Detector cần **hai** khái niệm thời gian, không phải một:
+
+| Đồng hồ | Nguồn | Dùng cho |
+|---|---|---|
+| Wall-clock | `juce::Time::getMillisecondCounterHiRes()` | Đo *độ dài* một khoảng (30 ms, 15 s, 30 s) |
+| "Tap còn sống" | `Spectrum::readCount > 0` | Quyết định khoảng đó **có được tính hay không** |
+
+Nói cách khác: auto-release đo **thời gian thực đã trôi qua trong lúc audio đang
+chảy**. Đây không phải là `readCount` (quy tắc carry-over cấm dùng nó làm nhịp,
+vì 512 mẫu không phải một đơn vị thời gian ổn định) và cũng không phải wall-clock
+thuần. `readCount` chỉ đóng vai trò **cổng chặn**, không phải thước đo.
+
+**Ràng buộc kéo theo:**
+
+- Cần một `ClockSource` **tiêm được từ ngoài** (injectable). Plan Task 14 ghi rõ
+  test là *"wait 30s simulated time"* — không thể test bằng cách ngồi chờ 30 giây
+  thật. Đây là ràng buộc thiết kế bắt buộc, không phải tùy chọn.
+- Cần định nghĩa "tap chết" cho chặt: bao nhiêu spectrum liên tiếp có
+  `readCount == 0` thì coi là chết? Một callback lỡ nhịp không phải là mất tín
+  hiệu. Sẽ chốt trong design doc.
+- Timer 15 giây của Soundcheck (§5.3) chịu **cùng** quy tắc — nếu không, một cú
+  giật ASIO sẽ làm soundcheck kết thúc sớm với ít notch hơn thực tế cần.
+- Đổi ý sang "cứ đếm tiếp" → bỏ cổng chặn, dùng wall-clock thuần. Rẻ hơn nhưng
+  mất tính chất an toàn nêu trên.
+- Phương án 3 ("restart thiết bị thì xóa") **chưa bị loại vĩnh viễn** — nó không
+  mâu thuẫn với lựa chọn hiện tại, chỉ là thêm một hành vi nữa. Có thể bổ sung
+  sau mà không phải sửa gì đã chốt.
+
+---
+
+## Câu hỏi đang chờ trả lời
 
 ### Các câu hỏi thiết kế Lane B còn lại (chưa hỏi)
 
@@ -297,6 +327,8 @@ Ghi ra đây để không bị quên, sẽ hỏi lần lượt:
    buffer, triple buffer, hay seqlock?
 4. **`depthDB` chưa được áp dụng ở đâu cả** — mọi notch hiện là null sâu tối đa.
    Spec §5.1 yêu cầu 6–24 dB. Sửa toán coefficient trước hay sau khi GUI hiển thị?
+5. **Ngưỡng "tap chết"** (sinh ra từ D-06): bao nhiêu spectrum liên tiếp
+   `readCount == 0` thì đóng băng timer?
 
 ---
 
