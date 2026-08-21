@@ -15,9 +15,11 @@ add_executable(HandsFreeTests
     test_biquad.cpp
     test_notchchain.cpp
     test_detector.cpp
+    test_peakiness.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
+    ../src/dsp/PeakinessAnalyzer.cpp
 )
 
 # Detector uses juce::dsp::FFT / WindowingFunction, so the test target needs

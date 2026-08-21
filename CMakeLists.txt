@@ -38,6 +38,8 @@ target_sources(HandsFree PRIVATE
     src/dsp/Biquad.h
     src/dsp/Detector.cpp
     src/dsp/Detector.h
+    src/dsp/PeakinessAnalyzer.cpp
+    src/dsp/PeakinessAnalyzer.h
     src/dsp/NotchChain.cpp
     src/dsp/NotchChain.h
     src/dsp/NotchCommand.h
