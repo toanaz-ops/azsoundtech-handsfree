@@ -9,19 +9,33 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    
+
     steps:
     - name: Checkout code with submodules
       uses: actions/checkout@v3
       with:
         submodules: recursive
-    
+
+    # The generator is deliberately NOT pinned.
+    #
+    # This step used to say -G "Visual Studio 17 2022". On 2026-08-22, the first
+    # time this workflow ever ran, it failed in 27 seconds with "could not find
+    # any instance of Visual Studio": windows-latest had moved to image
+    # windows-2025-vs2026, which ships Visual Studio 2026, and VS 2022 is simply
+    # not on the box any more.
+    #
+    # With no -G, CMake selects the newest Visual Studio it finds, so the next
+    # image bump does not break the build again. -A x64 still applies -- the
+    # auto-selected generator on a Windows image with VS installed IS a Visual
+    # Studio generator, which is what makes the platform flag valid.
+    #
+    # Do not re-pin this to a version number.
     - name: Configure CMake
-      run: cmake -B build -G "Visual Studio 17 2022" -A x64
-    
+      run: cmake -B build -A x64
+
     - name: Build
       run: cmake --build build --config Release
-    
+
     - name: Run tests
       run: |
         cd build
