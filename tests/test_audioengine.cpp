@@ -19,6 +19,8 @@
 #include "app/AudioEngine.h"
 #include "dsp/LockFreeRingBuffer.h"
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace
@@ -152,4 +154,163 @@ TEST (AudioEngine, DeviceRestartDrainsTheTap)
 
     EXPECT_EQ (engine.getTapBuffer().getAvailableRead(), 0u);
     EXPECT_EQ (engine.getTapBuffer().getAvailableWrite(), kTapCapacity);
+}
+
+//==============================================================================
+// The passthrough contract -- plan Task 9's specified test, never written.
+//
+// Task 9 called for "verify output matches input within 0.01 dB" and closed
+// without it. The engine's headline promise is that when it is NOT filtering,
+// what comes out is what went in; nothing in the repo checked that until now.
+//
+// These are characterisation tests, not red-green TDD: they pin behaviour that
+// already works. To confirm they are capable of failing rather than merely
+// green, a mutation was injected during development -- scaling the Bypass copy
+// by 0.999 (a 0.0087 dB change, deliberately just inside the tolerance) and
+// then by 0.99 (0.087 dB). The first passed and the second failed, which is
+// what a 0.01 dB bound should do.
+
+namespace
+{
+constexpr double kPi = 3.14159265358979323846;
+
+// 0.01 dB expressed as an amplitude ratio: 10^(0.01/20) - 1 == 0.00115...
+// Anything the engine does to the signal beyond this is audible drift, not
+// arithmetic noise.
+constexpr double kToleranceRatio = 0.00116;
+
+// Drives one callback with a sine on L and a different sine on R, so a
+// channel swap or a mono fold cannot pass. Retains the input for comparison,
+// which the constant-level CallbackDriver above cannot do.
+struct SineDriver
+{
+    explicit SineDriver (int numSamples, double sampleRate = 48000.0)
+        : inL (static_cast<std::size_t> (numSamples))
+        , inR (static_cast<std::size_t> (numSamples))
+        , outL (static_cast<std::size_t> (numSamples), 0.0f)
+        , outR (static_cast<std::size_t> (numSamples), 0.0f)
+        , frames (numSamples)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            inL[static_cast<std::size_t> (i)] =
+                0.5f * static_cast<float> (std::sin (2.0 * kPi * 1000.0 * i / sampleRate));
+            inR[static_cast<std::size_t> (i)] =
+                0.5f * static_cast<float> (std::sin (2.0 * kPi * 3000.0 * i / sampleRate));
+        }
+
+        ins[0]  = inL.data();
+        ins[1]  = inR.data();
+        outs[0] = outL.data();
+        outs[1] = outR.data();
+    }
+
+    void operator() (AudioEngine& engine)
+    {
+        const juce::AudioIODeviceCallbackContext context {};
+        engine.audioDeviceIOCallbackWithContext (ins, 2, outs, 2, frames, context);
+    }
+
+    std::vector<float> inL, inR, outL, outR;
+    const float* ins[2] {};
+    float*       outs[2] {};
+    int          frames;
+};
+
+// Largest |out - in| across a channel, as a fraction of the input's peak.
+double worstRelativeError (const std::vector<float>& in, const std::vector<float>& out)
+{
+    double peak  = 0.0;
+    double worst = 0.0;
+
+    for (std::size_t i = 0; i < in.size(); ++i)
+    {
+        peak  = std::max (peak,  std::abs (static_cast<double> (in[i])));
+        worst = std::max (worst, std::abs (static_cast<double> (out[i]) -
+                                           static_cast<double> (in[i])));
+    }
+
+    return peak > 0.0 ? worst / peak : worst;
+}
+} // namespace
+
+TEST (AudioEngine, BypassPassesInputThroughWithin001dB)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    ASSERT_EQ (engine.getMode(), AudioEngine::Mode::Bypass);
+
+    SineDriver drive (512);
+    drive (engine);
+
+    EXPECT_LT (worstRelativeError (drive.inL, drive.outL), kToleranceRatio);
+    EXPECT_LT (worstRelativeError (drive.inR, drive.outR), kToleranceRatio);
+}
+
+TEST (AudioEngine, AutoModeWithNoNotchesIsAlsoTransparent)
+{
+    // The more valuable half. Bypass short-circuits the DSP entirely, so it
+    // proves only that the copy works. Auto mode runs every sample through
+    // NotchChain::processSample -- float to double, sixteen Idle slots, back to
+    // float. If an Idle slot were ever anything other than a straight
+    // passthrough, THIS is the test that catches it, and Bypass would not.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    SineDriver drive (512);
+    drive (engine);
+
+    EXPECT_LT (worstRelativeError (drive.inL, drive.outL), kToleranceRatio);
+    EXPECT_LT (worstRelativeError (drive.inR, drive.outR), kToleranceRatio);
+}
+
+TEST (AudioEngine, PassthroughHoldsAcrossManyConsecutiveCallbacks)
+{
+    // One callback cannot show state leaking between callbacks. A biquad that
+    // retained state across an Idle slot, or an off-by-one in the block
+    // handling, would show up as drift only after several blocks.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    for (int block = 0; block < 32; ++block)
+    {
+        SineDriver drive (256);
+        drive (engine);
+
+        ASSERT_LT (worstRelativeError (drive.inL, drive.outL), kToleranceRatio)
+            << "block " << block;
+        ASSERT_LT (worstRelativeError (drive.inR, drive.outR), kToleranceRatio)
+            << "block " << block;
+    }
+}
+
+TEST (AudioEngine, ANullInputChannelProducesSilenceNotGarbage)
+{
+    // JUCE does not pre-clear the output buffers, so a missing input must be
+    // met with an explicit clear. Without it the callback hands the driver
+    // whatever was in that memory -- at full scale, into a PA.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+
+    constexpr int frames = 128;
+    std::vector<float> outL (frames, 0.7f);   // pre-poisoned, must be cleared
+    std::vector<float> outR (frames, 0.7f);
+
+    const float* ins[2] { nullptr, nullptr };
+    float* outs[2] { outL.data(), outR.data() };
+
+    const juce::AudioIODeviceCallbackContext context {};
+    engine.audioDeviceIOCallbackWithContext (ins, 2, outs, 2, frames, context);
+
+    for (int i = 0; i < frames; ++i)
+    {
+        ASSERT_FLOAT_EQ (outL[static_cast<std::size_t> (i)], 0.0f) << "sample " << i;
+        ASSERT_FLOAT_EQ (outR[static_cast<std::size_t> (i)], 0.0f) << "sample " << i;
+    }
 }
