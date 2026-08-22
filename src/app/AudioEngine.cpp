@@ -44,8 +44,21 @@ void AudioEngine::start()
 
     if (error.isNotEmpty())
     {
+        // Retain it, so the GUI can say WHY the device did not open rather
+        // than just showing a dark indicator.
+        {
+            const std::lock_guard<std::mutex> lock (lastDeviceErrorLock_);
+            lastDeviceError_ = error;
+        }
+
         juce::Logger::writeToLog ("AudioEngine: failed to open audio device: " + error);
         return;
+    }
+
+    // The device opened: whatever went wrong last time no longer applies.
+    {
+        const std::lock_guard<std::mutex> lock (lastDeviceErrorLock_);
+        lastDeviceError_.clear();
     }
 
     // 3) Register this as the audio callback. If the device is already
@@ -118,6 +131,124 @@ double AudioEngine::getCurrentLatency() const
 }
 
 //==============================================================================
+// Device enumeration, configuration and status.
+//
+// Every one of these runs before start() in the GUI's startup path, when
+// deviceManager_.getCurrentAudioDevice() is nullptr. The nullptr guard is the
+// contract, not defensive noise.
+
+juce::StringArray AudioEngine::getAvailableDeviceTypeNames()
+{
+    juce::StringArray names;
+
+    for (auto* type : deviceManager_.getAvailableDeviceTypes())
+    {
+        if (type != nullptr)
+            names.add (type->getTypeName());
+    }
+
+    return names;
+}
+
+juce::StringArray AudioEngine::getAvailableDeviceNames()
+{
+    auto* type = deviceManager_.getCurrentDeviceTypeObject();
+
+    if (type == nullptr)
+        return {};
+
+    // JUCE requires scanForDevices() before getDeviceNames() -- without it the
+    // list is whatever the last scan found, or empty on a fresh type object.
+    // This is why the method cannot be const.
+    type->scanForDevices();
+    return type->getDeviceNames();
+}
+
+juce::String AudioEngine::getCurrentDeviceType() const
+{
+    // The manager's ACTUAL type, not desiredDeviceType_. See the header.
+    return deviceManager_.getCurrentAudioDeviceType();
+}
+
+juce::Array<double> AudioEngine::getAvailableSampleRates()
+{
+    if (auto* device = deviceManager_.getCurrentAudioDevice())
+        return device->getAvailableSampleRates();
+
+    return {};
+}
+
+juce::Array<int> AudioEngine::getAvailableBufferSizes()
+{
+    if (auto* device = deviceManager_.getCurrentAudioDevice())
+        return device->getAvailableBufferSizes();
+
+    return {};
+}
+
+bool AudioEngine::setSampleRate (double newRate)
+{
+    if (newRate <= 0.0)
+        return false;
+
+    if (deviceManager_.getCurrentAudioDevice() == nullptr)
+        return false;
+
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup (setup);
+
+    if (setup.sampleRate == newRate)
+        return true;   // already there; not a failure
+
+    setup.sampleRate = newRate;
+
+    // setAudioDeviceSetup returns an EMPTY string on success and the error text
+    // on failure -- the inverse of the usual convention, so the test reads
+    // backwards on purpose. A rate the hardware refuses lands here rather than
+    // being applied silently.
+    return deviceManager_.setAudioDeviceSetup (setup, true).isEmpty();
+}
+
+bool AudioEngine::setBufferSize (int newSize)
+{
+    if (newSize <= 0)
+        return false;
+
+    if (deviceManager_.getCurrentAudioDevice() == nullptr)
+        return false;
+
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager_.getAudioDeviceSetup (setup);
+
+    if (setup.bufferSize == newSize)
+        return true;
+
+    setup.bufferSize = newSize;
+    return deviceManager_.setAudioDeviceSetup (setup, true).isEmpty();
+}
+
+double AudioEngine::getCurrentSampleRateHz() const
+{
+    return currentSampleRate_.load (std::memory_order_acquire);
+}
+
+int AudioEngine::getNumInputChannels() const
+{
+    return numInputChannels_.load (std::memory_order_relaxed);
+}
+
+int AudioEngine::getNumOutputChannels() const
+{
+    return numOutputChannels_.load (std::memory_order_relaxed);
+}
+
+juce::String AudioEngine::getLastDeviceError() const
+{
+    const std::lock_guard<std::mutex> lock (lastDeviceErrorLock_);
+    return lastDeviceError_;
+}
+
+//==============================================================================
 // Mode control
 
 void AudioEngine::setMode (Mode mode)
@@ -173,6 +304,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // and juce_recommended_config_flags adds only /Ox /MP /EHsc.)
     // tests/test_biquad.cpp SilenceDoesNotLeaveDenormalState pins both halves.
     const juce::ScopedNoDenormals noDenormals;
+
+    // Publish what this callback was ACTUALLY handed, for the status display.
+    // Two relaxed stores per callback: no allocation, no lock, no ordering
+    // relationship with anything else, and read only for display. Sourcing the
+    // counts here rather than from the device handle is deliberate -- a device
+    // can advertise channels the callback is not given.
+    numInputChannels_.store (numInputChannels, std::memory_order_relaxed);
+    numOutputChannels_.store (numOutputChannels, std::memory_order_relaxed);
 
     // Real-time thread: no allocation, no locking. The only shared state read
     // here is the mode, via a lock-free atomic.
@@ -296,5 +435,15 @@ void AudioEngine::audioDeviceError (const juce::String& errorMessage)
     // is atomic so the UI thread observes it without a lock. Error paths are
     // exceptional, so the log call here is acceptable off the hot path.
     isRunning_.store (false, std::memory_order_release);
+
+    // RETAIN the message, do not just log it. Without this the status
+    // indicator goes dark and the reason exists only in the JUCE log, which no
+    // soundman is reading mid-show. A mutex is fine here: this runs on the
+    // device thread, never the audio callback, and the function already logs.
+    {
+        const std::lock_guard<std::mutex> lock (lastDeviceErrorLock_);
+        lastDeviceError_ = errorMessage;
+    }
+
     juce::Logger::writeToLog ("AudioEngine device error: " + errorMessage);
 }

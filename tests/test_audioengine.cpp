@@ -314,3 +314,109 @@ TEST (AudioEngine, ANullInputChannelProducesSilenceNotGarbage)
         ASSERT_FLOAT_EQ (outR[static_cast<std::size_t> (i)], 0.0f) << "sample " << i;
     }
 }
+
+//==============================================================================
+// The public surface the GUI lane needs (Lane C audit section 3).
+//
+// The parallel execution plan section 2 argues this should land in ONE commit
+// before any GUI task starts, so GUI / licensing / installer lanes do not each
+// widen the same header and collide. These tests pin the contract.
+//
+// Every test here runs with NO DEVICE OPEN, and that is the point rather than a
+// limitation. The GUI calls these while populating combo boxes at startup --
+// before start() has ever been called. "Returns something safe and does not
+// crash with no device" IS the contract for most of this surface, and it is the
+// half a device-based test would never cover.
+
+TEST (AudioEngine, DeviceTypeEnumerationWorksBeforeAnyDeviceIsOpened)
+{
+    // Populating the device-type combo happens at construction time, long
+    // before start(). juce::AudioDeviceManager registers its types in its own
+    // constructor, so this must already work.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    const juce::StringArray types = engine.getAvailableDeviceTypeNames();
+
+    // Windows always has at least WASAPI and DirectSound registered. ASIO
+    // appears only when the SDK was present at build time, so it is NOT
+    // asserted -- .gitignore excludes external/asiosdk for licensing reasons
+    // and CI builds without it.
+    EXPECT_FALSE (types.isEmpty());
+}
+
+TEST (AudioEngine, DeviceQueriesAreSafeWithNoDeviceOpen)
+{
+    // Not a crash test for its own sake. Every one of these is on the path the
+    // GUI walks before a device exists, and juce::AudioDeviceManager returns
+    // nullptr from getCurrentAudioDevice() in that state -- which is exactly
+    // the dereference that would take the app down on launch.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    ASSERT_FALSE (engine.isRunning());
+
+    EXPECT_TRUE (engine.getAvailableSampleRates().isEmpty());
+    EXPECT_TRUE (engine.getAvailableBufferSizes().isEmpty());
+    EXPECT_TRUE (engine.getAvailableDeviceNames().isEmpty());
+    EXPECT_TRUE (engine.getCurrentDeviceName().isEmpty());
+
+    // Setters must REFUSE rather than pretend. A GUI that cannot tell a
+    // successful rate change from a silent no-op will show the user a value
+    // the hardware is not running -- the specific failure the audit called out.
+    EXPECT_FALSE (engine.setSampleRate (44100.0));
+    EXPECT_FALSE (engine.setBufferSize (128));
+}
+
+TEST (AudioEngine, NumericSampleRateAgreesWithTheDisplayString)
+{
+    // getCurrentSampleRate() returns "48000 Hz" -- a display string. Task 17's
+    // ComboBox needs the number and Task 25's preset JSON stores it
+    // numerically, so both forms must exist AND must never disagree.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+
+    const double  hz   = engine.getCurrentSampleRateHz();
+    const juce::String text = engine.getCurrentSampleRate();
+
+    EXPECT_DOUBLE_EQ (hz, 48000.0);
+    EXPECT_TRUE (text.startsWith (juce::String (hz)))
+        << "display string '" << text << "' does not begin with " << hz;
+}
+
+TEST (AudioEngine, ChannelCountsReportWhatTheCallbackActuallyDelivered)
+{
+    // Spec 6.1's status line reads "2 in / 2 out". Sourcing that from the
+    // callback rather than from a device handle is what makes it true: a device
+    // can advertise channels the callback is not actually handed.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+
+    // Nothing has flowed yet -- claiming 2 in / 2 out here would be a lie.
+    EXPECT_EQ (engine.getNumInputChannels(), 0);
+    EXPECT_EQ (engine.getNumOutputChannels(), 0);
+
+    SineDriver drive (128);
+    drive (engine);
+
+    EXPECT_EQ (engine.getNumInputChannels(), 2);
+    EXPECT_EQ (engine.getNumOutputChannels(), 2);
+}
+
+TEST (AudioEngine, TheLastDeviceErrorIsRetrievableInsteadOfOnlyLogged)
+{
+    // audioDeviceError() used to log the message and drop it. The status
+    // indicator went dark with the reason available nowhere in the UI -- a
+    // soundman mid-show got a dead app and no cause.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    EXPECT_TRUE (engine.getLastDeviceError().isEmpty());
+
+    engine.audioDeviceError ("ASIO driver stopped responding");
+
+    EXPECT_EQ (engine.getLastDeviceError(), "ASIO driver stopped responding");
+    EXPECT_FALSE (engine.isRunning());
+}
