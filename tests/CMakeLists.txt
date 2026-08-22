@@ -17,7 +17,9 @@ add_executable(HandsFreeTests
     test_detector.cpp
     test_peakiness.cpp
     test_audioengine.cpp
+    test_presetmanager.cpp
     ../src/app/AudioEngine.cpp
+    ../src/app/PresetManager.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
@@ -46,6 +48,14 @@ target_link_libraries(HandsFreeTests PRIVATE
 
 target_include_directories(HandsFreeTests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+)
+
+# Task 26's two shipped presets are read off disk BY THE REAL LOADER rather
+# than reproduced as string literals here -- a preset that only ever exists
+# inside a test proves nothing about the file that ships. The tests therefore
+# need the repo-relative location of presets/, which only CMake knows.
+target_compile_definitions(HandsFreeTests PRIVATE
+    HANDSFREE_PRESET_SOURCE_DIR="${CMAKE_SOURCE_DIR}/presets"
 )
 
 # MSVC: silence "warning C4996: 'std::copy_n': ... was declared deprecated" etc.

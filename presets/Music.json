@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "device": "",
+  "sampleRate": 48000,
+  "bufferSize": 64,
+  "notchDefaults": {
+    "Q": 25.0,
+    "depth": -10.0
+  },
+  "notches": []
+}
