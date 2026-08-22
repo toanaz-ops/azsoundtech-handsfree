@@ -20,6 +20,8 @@ add_executable(HandsFreeTests
     test_deviceviewmodel.cpp
     test_gui_wiring.cpp
     test_presetmanager.cpp
+    test_licensemanager.cpp
+    ../src/app/LicenseManager.cpp
     ../src/app/AudioEngine.cpp
     ../src/app/MainComponent.cpp
     ../src/app/PresetManager.cpp
@@ -50,6 +52,7 @@ target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
     juce::juce_audio_devices
     juce::juce_gui_basics
+    juce::juce_cryptography
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
