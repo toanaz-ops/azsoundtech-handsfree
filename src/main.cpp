@@ -47,10 +47,20 @@ private:
                              DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(true);
-            setContentOwned(new MainComponent(), true);
+
+            auto* content = new MainComponent();
+            setContentOwned(content, true);
+
             setResizable(true, true);
             centreWithSize(getWidth(), getHeight());
             setVisible(true);
+
+            // Opening the audio device is an explicit call, not a MainComponent
+            // constructor side effect -- that is what keeps the whole component
+            // constructible in a test on a machine with no audio hardware.
+            // Done AFTER setVisible so a device that refuses to open leaves a
+            // visible window showing why, rather than nothing at all.
+            content->startAudio();
         }
 
         void closeButtonPressed() override
