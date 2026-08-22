@@ -36,6 +36,14 @@ target_sources(HandsFree PRIVATE
     src/app/PresetManager.h
     src/app/MainComponent.cpp
     src/app/MainComponent.h
+    src/gui/DevicePanel.cpp
+    src/gui/DevicePanel.h
+    src/gui/DeviceViewModel.cpp
+    src/gui/DeviceViewModel.h
+    src/gui/ModeBar.cpp
+    src/gui/ModeBar.h
+    src/gui/StatusBar.cpp
+    src/gui/StatusBar.h
     src/dsp/Biquad.cpp
     src/dsp/Biquad.h
     src/dsp/Detector.cpp

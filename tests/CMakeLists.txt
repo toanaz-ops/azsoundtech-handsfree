@@ -17,9 +17,16 @@ add_executable(HandsFreeTests
     test_detector.cpp
     test_peakiness.cpp
     test_audioengine.cpp
+    test_deviceviewmodel.cpp
+    test_gui_wiring.cpp
     test_presetmanager.cpp
     ../src/app/AudioEngine.cpp
+    ../src/app/MainComponent.cpp
     ../src/app/PresetManager.cpp
+    ../src/gui/DeviceViewModel.cpp
+    ../src/gui/DevicePanel.cpp
+    ../src/gui/ModeBar.cpp
+    ../src/gui/StatusBar.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
@@ -42,6 +49,7 @@ add_executable(HandsFreeTests
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
     juce::juce_audio_devices
+    juce::juce_gui_basics
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
