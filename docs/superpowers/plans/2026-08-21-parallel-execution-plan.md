@@ -36,14 +36,36 @@ git worktree add ../hf-lane-b -b <branch>
 cmd //c mklink /J "..\hf-lane-b\external\JUCE" "<repo>\external\JUCE"
 ```
 
-Junctions are already proven to work in this environment — the project auditor
-used one to get around a `MAX_PATH` failure during its clean build.
+> **VERIFIED 2026-08-22 — and the two lines above are NOT SUFFICIENT.**
+> The full, tested procedure is
+> **[`docs/superpowers/runbooks/parallel-lanes.md`](../runbooks/parallel-lanes.md)**.
+> Follow that, not this snippet.
+>
+> The check this section asked for was run on a throwaway lane. Outcome:
+> worktree + junction **does** work — clean configure, both targets built,
+> 70/70 tests passing inside the lane, `git status` clean, commit and rollback
+> fine, main repo unaffected. But it needs a step this plan does not mention,
+> and gets one detail wrong:
+>
+> 1. **The junction alone kills git in the lane** —
+>    `fatal: not a git repository: external/JUCE/../../.git/modules/external/JUCE`.
+>    The submodule's `.git` file holds a *relative* gitdir that only resolves
+>    from the main repo. The lane needs
+>    `git config --worktree submodule."external/JUCE".{active=false,ignore=all}`,
+>    which in turn needs `extensions.worktreeConfig true` set once in the main
+>    repo. This is the "confuses git's gitlink handling" case the paragraph
+>    below anticipated; it is fixable rather than fatal.
+> 2. **`--worktree` is load-bearing.** Plain `git config` writes to the *shared*
+>    config and disabled the submodule in the **main** repo during this very
+>    verification. Caught and reverted, but a lane setup that does it silently
+>    breaks the main checkout for every other lane.
+> 3. **The generator here is `Visual Studio 18 2026`, not 17 2022.** This
+>    machine has only Visual Studio Build Tools 2026. `CLAUDE.md`'s documented
+>    command fails on a clean configure and appears to work only because
+>    `build/` holds a cache recording the real generator.
 
-**Verify once before relying on it:** in the new worktree, confirm
-`git status` does not report the submodule as dirty, and confirm a clean CMake
-configure + build succeeds. Budget one throwaway lane for this check. If the
-junction turns out to confuse git's gitlink handling, fall back to
-one-writer-at-a-time and re-plan; do not paper over it.
+Junctions were already known to work in this environment — the project auditor
+used one to get around a `MAX_PATH` failure during its clean build.
 
 ### Build directories
 
