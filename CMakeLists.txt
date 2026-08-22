@@ -31,6 +31,8 @@ juce_add_gui_app(HandsFree
 target_sources(HandsFree PRIVATE
     src/main.cpp
     src/app/AudioEngine.cpp
+    src/app/LicenseManager.cpp
+    src/app/LicenseManager.h
     src/app/AudioEngine.h
     src/app/MainComponent.cpp
     src/app/MainComponent.h
@@ -59,6 +61,7 @@ target_link_libraries(HandsFree
     PRIVATE
         juce::juce_audio_devices
         juce::juce_audio_utils
+        juce::juce_cryptography
         juce::juce_dsp
         juce::juce_gui_basics
         juce::juce_recommended_config_flags

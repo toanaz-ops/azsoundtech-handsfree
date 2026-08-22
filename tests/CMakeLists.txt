@@ -17,6 +17,8 @@ add_executable(HandsFreeTests
     test_detector.cpp
     test_peakiness.cpp
     test_audioengine.cpp
+    test_licensemanager.cpp
+    ../src/app/LicenseManager.cpp
     ../src/app/AudioEngine.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
@@ -40,6 +42,7 @@ add_executable(HandsFreeTests
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
     juce::juce_audio_devices
+    juce::juce_cryptography
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
