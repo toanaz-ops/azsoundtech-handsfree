@@ -125,9 +125,33 @@ which has bitten two agents on this project. `.gitignore` also has `build-*/`, s
 an in-repo lane build directory would be invisible to `git status` — the exact
 condition that let a stale `JuceHeader.h` survive.
 
-### 6. Tear down
+### 6. Tear down — ⚠ THE MOST DANGEROUS STEP
+
+**Remove the junction BEFORE removing the worktree.** A junction is a directory
+to every tool that walks a tree, so `git worktree remove --force` and `rm -rf`
+both follow it and delete **the target** — the shared `external/JUCE` that the
+main repo and every other lane are using.
+
+This is not hypothetical. It happened during the very session that wrote this
+runbook: teardown ran `git worktree remove --force` with the junction still in
+place, `external/JUCE` was emptied, and `git submodule status` in the main repo
+went to `-e18f7f5…`. Recovery is `git submodule update --init --recursive`, a
+99 MB re-clone. Nothing was permanently lost, because the submodule SHA lives in
+the index — but every lane was broken until it finished.
+
+The rule in §"Rules for anyone working in a lane" says never write to
+`external/JUCE`. Teardown *is* a write, and it is the one nobody thinks of.
 
 ```bash
+# 1. Unlink the junction FIRST. rmdir removes the LINK; rm -rf follows it.
+cmd //c rmdir "D:\hf-lanes\<lane>\external\JUCE"
+
+# 2. PROVE the shared checkout survived before going any further.
+ls "D:/DEV CAVE EP3/PROJECT005-AZ-handsfree/external/JUCE/modules" | wc -l
+#    must print a non-zero count. If it prints 0, STOP and re-clone:
+#    git submodule update --init --recursive external/JUCE
+
+# 3. Only now is it safe to remove the worktree.
 git worktree remove --force D:/hf-lanes/<lane>
 git branch -D <branch>
 rm -rf D:/hf-lanes/bld-<lane>
