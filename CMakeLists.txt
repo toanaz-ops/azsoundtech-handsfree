@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+﻿cmake_minimum_required(VERSION 3.22)
 
 project(HandsFree VERSION 1.0.0)
 
@@ -32,6 +32,8 @@ target_sources(HandsFree PRIVATE
     src/main.cpp
     src/app/AudioEngine.cpp
     src/app/LicenseManager.cpp
+    src/app/LicenseViewModel.cpp
+    src/app/PresetFirstRun.cpp
     src/app/LicenseManager.h
     src/app/AudioEngine.h
     src/app/PresetManager.cpp

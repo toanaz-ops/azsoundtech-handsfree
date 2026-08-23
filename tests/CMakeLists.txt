@@ -24,7 +24,11 @@ add_executable(HandsFreeTests
     test_clocksource.cpp
     test_candidatescorer.cpp
     test_notchcontroller.cpp
+    test_licenseviewmodel.cpp
+    test_presetsfirstrun.cpp
     ../src/app/LicenseManager.cpp
+    ../src/app/LicenseViewModel.cpp
+    ../src/app/PresetFirstRun.cpp
     ../src/app/NotchController.cpp
     ../src/app/AudioEngine.cpp
     ../src/app/MainComponent.cpp
