@@ -1,6 +1,7 @@
 #include "app/NotchController.h"
 
 #include <algorithm>
+#include <cmath>
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
                                   LockFreeRingBuffer<NotchCommand>& commands,
@@ -167,6 +168,7 @@ void NotchController::runOnce()
         }
         (void) liveNow;
 
+        {
         const std::lock_guard<std::mutex> lock (snapshotMutex_);
         std::copy (block.magnitudes, block.magnitudes + Detector::kNumBins,
                    latest_.magnitudes.begin());
@@ -175,6 +177,11 @@ void NotchController::runOnce()
         latest_.notches        = notchList;
         latest_.notchCount     = notchCount;
         ++latest_.sequence;
+        }
+
+        // Detection policy for THIS block, while its magnitudes are still
+        // alive (they die at the next processLatestBlock call).
+        processSpectrumForDetection (block, now);
     }
 
     // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
@@ -199,7 +206,9 @@ void NotchController::runOnce()
             for (int i = 0; i < kSlots; ++i)
             {
                 auto& n = model_[slotOf (c, i)];
-                if (n.active && (liveMs_ - n.lastDetectedMs) > kAutoReleaseMs)
+                // KD-7: soundcheck notches never auto-release.
+                if (n.active && n.origin != Origin::Soundcheck
+                    && (liveMs_ - n.lastDetectedMs) > kAutoReleaseMs)
                     pushClearLocked (c, i);
             }
     }
@@ -212,6 +221,146 @@ double NotchController::liveMsForTest() const
 {
     const std::lock_guard<std::mutex> lock (modelMutex_);
     return liveMs_;
+}
+
+void NotchController::setDetectionActive (bool active)
+{
+    detectionActive_.store (active, std::memory_order_relaxed);
+}
+
+void NotchController::startSoundcheck()
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    soundcheckEndsAtLiveMs_.store (liveMs_ + kSoundcheckDurationMs,
+                                   std::memory_order_relaxed);
+    detectionActive_.store (true, std::memory_order_relaxed);
+}
+
+// soundcheckEndsAtLiveMs_ is atomic<double> but is ALWAYS read under
+// modelMutex_ together with liveMs_ -- the atomic is belt-and-braces only;
+// the mutex is what actually keeps the pair consistent.
+double NotchController::remainingSoundcheckMs() const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    const double end = soundcheckEndsAtLiveMs_.load (std::memory_order_relaxed);
+    if (! (end > 0.0))
+        return 0.0;
+    return std::max (0.0, end - liveMs_);
+}
+
+bool NotchController::soundcheckActive() const
+{
+    return remainingSoundcheckMs() > 0.0;
+}
+
+double NotchController::getSoundcheckRemainingMs() const
+{
+    return remainingSoundcheckMs();
+}
+
+int NotchController::firstFreeSlotLocked() const
+{
+    for (int i = 0; i < kSlots; ++i)
+        if (! model_[slotOf (0, i)].active)
+            return i;
+    return -1;
+}
+
+void NotchController::processSpectrumForDetection (const Detector::Spectrum& block,
+                                                   double blockNowMs)
+{
+    if (! detectionActive_.load (std::memory_order_relaxed))
+        return;
+
+    // Real gap since the previous DRAINED block; the first block has no
+    // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
+    const double rawDt     = blockNowMs - previousBlockNowMs_;
+    const double elapsedMs = (previousBlockNowMs_ > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
+    previousBlockNowMs_    = blockNowMs;
+
+    scorer_.beginBlock (block.sampleRate);
+
+    // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
+    // same frame the scorer looks at (spec 5.2 step 7).
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        const double binWidthHz = block.sampleRate / (double) Detector::kFftSize;
+        for (int c = 0; c < kChannels; ++c)
+            for (int i = 0; i < kSlots; ++i)
+            {
+                auto& n = model_[slotOf (c, i)];
+                if (! n.active || n.origin == Origin::Soundcheck)
+                    continue;
+                const int bin = (int) std::lround (n.frequency / binWidthHz);
+                if (bin < 0 || bin >= Detector::kNumBins)
+                    continue;
+                if (PeakinessAnalyzer::peakinessAt (block.magnitudes,
+                                                    Detector::kNumBins, bin)
+                        > PeakinessAnalyzer::kDefaultThreshold)
+                {
+                    n.lastDetectedMs = liveMs_;
+                }
+            }
+    }
+
+    // Locked fundamentals for the harmonic penalty (KD-3).
+    std::vector<double> locked;
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        for (const auto& n : model_)
+            if (n.active)
+                locked.push_back (n.frequency);
+    }
+
+    if (persistence_.size() != (std::size_t) Detector::kNumBins)
+        persistence_.assign ((std::size_t) Detector::kNumBins, 0);
+
+    const auto result = analyzer_.analyse (block);
+    for (std::size_t i = 0; i < result.count && i < (std::size_t) Detector::kNumBins; ++i)
+    {
+        const auto& cand = result.candidates[i];
+        const float score = scorer_.scoreCandidate (
+            cand, block.magnitudes,
+            { locked.data(), locked.size() });
+
+        const int bin = cand.bin;
+        if (score > CandidateScorer::kConfirmScore)
+        {
+            if (++persistence_[(std::size_t) bin] >= (std::uint32_t) kPersistenceBlocks)
+            {
+                persistence_[(std::size_t) bin] = 0;
+
+                // KD-5: automatic notch params are fixed. KD-6: first index
+                // whose channel-0 model notch is inactive; BOTH channels take
+                // that SAME index, or nothing.
+                const int slot = firstFreeSlotLocked();
+                if (slot >= 0)
+                {
+                    const Origin origin = soundcheckActive() ? Origin::Soundcheck
+                                                             : Origin::Detector;
+                    const bool left  = setNotch (0, slot, cand.frequencyHz,
+                                                 30.0, -12.0, origin);
+                    const bool right = setNotch (1, slot, cand.frequencyHz,
+                                                 30.0, -12.0, origin);
+                    // Partial-failure analysis: setNotch validates only slot
+                    // bounds + params + sample rate, identical across both
+                    // calls, so left != right has no realistic trigger today
+                    // (same reasoning as adoptPreset). If it ever happens,
+                    // unwind the half-applied side rather than leave one
+                    // channel unprotected while the GUI claims protection.
+                    if (left != right)
+                        clearNotch (left ? 0 : 1, slot);
+                }
+            }
+        }
+        else
+        {
+            // Any non-confirming block resets that bin's streak.
+            persistence_[(std::size_t) bin] = 0;
+        }
+    }
+
+    scorer_.commitBlock (block.magnitudes, elapsedMs);
 }
 
 void NotchController::copySnapshot (SnapshotBuffer& destOwnedByCaller) const
