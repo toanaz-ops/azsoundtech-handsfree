@@ -48,6 +48,16 @@ public:
     static constexpr int kSlots      = 16;
     static constexpr int kTotalSlots = kChannels * kSlots;
 
+    // Auto-release measures real elapsed time but ONLY while the tap is
+    // delivering audio (owner decision D-06). The gate is "the tap delivered
+    // RECENTLY", not "it delivered this poll" -- see the design doc §4 for
+    // why the naive form halves the clock rate. 250 ms exceeds the longest
+    // legitimate gap between tap writes (2048 samples @ 44.1 kHz = 46.4 ms)
+    // with >5x margin. Bound assumed: buffer sizes up to ~2730 @ 44.1 kHz.
+    static constexpr double kTapSilenceTimeoutMs = 250.0;
+    // Spec §5.2 step 7: 30 s without peakiness releases a notch.
+    static constexpr double kAutoReleaseMs       = 30000.0;
+
     NotchController (LockFreeRingBuffer<float>& tap,
                      LockFreeRingBuffer<NotchCommand>& commands,
                      ClockSource& clock);
@@ -60,9 +70,12 @@ public:
     void clearNotch (int channel, int index);
     void clearAll();
 
-    // One synchronous pump step: (later tasks add spectrum drain, live-clock
-    // advance and auto-release here). Today: flush the outbox.
+    // One synchronous pump step: drain the spectrum, advance the live clock,
+    // apply auto-release, flush the outbox.
     void runOnce();
+
+    // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
+    double liveMsForTest() const;
 
     // Commands that had to be retried because the command ring was full.
     // Sustained growth means the audio callback stopped draining -- a real
@@ -94,9 +107,17 @@ private:
 
     Detector detector_;
 
-    std::mutex modelMutex_;                       // guards model_ and outbox_
+    mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
 
     std::atomic<std::uint64_t> retryCount_ { 0 };
+
+    // Live-clock state, all under modelMutex_. liveMs_ advances only while
+    // the tap is alive; EVERY spec timer (30 ms candidate persistence,
+    // 15 s soundcheck, 30 s auto-release) reads liveMs_, never the wall clock.
+    double liveMs_     = 0.0;
+    double lastPollMs_ = 0.0;
+    // Sentinel far below any real time: "the tap has never delivered".
+    double lastDataMs_ = -1.0e9;
 };

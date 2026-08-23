@@ -75,3 +75,51 @@ TEST (NotchControllerCommands, FullQueueDelaysButNeverLoses)
     const auto second = h.commands.read (batch + first, 160);
     EXPECT_EQ (first + second, 140u);  // nothing lost
 }
+
+TEST (NotchControllerAutoRelease, NotchSurvivesDeadTapAfter30s)   // D-06
+{
+    Harness h;  // tap never fed => dead forever
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Detector));
+    h.clock.advance (31000.0);
+    h.controller.runOnce();
+
+    NotchCommand cmd {};
+    std::size_t sets = 0, clears = 0;
+    while (h.commands.read (&cmd, 1) == 1)
+        (cmd.type == NotchCommandType::Clear ? clears : sets)++;
+    EXPECT_EQ (sets, 1u);
+    EXPECT_EQ (clears, 0u);
+}
+
+TEST (NotchControllerLiveClock, AlternatingEmptyPollsTrackWallTime)  // half-speed bug guard
+{
+    Harness h;
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 400; ++i) {
+        if (i % 2 == 0)                       // every OTHER poll delivers data
+            h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
+    EXPECT_NEAR (h.controller.liveMsForTest(), 2000.0, 60.0);
+}
+
+TEST (NotchControllerAutoRelease, LiveTapReleasesAfter30s)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Detector));
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 7000; ++i) {          // 7000 * 5 ms = 35 s of live audio
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
+    h.controller.runOnce();                   // make sure everything is flushed
+
+    NotchCommand cmd {};
+    bool sawClearOfSlot0 = false;
+    while (h.commands.read (&cmd, 1) == 1)
+        if (cmd.type == NotchCommandType::Clear && cmd.channel == 0 && cmd.index == 0)
+            sawClearOfSlot0 = true;
+    EXPECT_TRUE (sawClearOfSlot0);
+}

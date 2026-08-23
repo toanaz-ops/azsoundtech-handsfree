@@ -7,6 +7,7 @@ NotchController::NotchController (LockFreeRingBuffer<float>& tap,
     , commands_ (commands)
     , clock_ (clock)
     , detector_ (48000.0)
+    , lastPollMs_ (clock.nowMs())
 {
 }
 
@@ -32,11 +33,13 @@ bool NotchController::setNotch (int channel, int index,
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         auto& n = model_[slotOf (channel, index)];
-        n.frequency = frequency;
-        n.Q         = Q;
-        n.depthDB   = depthDB;
-        n.origin    = origin;
-        n.active    = true;
+        n.frequency      = frequency;
+        n.Q              = Q;
+        n.depthDB        = depthDB;
+        n.origin         = origin;
+        n.active         = true;
+        n.lockedAtMs     = liveMs_;
+        n.lastDetectedMs = liveMs_;
         outbox_.push_back (cmd);
     }
     return true;
@@ -71,7 +74,52 @@ void NotchController::clearAll()
 
 void NotchController::runOnce()
 {
+    // 1. Drain every block the tap already holds, so a large audio callback
+    //    delivering several hops at once never leaves the detector behind.
+    const double now = clock_.nowMs();
+    for (auto block = detector_.processLatestBlock (tap_);
+         block.magnitudes != nullptr;
+         block = detector_.processLatestBlock (tap_))
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        lastDataMs_ = now;
+    }
+
+    // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
+    //    NOT by whether THIS poll delivered data (that halves the rate).
+    const double nowPolled = clock_.nowMs();
+    const double dt        = nowPolled - lastPollMs_;
+    lastPollMs_            = nowPolled;
+
+    bool tapAlive = false;
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        tapAlive = (nowPolled - lastDataMs_) < kTapSilenceTimeoutMs;
+        if (tapAlive)
+            liveMs_ += dt;
+    }
+
+    // 3. Auto-release: only meaningful while audio actually flows (D-06).
+    if (tapAlive)
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        for (int c = 0; c < kChannels; ++c)
+            for (int i = 0; i < kSlots; ++i)
+            {
+                auto& n = model_[slotOf (c, i)];
+                if (n.active && (liveMs_ - n.lastDetectedMs) > kAutoReleaseMs)
+                    pushClearLocked (c, i);
+            }
+    }
+
+    // 4. Flush whatever the steps above queued.
     flushOutbox();
+}
+
+double NotchController::liveMsForTest() const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return liveMs_;
 }
 
 std::uint64_t NotchController::retryCount() const
