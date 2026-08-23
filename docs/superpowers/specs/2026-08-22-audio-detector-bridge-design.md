@@ -160,6 +160,13 @@ struct ModelNotch {
 ModelNotch notches[2][16];
 ```
 
+(Amended 2026-08-23.) `ModelNotch` holds `double`; `NotchCommand` holds `float`.
+The one-directional float→double widening at the model boundary is deliberate:
+the command struct stays at 16 bytes for ring density, and no value flows back
+from command to model, so there is no precision loss to reason about. Do not
+"reconcile" the two to the same type in either direction without reopening this
+decision.
+
 `origin` is carried because it costs one byte and answers a question the owner
 may revisit: [D-05] chose *"the detector adopts preset notches"*, but the
 rejected alternative *"detector leaves them alone"* becomes a one-line policy
@@ -173,7 +180,10 @@ recorded success, the model would then claim a notch the chain does not have.
 
 **Mitigation: the detector validates before sending, using the same predicates
 `Biquad::setNotchFilter` applies** — `sampleRate > 0`, `Q > 0`, `0 < freq <
-sampleRate/2`. The detector already knows the sample rate (it is carried in
+sampleRate/2`, and (amended 2026-08-23, owner-approved) **`depthDB <= 0`**: the
+depth-bearing four-argument `setNotchFilter` rejects a positive depth because
+the peaking form would BOOST the ringing frequency instead of cutting it. The
+detector already knows the sample rate (it is carried in
 `Spectrum::sampleRate` precisely to avoid a torn read). A command that would be
 rejected is never sent, so the silent-rejection path is unreachable in practice.
 
@@ -326,6 +336,25 @@ member."* Two reasons not to:
   why `Detector` has real coverage today while `AudioEngine` had none until the
   fix pass added four tests.
 
+### Lifecycle — the shutdown ordering (amended 2026-08-23, owner-approved)
+
+`LockFreeRingBuffer::clear()` has a hard precondition: neither producer nor
+consumer may be running. Both rings are cleared in `audioDeviceAboutToStart()`,
+so the device lifecycle must guarantee the detector thread is stopped first:
+
+```
+device restart / stop:
+  1. NotchController::stop(timeout)   -- detector thread joins; producer of
+                                         commands AND consumer of tap are gone
+  2. engine.stop()/restart            -- JUCE removes the audio callback
+device start:
+  3. audioDeviceAboutToStart()        -- clear() both rings (precondition holds)
+  4. NotchController::start()         -- thread resumes on clean rings
+```
+
+**MainComponent owns this ordering** because it owns both objects. No code path
+may clear either ring while `NotchController`'s thread is live.
+
 ---
 
 ## 7. What this design is tested by
@@ -376,6 +405,12 @@ Depth column and Task 20's depth-as-marker-height. Under [D-05] it also blocks
 the preset round-trip this design assumes works.
 
 It is independent of the bridge and should land before it. Tracked separately.
+
+**(Amended 2026-08-23: LANDED.)** The depth-bearing four-argument
+`Biquad::setNotchFilter(freq, Q, sampleRate, depthDB)` now exists
+(`src/dsp/Biquad.h`), `NotchChain::setNotch` carries depth through to it and
+replays depth across sample-rate changes (`src/dsp/NotchChain.cpp`). The
+prerequisite is satisfied; see also §3's amended predicate list.
 
 ---
 
