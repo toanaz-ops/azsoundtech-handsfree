@@ -21,6 +21,7 @@ add_executable(HandsFreeTests
     test_gui_wiring.cpp
     test_presetmanager.cpp
     test_licensemanager.cpp
+    test_clocksource.cpp
     ../src/app/LicenseManager.cpp
     ../src/app/AudioEngine.cpp
     ../src/app/MainComponent.cpp
