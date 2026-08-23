@@ -271,6 +271,45 @@ std::uint64_t AudioEngine::getTapDropCount() const
     return tapDropCount_.load (std::memory_order_relaxed);
 }
 
+LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue()
+{
+    return commandQueue_;
+}
+
+const NotchChain& AudioEngine::getNotchChainForTest (int channel) const
+{
+    // Out-of-range callers get channel 0 clamped; tests never pass bad input,
+    // and the sentinel dance of NotchChain::getNotchInfo would be overkill here.
+    return notchChains_[channel < 0 ? 0 : (channel > 1 ? 0 : channel)];
+}
+
+void AudioEngine::drainCommandQueue()
+{
+    // Real-time discipline: one bulk read into a pre-allocated stack array,
+    // then apply. Bounds-check EVERY field used as an index -- content that
+    // crossed a lock-free ring is trusted only after it is checked.
+    NotchCommand batch[kMaxCommandsPerCallback];
+    const std::size_t count = commandQueue_.read (batch, (std::size_t) kMaxCommandsPerCallback);
+
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const NotchCommand& cmd = batch[i];
+
+        if (cmd.channel >= 2 || cmd.index >= 16)
+            continue;   // corrupt or hostile command: skip, never index OOB
+
+        switch (cmd.type)
+        {
+            case NotchCommandType::Set:
+                notchChains_[cmd.channel].setNotch (cmd.index, cmd.frequency, cmd.Q, cmd.depthDB);
+                break;
+            case NotchCommandType::Clear:
+                notchChains_[cmd.channel].clearNotch (cmd.index);
+                break;
+        }
+    }
+}
+
 //==============================================================================
 // AudioIODeviceCallback -- real-time audio thread.
 
@@ -304,6 +343,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // and juce_recommended_config_flags adds only /Ox /MP /EHsc.)
     // tests/test_biquad.cpp SilenceDoesNotLeaveDenormalState pins both halves.
     const juce::ScopedNoDenormals noDenormals;
+
+    // Commands first (bridge design §2): a notch commanded this callback takes
+    // effect on THIS callback's samples instead of being one buffer late.
+    drainCommandQueue();
 
     // Publish what this callback was ACTUALLY handed, for the status display.
     // Two relaxed stores per callback: no allocation, no lock, no ordering
@@ -420,6 +463,11 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // to Task 14, which owns the detector instance; the method exists and is
     // tested here so that wiring is a one-liner.
     tapBuffer_.clear();
+
+    // Both rings are cleared under the same precondition (no producer/consumer
+    // running); the detector thread is stopped by MainComponent BEFORE any
+    // device restart reaches this point (bridge design §6.5).
+    commandQueue_.clear();
 }
 
 void AudioEngine::audioDeviceStopped()

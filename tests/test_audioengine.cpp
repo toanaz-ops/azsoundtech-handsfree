@@ -420,3 +420,75 @@ TEST (AudioEngine, TheLastDeviceErrorIsRetrievableInsteadOfOnlyLogged)
     EXPECT_EQ (engine.getLastDeviceError(), "ASIO driver stopped responding");
     EXPECT_FALSE (engine.isRunning());
 }
+
+//==============================================================================
+// Detector -> audio command queue (bridge design §2).
+//
+// Each test constructs the AudioEngine directly; the ScopedJuceInitialiser_GUI
+// is required for the same reason as every other test in this file (the
+// AudioDeviceManager constructor and JUCE's leak-detector machinery expect the
+// MessageManager to be up).
+
+TEST (AudioEngineCommands, CommandCrossesBoundaryInOneCallback)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 2, 1000.0f, 30.0f, -12.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_EQ (engine.getNotchChainForTest (0).getNotchInfo (2).state, NotchChain::NotchState::Active);
+    EXPECT_DOUBLE_EQ (engine.getNotchChainForTest (0).getNotchInfo (2).frequency, 1000.0);
+}
+
+TEST (AudioEngineCommands, ClearCommandDeactivates)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set   { NotchCommandType::Set,   1, 0, 800.0f, 30.0f, -12.0f };
+    const NotchCommand clear { NotchCommandType::Clear, 1, 0, 0.0f, 0.0f, 0.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+    ASSERT_EQ (q.write (&clear, 1), 1u);
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_NE (engine.getNotchChainForTest (1).getNotchInfo (0).state, NotchChain::NotchState::Active);
+}
+
+TEST (AudioEngineCommands, OutOfRangeChannelIsSkippedNotApplied)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    const NotchCommand evil { NotchCommandType::Set, 9, 2, 1000.0f, 30.0f, -12.0f };
+    ASSERT_EQ (q.write (&evil, 1), 1u);
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+    SUCCEED();   // surviving hostile ring content without OOB indexing IS the assertion
+}
+
+TEST (AudioEngineCommands, DrainCappedAt64PerCallback)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    for (int i = 0; i < 100; ++i) {
+        const NotchCommand c { NotchCommandType::Set, 0, (std::uint8_t)(i % 16), 500.0f + i, 30.0f, -12.0f };
+        ASSERT_EQ (q.write (&c, 1), 1u);
+    }
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_EQ (q.getAvailableRead(), 36u);   // exactly 64 consumed this callback
+}

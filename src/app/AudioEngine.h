@@ -37,6 +37,7 @@
 
 #include "dsp/LockFreeRingBuffer.h"
 #include "dsp/NotchChain.h"
+#include "dsp/NotchCommand.h"
 
 #include <array>
 #include <atomic>
@@ -161,6 +162,20 @@ public:
     // write, no allocation, no ordering dependency on anything else.
     std::uint64_t getTapDropCount() const;
 
+    // Command channel FROM the detector thread INTO the audio thread
+    // (bridge design §2): the audio callback drains up to 64 commands per
+    // callback and applies them to the notch chains.
+    //
+    // *** CALLER CONTRACT: write() only, and from exactly one thread. ***
+    // Same reasoning as getTapBuffer(): the type system cannot stop a caller
+    // from breaking the single-producer invariant -- the detector thread is
+    // and must remain the sole producer (owner decision D-05).
+    LockFreeRingBuffer<NotchCommand>& getCommandQueue();
+
+    // TEST ACCESSOR ONLY -- lets tests assert chain state without an audio
+    // device. Do not build product behaviour on this.
+    const NotchChain& getNotchChainForTest (int channel) const;
+
     // AudioIODeviceCallback interface
     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
     // audioDeviceIOCallbackWithContext; see Task 8 report.)
@@ -186,6 +201,22 @@ private:
     static constexpr size_t kTapCapacity = 8192;  // ~170 ms @ 48 kHz, power of 2
     LockFreeRingBuffer<float> tapBuffer_ { kTapCapacity };
     std::atomic<std::uint64_t> tapDropCount_ { 0 };
+
+    // Detector -> audio command ring (bridge design §2). Capacity 128 gives
+    // 4x headroom over the worst legitimate burst: a preset load installs up
+    // to 16 notches on each of 2 channels = 32 commands at once.
+    static constexpr size_t kCommandCapacity = 128;
+    LockFreeRingBuffer<NotchCommand> commandQueue_ { kCommandCapacity };
+
+    // Bound on worst-case callback time: 64 recomputes ~13 us against a
+    // 0.67 ms budget at a 32-sample buffer / 48 kHz (<2%). Chosen over 32 so
+    // a full 32-command preset applies within ONE callback -- a preset that
+    // half-applies across two callbacks is audible as two distinct changes.
+    static constexpr int kMaxCommandsPerCallback = 64;
+
+    // Audio-thread only: drains up to kMaxCommandsPerCallback commands from
+    // commandQueue_ into the notch chains. Called first in the callback.
+    void drainCommandQueue();
 
     // Cross-thread state. std::atomic keeps the audio callback lock-free and
     // allocation-free while still letting the UI thread observe/change mode,
