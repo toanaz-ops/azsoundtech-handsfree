@@ -182,9 +182,17 @@ constexpr double kToleranceRatio = 0.00116;
 // Drives one callback with a sine on L and a different sine on R, so a
 // channel swap or a mono fold cannot pass. Retains the input for comparison,
 // which the constant-level CallbackDriver above cannot do.
+//
+// startSample keeps the PHASE continuous across consecutive drivers: a
+// phase-resetting stimulus puts a step discontinuity at every block boundary
+// (512 is not an integer multiple of the 48-sample period of a 1 kHz sine at
+// 48 kHz), and through a Q=30 notch that step re-rings the filter's ~750-sample
+// transient inside every block -- which masquerades as a shallow notch. Real
+// input is continuous; the stimulus must be too.
 struct SineDriver
 {
-    explicit SineDriver (int numSamples, double sampleRate = 48000.0)
+    explicit SineDriver (int numSamples, double sampleRate = 48000.0,
+                         long long startSample = 0)
         : inL (static_cast<std::size_t> (numSamples))
         , inR (static_cast<std::size_t> (numSamples))
         , outL (static_cast<std::size_t> (numSamples), 0.0f)
@@ -193,10 +201,11 @@ struct SineDriver
     {
         for (int i = 0; i < numSamples; ++i)
         {
+            const double n = static_cast<double> (startSample + i);
             inL[static_cast<std::size_t> (i)] =
-                0.5f * static_cast<float> (std::sin (2.0 * kPi * 1000.0 * i / sampleRate));
+                0.5f * static_cast<float> (std::sin (2.0 * kPi * 1000.0 * n / sampleRate));
             inR[static_cast<std::size_t> (i)] =
-                0.5f * static_cast<float> (std::sin (2.0 * kPi * 3000.0 * i / sampleRate));
+                0.5f * static_cast<float> (std::sin (2.0 * kPi * 3000.0 * n / sampleRate));
         }
 
         ins[0]  = inL.data();
@@ -460,6 +469,195 @@ TEST (AudioEngineCommands, ClearCommandDeactivates)
     engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
 
     EXPECT_NE (engine.getNotchChainForTest (1).getNotchInfo (0).state, NotchChain::NotchState::Active);
+}
+
+//==============================================================================
+// The notch actually ATTENUATES through the callback.
+//
+// The AudioEngineCommands tests above prove a command changes chain STATE;
+// none of them proves a single sample got quieter. If drainCommandQueue()
+// applied commands to a copy of the chain, or NotchChain::processSample()
+// stopped consulting filters_[i], every state assertion here would stay
+// green while the PA kept howling.
+
+TEST (AudioEngine, NotchAttenuatesSignalThroughTheCallback)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    // Command a -18 dB notch at 1 kHz onto the LEFT chain only, exactly the
+    // way the detector thread does (write() into getCommandQueue()).
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 0, 1000.0f, 30.0f, -18.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    // A Q=30 biquad needs tens of milliseconds to settle at 48 kHz; the first
+    // blocks are transient. Drive 16 phase-continuous blocks of 512 (~171 ms)
+    // and measure only the last one.
+    constexpr int kBlock = 512;
+    constexpr int kSettleBlocks = 15;
+
+    double dbL = 0.0;
+    double dbR = 0.0;
+
+    for (int block = 0; block <= kSettleBlocks; ++block)
+    {
+        SineDriver drive (kBlock, 48000.0,
+                          static_cast<long long> (block) * kBlock);
+        drive (engine);
+
+        // RMS ratio in dB, block by block; keep the last (settled) one.
+        const auto rmsOf = [] (const std::vector<float>& v)
+        {
+            double sum = 0.0;
+            for (const float s : v)
+                sum += static_cast<double> (s) * static_cast<double> (s);
+            return std::sqrt (sum / static_cast<double> (v.size()));
+        };
+
+        dbL = 20.0 * std::log10 (rmsOf (drive.outL) / rmsOf (drive.inL));
+        dbR = 20.0 * std::log10 (rmsOf (drive.outR) / rmsOf (drive.inR));
+    }
+
+    // Removing the depthDB argument from the Biquad::setNotchFilter call in
+    // NotchChain::setNotch() turns this notch into a full null (~-infinity dB)
+    // and breaks the lower bound. Deleting the Active-slot filter call in
+    // NotchChain::processSample() leaves ~0 dB and breaks the upper bound.
+    // The window is deliberately wide (-24..-12 around the requested -18):
+    // this pins THAT the signal drops by roughly the asked-for depth, not the
+    // biquad's exact magnitude response at 1 kHz.
+    EXPECT_NEAR (dbL, -18.0, 6.0) << "measured " << dbL << " dB";
+
+    // The command named channel 0 only. Routing the notch to both chains --
+    // e.g. ignoring cmd.channel in drainCommandQueue() -- drags the RIGHT
+    // channel down too and breaks this bound.
+    EXPECT_NEAR (dbR, 0.0, 1.0) << "right channel must be untouched, measured " << dbR << " dB";
+}
+
+//==============================================================================
+// The tap CONTRACT: what is in the ring is exactly what left the app.
+//
+// TapDropCountRecordsTruncatedWrites above pins the COUNTS. Nothing pinned
+// the CONTENT: that the ring holds numSamples x callbacks samples, in order,
+// equal to the post-notch LEFT output -- not the input, not a scaled copy,
+// not interleaved with R.
+
+TEST (AudioEngine, TapHoldsExactlyAndOnlyWhatLeftOnTheLeftChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;   // Bypass: output IS the input, easiest oracle
+
+    constexpr int kBlock = 256;
+    constexpr int kBlocks = 5;
+    std::vector<float> expected;
+
+    for (int i = 0; i < kBlocks; ++i)
+    {
+        SineDriver drive (kBlock, 48000.0,
+                          static_cast<long long> (i) * kBlock);
+        drive (engine);
+        // Oracle is the INPUT, not outL: in Bypass they are equal, but
+        // deriving the expectation from the output would let any defect that
+        // corrupts the output path (and the tap with it) compare silence
+        // against silence and stay green.
+        expected.insert (expected.end(), drive.inL.begin(), drive.inL.end());
+    }
+
+    auto& tap = engine.getTapBuffer();
+
+    // Dropping the per-callback tap write (or writing it only outside
+    // Bypass) starves the ring and breaks this count.
+    ASSERT_EQ (tap.getAvailableRead(), static_cast<std::size_t> (kBlock * kBlocks));
+
+    // One bulk read() must reproduce every block's L output in order.
+    // Any reorder, interleave with R, or wrap off-by-one breaks the equality;
+    // reading more than was produced would break the count above.
+    std::vector<float> tapped (expected.size());
+    ASSERT_EQ (tap.read (tapped.data(), tapped.size()), tapped.size());
+
+    for (std::size_t i = 0; i < tapped.size(); ++i)
+        ASSERT_FLOAT_EQ (tapped[i], expected[i]) << "sample " << i;
+
+    // Exactly consumed: the ring must now be empty, proving the tap held
+    // ONLY these samples and nothing extra was interleaved.
+    EXPECT_EQ (tap.getAvailableRead(), 0u);
+}
+
+TEST (AudioEngine, TapIsPostNotchSoItDiffersFromInputWhenFiltering)
+{
+    // With a notch active, tap == output[0] and tap != input[0]. Comparing
+    // against BOTH directions is what makes "post-notch" falsifiable: tapping
+    // the INPUT instead (moving the write above the processing loop) keeps
+    // every count in this file green and only this pair of comparisons red.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 0, 1000.0f, 30.0f, -18.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    // First callback applies the command mid-flight; the second is fully
+    // filtered. BOTH blocks are tapped, so both are compared -- which also
+    // proves the ring preserves block ORDER across callbacks.
+    SineDriver first (512);
+    first (engine);
+    SineDriver second (512, 48000.0, 512);
+    second (engine);
+
+    constexpr std::size_t kTotal = 1024;
+    std::vector<float> tapped (kTotal);
+    ASSERT_EQ (engine.getTapBuffer().read (tapped.data(), kTotal), kTotal);
+
+    bool differsFromInput  = false;
+    bool matchesOutput     = true;
+    for (std::size_t i = 0; i < kTotal; ++i)
+    {
+        const float& in  = i < 512 ? first.inL[i]          : second.inL[i - 512];
+        const float& out = i < 512 ? first.outL[i]         : second.outL[i - 512];
+
+        if (tapped[i] != in)
+            differsFromInput = true;
+        if (tapped[i] != out)
+            matchesOutput = false;
+    }
+
+    EXPECT_TRUE (differsFromInput);
+    EXPECT_TRUE (matchesOutput);
+}
+
+TEST (AudioEngine, NullInputChannelsLeaveTheTapUntouched)
+{
+    // The tap gate requires input channel 0 to exist because the detector
+    // cannot use silence masquerading as signal. Deleting the
+    // inputChannelData[0] != nullptr clause makes the callback write the
+    // (cleared) OUTPUT into the ring anyway, and this count stops holding.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+
+    constexpr int frames = 128;
+    std::vector<float> outL (frames, 0.7f);
+    std::vector<float> outR (frames, 0.7f);
+    const float* ins[2] { nullptr, nullptr };
+    float* outs[2] { outL.data(), outR.data() };
+
+    const juce::AudioIODeviceCallbackContext context {};
+    engine.audioDeviceIOCallbackWithContext (ins, 2, outs, 2, frames, context);
+
+    EXPECT_EQ (engine.getTapBuffer().getAvailableRead(), 0u);
+
+    // Same promise when JUCE hands us no channel ARRAY at all -- dereferencing
+    // inputChannelData[0] unguarded would crash right here.
+    std::vector<float> out2 (frames, 0.7f);
+    float* outsOnly[1] { out2.data() };
+    engine.audioDeviceIOCallbackWithContext (nullptr, 0, outsOnly, 1, frames, context);
+
+    EXPECT_EQ (engine.getTapBuffer().getAvailableRead(), 0u);
 }
 
 TEST (AudioEngineCommands, OutOfRangeChannelIsSkippedNotApplied)
