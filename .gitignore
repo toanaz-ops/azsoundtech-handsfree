@@ -64,3 +64,6 @@ Thumbs.db
 
 # Codegraph index (local, regenerable)
 .codegraph/
+
+# Claude-desktop harness scratch state (worktree drift tracking)
+.feat-drift-history.json

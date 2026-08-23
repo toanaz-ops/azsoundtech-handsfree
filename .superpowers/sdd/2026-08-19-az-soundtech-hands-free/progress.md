@@ -315,3 +315,87 @@ STILL OPEN AFTER THIS SESSION
   - CLAUDE.md is untracked and not ignored; it appeared this session.
   - Tasks 5, 12-32 remain open. Task 12's stated blocker is dissolved by D-05,
     pending approval of the design that says so.
+
+================================================================================
+SESSION 2026-08-22/23 -- Four lanes landed; ledger backfilled 2026-08-23
+================================================================================
+
+Four worktree lanes ran against main @ 01db1f0 and merged. This section
+backfills their outcomes into the ledger; full evidence lives in
+shared/handoff/lanes/report-{gui-device,presets,licensing,installer}.md.
+Suite verified on main after all merges: 198/198 PASS (ctest -C Release,
+run directly 2026-08-23, also serving as verification of the JUCE restore --
+see INCIDENT below).
+
+LANE GUI DEVICE -- Tasks 16, 17, 18, 23 (partial). MERGED.
+  MainComponent owns an AudioEngine by value (the app previously processed no
+  audio at all); startAudio() called from main.cpp AFTER setVisible(true).
+  New: DeviceViewModel (+21 tests), DevicePanel (Tasks 16+17 as one component),
+  StatusBar (18), ModeBar (23 partial). App was RUN on screen: device opened,
+  status line live, "2 in / 2 out" proves audio flowed (Windows Audio fallback;
+  no ASIO SDK on this machine). 32 new tests, two mutation-verified.
+  NOT DONE: soundcheck countdown (needs bridge getSoundcheckSecondsRemaining);
+  Tasks 19/20/22/24 blocked on the bridge; spec s8 ASIO-missing guidance;
+  interactive combo clicking was reasoned-and-unit-tested, not observed.
+
+LANE PRESETS -- Task 25 (format half), Task 26. MERGED.
+  PresetManager.h/.cpp + presets/Speech.json, presets/Music.json at repo root
+  (NOT %APPDATA% -- installer copies them; CI can test repo files). 46 tests;
+  three mutation-verified. Format extension decided WITH OWNER: optional
+  notchDefaults {Q, depth} block -- plan Task 26's Q=40/-18 and Q=25/-10 are
+  not expressible in the Task 25 format otherwise (shipped defaults lock NO
+  notches; a test pins that). D-00 honoured via planFor(preset, targetRateHz):
+  AboveNyquist notches stay Idle with parameters intact, never clamped/dropped.
+  NOT DONE: wiring half of Task 25 (blocked by D-05 on the detector); first-run
+  copy into %APPDATA% (needs startup code); memory/MEMORY.md was left for a
+  single post-merge edit -- this is that edit's session.
+
+LANE LICENSING -- Tasks 27, 28, 29. MERGED.
+  LicenseManager behind three seams (ActivationTransport / MachineIdSource /
+  LicenseClock). 45 new tests; two mutation runs confirmed each kills exactly
+  its predicted pair. Backwards clock -> ClockTampered with 24 h tolerance.
+  JWT without exp accepted (perpetual licence is the normal case per spec s1).
+  XOR storage is OBFUSCATION, stated plainly: stops text-editor edits and
+  cross-machine copies (both tested); survives nobody who owns the binary.
+  OPEN DECISIONS FOR THE OWNER:
+   - Spec says grace = 7 days hard block; plan says warn 7 / disable 10.
+     Implemented the PLAN'S 7/10. Owner must pick one (differs on whether a
+     day-8 customer can still run a show).
+   - JWT SIGNATURE IS NOT VERIFIED CLIENT-SIDE AND CANNOT BE until a server
+     and a public key exist. Forged tokens with valid structure pass today.
+     Largest single gap in the licence system.
+  CRITICAL GAP, recorded so it is never mistaken for done: NOTHING constructs
+  a LicenseManager in production code. The shipped app enforces no licence.
+  Same defect shape the briefs were written to expose.
+
+LANE INSTALLER -- Task 30. LANDED 2026-08-23 (commit 84897d7).
+  installer/handsfree.nsi + fetch-deps.ps1 (SHA-pinned vc_redist) +
+  verify-installer.ps1 (20/20 checks: silent install, launch 6 s, uninstall)
+  + README. Version read from CMakeLists project() at compile time.
+  NOT DONE: Task 31 code signing BLOCKED twice over (no EV certificate --
+  business decision ~$300-500/yr; signtool not installed). Commands ready as
+  a commented block in handsfree.nsi. Clean-VM test NOT done: this machine has
+  VC++ runtime already, so the vc_redist install path NEVER EXECUTED.
+
+INCIDENT (2026-08-23) -- worktree cleanup deleted the shared JUCE checkout.
+  git worktree remove --force followed the external/JUCE junction inside two
+  lane worktrees and emptied the main repo's checkout. Recovered same session:
+  git submodule update --init --recursive -> e18f7f5 (the pinned commit),
+  rebuild both targets, ctest 198/198. Lesson recorded in
+  memory/worktree-junction-incident-2026-08-23.md: check LinkType and rmdir
+  the junction BEFORE removing any worktree. Third occurrence of this trap;
+  the runbook documented it but sits where cleanup steps do not read.
+
+STILL OPEN AFTER THESE LANES
+  - Bridge implementation (Tasks 5-real, 12, 13, 14, 15): design doc still
+    awaits owner approval. Everything in the DSP spine waits on it.
+  - Tasks 19, 20, 21, 22, 24 (spectrum, overlay, list, clear): need the
+    bridge's snapshot mechanism.
+  - Licence wiring: construct LicenseManager at startup, activation dialog,
+    grace banner (GUI work, unblocked NOW -- the class exists and is tested).
+  - Preset wiring half of Task 25 + first-run defaults copy: needs the
+    detector (D-05) for adoption; the %APPDATA% copy itself only needs
+    startup code.
+  - Task 31 signing: owner business decision. Clean-VM installer test.
+  - AudioEngine passthrough loopback test (spec-level debt since Task 9).
+  - Grace-days spec-vs-plan conflict needs an owner ruling.
