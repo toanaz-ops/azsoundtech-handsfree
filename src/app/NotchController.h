@@ -12,8 +12,11 @@
 // Threading (final form, arrived at over successive tasks):
 //   - Policy entry points (setNotch/clearNotch/clearAll/adoptPreset):
 //     message thread.
-//   - runOnce(): called from the detector thread loop (and directly from
-//     tests). Flushes the outbox into the command ring.
+//   - run(): the detector thread loop -- runOnce() then wait(5). Polling,
+//     never signalled from the audio thread: a WaitableEvent signal is a
+//     kernel transition on a thread whose contract here is no locks/
+//     allocation/logging; polling costs one wake per 5 ms against a ~170 ms
+//     tap margin (design §4).
 //   - Everything shared between those sides sits under modelMutex_. Neither
 //     side is real-time, so an ordinary mutex is correct here; lock-free
 //     machinery is reserved for the two channels touching the audio thread.
@@ -30,13 +33,17 @@
 #include "dsp/LockFreeRingBuffer.h"
 #include "dsp/NotchCommand.h"
 
+#include <juce_events/juce_events.h>
+
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <vector>
 
-class NotchController
+// private inheritance: the thread is an implementation detail; nothing
+// external should see Thread's interface.
+class NotchController : private juce::Thread
 {
 public:
     // Recorded because D-05's rejected alternative ("detector leaves preset
@@ -61,6 +68,14 @@ public:
     NotchController (LockFreeRingBuffer<float>& tap,
                      LockFreeRingBuffer<NotchCommand>& commands,
                      ClockSource& clock);
+
+    ~NotchController() override;
+
+    // Lifecycle. start() launches the poll loop; stop(timeoutMs) joins the
+    // thread. MainComponent MUST stop() this before any device restart can
+    // clear the rings (bridge design §6.5 -- clear()'s precondition).
+    void start();
+    void stop (int timeoutMs);
 
     // Policy entry points. Message thread. setNotch validates BEFORE touching
     // anything; false means nothing changed anywhere.
@@ -109,6 +124,8 @@ public:
     void setSampleRate (double sampleRate);
 
 private:
+    void run() override;
+
     struct ModelNotch
     {
         double frequency    = 0.0;

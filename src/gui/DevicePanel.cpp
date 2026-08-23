@@ -87,10 +87,16 @@ void DevicePanel::refresh()
 
 void DevicePanel::restartWith (const juce::String& typeName, const juce::String& deviceName)
 {
+    if (onBeforeRestart != nullptr)
+        onBeforeRestart();
+
     engine_.stop();
     engine_.setAudioDeviceType (typeName);
     engine_.setAudioDevice (deviceName);
     engine_.start();
+
+    if (onAfterRestart != nullptr)
+        onAfterRestart();
 
     // A failed start leaves its reason in getLastDeviceError(), which the
     // status bar polls, so nothing is reported here. Any stale refusal message
@@ -116,10 +122,16 @@ void DevicePanel::applySampleRate()
     // is still running. The refresh() below re-selects the ACTUAL rate, which
     // IS the revert -- leaving the combo showing a rate the device is not
     // running is precisely the failure the bool exists to prevent.
+    if (onBeforeRestart != nullptr)
+        onBeforeRestart();
+
     if (engine_.setSampleRate (requested))
         report ({});
     else
         report (refusedSampleRateMessage (requested, engine_.getCurrentSampleRateHz()));
+
+    if (onAfterRestart != nullptr)
+        onAfterRestart();
 
     refresh();
 }
@@ -133,10 +145,16 @@ void DevicePanel::applyBufferSize()
 
     const int requested = bufferSizes_[index];
 
+    if (onBeforeRestart != nullptr)
+        onBeforeRestart();
+
     if (engine_.setBufferSize (requested))
         report ({});
     else
         report (refusedBufferSizeMessage (requested, engine_.getCurrentBufferSize()));
+
+    if (onAfterRestart != nullptr)
+        onAfterRestart();
 
     refresh();
 }

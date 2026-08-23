@@ -20,6 +20,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "app/AudioEngine.h"
+#include "app/NotchController.h"
+#include "dsp/ClockSource.h"
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "gui/StatusBar.h"
@@ -59,6 +61,12 @@ private:
     void refreshStatus();
 
     AudioEngine engine_;
+
+    // Clock first, controller second: the controller holds a reference to it.
+    // Declaration order = destruction order: notchController_'s thread is
+    // joined BEFORE engine_ tears down (bridge design §6.5).
+    JuceMonotonicClock systemClock_;
+    NotchController notchController_;
 
     gui::DevicePanel devicePanel_ { engine_ };
     gui::StatusBar   statusBar_;

@@ -39,6 +39,14 @@ public:
     // hardware refused a setting.
     std::function<void (const juce::String&)> onMessage;
 
+    // Bridge design §6.5. Every path in this panel that touches the engine
+    // (restartWith, applySampleRate, applyBufferSize) stops/restarts the
+    // device, and the rings are cleared on the way -- so anything consuming
+    // the tap or producing commands MUST be stopped before and restarted
+    // after. MainComponent owns that ordering through these hooks.
+    std::function<void()> onBeforeRestart;
+    std::function<void()> onAfterRestart;
+
     void resized() override;
 
     // Public for the same reason ModeBar's buttons are: they are the

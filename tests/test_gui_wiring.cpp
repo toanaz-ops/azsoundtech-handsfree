@@ -22,8 +22,11 @@
 #include <gtest/gtest.h>
 
 #include "app/MainComponent.h"
+#include "app/NotchController.h"
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
+
+#include <vector>
 
 //==============================================================================
 // Task 23 -- mode buttons. Auto and Bypass in full; Soundcheck sets the mode
@@ -202,4 +205,54 @@ TEST (DevicePanel, RefreshOffersTheDriverTypesTheMachineActuallyHas)
     // user cannot choose a device from.
     EXPECT_EQ (panel.deviceTypeBox.getNumItems(),
                engine.getAvailableDeviceTypeNames().size());
+}
+
+//==============================================================================
+// Task 6 -- detector thread lifecycle. The controller's poll loop is joined
+// BEFORE the engine tears down (bridge design §6.5); these tests fail by
+// hanging or by a leak-detector hit if that ordering is wrong.
+
+TEST (MainComponent, ControllerLifecycleSurvivesConstructionDestruction)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    {
+        // Same pattern as every other MainComponent test in this file: built
+        // directly, never added to a desktop window. No message pump needed:
+        // the constructor wires callbacks but posts no messages, and
+        // runDispatchLoopUntil() is unavailable with JUCE_MODAL_LOOPS_
+        // PERMITTED off.
+        MainComponent app;
+    }
+    // Destruction runs notchController_'s destructor (joins its own thread)
+    // BEFORE engine_, reverse declaration order. A hang here means stop()
+    // failed to join; a leak-detector hit means something was left running.
+    SUCCEED();
+}
+
+TEST (NotchControllerThread, StartStopCycleJoinsCleanly)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, commands, clock };
+
+    controller.start();
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 50; ++i)
+    {
+        tap.write (hop.data(), hop.size());
+        juce::Thread::sleep (5);
+    }
+    controller.stop (2000);
+
+    // juce::Thread is inherited PRIVATELY, so isThreadRunning() is not visible
+    // here by design. Liveness is asserted through observable effects: the
+    // poll loop published frames, and stop() returning at all means the join
+    // completed within its 2 s budget.
+    NotchController::SnapshotBuffer snap {};
+    controller.copySnapshot (snap);
+    EXPECT_GT (snap.sequence, 0u);
 }

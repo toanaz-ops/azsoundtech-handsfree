@@ -11,12 +11,19 @@ constexpr int kStatusRefreshMs = 200;
 } // namespace
 
 MainComponent::MainComponent()
+    : notchController_ (engine_.getTapBuffer(), engine_.getCommandQueue(), systemClock_)
 {
     addAndMakeVisible (devicePanel_);
     addAndMakeVisible (statusBar_);
     addAndMakeVisible (modeBar_);
 
     modeBar_.onModeRequested = [this] (AudioEngine::Mode mode) { requestMode (mode); };
+
+    // Bridge design §6.5: a device change in the panel is always an engine
+    // RESTART, and the rings are cleared on the way -- so the detector thread
+    // must be joined first and relaunched after.
+    devicePanel_.onBeforeRestart = [this] { notchController_.stop (1000); };
+    devicePanel_.onAfterRestart  = [this] { notchController_.start(); };
 
     // A setting the hardware refused. Held rather than flashed: the user needs
     // to still be reading it a few seconds later.
@@ -41,6 +48,8 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    // §6.5: the detector thread must be dead before the engine tears down.
+    notchController_.stop (1000);
     engine_.stop();
 }
 
@@ -60,6 +69,10 @@ void MainComponent::startAudio()
     // when the requested one does not exist.
     engine_.setAudioDeviceType (gui::chooseDefaultDeviceType (engine_.getAvailableDeviceTypeNames()));
     engine_.start();
+
+    // The device is open: the detector can start pumping. start() is a no-op
+    // if the thread already runs.
+    notchController_.start();
 
     // Only now do getAvailableSampleRates() and getAvailableBufferSizes()
     // return anything.

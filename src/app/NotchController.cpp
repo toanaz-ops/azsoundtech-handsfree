@@ -5,12 +5,43 @@
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
                                   LockFreeRingBuffer<NotchCommand>& commands,
                                   ClockSource& clock)
-    : tap_ (tap)
+    : juce::Thread ("AZNotchDetector")
+    , tap_ (tap)
     , commands_ (commands)
     , clock_ (clock)
     , detector_ (48000.0)
     , lastPollMs_ (clock.nowMs())
 {
+}
+
+NotchController::~NotchController()
+{
+    // Safety net only: normal shutdown goes through MainComponent's explicit
+    // stop(). 2 s is generous for a loop whose step is ~5 ms.
+    stop (2000);
+}
+
+void NotchController::start()
+{
+    if (isThreadRunning())
+        return;
+    startThread();
+}
+
+void NotchController::stop (int timeoutMs)
+{
+    if (! isThreadRunning())
+        return;
+    stopThread (timeoutMs);
+}
+
+void NotchController::run()
+{
+    while (! threadShouldExit())
+    {
+        runOnce();
+        wait (5);
+    }
 }
 
 bool NotchController::setNotch (int channel, int index,
