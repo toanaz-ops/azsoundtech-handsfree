@@ -1,5 +1,7 @@
 #include "app/NotchController.h"
 
+#include <algorithm>
+
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
                                   LockFreeRingBuffer<NotchCommand>& commands,
                                   ClockSource& clock)
@@ -76,13 +78,45 @@ void NotchController::runOnce()
 {
     // 1. Drain every block the tap already holds, so a large audio callback
     //    delivering several hops at once never leaves the detector behind.
+    //    Each fresh block is published to the GUI snapshot IMMEDIATELY,
+    //    while its magnitudes pointer is still valid (it dies at the next
+    //    processLatestBlock call).
     const double now = clock_.nowMs();
     for (auto block = detector_.processLatestBlock (tap_);
          block.magnitudes != nullptr;
          block = detector_.processLatestBlock (tap_))
     {
-        const std::lock_guard<std::mutex> lock (modelMutex_);
-        lastDataMs_ = now;
+        // Capture model state under the model lock FIRST, release, THEN take
+        // the snapshot lock -- the two mutexes are never held together.
+        std::array<SnapshotNotch, kTotalSlots> notchList {};
+        std::uint32_t notchCount = 0;
+        double liveNow = 0.0;
+        {
+            const std::lock_guard<std::mutex> lock (modelMutex_);
+            lastDataMs_ = now;
+            liveNow     = liveMs_;
+            for (int c = 0; c < kChannels; ++c)
+                for (int i = 0; i < kSlots; ++i)
+                {
+                    const auto& n = model_[slotOf (c, i)];
+                    if (! n.active)
+                        continue;
+                    notchList[notchCount] = { (float) n.frequency, (float) n.Q,
+                                              (float) n.depthDB,
+                                              (std::uint8_t) c, (std::uint8_t) i };
+                    ++notchCount;
+                }
+        }
+        (void) liveNow;
+
+        const std::lock_guard<std::mutex> lock (snapshotMutex_);
+        std::copy (block.magnitudes, block.magnitudes + Detector::kNumBins,
+                   latest_.magnitudes.begin());
+        latest_.magnitudeCount = (std::uint32_t) Detector::kNumBins;
+        latest_.sampleRate     = block.sampleRate;
+        latest_.notches        = notchList;
+        latest_.notchCount     = notchCount;
+        ++latest_.sequence;
     }
 
     // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
@@ -120,6 +154,12 @@ double NotchController::liveMsForTest() const
 {
     const std::lock_guard<std::mutex> lock (modelMutex_);
     return liveMs_;
+}
+
+void NotchController::copySnapshot (SnapshotBuffer& destOwnedByCaller) const
+{
+    const std::lock_guard<std::mutex> lock (snapshotMutex_);
+    destOwnedByCaller = latest_;
 }
 
 std::uint64_t NotchController::retryCount() const

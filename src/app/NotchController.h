@@ -77,6 +77,30 @@ public:
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
 
+    // One consistent frame for the GUI: the spectrum and the notch list are
+    // captured under one lock at one instant (bridge design §5). Caller owns
+    // the destination -- returning a container would allocate every paint.
+    struct SnapshotNotch
+    {
+        float frequency = 0.0f;
+        float Q         = 0.0f;
+        float depthDB   = 0.0f;
+        std::uint8_t channel = 0;
+        std::uint8_t index   = 0;
+    };
+
+    struct SnapshotBuffer
+    {
+        std::array<float, Detector::kNumBins> magnitudes {};
+        std::uint32_t magnitudeCount = 0;
+        double sampleRate = 0.0;
+        std::array<SnapshotNotch, kTotalSlots> notches {};
+        std::uint32_t notchCount = 0;
+        std::uint64_t sequence = 0;   // increments on every published frame
+    };
+
+    void copySnapshot (SnapshotBuffer& destOwnedByCaller) const;
+
     // Commands that had to be retried because the command ring was full.
     // Sustained growth means the audio callback stopped draining -- a real
     // fault the UI should be able to surface.
@@ -120,4 +144,9 @@ private:
     double lastPollMs_ = 0.0;
     // Sentinel far below any real time: "the tap has never delivered".
     double lastDataMs_ = -1.0e9;
+
+    // One mutex, one struct (design §5): spectrum and notch list are always
+    // paired to the same instant. mutable: copySnapshot is const.
+    mutable std::mutex snapshotMutex_;
+    SnapshotBuffer    latest_;
 };

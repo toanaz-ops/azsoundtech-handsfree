@@ -123,3 +123,62 @@ TEST (NotchControllerAutoRelease, LiveTapReleasesAfter30s)
             sawClearOfSlot0 = true;
     EXPECT_TRUE (sawClearOfSlot0);
 }
+
+TEST (NotchControllerSnapshot, PublishesSpectrumWithBinsAndRate)
+{
+    Harness h;
+    std::vector<float> hop (512, 0.25f);
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_EQ (snap.magnitudeCount, (std::uint32_t) Detector::kNumBins);
+    EXPECT_DOUBLE_EQ (snap.sampleRate, 48000.0);
+    EXPECT_GE (snap.sequence, 1u);
+}
+
+TEST (NotchControllerSnapshot, NotchAndSpectrumShareOneInstant)
+{
+    Harness h;
+    std::vector<float> hop (512, 0.25f);
+
+    // Frame 1: no notches yet.
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+    NotchController::SnapshotBuffer first;
+    h.controller.copySnapshot (first);
+    EXPECT_EQ (first.notchCount, 0u);
+
+    // Frame 2: a notch added afterwards appears WITH the newer spectrum,
+    // never painted over the older one -- same sequence bump, same frame.
+    ASSERT_TRUE (h.controller.setNotch (0, 4, 1000.0, 30.0, -12.0, NotchController::Origin::Detector));
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+    NotchController::SnapshotBuffer second;
+    h.controller.copySnapshot (second);
+
+    EXPECT_GT (second.sequence, first.sequence);
+    ASSERT_EQ (second.notchCount, 1u);
+    EXPECT_EQ (second.notches[0].channel, 0);
+    EXPECT_EQ (second.notches[0].index, 4);
+    EXPECT_FLOAT_EQ (second.notches[0].frequency, 1000.0f);
+}
+
+TEST (NotchControllerSnapshot, CopyIsValueSemanticsNoAliasing)
+{
+    Harness h;
+    std::vector<float> hop (512, 0.25f);
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+
+    NotchController::SnapshotBuffer a;
+    h.controller.copySnapshot (a);
+    const auto seqA = a.sequence;
+
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+
+    // 'a' must be untouched by later publications.
+    EXPECT_EQ (a.sequence, seqA);
+}
