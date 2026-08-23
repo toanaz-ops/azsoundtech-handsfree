@@ -1,0 +1,6 @@
+# Fetched on demand by fetch-deps.ps1, never committed. 24.4 MB of
+# incompressible signed binary does not belong in git history.
+vendor/
+
+# Build output.
+AZSoundtech-Handsfree-Setup-*.exe
