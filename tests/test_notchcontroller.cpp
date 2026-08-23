@@ -182,3 +182,66 @@ TEST (NotchControllerSnapshot, CopyIsValueSemanticsNoAliasing)
     // 'a' must be untouched by later publications.
     EXPECT_EQ (a.sequence, seqA);
 }
+
+TEST (NotchControllerPreset, AdoptsWithPresetOriginOnBothChannels)
+{
+    Harness h;
+    std::vector<PresetNotch> notches (6);
+    for (int i = 0; i < 6; ++i) {
+        notches[i].index   = i;
+        notches[i].freq    = 500.0 + 100.0 * i;
+        notches[i].Q       = 30.0;
+        notches[i].depthDB = -12.0;
+    }
+
+    EXPECT_EQ (h.controller.adoptPreset (notches), 6);
+    h.controller.runOnce();
+
+    // 6 notches x 2 channels = 12 Set commands (design §2 burst sizing).
+    EXPECT_EQ (h.commands.getAvailableRead(), 12u);
+
+    NotchController::SnapshotBuffer snap;
+    h.tap.write (std::vector<float> (512, 0.25f).data(), 512);
+    h.controller.runOnce();
+    h.controller.copySnapshot (snap);
+    ASSERT_EQ (snap.notchCount, 12u);
+}
+
+TEST (NotchControllerPreset, InvalidNotchesAreSkippedNotHalfApplied)
+{
+    Harness h;
+    std::vector<PresetNotch> notches (2);
+    notches[0].index = 0; notches[0].freq = 1000.0;  notches[0].Q = 30.0; notches[0].depthDB = -12.0;
+    notches[1].index = 1; notches[1].freq = 24000.0; notches[1].Q = 30.0; notches[1].depthDB = -12.0;  // >= Nyquist of 48k
+
+    EXPECT_EQ (h.controller.adoptPreset (notches), 1);
+    h.controller.runOnce();
+    EXPECT_EQ (h.commands.getAvailableRead(), 2u);   // only the valid one, both channels
+}
+
+TEST (NotchControllerPreset, AdoptedPresetsAutoReleaseLikeDetectorNotches)   // D-05
+{
+    Harness h;
+    std::vector<PresetNotch> notches (1);
+    notches[0].index = 0; notches[0].freq = 1000.0; notches[0].Q = 30.0; notches[0].depthDB = -12.0;
+    ASSERT_EQ (h.controller.adoptPreset (notches), 1);
+
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 7000; ++i) {          // 35 s of live audio
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
+    h.controller.runOnce();
+
+    bool sawClearOfSlot0BothChannels = false;
+    bool clearCh0 = false, clearCh1 = false;
+    NotchCommand cmd {};
+    while (h.commands.read (&cmd, 1) == 1)
+        if (cmd.type == NotchCommandType::Clear && cmd.index == 0) {
+            if (cmd.channel == 0) clearCh0 = true;
+            if (cmd.channel == 1) clearCh1 = true;
+        }
+    sawClearOfSlot0BothChannels = clearCh0 && clearCh1;
+    EXPECT_TRUE (sawClearOfSlot0BothChannels);
+}

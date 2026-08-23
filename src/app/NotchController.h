@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "app/PresetManager.h"
 #include "dsp/ClockSource.h"
 #include "dsp/Detector.h"
 #include "dsp/LockFreeRingBuffer.h"
@@ -84,6 +85,14 @@ public:
                    Origin origin);
     void clearNotch (int channel, int index);
     void clearAll();
+
+    // Owner decision D-05: a preset loaded mid-show is ADOPTED -- its notches
+    // enter the model with Origin::Preset and auto-release treats them like
+    // any other notch (30 s un-reinforced -> released). Each preset notch is
+    // installed on BOTH channels (design §2 sizes the command burst as
+    // 2 x 16). Returns how many preset notches were adopted; a notch whose
+    // parameters fail validation on either channel is skipped entirely.
+    int adoptPreset (const std::vector<PresetNotch>& notches);
 
     // One synchronous pump step: drain the spectrum, advance the live clock,
     // apply auto-release, flush the outbox.

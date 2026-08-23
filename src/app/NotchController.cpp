@@ -105,6 +105,33 @@ void NotchController::clearAll()
             pushClearLocked (c, i);
 }
 
+int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
+{
+    int adopted = 0;
+    for (const auto& p : notches)
+    {
+        // Both channels or neither: a half-applied preset notch would leave
+        // one side unprotected while the GUI claims protection. setNotch
+        // validates before touching anything, so a failure here means the
+        // parameters were rejected -- skip the whole notch.
+        const bool left  = setNotch (0, p.index, p.freq, p.Q, p.depthDB, Origin::Preset);
+        const bool right = setNotch (1, p.index, p.freq, p.Q, p.depthDB, Origin::Preset);
+
+        if (left && right)
+        {
+            ++adopted;
+        }
+        else if (left != right)
+        {
+            // Cannot happen today (validation depends only on slot + params,
+            // which are identical for both calls), but if it ever does,
+            // unwind the half-applied side rather than keep it.
+            clearNotch (left ? 0 : 1, p.index);
+        }
+    }
+    return adopted;
+}
+
 void NotchController::runOnce()
 {
     // 1. Drain every block the tap already holds, so a large audio callback
