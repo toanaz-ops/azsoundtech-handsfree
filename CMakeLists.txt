@@ -55,6 +55,8 @@ target_sources(HandsFree PRIVATE
     src/dsp/NotchChain.cpp
     src/dsp/NotchChain.h
     src/dsp/NotchCommand.h
+    src/app/NotchController.cpp
+    src/app/NotchController.h
 )
 
 # Generates JuceLibraryCode/JuceHeader.h for this target. Without it the
