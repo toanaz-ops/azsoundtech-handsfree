@@ -97,6 +97,12 @@ while WASAPI is running. The getter must report the **actual** device type.
 Plan: *"Similar ComboBox/Label patterns."* — one line for the task that is most
 blocked.
 
+> **Update 2026-08-23:** `setSampleRate(double)` and `setBufferSize(int)` have
+> landed since this audit was written (commit `194a090` plus the device lane),
+> and the ⚠ display-vs-numeric split below was resolved as
+> `getCurrentSampleRateHz()`. Rows 1–3 of this table are stale; the audit text
+> is kept verbatim as a record.
+
 | Needs | Status |
 |---|---|
 | `setSampleRate(double)` | ❌ **does not exist** — verified by grep over `src/app/` |

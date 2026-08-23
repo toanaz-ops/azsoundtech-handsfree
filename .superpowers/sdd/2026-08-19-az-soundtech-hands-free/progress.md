@@ -399,3 +399,30 @@ STILL OPEN AFTER THESE LANES
   - Task 31 signing: owner business decision. Clean-VM installer test.
   - AudioEngine passthrough loopback test (spec-level debt since Task 9).
   - Grace-days spec-vs-plan conflict needs an owner ruling.
+
+SESSION 2026-08-23 (2) -- LANE B LANDED: the audio<->detector bridge.
+  Owner approved the design SAME DAY with three amendments (design doc
+  sections 3 / 6.5 / 9, commit 8915814): depthDB<=0 added to send-time
+  validation; float/double widening recorded as deliberate; new Lifecycle
+  section -- controller thread stops BEFORE any ring clear.
+  Seven commits, full suite 219/219 on a clean reconfigure:
+    81b2969 ClockSource (injectable, JUCE monotonic backing)
+    b471d7a NotchController model + validation + retrying outbox
+    f148029 live clock, 250 ms liveness gate, D-06 auto-release
+    281e257 mutex snapshot (spectrum+notches at ONE instant), caller-owned
+    6ef6616 AudioEngine owns command queue (128), drains <=64/callback
+    d1b245f detector thread + MainComponent wiring + lifecycle ordering
+            (DevicePanel restart hooks onBeforeRestart/onAfterRestart hold 6.5:
+             the engine's REAL restart paths live in DevicePanel, not
+             MainComponent -- found while wiring)
+    bff5eaf preset adoption per D-05, Origin::Preset, installed on BOTH channels
+  SUPERSEDES: line 251 above ("LANE B -- DRAFT, awaiting owner approval. No
+  bridge code written") and the "Bridge implementation" bullet under STILL
+  OPEN -- both were true when written, both false now.
+  NEEDS A HUMAN LISTEN: the drain point runs inside the real audio callback;
+  notch commands now mutate coefficients mid-stream within one buffer. Listen
+  at low volume with a real ASIO device before trusting it.
+  STILL OPEN after this session: Tasks 12-15 detection POLICY (the bridge
+  carries commands; the algorithm that DECIDES them is separate); GUI Tasks
+  16-24 now UNBLOCKED via NotchController::copySnapshot(); licence wiring;
+  Task 31 signing; passthrough loopback test; grace-days owner ruling.
