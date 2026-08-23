@@ -426,3 +426,29 @@ SESSION 2026-08-23 (2) -- LANE B LANDED: the audio<->detector bridge.
   carries commands; the algorithm that DECIDES them is separate); GUI Tasks
   16-24 now UNBLOCKED via NotchController::copySnapshot(); licence wiring;
   Task 31 signing; passthrough loopback test; grace-days owner ruling.
+
+SESSION 2026-08-23 (3) -- DSP SPINE LANDED: detection policy (Tasks 12 + 15).
+  Plan: docs/superpowers/plans/2026-08-23-detection-policy.md (KD-1..KD-9,
+  commit 76599e0). Two commits, suite 224 -> 229, clean-reconfigure verify:
+    48519ea CandidateScorer -- peakiness x rise x novelty product-form score,
+            harmonic penalty x0.5 at 1.4x..4.1x of locked fundamentals
+    993615b policy loop in NotchController::runOnce -- persistence 3 blocks
+            per bin, dual-channel placement (tap is mono-L), Origin::Soundcheck
+            exempt from auto-release, soundcheck 15 s on liveMs_, detection
+            gated by setDetectionActive()
+  With this, plan Tasks 12/13/14/15 are ALL delivered; the detector now
+  DECIDES as well as carries commands.
+  OPEN POLICY QUESTION for the owner (flagged by the implementing agent, not
+  changed): KD-6 picks the first slot free on channel 0 and mirrors it to
+  channel 1 WITHOUT checking channel 1 -- an existing Manual/Preset notch on
+  ch1 at that slot gets silently overwritten by an automatic notch. Fix would
+  be a ch1-aware slot search or a per-channel tap (stereo detection), both
+  deferred.
+  STILL OPEN after this session: Link L/R toggle (spec s5.4); stereo tap /
+  per-channel detection; magnitude->depth mapping (fixed -12 dB today); GUI
+  Tasks 16-24 via copySnapshot(); licence wiring; passthrough loopback test;
+  grace-days ruling.
+  NEEDS A HUMAN LISTEN (now stronger): the full auto loop runs end to end --
+  a real howl in the room will place notches on its own. Test at LOW volume:
+  feed a squealing monitor, watch notches appear ~30 ms after onset, stop the
+  howl, notch releases after 30 s of live audio.
