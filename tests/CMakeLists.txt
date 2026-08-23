@@ -22,6 +22,7 @@ add_executable(HandsFreeTests
     test_presetmanager.cpp
     test_licensemanager.cpp
     test_clocksource.cpp
+    test_candidatescorer.cpp
     test_notchcontroller.cpp
     ../src/app/LicenseManager.cpp
     ../src/app/NotchController.cpp
@@ -36,6 +37,7 @@ add_executable(HandsFreeTests
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
     ../src/dsp/PeakinessAnalyzer.cpp
+    ../src/dsp/CandidateScorer.cpp
 )
 
 # Detector uses juce::dsp::FFT / WindowingFunction, so the test target needs

@@ -1,0 +1,83 @@
+// CandidateScorer: turns raw spectral candidates into confidence scores.
+//
+// Consumes one spectrum frame per pump of the detector thread via
+// beginBlock()/commitBlock(), and scores each PeakinessAnalyzer::Candidate
+// against THREE independent axes (spec 5.2 steps 4-5); all three are
+// saturated to [0,1] and MULTIPLIED -- a candidate must be peaky AND rising
+// AND novel against its running baseline before it can confirm. The product
+// form is deliberate: the product's headline goal is FEWER false positives,
+// and each axis alone has known false-positive modes.
+//
+//   peakiness : bin_mag / mean(annulus +-3..+-5), threshold 10.0 (measured --
+//               see PeakinessAnalyzer.h; do not retune without the 60-seed sweep)
+//   rise      : mag_now / mag_~500ms_ago, threshold 1.5x
+//   novelty   : log-ratio against a per-bin EMA baseline (~3 s time constant)
+//   harmonic  : x0.5 when the candidate sits at 1.4x..4.1x of a LOCKED notch
+//               (plan Task 12) -- harmonics of an already-notched fundamental
+//               are symptoms, not separate howls
+//
+// Threading: designed to live entirely on the detector thread. Allocation
+// happens only in beginBlock() on the first block (buffer sizing); after
+// warm-up every path is allocation-free. NOT for the audio thread.
+
+#pragma once
+
+#include "dsp/PeakinessAnalyzer.h"
+
+#include <array>
+#include <cstddef>
+
+class CandidateScorer
+{
+public:
+    static constexpr double kBaselineTimeConstantMs = 3000.0;
+    static constexpr double kRiseReferenceMs        = 500.0;
+    static constexpr double kRiseHistoryWindowMs    = 800.0;
+    static constexpr double kRiseThreshold          = 1.5;
+    static constexpr float  kHarmonicPenalty        = 0.5f;
+    // A candidate whose peakiness does not clear the analyzer threshold is
+    // scored 0 outright -- the scorer never resurrects a rejected bin.
+    static constexpr float  kConfirmScore           = 0.7f;
+
+    static constexpr int kBins = Detector::kNumBins;              // 513
+    static constexpr int kMaxHistoryFrames = 128;
+
+    struct LockedFrequencyView
+    {
+        const double* data    = nullptr;
+        std::size_t   count   = 0;
+    };
+
+    CandidateScorer();
+
+    // Call once per detector pump BEFORE scoring candidates. Sizes the
+    // internal buffers on the first call (allocation-free afterwards).
+    void beginBlock (double sampleRate);
+
+    // Pure read against committed state: scores ONE candidate. Does not
+    // mutate anything.
+    float scoreCandidate (const PeakinessAnalyzer::Candidate& candidate,
+                          const float* magnitudes,
+                          const LockedFrequencyView& lockedFrequencies);
+
+    // Call once per detector pump AFTER all candidates are scored: advances
+    // the EMA baselines and pushes this frame into the rise-history ring.
+    void commitBlock (const float* magnitudes, double elapsedMs);
+
+private:
+    struct HistoryFrame
+    {
+        double timeMs = 0.0;
+        std::array<float, kBins> magnitudes {};
+    };
+
+    double sampleRate_     = 48000.0;
+    double clockMs_        = 0.0;
+    bool   buffersReady_   = false;
+
+    std::array<double, kBins> baselineEma_ {};
+
+    std::size_t            historyHead_  = 0;   // next write slot
+    std::size_t            historyCount_ = 0;
+    std::array<HistoryFrame, kMaxHistoryFrames> history_;
+};
