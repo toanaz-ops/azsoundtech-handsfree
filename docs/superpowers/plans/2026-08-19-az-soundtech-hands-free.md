@@ -2,6 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **📋 TRẠNG THÁI 23/08/2026** (chi tiết + bằng chứng: `.superpowers/sdd/2026-08-19-az-soundtech-hands-free/progress.md`)
+>
+> | Task | Trạng thái |
+> |---|---|
+> | 1–4, 6–11 (foundation, ring buffer, DSP core, engine, FFT, peakiness) | ✅ xong |
+> | 5 (command queue thật) | ✅ xong qua bridge (`AudioEngine` sở hữu queue, drain ≤64/callback) |
+> | 12–15 (harmonic detection, controller, auto-release, soundcheck) | ✅ xong qua bridge/DSP spine |
+> | 16–18, 23 (GUI device/rate/buffer/status/mode) | ✅ xong |
+> | 19–22, 24 (spectrum, overlay, notch list, clear) | ⬜ **VIỆC TIẾP THEO** — đã mở khóa bởi bridge snapshot |
+> | 25 (format half), 26 (presets mặc định) | ✅ xong; nửa wiring (nạp vào detector) cần nối startup |
+> | 27–29 (licensing) | ⏸️ **HOÃN theo D-07** — build + test xong, cố tình chưa wire (freeware v1) |
+> | 30 (NSIS installer) | ✅ xong, verify 20/20 install→launch→uninstall |
+> | 31 (code signing) | 🚫 chờ EV certificate (~$300–500/năm) — vẫn cần dù freeware (SmartScreen) |
+> | 32 (integration testing) | ⬜ chờ phần cứng thật (iD14/Wing/phòng rehearsal) |
+>
+> Suite hiện tại: **244/244 pass** · CI xanh. Tài liệu sản phẩm:
+> [`docs/GIOI-THIEU.md`](../../docs/GIOI-THIEU.md) ·
+> [`docs/KY-THUAT-CHONG-HU.md`](../../docs/KY-THUAT-CHONG-HU.md).
+
 **Goal:** Build a standalone Windows ASIO audio application that automatically detects and eliminates feedback in real-time using FFT-based detection and notch filtering.
 
 **Architecture:** Real-time audio thread handles ASIO I/O and biquad notch chain (lock-free, zero allocation). Background detector thread performs FFT analysis, peakiness scoring, and harmonic-aware detection, communicating via lock-free SPSC queue. JUCE framework for audio, DSP, and GUI.
