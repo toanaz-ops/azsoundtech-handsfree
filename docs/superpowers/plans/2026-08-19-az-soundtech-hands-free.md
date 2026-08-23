@@ -297,6 +297,12 @@ Load on first run, populate preset dropdown.
 
 ## Phase 11: License System (Week 10)
 
+> **DEFERRED per owner decision D-07 (2026-08-23):** the app ships as
+> FREEWARE. Tasks 27–29 are built and tested but deliberately NOT wired into
+> the app; licensing returns "in the future". See
+> `.superpowers/sdd/2026-08-19-az-soundtech-hands-free/owner-decisions.md`.
+> Do not wire it without reading D-07.
+
 ### Task 27: License Manager - Key Format
 
 **Files:**
@@ -456,6 +462,6 @@ Use `superpowers:executing-plans` skill for batch execution with checkpoints.
 2. ✅ No dropped samples in 8-hour test
 3. ✅ Auto-detect within 1s
 4. ✅ False-positive <5%
-5. ✅ License activate/deactivate works
+5. ✅ ~~License activate/deactivate works~~ — **DEFERRED per D-07** (freeware; licensing returns later)
 6. ✅ Installer runs clean
 

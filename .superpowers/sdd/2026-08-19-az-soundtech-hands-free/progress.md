@@ -452,3 +452,23 @@ SESSION 2026-08-23 (3) -- DSP SPINE LANDED: detection policy (Tasks 12 + 15).
   a real howl in the room will place notches on its own. Test at LOW volume:
   feed a squealing monitor, watch notches appear ~30 ms after onset, stop the
   howl, notch releases after 30 s of live audio.
+
+================================================================================
+ADDENDUM 2026-08-23 -- OWNER DECISION D-07 changes the licensing rows above
+================================================================================
+
+Owner decision D-07 (owner-decisions.md): the application ships as FREEWARE.
+Licensing code stays in the repo but is NOT wired into the app; it will be
+revisited in the future. Consequences for rows above:
+
+  - Lane licensing's "CRITICAL GAP: nothing constructs a LicenseManager" is
+    NO LONGER A GAP. It is the intended state. Do not wire it without reading
+    D-07 first.
+  - The grace-days spec-vs-plan conflict (7 vs 7/10) is MOOT until licensing
+    returns. Code follows the plan's 7/10 meanwhile.
+  - The JWT-signature-not-verifiable-client-side gap defers with everything
+    else; closing it needs a server and a public key anyway.
+  - Ship criterion 5 of the plan ("License activate/deactivate works") no
+    longer applies to v1.
+  - UNCHANGED by D-07: Task 31 code signing still matters (SmartScreen warns
+    for unsigned freeware too); the EV-certificate decision stays pending.

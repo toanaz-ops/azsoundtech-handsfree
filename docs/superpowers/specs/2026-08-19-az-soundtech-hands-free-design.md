@@ -220,6 +220,11 @@ Phần mềm standalone Windows giúp loại bỏ feedback (howling) trong live 
 
 ### 10.2 License
 
+> **HOÃN theo owner decision D-07 (2026-08-23):** app v1 phát hành dạng
+> **freeware** — mọi điều khoản dưới đây không áp dụng cho bản phát hành đầu.
+> Code licensing đã build + test và nằm chờ trong repo; bật lại khi có quyết
+> định mới. Xem `.superpowers/sdd/2026-08-19-az-soundtech-hands-free/owner-decisions.md`.
+
 - License key format: `AZHF-XXXX-XXXX-XXXX-XXXX`.
 - Online activation qua HTTPS tới `https://license.azsoundtech.com/activate` (POST key + machine hash → JWT response).
 - Offline grace: 7 ngày sau khi mất kết nối.

@@ -368,3 +368,39 @@ và hop 10.67 ms, khoảng một nửa số lần poll khoẻ mạnh cũng khôn
    rồi đánh dấu mục cũ là `⟲ ĐÃ THAY ĐỔI → xem D-xx-R1`.
 5. **Không xoá mục cũ.** Lịch sử một quyết định sai còn hữu ích hơn một quyết
    định đúng không có lịch sử.
+
+---
+
+## D-07 -- App phat hanh dang Freeware, licensing khoa lai trong tuong lai
+
+**Ngay:** 2026-08-23 · **Trang thai:** 🔵 Da chot
+
+**Boi canh.** LicenseManager (Tasks 27, 28, 29) da build va duoc 45 test bao
+phu, nhung khong co bat ky production code nao construct no -- lan report
+licensing goi day la "critical gap". Cau hoi mo: wire vao app ngay hay doi.
+
+**Cau hoi nguyen van:**
+
+> Tam thoi app toi doi thanh Freeware, chi khoa licensing trong tuong lai.
+
+**Cac phuong an:**
+
+| | Phuong an | Ket qua |
+|---|---|---|
+| 1 | Wire licence vao app ngay (dialog kich hoat, banner grace) | LOAI BO -- server activation chua ton tai, UI chi phi khong can cho freeware |
+| 2 | Xoa code licensing khoi repo | LOAI BO -- 45 test da xac minh, mai sau can lai thi mat cong lam lai |
+| 3 | Giu nguyen code, KHONG wire, ghi ro day la chu y chu khong phai thieu sot | **CHON** |
+
+**Rang buoc keo theo:**
+
+- Khoang trong "nothing constructs a LicenseManager" trong progress.md khong
+  con la defect -- no la trang thai dich cua D-07. Nguoi doc sau KHONG duoc
+  "sua" no ma khong doc quyet dinh nay.
+- Xung dot grace-days (spec 7 ngay vs plan 7/10) -> MO, hoan cung luc
+  licensing. Code dang theo plan (7/10); khi bat lai, owner quyet lai.
+- Gap JWT signature khong verify duoc client-side -> hoan theo licensing;
+  can server + public key moi dong duoc.
+- Ship criterion so 5 ("License activate/deactivate works") -> khong con la
+  tieu chi ship v1. Spec section 8/10 phan licence: HOAN.
+- Task 31 code signing VAN CON Lien quan: SmartScreen canh bao ca voi
+  freeware. Quyet dinh mua EV certificate van treo rieng.
