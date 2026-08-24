@@ -64,6 +64,8 @@
 
 #pragma once
 
+#include "app/SlotConfig.h"
+
 #include <juce_core/juce_core.h>
 
 #include <vector>
@@ -81,6 +83,28 @@ struct PresetNotch
     double freq    = 0.0;  ///< Hz. Strictly between 0 and the file's Nyquist.
     double Q       = 0.0;  ///< Quality factor. Strictly positive.
     double depthDB = 0.0;  ///< Attenuation in dB, NEGATIVE or zero.
+
+    /** Routing slot, [0, kMaxSlots - 1]. OPTIONAL in the file: a preset
+        written before multi-slot routing has no "slot" key and loads onto
+        slot 0, which is the whole of backward compatibility. A value outside
+        that range is not an error -- the channel-aware load skips that notch
+        and counts it in PresetLoadResult::skippedNotchCount so the caller can
+        warn, instead of refusing a file whose other notches are fine.
+    */
+    int slot = 0;
+};
+
+//==============================================================================
+/** One entry of the OPTIONAL "slots" section: the routing configuration of a
+    single processing slot.
+
+    Absent slots are stereo {0,1} -> {0,1} and disabled -- SlotConfig's own
+    defaults -- which is exactly what every v1 preset implied without saying.
+*/
+struct PresetSlot
+{
+    int        index = 0;   ///< [0, kMaxSlots - 1].
+    SlotConfig config;
 };
 
 //==============================================================================
@@ -125,6 +149,9 @@ struct Preset
 
     PresetNotchDefaults      notchDefaults;
     std::vector<PresetNotch> notches;
+
+    /** OPTIONAL routing section. Empty for every v1 file. */
+    std::vector<PresetSlot> slots;
 };
 
 //==============================================================================
@@ -155,6 +182,12 @@ struct PresetLoadResult
     bool              ok = false;
     Preset            preset;
     juce::StringArray errors;
+
+    /** How many notches were dropped because their "slot" was outside
+        [0, kMaxSlots - 1]. Set by the channel-aware load only; a skip is a
+        warning the caller surfaces, never a refused file.
+    */
+    int skippedNotchCount = 0;
 };
 
 //==============================================================================
@@ -189,6 +222,16 @@ public:
     */
     static PresetLoadResult fromJSON (const juce::String& text);
 
+    /** Same parse, then a routing pass against the OPEN DEVICE's channel
+        counts: notches whose "slot" is outside [0, kMaxSlots - 1] are skipped
+        and counted (never fatal), every referenced slot is auto-activated
+        with the config the file declared (or stereo when none did), and every
+        slot's channels are clamped to what the device actually has.
+    */
+    static PresetLoadResult fromJSON (const juce::String& text,
+                                      int numInputChannels,
+                                      int numOutputChannels);
+
     /** Value rules only -- the caller has already produced a well-typed
         Preset. Shared by fromJSON() and saveToFile() so that the writer can
         never emit a file the reader would refuse. Empty means valid.
@@ -209,6 +252,11 @@ public:
         not an empty preset.
     */
     static PresetLoadResult loadFromFile (const juce::File& file);
+
+    /** Channel-aware companion of loadFromFile(); see fromJSON(). */
+    static PresetLoadResult loadFromFile (const juce::File& file,
+                                          int numInputChannels,
+                                          int numOutputChannels);
 
     //==========================================================================
     /** THE HAND-OFF TO THE WIRING HALF OF TASK 25.

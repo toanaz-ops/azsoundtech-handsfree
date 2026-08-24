@@ -1,7 +1,9 @@
-#include "app/PresetManager.h"
+﻿#include "app/PresetManager.h"
 
+#include <algorithm>
 #include <cmath>
 #include <set>
+#include <utility>
 
 // Reading is two passes on purpose
 // ================================
@@ -154,6 +156,135 @@ bool readNotch (const juce::var&   entry,
     ok = readNumber (*object, "Q",     where, errors, out.Q)       && ok;
     ok = readNumber (*object, "depth", where, errors, out.depthDB) && ok;
 
+    // OPTIONAL v2 key: absent means slot 0, which is every v1 file ever
+    // written. Present but malformed is still a shape error the user fixes.
+    if (object->hasProperty ("slot"))
+    {
+        ok = readWholeNumber (*object, "slot", where, errors, out.slot) && ok;
+    }
+
+    return ok;
+}
+
+//==============================================================================
+// SHAPE pass for one entry of the OPTIONAL "slots" section (preset format v2).
+// Like readNotch, value rules are deliberately absent here -- validate()
+// and the channel-aware routing pass own those.
+bool readBool (const juce::DynamicObject& object,
+               const juce::Identifier&    key,
+               const juce::String&        where,
+               juce::StringArray&         errors,
+               bool&                      out)
+{
+    if (! object.hasProperty (key))
+    {
+        errors.add (where + "missing key \"" + key.toString() + "\"");
+        return false;
+    }
+
+    const juce::var value = object.getProperty (key);
+
+    // A JSON true must not slip through an integer check as 1 -- same rule
+    // as isNumber() above, from the other side.
+    if (! value.isBool())
+    {
+        errors.add (where + "\"" + key.toString() + "\" must be a boolean, but is "
+                    + describeType (value));
+        return false;
+    }
+
+    out = static_cast<bool> (value);
+    return true;
+}
+
+// Both lanes are required because SlotConfig always stores kMaxSlotLanes
+// entries: accepting "[2]" for a mono slot would mean inventing the second
+// lane's value, and an invented channel number is a wire we cannot trace.
+bool readChannelArray (const juce::DynamicObject& object,
+                       const juce::Identifier&    key,
+                       const juce::String&        where,
+                       juce::StringArray&         errors,
+                       int*                       out)
+{
+    if (! object.hasProperty (key))
+    {
+        errors.add (where + "missing key \"" + key.toString() + "\"");
+        return false;
+    }
+
+    const juce::var value = object.getProperty (key);
+
+    if (! value.isArray())
+    {
+        errors.add (where + "\"" + key.toString() + "\" must be an array of "
+                    + juce::String (kMaxSlotLanes) + " channel numbers, but is "
+                    + describeType (value));
+        return false;
+    }
+
+    const juce::Array<juce::var>& entries = *value.getArray();
+
+    if (entries.size() != kMaxSlotLanes)
+    {
+        errors.add (where + "\"" + key.toString() + "\" must hold exactly "
+                    + juce::String (kMaxSlotLanes) + " channel numbers, but holds "
+                    + juce::String (entries.size()));
+        return false;
+    }
+
+    bool ok = true;
+
+    for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+    {
+        const juce::var entry = entries.getReference (lane);
+
+        if (! isNumber (entry))
+        {
+            errors.add (where + "\"" + key.toString() + "[" + juce::String (lane)
+                        + "]\" must be a number, but is " + describeType (entry));
+            ok = false;
+            continue;
+        }
+
+        const double asDouble = static_cast<double> (entry);
+
+        if (asDouble != std::floor (asDouble))
+        {
+            errors.add (where + "\"" + key.toString() + "[" + juce::String (lane)
+                        + "]\" must be a whole number, but is " + juce::String (asDouble));
+            ok = false;
+            continue;
+        }
+
+        out[lane] = static_cast<int> (asDouble);
+    }
+
+    return ok;
+}
+
+bool readSlotEntry (const juce::var&   entry,
+                    int                position,
+                    juce::StringArray& errors,
+                    PresetSlot&        out)
+{
+    const juce::String where = "slots[" + juce::String (position) + "]: ";
+
+    auto* object = entry.getDynamicObject();
+
+    if (object == nullptr)
+    {
+        errors.add (where + "expected an object, but found " + describeType (entry));
+        return false;
+    }
+
+    bool ok = readWholeNumber (*object, "index", where, errors, out.index);
+    ok = readBool (*object, "enabled", where, errors, out.config.enabled)      && ok;
+    ok = readWholeNumber (*object, "width", where, errors, out.config.width)   && ok;
+    ok = readChannelArray (*object, "inputChannels",  where, errors,
+                           out.config.inputChannels)                          && ok;
+    ok = readChannelArray (*object, "outputChannels", where, errors,
+                           out.config.outputChannels)                         && ok;
+
     return ok;
 }
 
@@ -254,10 +385,72 @@ juce::String PresetManager::toJSON (const Preset& preset)
         entry->setProperty ("Q",     notch.Q);
         entry->setProperty ("depth", notch.depthDB);
 
+        // v1 output stays v1-shaped: a preset with nothing on but slot 0
+        // must not grow keys a v1 reader would trip over.
+        if (notch.slot != 0)
+        {
+            entry->setProperty ("slot", notch.slot);
+        }
+
         notches.add (juce::var (entry));
     }
 
     root->setProperty ("notches", notches);
+
+    // The slots section is emitted only when some slot differs from the
+    // configuration every v1 file implied -- disabled stereo {0,1} -> {0,1}
+    // -- so an untouched preset keeps producing a pure v1 file.
+    const SlotConfig defaultConfig;
+
+    auto slotIsNonDefault = [&defaultConfig] (const PresetSlot& s)
+    {
+        if (s.config.enabled != defaultConfig.enabled) return true;
+        if (s.config.width   != defaultConfig.width)   return true;
+
+        for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+        {
+            if (s.config.inputChannels[lane]  != defaultConfig.inputChannels[lane]
+                || s.config.outputChannels[lane] != defaultConfig.outputChannels[lane])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    const bool anyNonDefault =
+        std::any_of (preset.slots.begin(), preset.slots.end(), slotIsNonDefault);
+
+    if (anyNonDefault)
+    {
+        juce::Array<juce::var> slots;
+
+        for (const auto& slot : preset.slots)
+        {
+            auto* entry = new juce::DynamicObject();
+
+            entry->setProperty ("index",   slot.index);
+            entry->setProperty ("enabled", juce::var (slot.config.enabled));
+            entry->setProperty ("width",   slot.config.width);
+
+            juce::Array<juce::var> inputs;
+            juce::Array<juce::var> outputs;
+
+            for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+            {
+                inputs.add (slot.config.inputChannels[lane]);
+                outputs.add (slot.config.outputChannels[lane]);
+            }
+
+            entry->setProperty ("inputChannels",  inputs);
+            entry->setProperty ("outputChannels", outputs);
+
+            slots.add (juce::var (entry));
+        }
+
+        root->setProperty ("slots", slots);
+    }
 
     return juce::JSON::toString (juce::var (root));
 }
@@ -267,11 +460,11 @@ juce::StringArray PresetManager::validate (const Preset& preset)
 {
     juce::StringArray errors;
 
-    if (preset.version != CURRENT_VERSION)
+    if (preset.version != PresetManager::CURRENT_VERSION)
     {
         errors.add ("unsupported preset version \"" + preset.version
                     + "\" -- this build understands \""
-                    + juce::String (CURRENT_VERSION) + "\"");
+                    + juce::String (PresetManager::CURRENT_VERSION) + "\"");
     }
 
     double nyquistHz = 0.0;
@@ -334,10 +527,18 @@ juce::StringArray PresetManager::validate (const Preset& preset)
 }
 
 //==============================================================================
-PresetLoadResult PresetManager::fromJSON (const juce::String& text)
+namespace
 {
-    PresetLoadResult result;
 
+// The PARSE half shared by both fromJSON() overloads. Reads shape only --
+// version gate, key types, arrays -- and leaves every value rule to
+// validate() exactly as before. Returns false on the early bails (not JSON,
+// not an object, unknown version) where reading on would interpret fields
+// whose meaning is exactly what is in doubt.
+bool parsePresetText (const juce::String& text,
+                      Preset&             preset,
+                      juce::StringArray&  errors)
+{
     juce::var          parsed;
     const juce::Result parseOutcome = juce::JSON::parse (text, parsed);
 
@@ -345,17 +546,17 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
     {
         // Covers the empty file and the truncated file, which is what most
         // real corruption looks like.
-        result.errors.add ("not valid JSON: " + parseOutcome.getErrorMessage().trim());
-        return result;
+        errors.add ("not valid JSON: " + parseOutcome.getErrorMessage().trim());
+        return false;
     }
 
     auto* root = parsed.getDynamicObject();
 
     if (root == nullptr)
     {
-        result.errors.add ("not a preset: the top level is " + describeType (parsed)
-                           + ", not a JSON object");
-        return result;
+        errors.add ("not a preset: the top level is " + describeType (parsed)
+                    + ", not a JSON object");
+        return false;
     }
 
     // -- version, first and alone -------------------------------------------
@@ -364,40 +565,39 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
     // doubt.
     if (! root->hasProperty ("version"))
     {
-        result.errors.add ("missing key \"version\"");
-        return result;
+        errors.add ("missing key \"version\"");
+        return false;
     }
 
     const juce::var version = root->getProperty ("version");
 
     if (! version.isString())
     {
-        result.errors.add ("\"version\" must be a string such as \""
-                           + juce::String (CURRENT_VERSION) + "\", but is "
-                           + describeType (version));
-        return result;
+        errors.add ("\"version\" must be a string such as \""
+                    + juce::String (PresetManager::CURRENT_VERSION) + "\", but is "
+                    + describeType (version));
+        return false;
     }
 
-    if (version.toString() != CURRENT_VERSION)
+    if (version.toString() != PresetManager::CURRENT_VERSION)
     {
-        result.errors.add ("unsupported preset version \"" + version.toString()
-                           + "\" -- this build understands \""
-                           + juce::String (CURRENT_VERSION) + "\"");
-        return result;
+        errors.add ("unsupported preset version \"" + version.toString()
+                    + "\" -- this build understands \""
+                    + juce::String (PresetManager::CURRENT_VERSION) + "\"");
+        return false;
     }
 
-    Preset preset;
     preset.version = version.toString();
 
     // -- device: metadata, decision [D] -------------------------------------
     if (! root->hasProperty ("device"))
     {
-        result.errors.add ("missing key \"device\"");
+        errors.add ("missing key \"device\"");
     }
     else if (! root->getProperty ("device").isString())
     {
-        result.errors.add ("\"device\" must be a string, but is "
-                           + describeType (root->getProperty ("device")));
+        errors.add ("\"device\" must be a string, but is "
+                    + describeType (root->getProperty ("device")));
     }
     else
     {
@@ -409,13 +609,13 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
     // -- sampleRate ---------------------------------------------------------
     if (! root->hasProperty ("sampleRate"))
     {
-        result.errors.add ("missing key \"sampleRate\"");
+        errors.add ("missing key \"sampleRate\"");
     }
     else if (! isNumber (root->getProperty ("sampleRate")))
     {
-        result.errors.add ("\"sampleRate\" must be a number in Hz, but is "
-                           + describeType (root->getProperty ("sampleRate"))
-                           + " -- a formatted string such as \"48000 Hz\" is not a sample rate");
+        errors.add ("\"sampleRate\" must be a number in Hz, but is "
+                    + describeType (root->getProperty ("sampleRate"))
+                    + " -- a formatted string such as \"48000 Hz\" is not a sample rate");
     }
     else
     {
@@ -425,11 +625,11 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
     // -- bufferSize ---------------------------------------------------------
     if (! root->hasProperty ("bufferSize"))
     {
-        result.errors.add ("missing key \"bufferSize\"");
+        errors.add ("missing key \"bufferSize\"");
     }
     else
     {
-        readWholeNumber (*root, "bufferSize", "", result.errors, preset.bufferSize);
+        readWholeNumber (*root, "bufferSize", "", errors, preset.bufferSize);
     }
 
     // -- notchDefaults: OPTIONAL --------------------------------------------
@@ -442,27 +642,54 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
 
         if (auto* defaultsObject = defaults.getDynamicObject())
         {
-            readNumber (*defaultsObject, "Q",     "notchDefaults: ", result.errors,
+            readNumber (*defaultsObject, "Q",     "notchDefaults: ", errors,
                         preset.notchDefaults.Q);
-            readNumber (*defaultsObject, "depth", "notchDefaults: ", result.errors,
+            readNumber (*defaultsObject, "depth", "notchDefaults: ", errors,
                         preset.notchDefaults.depthDB);
         }
         else
         {
-            result.errors.add ("\"notchDefaults\" must be an object, but is "
-                               + describeType (defaults));
+            errors.add ("\"notchDefaults\" must be an object, but is "
+                        + describeType (defaults));
+        }
+    }
+
+    // -- slots: OPTIONAL (preset format v2) ---------------------------------
+    // Absent is every v1 file ever written. Present but malformed is a shape
+    // error like any other; the routing pass only runs when the shape held.
+    if (root->hasProperty ("slots"))
+    {
+        if (! root->getProperty ("slots").isArray())
+        {
+            errors.add ("\"slots\" must be an array, but is "
+                        + describeType (root->getProperty ("slots")));
+        }
+        else
+        {
+            const juce::Array<juce::var>& entries =
+                *root->getProperty ("slots").getArray();
+
+            for (int i = 0; i < entries.size(); ++i)
+            {
+                PresetSlot slot;
+
+                if (readSlotEntry (entries.getReference (i), i, errors, slot))
+                {
+                    preset.slots.push_back (slot);
+                }
+            }
         }
     }
 
     // -- notches ------------------------------------------------------------
     if (! root->hasProperty ("notches"))
     {
-        result.errors.add ("missing key \"notches\"");
+        errors.add ("missing key \"notches\"");
     }
     else if (! root->getProperty ("notches").isArray())
     {
-        result.errors.add ("\"notches\" must be an array, but is "
-                           + describeType (root->getProperty ("notches")));
+        errors.add ("\"notches\" must be an array, but is "
+                    + describeType (root->getProperty ("notches")));
     }
     else
     {
@@ -472,20 +699,112 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
         {
             PresetNotch notch;
 
-            if (readNotch (entries.getReference (i), i, result.errors, notch))
+            if (readNotch (entries.getReference (i), i, errors, notch))
             {
                 preset.notches.push_back (notch);
             }
         }
     }
 
+    return errors.isEmpty();
+}
+
+//==============================================================================
+// The ROUTING pass of the channel-aware overload. Three jobs, in order:
+//
+// 1. A notch whose "slot" is outside [0, kMaxSlots - 1] is DROPPED and
+//    counted, never fatal: one hand-edited typo must not take down the other
+//    fifteen measured notches in the file.
+// 2. Every referenced slot is auto-activated. The config the file declared
+//    wins; a slot no "slots" entry mentions gets the stereo default -- which
+//    is precisely what a v1 file implied without saying.
+// 3. Every slot's channels are clamped to what the device actually has.
+//    Clamping ROUTING here is safe and wanted -- it maps a channel number to
+//    the nearest existing one. Clamping FILTER COEFFICIENTS is what produced
+//    the 4.11e18 peak in Biquad.h; that remains forbidden everywhere else.
+void routeNotchesToSlots (Preset& preset,
+                          int     numInputChannels,
+                          int     numOutputChannels,
+                          int&    skippedCount)
+{
+    std::vector<PresetNotch> kept;
+    kept.reserve (preset.notches.size());
+
+    for (const auto& notch : preset.notches)
+    {
+        if (notch.slot >= 0 && notch.slot < kMaxSlots)
+        {
+            kept.push_back (notch);
+        }
+        else
+        {
+            ++skippedCount;
+        }
+    }
+
+    preset.notches = std::move (kept);
+
+    // Duplicate declarations of one index would leave two configs for one
+    // slot; the first wins, matching how a reader meets them in file order.
+    std::set<int> seenSlotIndices;
+    std::vector<PresetSlot> uniqueSlots;
+    uniqueSlots.reserve (preset.slots.size());
+
+    for (auto& slot : preset.slots)
+    {
+        if (seenSlotIndices.insert (slot.index).second)
+        {
+            uniqueSlots.push_back (slot);
+        }
+    }
+
+    preset.slots = std::move (uniqueSlots);
+
+    std::set<int> referenced;
+
+    for (const auto& notch : preset.notches)
+    {
+        referenced.insert (notch.slot);
+    }
+
+    for (int index : referenced)
+    {
+        bool declared = false;
+
+        for (const auto& slot : preset.slots)
+        {
+            if (slot.index == index)
+            {
+                declared = true;
+                break;
+            }
+        }
+
+        if (! declared)
+        {
+            preset.slots.push_back (PresetSlot { index, SlotConfig {} });
+        }
+    }
+
+    for (auto& slot : preset.slots)
+    {
+        if (referenced.count (slot.index) != 0)
+        {
+            slot.config.enabled = true;
+        }
+
+        slot.config = slotClampedTo (slot.config, numInputChannels, numOutputChannels);
+    }
+}
+
+PresetLoadResult finishLoad (Preset& preset, const juce::StringArray& errors)
+{
+    PresetLoadResult result;
+
     // The VALUE pass runs only if the shape is sound, so that a notch whose
     // "freq" was a string does not also generate a bogus range complaint, and
     // so that the positions in the value messages still match the file.
-    if (result.errors.isEmpty())
-    {
-        result.errors = validate (preset);
-    }
+    result.errors = errors.isEmpty() ? PresetManager::validate (preset) : errors;
 
     result.ok = result.errors.isEmpty();
 
@@ -499,6 +818,39 @@ PresetLoadResult PresetManager::fromJSON (const juce::String& text)
         // reads the message, shrugs, and uses the struct anyway.
         result.preset = Preset {};
     }
+
+    return result;
+}
+
+} // namespace
+
+//==============================================================================
+PresetLoadResult PresetManager::fromJSON (const juce::String& text)
+{
+    Preset           preset;
+    juce::StringArray errors;
+
+    parsePresetText (text, preset, errors);
+
+    return finishLoad (preset, errors);
+}
+
+//==============================================================================
+PresetLoadResult PresetManager::fromJSON (const juce::String& text,
+                                          int                 numInputChannels,
+                                          int                 numOutputChannels)
+{
+    Preset           preset;
+    juce::StringArray errors;
+    int              skipped = 0;
+
+    if (parsePresetText (text, preset, errors))
+    {
+        routeNotchesToSlots (preset, numInputChannels, numOutputChannels, skipped);
+    }
+
+    PresetLoadResult result = finishLoad (preset, errors);
+    result.skippedNotchCount = skipped;
 
     return result;
 }
@@ -552,6 +904,24 @@ PresetLoadResult PresetManager::loadFromFile (const juce::File& file)
     // loadFileAsString honours a BOM if one is present and assumes UTF-8
     // otherwise, which is what saveToFile writes.
     return fromJSON (file.loadFileAsString());
+}
+
+//==============================================================================
+PresetLoadResult PresetManager::loadFromFile (const juce::File& file,
+                                              int               numInputChannels,
+                                              int               numOutputChannels)
+{
+    PresetLoadResult result;
+
+    if (! file.existsAsFile())
+    {
+        result.errors.add ("no such preset file: " + file.getFullPathName());
+        return result;
+    }
+
+    return fromJSON (file.loadFileAsString(),
+                     numInputChannels,
+                     numOutputChannels);
 }
 
 //==============================================================================
