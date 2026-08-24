@@ -14,7 +14,7 @@ set(JUCE_ASIO_SDK_PATH "${CMAKE_SOURCE_DIR}/external/asiosdk" CACHE PATH "Path t
 
 if(EXISTS "${JUCE_ASIO_SDK_PATH}/common/asio.h")
     message(STATUS "ASIO SDK found at ${JUCE_ASIO_SDK_PATH}")
-    set(JUCE_ASIO ON CACHE BOOL "Enable ASIO support" FORCE)
+    set(HANDSFREE_HAVE_ASIO ON)
 else()
     message(WARNING "ASIO SDK not found. Download from Steinberg and place in external/asiosdk/")
 endif()
@@ -26,6 +26,14 @@ juce_add_gui_app(HandsFree
     BUNDLE_ID "com.azsoundtech.handsfree"
     VERSION "1.0.0"
 )
+
+# ASIO support lives behind the JUCE_ASIO compile definition on the app target.
+# A CACHE variable named JUCE_ASIO does NOTHING -- verified 2026-08-24: with the
+# SDK present but only the cache var set, no vcxproj carried -DJUCE_ASIO=1 and
+# the binary shipped without the ASIO device type.
+if(HANDSFREE_HAVE_ASIO)
+    target_compile_definitions(HandsFree PRIVATE JUCE_ASIO=1)
+endif()
 
 # Source files
 target_sources(HandsFree PRIVATE
