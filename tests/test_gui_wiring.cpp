@@ -24,6 +24,7 @@
 #include "app/MainComponent.h"
 #include "app/NotchController.h"
 #include "gui/DeviceDrawer.h"
+#include "gui/theme/AzTheme.h"
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "test_gui_helpers.h"
@@ -256,10 +257,13 @@ TEST (MainComponent, SlotRoutingTableGetsSizedContentInsideTheViewport)
     app.resized();   // headless: no peer, so drive the layout pass directly
 
     // The Viewport bug (2026-08-24) left the table a 0x0 rect -- an empty
-    // black band where the routing controls should be. Pin the content to the
-    // panel's full preferred height and a real width.
+    // black band where the routing controls should be. Default shows 2 rows
+    // plus the Add row; the content must be sized to exactly that.
     const auto table = app.slotTableBoundsForTest();
-    EXPECT_EQ (table.getHeight(), gui::SlotPanel::getPreferredHeight());
+    EXPECT_EQ (table.getHeight(),
+               gui::SlotPanel::kCaptionHeight
+                 + 3 * gui::SlotPanel::kRowHeight
+                 + 3 * az::theme::spacing);
     EXPECT_GT (table.getWidth(), 0);
 }
 

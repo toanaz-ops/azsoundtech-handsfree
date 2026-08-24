@@ -72,16 +72,21 @@ public:
     // test can drive the controls directly.
     [[nodiscard]] Row& getRowForTest (int slotIndex) { return rows_[(std::size_t) slotIndex]; }
 
+    // How many of the 8 rows are shown. Starts at 2 -- the stereo In1/In2
+    // pair most rigs need. The Add button reveals the next row, up to all 8;
+    // revealing a row never enables its slot, it only makes the controls
+    // reachable.
+    void   setVisibleRowCount (int n);
+    [[nodiscard]] int getVisibleRowCount() const { return visibleRows_; }
+
     static constexpr int kRowHeight = 26;
     static constexpr int kCaptionHeight = 18;
 
-    // Height of the caption row plus all 8 slot rows. A hosting Viewport does
-    // NOT size its content by itself -- the parent must give the panel this
-    // height (and the visible width) or the table renders as an empty rect.
-    [[nodiscard]] static constexpr int getPreferredHeight()
-    {
-        return kCaptionHeight + kMaxSlots * kRowHeight;
-    }
+    // Height the hosting Viewport should give the panel for its CURRENT
+    // visible row count: theme margins + caption + rows (+ the Add row while
+    // any row is still hidden). A Viewport never sizes its content by itself
+    // -- the parent must hand the panel this height or it renders empty.
+    [[nodiscard]] int getPreferredHeight() const;
 
     void resized() override;
 
@@ -94,7 +99,12 @@ private:
 
     AudioEngine& engine_;
 
+    int visibleRows_ = 2;
     std::array<Row, kMaxSlots> rows_;
+
+    // Sits in the row slot after the last visible one while any row is
+    // hidden; reveals one more row per click.
+    juce::TextButton addButton_ { {}, "+ Add slot" };
 
     juce::Label widthCaption_ { {}, "Width" };
     juce::Label inACaption_   { {}, "In A" };

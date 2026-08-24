@@ -22,10 +22,6 @@ constexpr int kNotchListHeight = 120;
 
 // ApplicationProperties key for the persisted layout (spec G-2 / section 3).
 constexpr const char* kLayoutPropertyKey = "layout";
-
-// Preferred height of the slot routing table: exactly what the panel itself
-// reports for caption + 8 rows, so the two can never drift apart.
-constexpr int kSlotPanelPreferredHeight = gui::SlotPanel::getPreferredHeight();
 } // namespace
 
 MainComponent::MainComponent (
@@ -502,11 +498,13 @@ void MainComponent::resized()
 
     // The routing table sits under the drawer, scrollable, and yields first:
     // its height is whatever remains once the spectrum's own minimum (and the
-    // rail) are reserved. A short window collapses it to nothing rather than
-    // squeezing the spectrum below its usable floor.
-    const int maxSlotHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer
-                                             - drawerHeight - gap);
-    const int slotHeight = juce::jlimit (0, maxSlotHeight, kSlotPanelPreferredHeight);
+    // rail) are reserved. area has ALREADY had the drawer + gap removed, so
+    // the only remaining reservation is the one below -- subtracting the
+    // drawer again (the pre-2026-08-24 form) starves the table and shears its
+    // last visible row.
+    const int slotPreferred = slotPanel_.getPreferredHeight();
+    const int maxSlotHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
+    const int slotHeight = juce::jlimit (0, maxSlotHeight, slotPreferred);
 
     // Visibility tracks the layout decision: a shrinking window that drops
     // the FlexItem must not leave the scroller sitting at stale bounds.
@@ -522,10 +520,11 @@ void MainComponent::resized()
 
         // A Viewport never sizes its content by itself: without this the
         // table renders as an empty black rect (the bug the 2026-08-24
-        // screenshots showed). Full preferred height; the viewport adds a
-        // scrollbar only when the window is shorter than the table.
+        // screenshots showed). Full preferred height for the CURRENT visible
+        // row count; the viewport adds a scrollbar only when the window is
+        // shorter than the table.
         slotPanel_.setSize (juce::jmax (1, slotScroller_.getMaximumVisibleWidth()),
-                            gui::SlotPanel::getPreferredHeight());
+                            slotPreferred);
     }
 
     if (layout_ == gui::ScreenLayout::Performance)

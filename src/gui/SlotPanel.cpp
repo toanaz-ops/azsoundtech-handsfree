@@ -98,6 +98,15 @@ SlotPanel::SlotPanel (AudioEngine& engine)
         }
     }
 
+    // Reveals one more row per click. The parent re-runs resized() so the
+    // Viewport re-sizes this panel from getPreferredHeight() (same pattern
+    // DeviceDrawer::setOpen uses to force the parent's layout pass).
+    addButton_.onClick = [this]
+    {
+        setVisibleRowCount (juce::jmin (visibleRows_ + 1, kMaxSlots));
+    };
+    addAndMakeVisible (addButton_);
+
     refresh();
 }
 
@@ -224,6 +233,35 @@ void SlotPanel::handleRowChanged (int slotIndex)
         onSlotConfigChanged (slotIndex, config);
 }
 
+void SlotPanel::setVisibleRowCount (int n)
+{
+    const auto clamped = juce::jlimit (1, kMaxSlots, n);
+
+    if (clamped == visibleRows_)
+        return;
+
+    visibleRows_ = clamped;
+
+    // The parent owns this panel's size (it hosts the Viewport), so the
+    // height change has to go through the parent's layout pass.
+    if (auto* parent = getParentComponent())
+        parent->resized();
+    else
+        resized();
+}
+
+int SlotPanel::getPreferredHeight() const
+{
+    using namespace az::theme;
+
+    // theme margins (reduced gap/spacing top+bottom) + caption + spacing
+    // between caption and rows, then one kRowHeight per visible row plus the
+    // Add row while any of the 8 is still hidden.
+    const int rows = visibleRows_ + (visibleRows_ < kMaxSlots ? 1 : 0);
+
+    return 2 * spacing + kCaptionHeight + spacing + rows * kRowHeight;
+}
+
 void SlotPanel::resized()
 {
     using namespace az::theme;
@@ -263,8 +301,22 @@ void SlotPanel::resized()
 
     for (int i = 0; i < kMaxSlots; ++i)
     {
-        auto rowArea = area.removeFromTop (kRowHeight);
         auto& row = rows_[(std::size_t) i];
+
+        // Rows past the visible count keep their controls alive (tests drive
+        // them directly) but get an empty rect -- nothing painted, no hits.
+        if (i >= visibleRows_)
+        {
+            row.number.setBounds ({});
+            row.enable .setBounds ({});
+            row.width  .setBounds ({});
+            row.inLanes[0].setBounds ({});  row.inLanes[1] .setBounds ({});
+            row.outLanes[0].setBounds ({}); row.outLanes[1].setBounds ({});
+            row.led.setBounds ({});
+            continue;
+        }
+
+        auto rowArea = area.removeFromTop (kRowHeight);
 
         row.number.setBounds (rowArea.removeFromLeft (kNumberColumn));
         row.number.setJustificationType (juce::Justification::centredRight);
@@ -288,6 +340,16 @@ void SlotPanel::resized()
 
         row.led.setBounds (rowArea.removeFromLeft (kLedColumn));
     }
+
+    // The Add row occupies the slot right after the last visible row and
+    // disappears once all 8 are on screen.
+    if (visibleRows_ < kMaxSlots)
+    {
+        auto addArea = area.removeFromTop (kRowHeight);
+        addButton_.setBounds (addArea.removeFromLeft (110).reduced (2, 1));
+    }
+    else
+        addButton_.setBounds ({});
 }
 
 } // namespace gui
