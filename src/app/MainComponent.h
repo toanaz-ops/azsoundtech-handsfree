@@ -30,6 +30,7 @@
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "gui/ModeRail.h"
+#include "gui/SlotPanel.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
@@ -144,6 +145,13 @@ private:
     gui::ModeRail     modeRail_;
     gui::StatusBadge  statusBadge_;      // hosted inside deviceDrawer_'s header
     gui::DeviceDrawer deviceDrawer_;
+
+    // The 8-slot routing table (Task 7). Reads the engine in refresh();
+    // changes come back through onSlotConfigChanged, wired to the §6.5 cycle
+    // below. Hosted in a Viewport so all 8 rows scroll when the window is
+    // too short to show them.
+    gui::SlotPanel   slotPanel_ { engine_ };
+    juce::Viewport   slotScroller_;
 
     // Ruling R-1: NotchListPanel does not exist yet (Task 4). This slot stays
     // null this lane; resized() tolerates that.

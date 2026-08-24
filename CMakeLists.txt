@@ -54,6 +54,8 @@ target_sources(HandsFree PRIVATE
     src/gui/DevicePanel.h
     src/gui/DeviceViewModel.cpp
     src/gui/DeviceViewModel.h
+    src/gui/SlotPanel.cpp
+    src/gui/SlotPanel.h
     src/gui/ModeBar.cpp
     src/gui/ModeBar.h
     src/gui/ModeRail.cpp

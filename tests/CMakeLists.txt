@@ -12,6 +12,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(HandsFreeTests
     test_slotconfig.cpp
+    test_slotpanel.cpp
     test_ringbuffer.cpp
     test_biquad.cpp
     test_notchchain.cpp
@@ -40,6 +41,7 @@ add_executable(HandsFreeTests
     ../src/gui/DeviceViewModel.cpp
     ../src/gui/DeviceDrawer.cpp
     ../src/gui/DevicePanel.cpp
+    ../src/gui/SlotPanel.cpp
     ../src/gui/ModeBar.cpp
     ../src/gui/ModeRail.cpp
     ../src/gui/StatusBadge.cpp

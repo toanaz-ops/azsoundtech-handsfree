@@ -18,6 +18,12 @@ constexpr int kMinSpectrumHeight = 120;
 
 // ApplicationProperties key for the persisted layout (spec G-2 / section 3).
 constexpr const char* kLayoutPropertyKey = "layout";
+
+// Preferred height of the slot routing table (caption + 8 x SlotPanel::
+// kRowHeight). resized() clamps this against the space left after the
+// spectrum's own minimum is protected -- a short window scrolls the table,
+// it never starves the spectrum.
+constexpr int kSlotPanelPreferredHeight = 18 + 8 * gui::SlotPanel::kRowHeight;
 } // namespace
 
 MainComponent::MainComponent()
@@ -44,6 +50,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (spectrumView_);
     addAndMakeVisible (modeRail_);
     addAndMakeVisible (deviceDrawer_);
+    addAndMakeVisible (slotScroller_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
 
     modeBar_.onModeRequested = [this] (AudioEngine::Mode mode) { requestMode (mode); };
@@ -103,6 +110,29 @@ MainComponent::MainComponent()
     {
         panelMessage_ = message;
         refreshStatus();
+    };
+
+    // The routing table never touches the engine itself: a mapping change is
+    // the SAME §6.5 shape as a device change -- join every detector thread,
+    // store the config, resync widths (setWidth() needs a stopped thread) and
+    // relaunch. refresh() then re-reads the engine so the panel shows what
+    // actually landed.
+    slotScroller_.setViewedComponent (&slotPanel_, false);
+    slotPanel_.onSlotConfigChanged = [this] (int slotIndex, const SlotConfig& config)
+    {
+        for (auto& controller : notchControllers_)
+            controller->stop (1000);
+
+        engine_.setSlotConfig (slotIndex, config);
+
+        for (int i = 0; i < kMaxSlots; ++i)
+        {
+            auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setWidth (engine_.getSlotConfig (i).width);
+            controller.start();
+        }
+
+        slotPanel_.refresh();
     };
 
     // Layout persistence (spec section 3). Stored under %APPDATA%\AZ Soundtech,
@@ -185,6 +215,9 @@ void MainComponent::startAudio()
     // Only now do getAvailableSampleRates() and getAvailableBufferSizes()
     // return anything.
     devicePanel_.refresh();
+    // Same for the routing table's channel names: empty until the device is
+    // open, which is why refresh() has to run again here.
+    slotPanel_.refresh();
     refreshStatus();
 }
 
@@ -412,6 +445,19 @@ void MainComponent::resized()
     main.items.add (juce::FlexItem (deviceDrawer_)
                         .withHeight ((float) drawerHeight)
                         .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
+
+    // The routing table sits under the drawer, scrollable, and yields first:
+    // its height is whatever remains once the spectrum's own minimum (and the
+    // rail) are reserved. A short window collapses it to nothing rather than
+    // squeezing the spectrum below its usable floor.
+    const int maxSlotHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer
+                                             - drawerHeight - gap);
+    const int slotHeight = juce::jlimit (0, maxSlotHeight, kSlotPanelPreferredHeight);
+
+    if (slotHeight > 0)
+        main.items.add (juce::FlexItem (slotScroller_)
+                            .withHeight ((float) slotHeight)
+                            .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
 
     if (layout_ == gui::ScreenLayout::Performance)
     {
