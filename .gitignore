@@ -67,3 +67,4 @@ Thumbs.db
 
 # Claude-desktop harness scratch state (worktree drift tracking)
 .feat-drift-history.json
+.superpowers/brainstorm/
