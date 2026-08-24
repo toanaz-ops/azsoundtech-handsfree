@@ -23,6 +23,7 @@
 
 #include "app/MainComponent.h"
 #include "app/NotchController.h"
+#include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 
@@ -145,6 +146,96 @@ TEST (MainComponent, RequestingAModeReachesTheEngine)
     app.requestMode (AudioEngine::Mode::Auto);
 
     EXPECT_EQ (app.getAudioEngine().getMode(), AudioEngine::Mode::Auto);
+}
+
+//==============================================================================
+// Task 3 -- L1/L2 layouts, DeviceDrawer, persistence (spec 2026-08-23
+// sections 0 G-2, 2 and 3; test table row "Layout switch").
+//
+// Note on the persistence tests: the layout is stored in the SAME file the
+// real app uses (%APPDATA%\AZ Soundtech). These tests restore the default
+// (Performance) when they finish so a human's own choice is not clobbered.
+
+TEST (MainComponent, DefaultLayoutIsPerformance)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    // G-2: L2 Performance is the shipped default.
+    EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
+}
+
+TEST (MainComponent, LayoutSwitchPersistsAcrossReconstruction)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    {
+        MainComponent app;
+        app.setLayout (gui::ScreenLayout::Classic);
+
+        // The in-memory value AND the persisted property must agree right now.
+        EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Classic);
+    }
+
+    {
+        // "Restart": a fresh component must come back in the saved layout.
+        MainComponent reopened;
+        EXPECT_EQ (reopened.getLayout(), gui::ScreenLayout::Classic);
+
+        // Leave the default in place for everyone after this test.
+        reopened.setLayout (gui::ScreenLayout::Performance);
+        EXPECT_EQ (reopened.getLayout(), gui::ScreenLayout::Performance);
+    }
+}
+
+TEST (MainComponent, DrawerSettingsToggleSwitchesTheLayout)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    ASSERT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
+    EXPECT_TRUE (app.getDeviceDrawer().performanceButton_.getToggleState());
+
+    // Clicking the L1 cell in the drawer's settings row drives the same path
+    // the operator uses. sendNotificationSync dispatches inline: no message
+    // pump needed with modal loops off.
+    app.getDeviceDrawer().classicButton_.setToggleState (true, juce::sendNotificationSync);
+
+    EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Classic);
+    EXPECT_TRUE (app.getDeviceDrawer().classicButton_.getToggleState());
+
+    app.setLayout (gui::ScreenLayout::Performance);   // restore the default
+}
+
+TEST (MainComponent, MinimumSizeKeepsRailAndSpectrumDisjoint)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    for (const auto layout : { gui::ScreenLayout::Classic, gui::ScreenLayout::Performance })
+    {
+        app.setLayout (layout);
+        app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+
+        const auto rail     = app.railBoundsForTest();
+        const auto spectrum = app.spectrumBoundsForTest();
+
+        // Both must actually be laid out before the non-overlap claim means
+        // anything.
+        EXPECT_FALSE (rail.isEmpty());
+        EXPECT_FALSE (spectrum.isEmpty());
+
+        // The binding assertion: zero intersecting pixels between the fixed
+        // rail and the spectrum at the smallest window we allow.
+        const auto overlap = rail.getIntersection (spectrum);
+        EXPECT_EQ (overlap.getWidth() * overlap.getHeight(), 0)
+            << "rail and spectrum overlap at minimum window size, layout "
+            << (int) layout;
+    }
+
+    app.setLayout (gui::ScreenLayout::Performance);   // restore the default
 }
 
 //==============================================================================

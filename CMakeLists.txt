@@ -48,6 +48,8 @@ target_sources(HandsFree PRIVATE
     src/app/PresetManager.h
     src/app/MainComponent.cpp
     src/app/MainComponent.h
+    src/gui/DeviceDrawer.cpp
+    src/gui/DeviceDrawer.h
     src/gui/DevicePanel.cpp
     src/gui/DevicePanel.h
     src/gui/DeviceViewModel.cpp

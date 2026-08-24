@@ -8,24 +8,51 @@ namespace
 // is nothing here a soundman reads faster than that, and the poll costs three
 // relaxed atomic loads plus a device query.
 constexpr int kStatusRefreshMs = 200;
+
+// Smallest spectrum worth looking at; resized() clamps the drawer against it.
+constexpr int kMinSpectrumHeight = 120;
+
+// ApplicationProperties key for the persisted layout (spec G-2 / section 3).
+constexpr const char* kLayoutPropertyKey = "layout";
 } // namespace
 
 MainComponent::MainComponent()
     : notchController_ (engine_.getTapBuffer(), engine_.getCommandQueue(), systemClock_)
+    , spectrumView_ (notchController_)
+    , modeRail_ (gui::ModeRail::Orientation::Vertical)
+    , deviceDrawer_ (devicePanel_)
 {
     // The Console-industrial theme, applied once here and inherited by every
     // child through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
 
-    addAndMakeVisible (devicePanel_);
-    addAndMakeVisible (statusBar_);
-    addAndMakeVisible (modeBar_);
+    addAndMakeVisible (spectrumView_);
+    addAndMakeVisible (modeRail_);
+    addAndMakeVisible (deviceDrawer_);
+    // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
 
     modeBar_.onModeRequested = [this] (AudioEngine::Mode mode) { requestMode (mode); };
 
+    // New console wiring. The rail requests modes through the same
+    // requestMode() path the old bar used -- one route to the engine.
+    modeRail_.onSoundcheck = [this] { requestMode (AudioEngine::Mode::Soundcheck); };
+    modeRail_.onAuto       = [this] { requestMode (AudioEngine::Mode::Auto); };
+    modeRail_.onBypass     = [this] { requestMode (AudioEngine::Mode::Bypass); };
+
+    // R-3 already guards this behind ModeRail's confirmation hook.
+    modeRail_.onClearAllConfirmed = [this] { notchController_.clearAll(); };
+    modeRail_.getSoundcheckRemainingMs = [this]
+    {
+        return notchController_.getSoundcheckRemainingMs();
+    };
+
+    deviceDrawer_.setStatusBadge (&statusBadge_);
+    deviceDrawer_.onLayoutSelected = [this] (gui::ScreenLayout layout) { setLayout (layout); };
+
     // Bridge design §6.5: a device change in the panel is always an engine
     // RESTART, and the rings are cleared on the way -- so the detector thread
-    // must be joined first and relaunched after.
+    // must be joined first and relaunched after. These hooks live on the ONE
+    // DevicePanel instance; re-parenting it into the drawer changed nothing.
     devicePanel_.onBeforeRestart = [this] { notchController_.stop (1000); };
     devicePanel_.onAfterRestart  = [this] { notchController_.start(); };
 
@@ -36,6 +63,24 @@ MainComponent::MainComponent()
         panelMessage_ = message;
         refreshStatus();
     };
+
+    // Layout persistence (spec section 3). Stored under %APPDATA%\AZ Soundtech,
+    // read back on every launch; G-2 fixes the default at Performance.
+    juce::PropertiesFile::Options propertyOptions;
+    propertyOptions.applicationName     = "AZ Soundtech Hands-free";
+    propertyOptions.filenameSuffix      = "xml";
+    propertyOptions.folderName          = "AZ Soundtech";
+    appProperties_.setStorageParameters (propertyOptions);
+
+    {
+        const int saved = appProperties_.getUserSettings()
+                              ->getIntValue (kLayoutPropertyKey, (int) gui::ScreenLayout::Performance);
+        layout_ = (saved == (int) gui::ScreenLayout::Classic)
+                      ? gui::ScreenLayout::Classic
+                      : gui::ScreenLayout::Performance;
+    }
+
+    applyLayoutState (layout_);
 
     // Enumeration is safe with no device open -- every AudioEngine query used
     // here guards getCurrentAudioDevice() being null. The rate and buffer
@@ -100,6 +145,35 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
     modeBar_.setDisplayedMode (engine_.getMode());
 }
 
+void MainComponent::setLayout (gui::ScreenLayout layout)
+{
+    if (layout == layout_)
+        return;
+
+    layout_ = layout;
+
+    // Persist immediately: a crash or power cut mid-show must not lose the
+    // operator's arrangement choice.
+    auto* storedProperties = appProperties_.getUserSettings();
+    storedProperties->setValue (kLayoutPropertyKey, (int) layout);
+    storedProperties->saveIfNeeded();
+
+    applyLayoutState (layout);
+    resized();
+}
+
+void MainComponent::applyLayoutState (gui::ScreenLayout layout)
+{
+    // Same components, different arrangement -- nothing is destroyed or
+    // recreated here (spec section 3).
+    modeRail_.setOrientation (layout == gui::ScreenLayout::Performance
+                                  ? gui::ModeRail::Orientation::Vertical
+                                  : gui::ModeRail::Orientation::Horizontal);
+
+    deviceDrawer_.applyLayoutMode (layout);
+    deviceDrawer_.setSelectedLayout (layout);
+}
+
 void MainComponent::refreshStatus()
 {
     gui::DeviceStatus status;
@@ -123,6 +197,16 @@ void MainComponent::timerCallback()
 {
     refreshStatus();
 
+    // The badge answers "is it protecting?" in one glance (spec sections 2
+    // and 5): IDLE with no device running, BYPASSED when the mode says so,
+    // PROTECTING only while audio actually flows through active detection.
+    if (! engine_.isRunning())
+        statusBadge_.setState (gui::ProtectionState::Idle);
+    else if (engine_.getMode() == AudioEngine::Mode::Bypass)
+        statusBadge_.setState (gui::ProtectionState::Bypassed);
+    else
+        statusBadge_.setState (gui::ProtectionState::Protecting);
+
     // The engine's mode can change from somewhere other than these buttons --
     // it already can via setMode(), and the detector will do it when Soundcheck
     // becomes real. setDisplayedMode() reflects without requesting, so this
@@ -144,15 +228,51 @@ void MainComponent::paint (juce::Graphics& g)
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds();
+    using namespace az::theme;
 
+    auto area = getLocalBounds();
     area.removeFromTop (36);  // title, drawn in paint()
 
-    devicePanel_.setBounds (area.removeFromTop (64));
-    statusBar_  .setBounds (area.removeFromTop (50));
-    modeBar_    .setBounds (area.removeFromTop (36));
+    juce::FlexBox main;
+    main.flexDirection = juce::FlexBox::Direction::column;
 
-    // What is left is where the spectrum, the notch overlay and the notch list
-    // go (Tasks 19, 20, 22). Those are blocked on the bridge design and are not
-    // this lane's.
+    // Reserve room for the rail plus a minimum usable spectrum, then clamp the
+    // drawer so a too-small window shrinks the drawer instead of overlapping
+    // siblings (spec section 3). setResizeLimits should make the clamp a
+    // no-op in practice.
+    const int reserveBelowDrawer = kMinSpectrumHeight + gap
+                                 + (layout_ == gui::ScreenLayout::Performance
+                                        ? 320   // vertical rail: 4 cells + label + trailing gaps
+                                        : buttonCellHeight);
+    const int maxDrawerHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
+    const int drawerHeight    = juce::jlimit (0, maxDrawerHeight,
+                                              deviceDrawer_.getPreferredHeight());
+
+    main.items.add (juce::FlexItem (deviceDrawer_)
+                        .withHeight ((float) drawerHeight)
+                        .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
+
+    if (layout_ == gui::ScreenLayout::Performance)
+    {
+        // L2: big spectrum with the fixed-width rail down the right edge.
+        juce::FlexBox row;
+        row.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
+        row.items.add (juce::FlexItem (modeRail_).withWidth ((float) railWidth));
+        main.items.add (juce::FlexItem (row).withFlex (1.0f));
+    }
+    else
+    {
+        // L1: horizontal rail strip under the device bar, spectrum below.
+        main.items.add (juce::FlexItem (modeRail_)
+                            .withHeight ((float) buttonCellHeight)
+                            .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
+        main.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
+    }
+
+    // R-1: NotchListPanel arrives in Task 4. Until then this slot stays null
+    // and contributes nothing to the layout.
+    if (notchListSlot_ != nullptr)
+        main.items.add (juce::FlexItem (*notchListSlot_).withHeight (120.0f));
+
+    main.performLayout (area);
 }

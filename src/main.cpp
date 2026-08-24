@@ -52,6 +52,12 @@ private:
             setContentOwned(content, true);
 
             setResizable(true, true);
+            // Minimum window: must fit the 96 px rail plus a usable spectrum
+            // with no overlap at either layout (spec 2026-08-23 section 3).
+            // Lives here because setResizeLimits is a ResizableWindow API.
+            setResizeLimits(MainComponent::kMinimumWidth,
+                            MainComponent::kMinimumHeight,
+                            16384, 16384);
             centreWithSize(getWidth(), getHeight());
             setVisible(true);
 

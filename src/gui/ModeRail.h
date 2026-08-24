@@ -25,6 +25,12 @@ public:
     explicit ModeRail (Orientation orientation = Orientation::Vertical);
     ~ModeRail() override;
 
+    // L1/L2 switching re-parents the SAME rail into a differently oriented
+    // slot (spec section 3: components stay layout-agnostic), so the
+    // orientation is mutable after construction.
+    void setOrientation (Orientation newOrientation) { orientation_ = newOrientation; }
+    [[nodiscard]] Orientation getOrientation() const { return orientation_; }
+
     // R-3: injectable so tests run headless (JUCE_MODAL_LOOPS_PERMITTED off).
     // The default opens a native asynchronous confirmation box and invokes
     // its callback EXACTLY ONCE with the user's choice. Only a callback of

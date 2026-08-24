@@ -37,6 +37,7 @@ add_executable(HandsFreeTests
     ../src/app/MainComponent.cpp
     ../src/app/PresetManager.cpp
     ../src/gui/DeviceViewModel.cpp
+    ../src/gui/DeviceDrawer.cpp
     ../src/gui/DevicePanel.cpp
     ../src/gui/ModeBar.cpp
     ../src/gui/ModeRail.cpp
