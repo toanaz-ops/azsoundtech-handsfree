@@ -46,6 +46,8 @@ target_sources(HandsFree PRIVATE
     src/gui/DeviceViewModel.h
     src/gui/ModeBar.cpp
     src/gui/ModeBar.h
+    src/gui/SpectrumView.cpp
+    src/gui/SpectrumView.h
     src/gui/StatusBar.cpp
     src/gui/StatusBar.h
     src/gui/theme/AzTheme.cpp

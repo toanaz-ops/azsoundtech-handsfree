@@ -19,6 +19,7 @@ add_executable(HandsFreeTests
     test_audioengine.cpp
     test_deviceviewmodel.cpp
     test_gui_wiring.cpp
+    test_spectrumview.cpp
     test_aztheme.cpp
     test_presetmanager.cpp
     test_licensemanager.cpp
@@ -37,6 +38,7 @@ add_executable(HandsFreeTests
     ../src/gui/DeviceViewModel.cpp
     ../src/gui/DevicePanel.cpp
     ../src/gui/ModeBar.cpp
+    ../src/gui/SpectrumView.cpp
     ../src/gui/StatusBar.cpp
     ../src/gui/theme/AzTheme.cpp
     ../src/dsp/Biquad.cpp
