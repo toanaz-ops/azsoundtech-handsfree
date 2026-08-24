@@ -479,6 +479,42 @@ TEST (MainComponent, PresetWithOutOfRangeSlotStillLoadsTheRest)
     EXPECT_FLOAT_EQ (cmd.frequency, 482.0f);
 }
 
+TEST (MainComponent, PresetReferencedSlotIsEnabledOnEngineAndAdoptedTogether)
+{
+    // Spec §6 auto-activation pinned from BOTH sides: a notch routed to a
+    // slot the file never declares must switch that slot ON in the ENGINE
+    // (enabled flag) AND land in its CONTROLLER. Either alone is half a
+    // protection claim -- the chain would be silent or the detector deaf.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    // No "slots" section at all: slot 5 exists only because the notch
+    // references it.
+    const juce::String json = R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+                              R"("notches":[{"index":2,"freq":1250.0,"Q":30.0,"depth":-12.0,"slot":5}]})";
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-task6b-activate.json");
+    ASSERT_TRUE (presetFile.replaceWithText (json));
+
+    EXPECT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    EXPECT_TRUE (app.getAudioEngine().getSlotConfig (5).enabled);
+
+    auto* controller5 = app.getNotchControllerForTest (5);
+    ASSERT_NE (controller5, nullptr);
+    controller5->runOnce();
+
+    auto& queue5 = app.getAudioEngine().getCommandQueue (5);
+    ASSERT_GE (queue5.getAvailableRead(), 1u);   // default width 2 -> up to 2 lanes
+    NotchCommand cmd {};
+    ASSERT_EQ (queue5.read (&cmd, 1), 1u);
+    EXPECT_EQ (cmd.type, NotchCommandType::Set);
+    EXPECT_FLOAT_EQ (cmd.frequency, 1250.0f);
+}
+
 TEST (MainComponent, SoundcheckGatingAppliesToEnabledSlotsOnly)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

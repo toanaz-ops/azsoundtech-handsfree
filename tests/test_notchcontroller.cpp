@@ -513,6 +513,36 @@ TEST (NotchControllerDetection, SoundcheckNotchNeverAutoReleases)
     EXPECT_DOUBLE_EQ (h.controller.getSoundcheckRemainingMs(), 0.0);
 }
 
+TEST (NotchControllerDetection, SoundcheckAutoDisarmsAtExpiryExactlyOnce)
+{
+    // Spec §5.3: startSoundcheck() arms detection FOR THE DURATION. Before the
+    // auto-disarm fix nothing ever cleared detectionActive_, so one press of
+    // Soundcheck left the detector live forever.
+    Harness h;
+    h.controller.startSoundcheck();
+    EXPECT_TRUE (h.controller.detectionActiveForTest());
+
+    NoiseSource quiet;
+    // ~10 s of live audio: still inside the 15 s window.
+    for (int i = 0; i < 900; ++i)   // 900 * 10.667 ms ~= 9.6 s
+        pump (h, quiet.hop());
+    EXPECT_TRUE (h.controller.soundcheckActive());
+    EXPECT_TRUE (h.controller.detectionActiveForTest());
+
+    // Past expiry the controller disarms ITSELF, in the same live time the
+    // countdown reports.
+    for (int i = 0; i < 700; ++i)   // cumulative ~= 17 s
+        pump (h, quiet.hop());
+    EXPECT_DOUBLE_EQ (h.controller.getSoundcheckRemainingMs(), 0.0);
+    EXPECT_FALSE (h.controller.detectionActiveForTest());
+
+    // Exactly once: later polls see no deadline -- no resurrect, no re-store.
+    for (int i = 0; i < 100; ++i)   // cumulative ~= 18 s
+        pump (h, quiet.hop());
+    EXPECT_FALSE (h.controller.detectionActiveForTest());
+    EXPECT_DOUBLE_EQ (h.controller.getSoundcheckRemainingMs(), 0.0);
+}
+
 // ===========================================================================
 // Multi-slot routing (task 4): every command carries its controller's slot
 // id, and only width_ lanes are driven.

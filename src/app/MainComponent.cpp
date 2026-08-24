@@ -265,7 +265,27 @@ bool MainComponent::loadPreset (const juce::File& file)
     // Detectors run exactly while audio does (startAudio / the after-restart
     // hook), so that is also the only time they need stopping for setWidth()
     // and adoptPreset(), whose precondition is a STOPPED detector thread.
+    // Stop ALL of them once, mutate, restart once -- the §6.5 shape.
     const bool detectorsRunning = engine_.isRunning();
+
+    if (detectorsRunning)
+        for (auto& controller : notchControllers_)
+            controller->stop (1000);
+
+    // Width resync for EVERY slot whose config landed from the file -- not
+    // just notch-bearing ones. A slot declared mono with zero notches today
+    // must not detect on two lanes tomorrow. (The channel-aware loader also
+    // auto-adds every referenced slot to this list, so every adopt below is
+    // covered too. An out-of-range index was already ignored by
+    // setSlotConfig() above and is ignored here for the same reason.)
+    for (const auto& entry : result.preset.slots)
+    {
+        if (entry.index < 0 || entry.index >= kMaxSlots)
+            continue;
+
+        notchControllers_[(std::size_t) entry.index]->setWidth (
+            engine_.getSlotConfig (entry.index).width);
+    }
 
     for (int s = 0; s < kMaxSlots; ++s)
     {
@@ -275,20 +295,13 @@ bool MainComponent::loadPreset (const juce::File& file)
             if (notch.slot == s)
                 notchesForSlot.push_back (notch);
 
-        if (notchesForSlot.empty())
-            continue;
-
-        auto& controller = *notchControllers_[(std::size_t) s];
-
-        if (detectorsRunning)
-            controller.stop (1000);
-
-        controller.setWidth (engine_.getSlotConfig (s).width);
-        controller.adoptPreset (notchesForSlot);
-
-        if (detectorsRunning)
-            controller.start();
+        if (! notchesForSlot.empty())
+            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot);
     }
+
+    if (detectorsRunning)
+        for (auto& controller : notchControllers_)
+            controller->start();
 
     return true;
 }

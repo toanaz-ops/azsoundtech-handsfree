@@ -211,6 +211,20 @@ void NotchController::runOnce()
         tapAlive = (nowPolled - lastDataMs_) < kTapSilenceTimeoutMs;
         if (tapAlive)
             liveMs_ += dt;
+
+        // Spec §5.3: soundcheck detects FOR THE DURATION -- nothing clears
+        // detectionActive_ after the window, so without this the controller
+        // detects forever after a single Soundcheck. The expiry is judged in
+        // the SAME live time the countdown reports, immediately after the
+        // same advance, so it cannot drift from getSoundcheckRemainingMs().
+        // Clearing the deadline here is what makes the disarm happen exactly
+        // once: later polls see no deadline and store nothing.
+        const double endsAt = soundcheckEndsAtLiveMs_.load (std::memory_order_relaxed);
+        if (endsAt > 0.0 && liveMs_ >= endsAt)
+        {
+            soundcheckEndsAtLiveMs_.store (-1.0, std::memory_order_relaxed);
+            detectionActive_.store (false, std::memory_order_relaxed);
+        }
     }
 
     // 3. Auto-release: only meaningful while audio actually flows (D-06).

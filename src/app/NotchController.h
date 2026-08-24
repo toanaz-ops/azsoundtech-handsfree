@@ -129,6 +129,11 @@ public:
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
 
+    // TEST ACCESSOR ONLY -- the detection gate is otherwise observable only
+    // through a live spectrum; headless tests assert the disarm directly.
+    bool detectionActiveForTest() const
+        { return detectionActive_.load (std::memory_order_relaxed); }
+
     // One consistent frame for the GUI: the spectrum and the notch list are
     // captured under one lock at one instant (bridge design §5). Caller owns
     // the destination -- returning a container would allocate every paint.
