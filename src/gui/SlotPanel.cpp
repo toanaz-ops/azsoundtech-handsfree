@@ -230,24 +230,31 @@ void SlotPanel::resized()
 
     auto area = getLocalBounds().reduced (gap, spacing);
 
-    // Caption row over the columns that exist THIS refresh -- the B captions
-    // follow their combos' visibility so nothing floats unanchored.
+    // FIXED-WIDTH GRID: both lane-B slots are always reserved, so every row
+    // and the caption line share one set of columns no matter how many rows
+    // are currently mono. A hidden lane-B combo gets an EMPTY rect at its own
+    // slot -- nothing downstream shifts left.
+    bool anyStereo = false;
+
+    for (const auto& row : rows_)
+        anyStereo = anyStereo || row.inLanes[1].isVisible();
+
     auto captions = area.removeFromTop (18);
 
-    widthCaption_.setBounds (captions.removeFromLeft (kNumberColumn + kEnableColumn + kWidthColumn));
-    inACaption_ .setBounds (captions.removeFromLeft (kLaneColumn));
+    captions.removeFromLeft (kNumberColumn + kEnableColumn);
+    widthCaption_.setBounds (captions.removeFromLeft (kWidthColumn));
 
-    if (rows_[0].inLanes[1].isVisible())
-        inBCaption_.setBounds (captions.removeFromLeft (kLaneColumn));
-    else
-        inBCaption_.setBounds ({});
+    const auto inARect  = captions.removeFromLeft (kLaneColumn);
+    const auto inBRect  = captions.removeFromLeft (kLaneColumn);
+    const auto outARect = captions.removeFromLeft (kLaneColumn);
+    const auto outBRect = captions.removeFromLeft (kLaneColumn);
 
-    outACaption_.setBounds (captions.removeFromLeft (kLaneColumn));
+    inACaption_ .setBounds (inARect);
+    outACaption_.setBounds (outARect);
 
-    if (rows_[0].outLanes[1].isVisible())
-        outBCaption_.setBounds (captions.removeFromLeft (kLaneColumn));
-    else
-        outBCaption_.setBounds ({});
+    // A caption over a fully-mono table would label nothing.
+    inBCaption_ .setBounds (anyStereo ? inBRect  : juce::Rectangle<int>());
+    outBCaption_.setBounds (anyStereo ? outBRect : juce::Rectangle<int>());
 
     ledCaption_.setBounds (captions.removeFromLeft (kLedColumn));
     ledCaption_.setJustificationType (juce::Justification::centredLeft);
@@ -264,19 +271,20 @@ void SlotPanel::resized()
 
         row.enable.setBounds (rowArea.removeFromLeft (kEnableColumn).reduced (2, 1));
         row.width .setBounds (rowArea.removeFromLeft (kWidthColumn).reduced (2, 1));
+
         row.inLanes[0].setBounds (rowArea.removeFromLeft (kLaneColumn).reduced (2, 1));
 
-        if (row.inLanes[1].isVisible())
-            row.inLanes[1].setBounds (rowArea.removeFromLeft (kLaneColumn).reduced (2, 1));
-        else
-            row.inLanes[1].setBounds ({});
+        const auto inB = rowArea.removeFromLeft (kLaneColumn);
+        row.inLanes[1].setBounds (row.inLanes[1].isVisible()
+                                      ? inB.reduced (2, 1)
+                                      : juce::Rectangle<int>());
 
         row.outLanes[0].setBounds (rowArea.removeFromLeft (kLaneColumn).reduced (2, 1));
 
-        if (row.outLanes[1].isVisible())
-            row.outLanes[1].setBounds (rowArea.removeFromLeft (kLaneColumn).reduced (2, 1));
-        else
-            row.outLanes[1].setBounds ({});
+        const auto outB = rowArea.removeFromLeft (kLaneColumn);
+        row.outLanes[1].setBounds (row.outLanes[1].isVisible()
+                                       ? outB.reduced (2, 1)
+                                       : juce::Rectangle<int>());
 
         row.led.setBounds (rowArea.removeFromLeft (kLedColumn));
     }

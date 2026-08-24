@@ -113,24 +113,21 @@ MainComponent::MainComponent()
     };
 
     // The routing table never touches the engine itself: a mapping change is
-    // the SAME §6.5 shape as a device change -- join every detector thread,
-    // store the config, resync widths (setWidth() needs a stopped thread) and
-    // relaunch. refresh() then re-reads the engine so the panel shows what
-    // actually landed.
+    // the SAME §6.5 shape as a device change, and it goes through the ONE
+    // restart cycle wired above (devicePanel_'s hooks) rather than re-typing
+    // the thread-join/restart bodies here.
     slotScroller_.setViewedComponent (&slotPanel_, false);
     slotPanel_.onSlotConfigChanged = [this] (int slotIndex, const SlotConfig& config)
     {
-        for (auto& controller : notchControllers_)
-            controller->stop (1000);
+        jassert (devicePanel_.onBeforeRestart != nullptr);
+
+        if (devicePanel_.onBeforeRestart != nullptr)
+            devicePanel_.onBeforeRestart();
 
         engine_.setSlotConfig (slotIndex, config);
 
-        for (int i = 0; i < kMaxSlots; ++i)
-        {
-            auto& controller = *notchControllers_[(std::size_t) i];
-            controller.setWidth (engine_.getSlotConfig (i).width);
-            controller.start();
-        }
+        if (devicePanel_.onAfterRestart != nullptr)
+            devicePanel_.onAfterRestart();
 
         slotPanel_.refresh();
     };
@@ -453,6 +450,10 @@ void MainComponent::resized()
     const int maxSlotHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer
                                              - drawerHeight - gap);
     const int slotHeight = juce::jlimit (0, maxSlotHeight, kSlotPanelPreferredHeight);
+
+    // Visibility tracks the layout decision: a shrinking window that drops
+    // the FlexItem must not leave the scroller sitting at stale bounds.
+    slotScroller_.setVisible (slotHeight > 0);
 
     if (slotHeight > 0)
         main.items.add (juce::FlexItem (slotScroller_)
