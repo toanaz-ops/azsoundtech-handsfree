@@ -7,8 +7,11 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - name: Checkout code with submodules
@@ -30,8 +33,16 @@ jobs:
     # Studio generator, which is what makes the platform flag valid.
     #
     # Do not re-pin this to a version number.
-    - name: Configure CMake
+    # Windows: -A x64 applies because the auto-selected generator is a Visual
+    # Studio generator. macOS: plain configure, no ASIO SDK -- JUCE_ASIO
+    # compiles only on Windows, so nothing external is needed there.
+    - name: Configure CMake (Windows)
+      if: matrix.os == 'windows-latest'
       run: cmake -B build -A x64
+
+    - name: Configure CMake (macOS)
+      if: matrix.os == 'macos-latest'
+      run: cmake -B build
 
     - name: Build
       run: cmake --build build --config Release

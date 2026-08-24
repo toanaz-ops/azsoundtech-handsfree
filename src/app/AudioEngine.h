@@ -45,6 +45,17 @@
 #include <cstdint>
 #include <mutex>
 
+inline const char* defaultDeviceTypeName()
+{
+#if JUCE_MAC
+    return "CoreAudio";
+#elif JUCE_WINDOWS
+    return "ASIO";
+#else
+    return "";
+#endif
+}
+
 class AudioEngine : public juce::AudioIODeviceCallback
 {
 public:
@@ -314,9 +325,10 @@ private:
     mutable std::mutex lastDeviceErrorLock_;
     juce::String       lastDeviceError_;
 
-    // Preferences applied on the next start(). Default type is ASIO; if the
+    // Preferences applied on the next start(). Default type is the platform's
+    // low-latency driver type (ASIO on Windows, CoreAudio on macOS); if that
     // driver is not registered, JUCE silently keeps the current type.
-    juce::String desiredDeviceType_ { "ASIO" };
+    juce::String desiredDeviceType_ { defaultDeviceTypeName() };
     juce::String desiredDeviceName_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
