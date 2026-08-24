@@ -21,11 +21,11 @@
 //     device thread and read by the GUI on the message thread. Do not reach
 //     for it from the callback.
 //
-// The post-notch left-channel tap (Task 9) is written into tapBuffer_ -- an
-// SPSC lock-free ring buffer -- once per callback, in every mode including
-// Bypass. The audio thread is the sole producer; the detector thread (Task
-// 10) is the sole consumer and reads 1024-sample blocks with a 512-sample
-// hop from it.
+// The per-slot post-DSP lane-0 taps (multi-slot routing, spec §3) are written
+// into one SPSC lock-free ring buffer PER SLOT -- once per callback, in every
+// mode including Bypass. The audio thread is the sole producer of each ring;
+// the detector side is the sole consumer and reads 1024-sample blocks with a
+// 512-sample hop.
 
 #pragma once
 
@@ -35,6 +35,7 @@
 // juce_audio_devices pulls in juce_audio_basics, juce_events and juce_core.
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include "app/SlotConfig.h"
 #include "dsp/LockFreeRingBuffer.h"
 #include "dsp/NotchChain.h"
 #include "dsp/NotchCommand.h"
@@ -137,44 +138,75 @@ public:
     void setMode(Mode mode);
     Mode getMode() const;
 
-    // Tap: post-notch LEFT channel, written once per callback into an SPSC
-    // ring buffer. Read side belongs to the detector thread (Task 10).
+    // Tap: post-notch lane-0 output of a slot, written once per callback into
+    // an SPSC ring buffer -- one ring PER SLOT. Read side belongs to the
+    // detector thread (Task 10).
     //
-    // *** CALLER CONTRACT: read() only, and from exactly one thread. ***
+    // *** CALLER CONTRACT: read() only, and from exactly one thread per ring.
+    // ***
     // This hands out a non-const reference, so nothing in the type system
     // stops a caller from calling write() and breaking the single-producer
     // invariant the whole design rests on -- the audio callback is and must
-    // remain the sole producer. A consumer-only wrapper was considered and
-    // rejected for now: Detector::processLatestBlock() takes
-    // LockFreeRingBuffer<float>& directly, so introducing a view type would
-    // mean changing the detector's signature too, which is more churn than
-    // the risk currently justifies. If a second caller ever appears, add the
-    // view then.
-    LockFreeRingBuffer<float>& getTapBuffer();
-
-    // Number of tap samples dropped because the ring was full, accumulated
-    // over the lifetime of the engine. Dropping is the correct behaviour on
-    // the audio thread -- blocking or spinning is not -- but a drop splices
-    // sample N onto sample N+k, and through the detector's Hann window that
-    // step is broadband energy in every bin. Without this count nothing
-    // downstream can distinguish a drop-induced false peak from a real howl.
-    // Incremented with memory_order_relaxed: one lock-free RMW per short
-    // write, no allocation, no ordering dependency on anything else.
-    std::uint64_t getTapDropCount() const;
-
-    // Command channel FROM the detector thread INTO the audio thread
-    // (bridge design §2): the audio callback drains up to 64 commands per
-    // callback and applies them to the notch chains.
+    // remain the sole producer of every slot's tap ring. A consumer-only
+    // wrapper was considered and rejected for now: Detector::processLatestBlock()
+    // takes LockFreeRingBuffer<float>& directly, so introducing a view type
+    // would mean changing the detector's signature too, which is more churn
+    // than the risk currently justifies. If a second caller ever appears, add
+    // the view then.
     //
-    // *** CALLER CONTRACT: write() only, and from exactly one thread. ***
+    // The no-argument overloads are the LEGACY surface (slot 0): everything
+    // that existed before multi-slot routing keeps working unchanged.
+    LockFreeRingBuffer<float>& getTapBuffer();
+    LockFreeRingBuffer<float>& getTapBuffer (int slot);
+
+    // Number of tap samples dropped because a slot's ring was full, accumulated
+    // over the lifetime of the engine -- tracked PER SLOT; the no-argument
+    // overload reads slot 0. Dropping is the correct behaviour on the audio
+    // thread -- blocking or spinning is not -- but a drop splices sample N onto
+    // sample N+k, and through the detector's Hann window that step is broadband
+    // energy in every bin. Without this count nothing downstream can
+    // distinguish a drop-induced false peak from a real howl. Incremented with
+    // memory_order_relaxed: one lock-free RMW per short write, no allocation,
+    // no ordering dependency on anything else.
+    std::uint64_t getTapDropCount() const;
+    std::uint64_t getTapDropCount (int slot) const;
+
+    // Command channel FROM the detector threads INTO the audio thread (bridge
+    // design §2), one queue PER SLOT: the audio callback drains up to 256
+    // commands per callback PER QUEUE and applies them to that slot's notch
+    // chains. The no-argument overload is the legacy surface (slot 0).
+    //
+    // *** CALLER CONTRACT: write() only, and from exactly one thread per queue.
+    // ***
     // Same reasoning as getTapBuffer(): the type system cannot stop a caller
-    // from breaking the single-producer invariant -- the detector thread is
-    // and must remain the sole producer (owner decision D-05).
+    // from breaking the single-producer invariant -- the detector side is and
+    // must remain the sole producer (owner decision D-05). A command's `slot`
+    // field must match the queue it is written to; mismatched pairs are
+    // skipped by the drain, never applied.
     LockFreeRingBuffer<NotchCommand>& getCommandQueue();
+    LockFreeRingBuffer<NotchCommand>& getCommandQueue (int slot);
+
+    // Slot routing configuration. Plain atomics, written relaxed: SAFE without
+    // a lock only because every mapping change goes through a device restart
+    // (bridge design §6.5) -- the audio callback is not running while these are
+    // stored. The callback snapshots them at the TOP of each block and uses
+    // the copy for the whole block. Thread: message thread.
+    void       setSlotConfig (int slotIndex, const SlotConfig& config);
+    SlotConfig getSlotConfig (int slotIndex) const;
+
+    // Channel names as the OPEN device reports them. Empty when no device is
+    // open, which is the state the routing GUI is in while it populates its
+    // channel selectors -- the nullptr guard is the contract, same as every
+    // other device accessor above. Thread: message thread.
+    juce::StringArray getInputChannelNames();
+    juce::StringArray getOutputChannelNames();
 
     // TEST ACCESSOR ONLY -- lets tests assert chain state without an audio
-    // device. Do not build product behaviour on this.
+    // device. Do not build product behaviour on this. The (channel) form is
+    // the legacy surface: slot 0, lane = channel. The (slot, lane) form reaches
+    // any chain in the 8x2 grid.
     const NotchChain& getNotchChainForTest (int channel) const;
+    const NotchChain& getNotchChainForTest (int slot, int lane) const;
 
     // AudioIODeviceCallback interface
     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
@@ -192,31 +224,72 @@ public:
 
 private:
     juce::AudioDeviceManager deviceManager_;
-    std::array<NotchChain, 2> notchChains_;  // L=0, R=1
 
-    // Post-notch left-channel tap (SPSC ring buffer, lock-free). The audio
-    // callback is the single producer; the detector thread is the single
-    // consumer. Pre-allocated at construction; write() never blocks and
+    // Multi-slot DSP grid (spec §3): 8 slots x up to 2 lanes each. Slot 0 is
+    // enabled stereo {0,1} -> {0,1} by default, which is EXACTLY today's
+    // behaviour, so every pre-existing caller and test sees no change. The
+    // chains are pre-built at the nominal 48 kHz rate; audioDeviceAboutToStart()
+    // retargets all of them to the device's actual rate before any notch is
+    // set (Task 9 Part C).
+    std::array<std::array<NotchChain, kMaxSlotLanes>, kMaxSlots> notchChains_
+    {{
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }},
+        {{ NotchChain (48000.0), NotchChain (48000.0) }}
+    }};
+
+    // Per-slot post-DSP lane-0 taps (SPSC ring buffers, lock-free). The audio
+    // callback is the single producer of every ring; the detector side is the
+    // single consumer. Pre-allocated at construction; write() never blocks and
     // silently drops whatever does not fit.
     static constexpr size_t kTapCapacity = 8192;  // ~170 ms @ 48 kHz, power of 2
-    LockFreeRingBuffer<float> tapBuffer_ { kTapCapacity };
-    std::atomic<std::uint64_t> tapDropCount_ { 0 };
+    std::array<LockFreeRingBuffer<float>, kMaxSlots> tapBuffers_
+    {
+        { LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
+          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
+          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
+          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }
+    };
+    std::array<std::atomic<std::uint64_t>, kMaxSlots> tapDropCounts_ {};
 
-    // Detector -> audio command ring (bridge design §2). Capacity 128 gives
-    // 4x headroom over the worst legitimate burst: a preset load installs up
-    // to 16 notches on each of 2 channels = 32 commands at once.
-    static constexpr size_t kCommandCapacity = 128;
-    LockFreeRingBuffer<NotchCommand> commandQueue_ { kCommandCapacity };
+    // Per-slot detector -> audio command rings (bridge design §2). Capacity
+    // 1024 gives 4x headroom over the worst legitimate burst per spec §3:
+    // 16 notches x 2 lanes x 8 slots = 256 commands at once.
+    static constexpr size_t kCommandCapacity = 1024;
+    std::array<LockFreeRingBuffer<NotchCommand>, kMaxSlots> commandQueues_
+    {
+        { LockFreeRingBuffer<NotchCommand> (kCommandCapacity), LockFreeRingBuffer<NotchCommand> (kCommandCapacity),
+          LockFreeRingBuffer<NotchCommand> (kCommandCapacity), LockFreeRingBuffer<NotchCommand> (kCommandCapacity),
+          LockFreeRingBuffer<NotchCommand> (kCommandCapacity), LockFreeRingBuffer<NotchCommand> (kCommandCapacity),
+          LockFreeRingBuffer<NotchCommand> (kCommandCapacity), LockFreeRingBuffer<NotchCommand> (kCommandCapacity) }
+    };
 
-    // Bound on worst-case callback time: 64 recomputes ~13 us against a
-    // 0.67 ms budget at a 32-sample buffer / 48 kHz (<2%). Chosen over 32 so
-    // a full 32-command preset applies within ONE callback -- a preset that
-    // half-applies across two callbacks is audible as two distinct changes.
-    static constexpr int kMaxCommandsPerCallback = 64;
+    // Bound on worst-case callback time: 256 recomputes ~52 us against a
+    // 670 us budget at a 32-sample buffer / 48 kHz (<10%). Sized so the full
+    // worst-case burst (256 commands) applies within ONE callback -- a preset
+    // that half-applies across two callbacks is audible as two distinct
+    // changes.
+    static constexpr int kMaxCommandsPerCallback = 256;
 
     // Audio-thread only: drains up to kMaxCommandsPerCallback commands from
-    // commandQueue_ into the notch chains. Called first in the callback.
-    void drainCommandQueue();
+    // ONE slot's ring into that slot's chains. Called for all 8 rings, first
+    // thing in the callback.
+    void drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot);
+
+    // Slot routing configuration. Plain atomics read relaxed by the audio
+    // callback: AN TOÀN / safe without a lock because every mapping change
+    // goes through a device restart (§6.5) -- the callback is not running at
+    // that moment, and the callback additionally snapshots into locals at the
+    // top of every block. width 0 = slot empty/disabled.
+    std::array<std::atomic<bool>, kMaxSlots> slotEnabled_ {};
+    std::array<std::atomic<int>,  kMaxSlots> slotWidth_   {};
+    std::array<std::array<std::atomic<int>, kMaxSlotLanes>, kMaxSlots> slotInCh_  {};
+    std::array<std::array<std::atomic<int>, kMaxSlotLanes>, kMaxSlots> slotOutCh_ {};
 
     // Cross-thread state. std::atomic keeps the audio callback lock-free and
     // allocation-free while still letting the UI thread observe/change mode,

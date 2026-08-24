@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include "app/AudioEngine.h"
+#include "app/SlotConfig.h"
 #include "dsp/LockFreeRingBuffer.h"
 
 #include <algorithm>
@@ -674,12 +675,15 @@ TEST (AudioEngineCommands, OutOfRangeChannelIsSkippedNotApplied)
     SUCCEED();   // surviving hostile ring content without OOB indexing IS the assertion
 }
 
-TEST (AudioEngineCommands, DrainCappedAt64PerCallback)
+TEST (AudioEngineCommands, DrainCappedAt256PerCallback)
 {
+    // Cap moved 64 -> 256 per spec §3: worst-case burst is 16 notches x 2 lanes
+    // x 8 slots = 256 commands. Same intent as the original DrainCappedAt64 test:
+    // the drain honours its per-callback bound instead of unbounded draining.
     const juce::ScopedJuceInitialiser_GUI juceInit;
     AudioEngine engine;
     auto& q = engine.getCommandQueue();
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < 300; ++i) {
         const NotchCommand c { NotchCommandType::Set, 0, (std::uint8_t)(i % 16), 500.0f + i, 30.0f, -12.0f };
         ASSERT_EQ (q.write (&c, 1), 1u);
     }
@@ -688,5 +692,350 @@ TEST (AudioEngineCommands, DrainCappedAt64PerCallback)
     const float* in[2] = { nullptr, nullptr };
     engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
 
-    EXPECT_EQ (q.getAvailableRead(), 36u);   // exactly 64 consumed this callback
+    EXPECT_EQ (q.getAvailableRead(), 44u);   // exactly 256 consumed this callback
+}
+
+//==============================================================================
+// Multi-slot routing (spec §3, Task 3).
+//
+// The engine now owns 8 independently-routed slots. These tests drive the
+// callback with MORE channels than the old stereo pair (4 in / 4 out) so a
+// cross-route cannot silently fold back onto 0/1.
+
+namespace
+{
+// Arbitrary channel-count driver. Buffers are owned here so a test can
+// stimulate ANY input channel and inspect ANY output channel.
+struct RoutingDriver
+{
+    RoutingDriver (int numSamples, int numIn, int numOut)
+        : frames (numSamples), numIn (numIn), numOut (numOut)
+    {
+        in.assign ((std::size_t) numIn,  std::vector<float> ((std::size_t) numSamples, 0.0f));
+        out.assign ((std::size_t) numOut, std::vector<float> ((std::size_t) numSamples, 0.0f));
+        inPtrs.resize ((std::size_t) numIn);
+        outPtrs.resize ((std::size_t) numOut);
+    }
+
+    // Fills channel `ch` with a phase-continuous sine at `freq`, amplitude `amp`.
+    void sine (int ch, double freq, double sampleRate, float amp, long long startSample = 0)
+    {
+        for (int i = 0; i < frames; ++i)
+        {
+            const double n = static_cast<double> (startSample + i);
+            in[(std::size_t) ch][(std::size_t) i] =
+                amp * static_cast<float> (std::sin (2.0 * kPi * freq * n / sampleRate));
+        }
+    }
+
+    void poisonOutputs (float value)
+    {
+        for (auto& o : out)
+            std::fill (o.begin(), o.end(), value);
+    }
+
+    void operator() (AudioEngine& engine)
+    {
+        for (int c = 0; c < numIn; ++c)  inPtrs[(std::size_t) c]  = in[(std::size_t) c].data();
+        for (int c = 0; c < numOut; ++c) outPtrs[(std::size_t) c] = out[(std::size_t) c].data();
+        const juce::AudioIODeviceCallbackContext context {};
+        engine.audioDeviceIOCallbackWithContext (inPtrs.data(), numIn,
+                                                 outPtrs.data(), numOut,
+                                                 frames, context);
+    }
+
+    int frames, numIn, numOut;
+    std::vector<std::vector<float>> in, out;
+    std::vector<const float*> inPtrs;
+    std::vector<float*>       outPtrs;
+};
+
+double rmsOf (const std::vector<float>& v)
+{
+    double sum = 0.0;
+    for (const float s : v)
+        sum += static_cast<double> (s) * static_cast<double> (s);
+    return std::sqrt (sum / static_cast<double> (v.size()));
+}
+} // namespace
+
+TEST (AudioEngineRouting, MonoSlotRoutesAcrossChannelsThroughTheNotch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    SlotConfig off {};                       // disabled slot
+    engine.setSlotConfig (0, off);           // keep the legacy pair OUT of the way
+
+    SlotConfig s1;
+    s1.enabled = true;
+    s1.width = 1;
+    s1.inputChannels[0]  = 1;
+    s1.outputChannels[0] = 3;
+    engine.setSlotConfig (1, s1);
+
+    auto& q = engine.getCommandQueue (1);
+    const NotchCommand set { NotchCommandType::Set, 0, 0, 1000.0f, 30.0f, -18.0f, /*slot*/ 1 };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    constexpr int kBlock = 512;
+    constexpr int kSettleBlocks = 15;
+
+    double dbOut3 = 0.0;
+    RoutingDriver last (kBlock, 2, 4);
+    for (int block = 0; block <= kSettleBlocks; ++block)
+    {
+        last = RoutingDriver (kBlock, 2, 4);
+        last.sine (1, 1000.0, 48000.0, 0.5f,
+                   static_cast<long long> (block) * kBlock);
+        last (engine);
+
+        dbOut3 = 20.0 * std::log10 (rmsOf (last.out[3]) / rmsOf (last.in[1]));
+    }
+
+    // Same window as the stereo NotchAttenuatesSignal test: pins THAT the
+    // routed lane drops by roughly the asked-for depth.
+    EXPECT_NEAR (dbOut3, -18.0, 6.0) << "measured " << dbOut3 << " dB";
+
+    // Nothing routes to 0/1/2: no enabled slot names them, so the settled
+    // block's outputs there must be exactly cleared -- not near-zero, zero.
+    for (int ch : { 0, 1, 2 })
+        for (int i = 0; i < kBlock; ++i)
+            ASSERT_FLOAT_EQ (last.out[(std::size_t) ch][(std::size_t) i], 0.0f)
+                << "ch " << ch << " sample " << i;
+}
+
+TEST (AudioEngineRouting, TwoMonoSlotsSumIntoOneOutputChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+
+    SlotConfig s0; s0.enabled = true; s0.width = 1;
+    s0.inputChannels[0] = 0; s0.outputChannels[0] = 0;
+    engine.setSlotConfig (0, s0);
+
+    SlotConfig s1; s1.enabled = true; s1.width = 1;
+    s1.inputChannels[0] = 1; s1.outputChannels[0] = 0;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (512, 2, 4);
+    d.sine (0, 1000.0, 48000.0, 0.5f);
+    d.sine (1, 3000.0, 48000.0, 0.5f);
+    d (engine);
+
+    // Accumulation contract: out[n] += per lane, so two lanes aimed at one
+    // output SUM. A copy-instead-of-accumulate defect leaves only the last
+    // lane's signal and breaks this against the sum oracle.
+    std::vector<float> expectedSum ((std::size_t) d.frames);
+    for (int i = 0; i < d.frames; ++i)
+        expectedSum[(std::size_t) i] = d.in[0][(std::size_t) i] + d.in[1][(std::size_t) i];
+
+    EXPECT_LT (worstRelativeError (expectedSum, d.out[0]), kToleranceRatio);
+
+    for (const float s : d.out[1])
+        ASSERT_FLOAT_EQ (s, 0.0f);
+}
+
+TEST (AudioEngineRouting, BypassFollowsTheSlotMappingNotTheChannelIndex)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;   // Bypass by default
+
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+
+    SlotConfig s1;
+    s1.enabled = true;
+    s1.width = 1;
+    s1.inputChannels[0]  = 1;
+    s1.outputChannels[0] = 3;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (256, 4, 4);
+    d.sine (0, 500.0, 48000.0, 0.5f);
+    d.sine (1, 1500.0, 48000.0, 0.25f);
+    d.sine (2, 2500.0, 48000.0, 0.75f);
+    d.poisonOutputs (0.7f);
+    d (engine);
+
+    // Bypass copies IN->OUT along the mapping: out3 must equal in1 bit-for-bit,
+    // and every unmapped output must be CLEARED, not left poisoned.
+    for (int i = 0; i < d.frames; ++i)
+        ASSERT_FLOAT_EQ (d.out[3][(std::size_t) i], d.in[1][(std::size_t) i]) << "sample " << i;
+
+    for (int ch : { 0, 1, 2 })
+        for (int i = 0; i < d.frames; ++i)
+            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) i], 0.0f)
+                << "ch " << ch << " sample " << i;
+}
+
+TEST (AudioEngineRouting, LaneOutOfRangeIsDroppedAndOutputStillCleared)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+
+    SlotConfig s1;                    // device only has 4 inputs; index 7 is OOB
+    s1.enabled = true;
+    s1.width = 1;
+    s1.inputChannels[0]  = 7;
+    s1.outputChannels[0] = 0;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (128, 4, 4);
+    for (int c = 0; c < 4; ++c)
+        d.sine (c, 1000.0 + 500.0 * c, 48000.0, 0.5f);
+    d.poisonOutputs (0.7f);
+    d (engine);                       // must not crash
+
+    // The lane was dropped: every output is cleared silence.
+    for (int ch = 0; ch < 4; ++ch)
+        for (int i = 0; i < d.frames; ++i)
+            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) i], 0.0f)
+                << "ch " << ch << " sample " << i;
+}
+
+TEST (AudioEngineRouting, TapsArePerSlotWithIndependentDropCounts)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;   // Bypass: slot 0 taps out0 == in0
+
+    SlotConfig s1;
+    s1.enabled = true;
+    s1.width = 1;
+    s1.inputChannels[0]  = 1;
+    s1.outputChannels[0] = 3;
+    engine.setSlotConfig (1, s1);
+
+    // CONTENT: ring 1 holds slot 1's own post-DSP lane-0 output (== its input
+    // under Bypass), not slot 0's and not interleaved with anything.
+    RoutingDriver content (512, 2, 4);
+    content.sine (0, 700.0, 48000.0, 0.5f);
+    content.sine (1, 2100.0, 48000.0, 0.5f);
+    content (engine);
+
+    std::vector<float> tapped1 ((std::size_t) content.frames);
+    ASSERT_EQ (engine.getTapBuffer (1).read (tapped1.data(), tapped1.size()),
+               tapped1.size());
+    for (int i = 0; i < content.frames; ++i)
+        ASSERT_FLOAT_EQ (tapped1[(std::size_t) i], content.in[1][(std::size_t) i])
+            << "sample " << i;
+
+    // Empty ring 0 again so the drop-count phase below starts from zero
+    // (the content block left 512 samples there; ring 1 was already consumed
+    // by the content read above).
+    {
+        std::vector<float> scratch ((std::size_t) content.frames);
+        ASSERT_EQ (engine.getTapBuffer (0).read (scratch.data(), scratch.size()),
+                   scratch.size());
+    }
+
+    // DROP ISOLATION: fill both rings, overflow both once, then free ONLY
+    // ring 0. The next callback must drop into ring 1 while ring 0 writes clean.
+    constexpr int kBlock = 1024;
+    for (int i = 0; i < 9; ++i)
+    {
+        RoutingDriver d (kBlock, 2, 4);
+        d.sine (0, 700.0, 48000.0, 0.5f);
+        d.sine (1, 2100.0, 48000.0, 0.5f);
+        d (engine);
+    }
+
+    EXPECT_EQ (engine.getTapDropCount (0), 1024u);
+    EXPECT_EQ (engine.getTapDropCount (1), 1024u);
+
+    std::vector<float> drain (kTapCapacity);
+    ASSERT_EQ (engine.getTapBuffer (0).read (drain.data(), drain.size()), drain.size());
+
+    {
+        RoutingDriver d (kBlock, 2, 4);
+        d.sine (0, 700.0, 48000.0, 0.5f);
+        d.sine (1, 2100.0, 48000.0, 0.5f);
+        d (engine);
+    }
+
+    EXPECT_EQ (engine.getTapDropCount (0), 1024u)  << "ring 0 had room again";
+    EXPECT_EQ (engine.getTapDropCount (1), 2048u)  << "ring 1 stayed full";
+}
+
+TEST (AudioEngineCommands, CommandOnQueue1AppliesToSlot1Only)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+
+    auto& q1 = engine.getCommandQueue (1);
+    const NotchCommand good { NotchCommandType::Set, 0, 5, 1234.0f, 30.0f, -12.0f, /*slot*/ 1 };
+    ASSERT_EQ (q1.write (&good, 1), 1u);
+
+    // A command claiming slot 0 but smuggled through queue 1 must be SKIPPED:
+    // queue and slot field must agree, or a hostile/mismatched pair would let
+    // one detector thread reach another slot's chain.
+    const NotchCommand evil { NotchCommandType::Set, 0, 6, 4321.0f, 30.0f, -12.0f, /*slot*/ 0 };
+    ASSERT_EQ (q1.write (&evil, 1), 1u);
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_EQ (engine.getNotchChainForTest (1, 0).getNotchInfo (5).state,
+               NotchChain::NotchState::Active);
+    EXPECT_DOUBLE_EQ (engine.getNotchChainForTest (1, 0).getNotchInfo (5).frequency, 1234.0);
+
+    // Every OTHER chain is untouched.
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+        {
+            if (slot == 1 && lane == 0)
+                continue;
+            EXPECT_NE (engine.getNotchChainForTest (slot, lane).getNotchInfo (5).state,
+                       NotchChain::NotchState::Active)
+                << "slot " << slot << " lane " << lane;
+            EXPECT_NE (engine.getNotchChainForTest (slot, lane).getNotchInfo (6).state,
+                       NotchChain::NotchState::Active)
+                << "slot " << slot << " lane " << lane;
+        }
+}
+
+TEST (AudioEngine, NoArgAccessorsStillReturnSlotZero)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+
+    EXPECT_EQ (&engine.getTapBuffer(), &engine.getTapBuffer (0));
+    EXPECT_EQ (&engine.getCommandQueue(), &engine.getCommandQueue (0));
+    EXPECT_EQ (engine.getTapDropCount(), engine.getTapDropCount (0));
+    EXPECT_EQ (&engine.getNotchChainForTest (0), &engine.getNotchChainForTest (0, 0));
+    EXPECT_EQ (&engine.getNotchChainForTest (1), &engine.getNotchChainForTest (0, 1));
+
+    // Legacy drop count IS slot 0's drop count: overflow ring 0 only.
+    CallbackDriver drive { 1024 };
+    for (int i = 0; i < 9; ++i)
+        drive (engine);
+    EXPECT_EQ (engine.getTapDropCount(), 1024u);
+    EXPECT_EQ (engine.getTapDropCount (0), 1024u);
+}
+
+TEST (AudioEngine, ChannelNameQueriesAreSafeWithNoDeviceOpen)
+{
+    // Same contract as DeviceQueriesAreSafeWithNoDeviceOpen above, extended to
+    // the new name accessors Task 6's routing UI needs: nullptr-guarded, empty
+    // rather than crashing before start().
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    EXPECT_TRUE (engine.getInputChannelNames().isEmpty());
+    EXPECT_TRUE (engine.getOutputChannelNames().isEmpty());
 }

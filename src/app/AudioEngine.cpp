@@ -6,10 +6,19 @@ constexpr int kNumChannels = 2;  // stereo in/out
 }
 
 AudioEngine::AudioEngine()
-    : notchChains_ { { NotchChain (48000.0), NotchChain (48000.0) } }
 {
+    // Legacy default mapping: slot 0 enabled stereo {0,1} -> {0,1}, slots 1..7
+    // empty. This is exactly the pre-multi-slot behaviour, so nothing that
+    // only ever used slot 0 changes.
+    slotEnabled_[0].store (true,  std::memory_order_relaxed);
+    slotWidth_[0].store  (2,      std::memory_order_relaxed);
+    slotInCh_[0][0].store (0,     std::memory_order_relaxed);
+    slotInCh_[0][1].store (1,     std::memory_order_relaxed);
+    slotOutCh_[0][0].store (0,    std::memory_order_relaxed);
+    slotOutCh_[0][1].store (1,    std::memory_order_relaxed);
+
     // The chains are pre-built at the nominal 48 kHz rate.
-    // audioDeviceAboutToStart() retargets each chain to the device's actual
+    // audioDeviceAboutToStart() retargets every chain to the device's actual
     // rate via NotchChain::setSampleRate() before any notch is set, so the
     // coefficients produced by a later setNotch() call always match the
     // running device (Task 9 Part C).
@@ -263,48 +272,138 @@ AudioEngine::Mode AudioEngine::getMode() const
 
 LockFreeRingBuffer<float>& AudioEngine::getTapBuffer()
 {
-    return tapBuffer_;
+    return getTapBuffer (0);
+}
+
+LockFreeRingBuffer<float>& AudioEngine::getTapBuffer (int slot)
+{
+    // Clamped, never OOB: tests and future callers get slot 0 for bad input,
+    // matching the getNotchChainForTest convention.
+    return tapBuffers_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))];
 }
 
 std::uint64_t AudioEngine::getTapDropCount() const
 {
-    return tapDropCount_.load (std::memory_order_relaxed);
+    return getTapDropCount (0);
+}
+
+std::uint64_t AudioEngine::getTapDropCount (int slot) const
+{
+    return tapDropCounts_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))]
+        .load (std::memory_order_relaxed);
 }
 
 LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue()
 {
-    return commandQueue_;
+    return getCommandQueue (0);
+}
+
+LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue (int slot)
+{
+    return commandQueues_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))];
+}
+
+void AudioEngine::setSlotConfig (int slotIndex, const SlotConfig& config)
+{
+    if (slotIndex < 0 || slotIndex >= kMaxSlots)
+        return;
+
+    // Relaxed stores are sufficient: every mapping change goes through a
+    // device restart (§6.5), so the audio callback is not running while these
+    // land. The callback additionally snapshots into locals at the top of
+    // every block.
+    const auto s = (std::size_t) slotIndex;
+    slotEnabled_[s].store (config.enabled, std::memory_order_relaxed);
+    slotWidth_[s].store  (config.width,    std::memory_order_relaxed);
+
+    for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+    {
+        slotInCh_[s][(std::size_t) lane].store (config.inputChannels[lane],
+                                                std::memory_order_relaxed);
+        slotOutCh_[s][(std::size_t) lane].store (config.outputChannels[lane],
+                                                 std::memory_order_relaxed);
+    }
+}
+
+SlotConfig AudioEngine::getSlotConfig (int slotIndex) const
+{
+    SlotConfig c;
+
+    if (slotIndex < 0 || slotIndex >= kMaxSlots)
+        return c;
+
+    const auto s = (std::size_t) slotIndex;
+    c.enabled = slotEnabled_[s].load (std::memory_order_relaxed);
+    c.width   = slotWidth_[s].load (std::memory_order_relaxed);
+
+    for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+    {
+        c.inputChannels[lane]  = slotInCh_[s][(std::size_t) lane].load (std::memory_order_relaxed);
+        c.outputChannels[lane] = slotOutCh_[s][(std::size_t) lane].load (std::memory_order_relaxed);
+    }
+
+    return c;
+}
+
+juce::StringArray AudioEngine::getInputChannelNames()
+{
+    if (auto* device = deviceManager_.getCurrentAudioDevice())
+        return device->getInputChannelNames();
+
+    return {};
+}
+
+juce::StringArray AudioEngine::getOutputChannelNames()
+{
+    if (auto* device = deviceManager_.getCurrentAudioDevice())
+        return device->getOutputChannelNames();
+
+    return {};
 }
 
 const NotchChain& AudioEngine::getNotchChainForTest (int channel) const
 {
     // Out-of-range callers get channel 0 clamped; tests never pass bad input,
     // and the sentinel dance of NotchChain::getNotchInfo would be overkill here.
-    return notchChains_[channel < 0 ? 0 : (channel > 1 ? 0 : channel)];
+    return notchChains_[0][(std::size_t) (channel < 0 ? 0 : (channel > 1 ? 0 : channel))];
 }
 
-void AudioEngine::drainCommandQueue()
+const NotchChain& AudioEngine::getNotchChainForTest (int slot, int lane) const
+{
+    if (slot < 0 || slot >= kMaxSlots || lane < 0 || lane >= kMaxSlotLanes)
+        return notchChains_[0][0];
+
+    return notchChains_[(std::size_t) slot][(std::size_t) lane];
+}
+
+void AudioEngine::drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot)
 {
     // Real-time discipline: one bulk read into a pre-allocated stack array,
     // then apply. Bounds-check EVERY field used as an index -- content that
     // crossed a lock-free ring is trusted only after it is checked.
     NotchCommand batch[kMaxCommandsPerCallback];
-    const std::size_t count = commandQueue_.read (batch, (std::size_t) kMaxCommandsPerCallback);
+    const std::size_t count = ring.read (batch, (std::size_t) kMaxCommandsPerCallback);
 
     for (std::size_t i = 0; i < count; ++i)
     {
         const NotchCommand& cmd = batch[i];
 
-        if (cmd.channel >= 2 || cmd.index >= 16)
+        // A command only applies to the slot whose queue carried it -- the
+        // `slot` field must agree with the ring it arrived on. (channel is
+        // uint8_t, so it can never be negative.) cmd.index >= 16 would index
+        // past the chain's notch slots.
+        if (cmd.slot != slot || cmd.channel >= kMaxSlotLanes || cmd.index >= 16)
             continue;   // corrupt or hostile command: skip, never index OOB
 
         switch (cmd.type)
         {
             case NotchCommandType::Set:
-                notchChains_[cmd.channel].setNotch (cmd.index, cmd.frequency, cmd.Q, cmd.depthDB);
+                notchChains_[(std::size_t) slot][(std::size_t) cmd.channel]
+                    .setNotch (cmd.index, cmd.frequency, cmd.Q, cmd.depthDB);
                 break;
             case NotchCommandType::Clear:
-                notchChains_[cmd.channel].clearNotch (cmd.index);
+                notchChains_[(std::size_t) slot][(std::size_t) cmd.channel]
+                    .clearNotch (cmd.index);
                 break;
         }
     }
@@ -346,7 +445,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Commands first (bridge design §2): a notch commanded this callback takes
     // effect on THIS callback's samples instead of being one buffer late.
-    drainCommandQueue();
+    // Every slot's queue is drained; each drain applies only to that slot.
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        drainCommandsFrom (commandQueues_[(std::size_t) slot], slot);
 
     // Publish what this callback was ACTUALLY handed, for the status display.
     // Two relaxed stores per callback: no allocation, no lock, no ordering
@@ -357,54 +458,117 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     numOutputChannels_.store (numOutputChannels, std::memory_order_relaxed);
 
     // Real-time thread: no allocation, no locking. The only shared state read
-    // here is the mode, via a lock-free atomic.
+    // here is the mode and the slot mapping, via lock-free atomics. The mode
+    // AND the mapping are snapshotted ONCE at the top of the block: a config
+    // change mid-block would otherwise mix lanes from two mappings inside one
+    // output buffer.
     const bool bypass = (currentMode_.load (std::memory_order_acquire) == Mode::Bypass);
 
-    // JUCE requires every output channel to be written or cleared, and the
-    // output buffers are NOT pre-cleared for us.
-    for (int ch = 0; ch < numOutputChannels; ++ch)
+    struct LaneRef { const float* in; float* out; NotchChain* chain; };
+
+    // Stack-resident lane table -- no heap, no lock. Upper bound: every slot
+    // stereo = 8 x 2 lanes.
+    LaneRef lanes[kMaxSlots * kMaxSlotLanes];
+    int numLanes = 0;
+
+    // Per-slot tap source: slot s taps its LANE 0 output post-DSP when that
+    // lane exists and is valid. Null means "do not tap this slot" -- disabled
+    // slot, invalid width, or no valid lane 0.
+    const float* tapSource[kMaxSlots] {};
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
     {
-        float* output = outputChannelData[ch];
-
-        if (output == nullptr)
+        if (! slotEnabled_[slot].load (std::memory_order_relaxed))
             continue;
 
-        const float* input = (ch < numInputChannels) ? inputChannelData[ch] : nullptr;
+        // Width outside {1,2} is treated as an empty/disabled slot (ledger
+        // ruling from the Task 1 review) rather than being clamped -- a bad
+        // value must never widen into an unplanned route.
+        const int width = slotWidth_[slot].load (std::memory_order_relaxed);
 
-        // Bypass, missing input, or a channel beyond the stereo DSP pair:
-        // pass the input straight through. A null input leaves the output
-        // cleared (silence).
-        if (bypass || input == nullptr || ch >= 2)
+        if (width != 1 && width != 2)
+            continue;
+
+        for (int lane = 0; lane < width; ++lane)
         {
-            if (input != nullptr)
-                juce::FloatVectorOperations::copy (output, input, numSamples);
-            else
-                juce::FloatVectorOperations::clear (output, numSamples);
+            const int inIdx  = slotInCh_[slot][(std::size_t) lane].load (std::memory_order_relaxed);
+            const int outIdx = slotOutCh_[slot][(std::size_t) lane].load (std::memory_order_relaxed);
 
-            continue;
+            if (inIdx < 0 || inIdx >= numInputChannels
+                || outIdx < 0 || outIdx >= numOutputChannels)
+                continue;
+
+            const float* in = (inputChannelData != nullptr)
+                                  ? inputChannelData[inIdx] : nullptr;
+            float* out      = (outputChannelData != nullptr)
+                                  ? outputChannelData[outIdx] : nullptr;
+
+            if (in == nullptr || out == nullptr)
+                continue;
+
+            lanes[numLanes++] = { in, out,
+                                  &notchChains_[(std::size_t) slot][(std::size_t) lane] };
+
+            if (lane == 0)
+                tapSource[slot] = out;
         }
-
-        // Sample-by-sample processing through the per-channel notch chain.
-        // NotchChain::processSample() never allocates and never locks.
-        NotchChain& chain = notchChains_[static_cast<size_t> (ch)];
-
-        for (int n = 0; n < numSamples; ++n)
-            output[n] = static_cast<float> (chain.processSample (static_cast<double> (input[n])));
     }
 
-    // Tap the LEFT channel POST-notch -- the signal actually leaving the app
-    // -- in every mode, including Bypass (the detector must still see the
-    // signal when bypassed). Written straight from the already-processed
-    // output buffer in ONE bulk write() per callback: no heap buffer, no
-    // per-sample writes. The detector may be slow or absent: a short write
-    // (or 0) is expected and silently tolerated -- never block, never spin,
-    // never log. If there is no input channel 0, write nothing.
-    if (inputChannelData != nullptr && numInputChannels > 0
-        && inputChannelData[0] != nullptr
-        && outputChannelData != nullptr && outputChannelData[0] != nullptr)
+    // JUCE requires every output channel to be written or cleared, and the
+    // output buffers are NOT pre-cleared for us. Clearing ALL of them up front
+    // lets the DSP accumulate (`out[n] +=`) on top of silence afterwards --
+    // which is what makes several slots aiming at one output channel SUM
+    // instead of overwrite each other.
+    if (outputChannelData != nullptr)
     {
+        for (int ch = 0; ch < numOutputChannels; ++ch)
+        {
+            if (outputChannelData[ch] != nullptr)
+                juce::FloatVectorOperations::clear (outputChannelData[ch], numSamples);
+        }
+    }
+
+    if (bypass)
+    {
+        // Bypass copies IN->OUT along the mapping (the detector still sees
+        // signal via the per-slot taps below).
+        for (int i = 0; i < numLanes; ++i)
+            juce::FloatVectorOperations::copy (lanes[i].out, lanes[i].in, numSamples);
+    }
+    else
+    {
+        // Sample-by-sample processing through the per-lane notch chain,
+        // ACCUMULATED onto the cleared output: several slots routed at one
+        // output channel is valid and must SUM. NotchChain::processSample()
+        // never allocates and never locks.
+        for (int i = 0; i < numLanes; ++i)
+        {
+            NotchChain&   chain = *lanes[i].chain;
+            const float*  in    = lanes[i].in;
+            float*        out   = lanes[i].out;
+
+            for (int n = 0; n < numSamples; ++n)
+                out[n] += static_cast<float> (
+                    chain.processSample (static_cast<double> (in[n])));
+        }
+    }
+
+    // Tap EVERY enabled slot's post-DSP lane-0 output -- the signal actually
+    // leaving that slot -- in every mode, including Bypass (the detector must
+    // still see the signal when bypassed). Written straight from the
+    // already-processed output buffer in ONE bulk write() per callback: no
+    // heap buffer, no per-sample writes. The detector may be slow or absent:
+    // a short write (or 0) is expected and silently tolerated -- never block,
+    // never spin, never log. A slot with no valid lane-0 input/output pair is
+    // not tapped at all.
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+    {
+        if (tapSource[slot] == nullptr)
+            continue;
+
         const size_t requested = static_cast<size_t> (numSamples);
-        const size_t written   = tapBuffer_.write (outputChannelData[0], requested);
+        const size_t written   =
+            tapBuffers_[(std::size_t) slot].write (tapSource[slot], requested);
 
         // Dropping is the right BEHAVIOUR here -- blocking or spinning on the
         // audio thread is not an option -- but discarding the FACT is not. A
@@ -418,7 +582,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // ordering relationship with anything else, since the count is only
         // ever read for display.
         if (written < requested)
-            tapDropCount_.fetch_add (requested - written, std::memory_order_relaxed);
+            tapDropCounts_[(std::size_t) slot].fetch_add (requested - written,
+                                                          std::memory_order_relaxed);
     }
 }
 
@@ -430,23 +595,26 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         currentSampleRate_.store (sampleRate, std::memory_order_release);
         currentBufferSize_.store (device->getCurrentBufferSizeSamples(), std::memory_order_release);
 
-        // Retarget BOTH notch chains to the device's actual rate. JUCE calls
-        // audioDeviceAboutToStart BEFORE inserting the callback into its
-        // dispatch list, so this runs before the audio thread can touch the
-        // chains -- no synchronization needed. setSampleRate() never
-        // allocates: it only rewrites pre-allocated coefficient slots and
-        // clears filter state. A non-positive rate (should not happen on a
-        // running device) is safely ignored inside setSampleRate().
-        for (auto& chain : notchChains_)
-            chain.setSampleRate (sampleRate);
+        // Retarget ALL notch chains (8 slots x 2 lanes) to the device's actual
+        // rate. JUCE calls audioDeviceAboutToStart BEFORE inserting the
+        // callback into its dispatch list, so this runs before the audio
+        // thread can touch the chains -- no synchronization needed.
+        // setSampleRate() never allocates: it only rewrites pre-allocated
+        // coefficient slots and clears filter state. A non-positive rate
+        // (should not happen on a running device) is safely ignored inside
+        // setSampleRate().
+        for (auto& slotChains : notchChains_)
+            for (auto& chain : slotChains)
+                chain.setSampleRate (sampleRate);
     }
 
     // Clear any filter state left over from a previous device session so the
-    // DSP starts from a clean slate.
-    for (auto& chain : notchChains_)
-        chain.reset();
+    // DSP starts from a clean slate -- every chain in the grid.
+    for (auto& slotChains : notchChains_)
+        for (auto& chain : slotChains)
+            chain.reset();
 
-    // Drain the tap. Whatever is still in the ring was captured by the
+    // Drain EVERY tap ring. Whatever is still in a ring was captured by the
     // PREVIOUS device session, possibly at a different sample rate. Leaving it
     // there splices old audio onto the front of the first analysis windows of
     // the new session, so the detector's first spectra would be labelled with
@@ -462,12 +630,15 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // Detector::reset() is the consumer-side counterpart. Calling it belongs
     // to Task 14, which owns the detector instance; the method exists and is
     // tested here so that wiring is a one-liner.
-    tapBuffer_.clear();
+    for (auto& tap : tapBuffers_)
+        tap.clear();
 
-    // Both rings are cleared under the same precondition (no producer/consumer
-    // running); the detector thread is stopped by MainComponent BEFORE any
-    // device restart reaches this point (bridge design §6.5).
-    commandQueue_.clear();
+    // All 16 rings (8 taps + 8 command queues) are cleared under the same
+    // precondition (no producer/consumer running); the detector side is
+    // stopped by MainComponent BEFORE any device restart reaches this point
+    // (bridge design §6.5).
+    for (auto& queue : commandQueues_)
+        queue.clear();
 }
 
 void AudioEngine::audioDeviceStopped()
