@@ -1,4 +1,4 @@
-﻿#include "app/PresetManager.h"
+#include "app/PresetManager.h"
 
 #include <algorithm>
 #include <cmath>

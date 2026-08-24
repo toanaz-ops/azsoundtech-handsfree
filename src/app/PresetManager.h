@@ -219,6 +219,11 @@ public:
 
     /** Parses and validates JSON text. Never throws; every problem, including
         "this is not JSON at all", arrives as a message in the result.
+
+        WARNING: this overload also accepts v2 files, and returns any "slot"
+        ids and "slots" configs RAW -- unclamped, unreferenced slots not
+        activated, out-of-range slot ids not skipped or counted. Prefer the
+        channel-aware overload below when a v2 file may carry routing data.
     */
     static PresetLoadResult fromJSON (const juce::String& text);
 
@@ -250,6 +255,11 @@ public:
 
     /** Reads and parses a preset file. A missing file is a reported failure,
         not an empty preset.
+
+        WARNING: this overload also accepts v2 files, and returns any "slot"
+        ids and "slots" configs RAW -- unclamped, unreferenced slots not
+        activated, out-of-range slot ids not skipped or counted. Prefer the
+        channel-aware overload below when a v2 file may carry routing data.
     */
     static PresetLoadResult loadFromFile (const juce::File& file);
 
