@@ -71,6 +71,14 @@ public:
     void setLayout (gui::ScreenLayout layout);
     [[nodiscard]] gui::ScreenLayout getLayout() const { return layout_; }
 
+    // Loads a preset file through the CHANNEL-AWARE PresetManager path, with
+    // the open device's channel counts (stereo when no device is open):
+    // every declared routing config lands in the engine, each notch is
+    // adopted by the controller of its routing slot at that slot's engine
+    // width, and an out-of-range slot id is logged as a warning -- never a
+    // refused file. Returns false (with nothing applied) when the load fails.
+    bool loadPreset (const juce::File& file);
+
     // The drawer (device controls + settings row). Public so tests can drive
     // its toggle buttons like any other component interface.
     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
@@ -79,6 +87,11 @@ public:
     // without reaching into private members.
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
+
+    // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
+    // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
+    // slot; never null for [0, kMaxSlots).
+    NotchController* getNotchControllerForTest (int slot);
 
     void paint (juce::Graphics& g) override;
     void resized() override;

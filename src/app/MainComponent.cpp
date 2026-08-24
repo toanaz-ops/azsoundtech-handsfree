@@ -1,6 +1,10 @@
 #include "app/MainComponent.h"
 
+#include "app/PresetManager.h"
 #include "gui/DeviceViewModel.h"
+
+#include <cstddef>
+#include <vector>
 
 namespace
 {
@@ -148,6 +152,14 @@ AudioEngine& MainComponent::getAudioEngine()
     return engine_;
 }
 
+NotchController* MainComponent::getNotchControllerForTest (int slot)
+{
+    if (slot < 0 || slot >= kMaxSlots)
+        return nullptr;
+
+    return notchControllers_[(std::size_t) slot].get();
+}
+
 void MainComponent::startAudio()
 {
     // Task 16: prefer ASIO, but do NOT require it. The plan said "filter to
@@ -187,6 +199,98 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
     // exist yet.
     engine_.setMode (mode);
     modeBar_.setDisplayedMode (engine_.getMode());
+
+    // KD-9 detection gating lives HERE because this is the one object that owns
+    // both the mode controls and the controllers: Bypass must never place a
+    // notch, Soundcheck detects for its 15 s live-time window (KD-7 exempts its
+    // notches from auto-release), Auto detects continuously. Applied to every
+    // slot the engine has enabled -- a disabled slot has no live chain to
+    // protect and its controller must stay silent.
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        if (! engine_.getSlotConfig (i).enabled)
+            continue;
+
+        auto& controller = *notchControllers_[(std::size_t) i];
+
+        switch (mode)
+        {
+            case AudioEngine::Mode::Bypass:
+                controller.setDetectionActive (false);
+                break;
+            case AudioEngine::Mode::Auto:
+                controller.setDetectionActive (true);
+                break;
+            case AudioEngine::Mode::Soundcheck:
+                controller.startSoundcheck();
+                break;
+        }
+    }
+}
+
+bool MainComponent::loadPreset (const juce::File& file)
+{
+    // Channel counts come from the OPEN device. With no device yet the engine
+    // reports zero, but the loader needs real numbers to clamp each slot's
+    // channel mapping against -- stereo is what a default interface implies,
+    // and matches what startAudio() will find on the common rig.
+    const auto channelCount = [] (int reported)
+    {
+        return reported > 0 ? reported : 2;
+    };
+
+    const auto result = PresetManager::loadFromFile (
+        file,
+        channelCount (engine_.getNumInputChannels()),
+        channelCount (engine_.getNumOutputChannels()));
+
+    if (! result.ok)
+        return false;
+
+    if (result.skippedNotchCount > 0)
+    {
+        // A skipped notch is a WARNING, never a refused file (PresetManager.h).
+        // The GUI toast is future work; until then the log carries it.
+        juce::Logger::writeToLog (
+            "preset \"" + file.getFileName() + "\": skipped "
+            + juce::String (result.skippedNotchCount)
+            + " notch(es) whose routing slot is out of range");
+    }
+
+    // Routing configs land FIRST, so the widths adopted below are read back
+    // from the engine state this very load established.
+    for (const auto& entry : result.preset.slots)
+        engine_.setSlotConfig (entry.index, entry.config);
+
+    // Detectors run exactly while audio does (startAudio / the after-restart
+    // hook), so that is also the only time they need stopping for setWidth()
+    // and adoptPreset(), whose precondition is a STOPPED detector thread.
+    const bool detectorsRunning = engine_.isRunning();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+    {
+        std::vector<PresetNotch> notchesForSlot;
+
+        for (const auto& notch : result.preset.notches)
+            if (notch.slot == s)
+                notchesForSlot.push_back (notch);
+
+        if (notchesForSlot.empty())
+            continue;
+
+        auto& controller = *notchControllers_[(std::size_t) s];
+
+        if (detectorsRunning)
+            controller.stop (1000);
+
+        controller.setWidth (engine_.getSlotConfig (s).width);
+        controller.adoptPreset (notchesForSlot);
+
+        if (detectorsRunning)
+            controller.start();
+    }
+
+    return true;
 }
 
 void MainComponent::setLayout (gui::ScreenLayout layout)

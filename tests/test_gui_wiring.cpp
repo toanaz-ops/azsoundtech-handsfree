@@ -367,3 +367,136 @@ TEST (NotchControllerThread, StartStopCycleJoinsCleanly)
     controller.copySnapshot (snap);
     EXPECT_GT (snap.sequence, 0u);
 }
+
+//==============================================================================
+// Task 6B -- preset loading through the CHANNEL-AWARE path, and detection
+// gating per enabled slot. With no audio device open the engine reports zero
+// channels, so the loader must fall back to stereo; and since nothing drains
+// a controller's outbox headlessly, each test pumps runOnce() once and reads
+// the ENGINE's per-slot command queues: whatever lands there is what the
+// audio thread would consume.
+
+namespace
+{
+juce::String makeSlotAwarePresetJson()
+{
+    // One legacy notch (slot 0 implied, as every v1 file) plus one explicitly
+    // routed to slot 3, whose mono config the file declares.
+    return R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+           R"("slots":[{"index":3,"enabled":true,"width":1,"inputChannels":[1,0],"outputChannels":[1,0]}],)"
+           R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
+           R"({"index":1,"freq":2500.0,"Q":25.0,"depth":-10.0,"slot":3}]})";
+}
+} // namespace
+
+TEST (MainComponent, SlotAwarePresetLoadRoutesConfigsAndNotchesPerSlot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-task6b-routing.json");
+    ASSERT_TRUE (presetFile.replaceWithText (makeSlotAwarePresetJson()));
+
+    EXPECT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    // The declared routing config reached the ENGINE...
+    const auto slot3 = app.getAudioEngine().getSlotConfig (3);
+    EXPECT_TRUE (slot3.enabled);
+    EXPECT_EQ (slot3.width, 1);
+
+    // ...and the loader's fallback channel counts (no device -> 2/2) clamped
+    // lane 0 of slot 3 from the file's input 1 / output 1 into range unchanged.
+    EXPECT_EQ (slot3.inputChannels[0], 1);
+    EXPECT_EQ (slot3.outputChannels[0], 1);
+
+    // Slot 0 was only IMPLIED (legacy notch): the loader auto-activated it
+    // with the stereo config every v1 file means.
+    const auto slot0 = app.getAudioEngine().getSlotConfig (0);
+    EXPECT_TRUE (slot0.enabled);
+    EXPECT_EQ (slot0.width, 2);
+
+    // Each notch landed in ITS SLOT's controller: pumping that controller
+    // flushes its outbox into the engine's per-slot command queue.
+    auto* controller3 = app.getNotchControllerForTest (3);
+    ASSERT_NE (controller3, nullptr);
+    controller3->runOnce();
+
+    auto& queue3 = app.getAudioEngine().getCommandQueue (3);
+    ASSERT_EQ (queue3.getAvailableRead(), 1u);   // width 1 -> one lane
+    NotchCommand cmd3 {};
+    ASSERT_EQ (queue3.read (&cmd3, 1), 1u);
+    EXPECT_EQ (cmd3.type, NotchCommandType::Set);
+    EXPECT_EQ (cmd3.index, 1);
+    EXPECT_FLOAT_EQ (cmd3.frequency, 2500.0f);
+
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->runOnce();
+
+    auto& queue0 = app.getAudioEngine().getCommandQueue (0);
+    ASSERT_EQ (queue0.getAvailableRead(), 2u);   // width 2 -> both lanes
+    NotchCommand cmd0a {};
+    NotchCommand cmd0b {};
+    ASSERT_EQ (queue0.read (&cmd0a, 1), 1u);
+    ASSERT_EQ (queue0.read (&cmd0b, 1), 1u);
+    EXPECT_EQ (cmd0a.type, NotchCommandType::Set);
+    EXPECT_EQ (cmd0b.type, NotchCommandType::Set);
+    EXPECT_FLOAT_EQ (cmd0a.frequency, 482.0f);
+    EXPECT_FLOAT_EQ (cmd0b.frequency, 482.0f);
+}
+
+TEST (MainComponent, PresetWithOutOfRangeSlotStillLoadsTheRest)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    // slot 9 is outside [0, kMaxSlots): the channel-aware load SKIPS that
+    // notch and counts it -- never refuses the file.
+    const juce::String json = R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+                              R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
+                              R"({"index":1,"freq":900.0,"Q":30.0,"depth":-12.0,"slot":9}]})";
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-task6b-skipped.json");
+    ASSERT_TRUE (presetFile.replaceWithText (json));
+
+    EXPECT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    // The surviving notch still reached slot 0's controller.
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->runOnce();
+
+    auto& queue0 = app.getAudioEngine().getCommandQueue (0);
+    ASSERT_GE (queue0.getAvailableRead(), 2u);
+    NotchCommand cmd {};
+    ASSERT_EQ (queue0.read (&cmd, 1), 1u);
+    EXPECT_FLOAT_EQ (cmd.frequency, 482.0f);
+}
+
+TEST (MainComponent, SoundcheckGatingAppliesToEnabledSlotsOnly)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    // Fresh engine: only slot 0 is enabled, slots 1..7 are not.
+    EXPECT_TRUE (app.getAudioEngine().getSlotConfig (0).enabled);
+    EXPECT_FALSE (app.getAudioEngine().getSlotConfig (1).enabled);
+
+    app.requestMode (AudioEngine::Mode::Soundcheck);
+
+    // Enabled slot: detection armed for the 15 s live-time window...
+    EXPECT_GT (app.getNotchControllerForTest (0)->getSoundcheckRemainingMs(), 0.0);
+    // ...disabled slot: its controller stays silent.
+    EXPECT_DOUBLE_EQ (app.getNotchControllerForTest (1)->getSoundcheckRemainingMs(), 0.0);
+
+    // And Bypass disarms again through the same route.
+    app.requestMode (AudioEngine::Mode::Bypass);
+    SUCCEED();
+}
