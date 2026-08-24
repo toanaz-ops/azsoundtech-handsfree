@@ -16,4 +16,6 @@ struct NotchCommand
     float frequency;    // Hz, only valid for Set
     float Q;            // Quality factor, only valid for Set
     float depthDB;      // Depth in dB, only valid for Set
+    int slot = 0;       // multi-slot routing (spec §3): slot nào sở hữu command này.
+                        // Default 0 giữ nguyên hành vi mọi caller cũ.
 };

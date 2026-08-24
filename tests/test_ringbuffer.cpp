@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 #include "dsp/LockFreeRingBuffer.h"
+#include "dsp/NotchCommand.h"
 
 #include <vector>
 #include <numeric>
@@ -173,6 +174,27 @@ TEST(LockFreeRingBuffer, ClearDiscardsPendingData)
     buffer.clear();
     EXPECT_EQ(buffer.getAvailableRead(), 0u);
     EXPECT_EQ(buffer.getAvailableWrite(), buffer.getCapacity());
+}
+
+TEST(LockFreeRingBuffer, NotchCommandRoundTripKeepsSlotId)
+{
+    LockFreeRingBuffer<NotchCommand> ring(kTestCapacity);
+
+    NotchCommand in {};
+    in.type = NotchCommandType::Set;
+    in.channel = 1;
+    in.index = 3;
+    in.frequency = 1000.0f;
+    in.Q = 8.0f;
+    in.depthDB = -12.0f;
+    in.slot = 5;
+
+    EXPECT_EQ(ring.write(&in, 1), 1u);
+
+    NotchCommand out {};
+    ASSERT_EQ(ring.read(&out, 1), 1u);
+    EXPECT_EQ(out.type, in.type);
+    EXPECT_EQ(out.slot, 5);
 }
 
 //==============================================================================
