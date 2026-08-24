@@ -556,6 +556,26 @@ TEST (NotchControllerSlotAware, SetWidthClampsIntoRange)
     }
 }
 
+TEST (NotchControllerSlotAware, PolicyApiRejectsLanesBeyondWidth)
+{
+    SlotHarness h (0);
+    h.controller.setWidth (1);
+
+    // Lane 1 is outside width: setNotch must reject, clearNotch must no-op --
+    // neither may ever leave a command whose channel exceeds width.
+    EXPECT_FALSE (h.controller.setNotch (1, 0, 1000.0, 30.0, -12.0,
+                                         NotchController::Origin::Detector));
+    h.controller.clearNotch (1, 0);
+    h.controller.runOnce();
+    EXPECT_EQ (h.commands.getAvailableRead(), 0u);
+
+    // Lane 0 still works normally at width 1.
+    EXPECT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Detector));
+    h.controller.runOnce();
+    EXPECT_EQ (h.commands.getAvailableRead(), 1u);
+}
+
 TEST (NotchControllerSlotAware, DefaultsMatchLegacyBehaviour)
 {
     Harness h;   // slotId 0, default width 2 -- exactly the old controller

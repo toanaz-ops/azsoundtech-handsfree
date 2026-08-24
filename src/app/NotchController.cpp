@@ -58,7 +58,8 @@ bool NotchController::setNotch (int channel, int index,
                                 double frequency, double Q, double depthDB,
                                 Origin origin)
 {
-    if (channel < 0 || channel >= kChannels || index < 0 || index >= kSlots)
+    // width gates the policy surface; internal fan-out loops never exceed it.
+    if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
         return false;
 
     // Same predicates Biquad::setNotchFilter applies (see header comment).
@@ -102,7 +103,8 @@ void NotchController::pushClearLocked (int channel, int index)
 
 void NotchController::clearNotch (int channel, int index)
 {
-    if (channel < 0 || channel >= kChannels || index < 0 || index >= kSlots)
+    // width gates the policy surface; internal fan-out loops never exceed it.
+    if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
         return;
     const std::lock_guard<std::mutex> lock (modelMutex_);
     pushClearLocked (channel, index);
