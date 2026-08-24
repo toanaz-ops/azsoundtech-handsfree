@@ -8,6 +8,8 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [Brief verification](brief-verification-2026-08-21.md) — brief v2 "đã sửa" vẫn còn 3 lỗi; kiểm chứng cả tên API, hợp đồng ngữ nghĩa VÀ số học của assertion.
 - [Worktree junction incident](worktree-junction-incident-2026-08-23.md) — `git worktree remove` đi theo junction và xóa JUCE dùng chung (lần 3); kiểm tra `LinkType` và rmdir junction TRƯỚC khi remove.
 - [Bridge lifecycle](bridge-lifecycle-devicepanel-2026-08-23.md) — đường restart thiết bị thật nằm ở DevicePanel; mọi đường restart mới phải bọc hook `onBeforeRestart/onAfterRestart` để giữ §6.5 (stop controller trước khi clear ring).
+- [ASIO SDK silent disable](asio-sdk-silent-disable-2026-08-24.md) — thiếu `external/asiosdk` KHÔNG fail configure, chỉ warn rồi tắt ASIO im lặng; check `JUCE_ASIO:BOOL=ON` trong CMakeCache trước khi nghi driver.
+- [GUI console lessons](gui-console-lessons-2026-08-24.md) — `git commit -- <path>` commit nguyên working-tree file (hunk lane khác lọt vào); JUCE headless `setSize()` không peer → `resized()` không chạy, layout test pass rỗng; confirm dialog async phải injectable + SafePointer.
 
 ## Conventions (tóm tắt)
 
