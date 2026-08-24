@@ -24,6 +24,7 @@
 
 #include "app/AudioEngine.h"
 #include "app/NotchController.h"
+#include "app/SlotConfig.h"
 #include "dsp/ClockSource.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
@@ -101,11 +102,19 @@ private:
 
     AudioEngine engine_;
 
-    // Clock first, controller second: the controller holds a reference to it.
-    // Declaration order = destruction order: notchController_'s thread is
-    // joined BEFORE engine_ tears down (bridge design §6.5).
+    // Clock first, controllers second: each controller holds a reference to
+    // the clock. Declaration order = destruction order: the controllers'
+    // threads are joined BEFORE engine_ tears down (bridge design §6.5).
     JuceMonotonicClock systemClock_;
-    NotchController notchController_;
+    // One detector controller per routing slot; element i is wired to
+    // engine_'s slot-i tap and command queue (see the constructor).
+    //
+    // Heap-held (unique_ptr) deliberately: a NotchController is ~280 kB
+    // (the scorer's 128x513-float history dominates), so eight BY VALUE
+    // would put ~2.3 MB on this object's owner's stack -- over the default
+    // 1 MB Windows thread stack, measured as a segfault in every
+    // MainComponent-constructing test.
+    std::array<std::unique_ptr<NotchController>, kMaxSlots> notchControllers_;
 
     gui::DevicePanel devicePanel_ { engine_ };
 
@@ -116,8 +125,8 @@ private:
     gui::ModeBar     modeBar_;
 
     // New console components (Tasks 1-3). Declaration order matters:
-    // SpectrumView reads notchController_, DeviceDrawer re-parents devicePanel_
-    // -- both are declared above, so they outlive these.
+    // SpectrumView reads notchControllers_[0], DeviceDrawer re-parents
+    // devicePanel_ -- both are declared above, so they outlive these.
     gui::SpectrumView spectrumView_;
     gui::ModeRail     modeRail_;
     gui::StatusBadge  statusBadge_;      // hosted inside deviceDrawer_'s header

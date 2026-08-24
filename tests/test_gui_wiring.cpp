@@ -315,9 +315,29 @@ TEST (MainComponent, ControllerLifecycleSurvivesConstructionDestruction)
         // PERMITTED off.
         MainComponent app;
     }
-    // Destruction runs notchController_'s destructor (joins its own thread)
-    // BEFORE engine_, reverse declaration order. A hang here means stop()
-    // failed to join; a leak-detector hit means something was left running.
+    // Destruction runs notchControllers_' destructors (each joins its own
+    // thread) BEFORE engine_, reverse declaration order. A hang here means
+    // stop() failed to join; a leak-detector hit means something was left
+    // running.
+    SUCCEED();
+}
+
+// Task 6 structural test: the 8-controller array must construct with no device
+// open (the state this machine's tests are always in) and destroy cleanly --
+// eight joined threads, not one.
+TEST (MainComponent, EightControllerArrayConstructsWithoutDeviceAndDestroysCleanly)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    {
+        MainComponent app;
+
+        EXPECT_FALSE (app.getAudioEngine().isRunning());
+
+        // Exercising the hooks' code paths without a device is safe: every
+        // engine query they use guards the null-device case.
+        app.requestMode (AudioEngine::Mode::Bypass);
+    }
     SUCCEED();
 }
 

@@ -17,8 +17,19 @@ constexpr const char* kLayoutPropertyKey = "layout";
 } // namespace
 
 MainComponent::MainComponent()
-    : notchController_ (engine_.getTapBuffer(), engine_.getCommandQueue(), systemClock_)
-    , spectrumView_ (notchController_)
+    : notchControllers_ ([this]
+      {
+          // Heap allocation per slot -- see the member comment in the header
+          // for why these cannot live inside this object's stack frame.
+          decltype (notchControllers_) controllers;
+          for (int i = 0; i < kMaxSlots; ++i)
+              controllers[(std::size_t) i] =
+                  std::make_unique<NotchController> (engine_.getTapBuffer (i),
+                                                     engine_.getCommandQueue (i),
+                                                     systemClock_, i);
+          return controllers;
+      }())
+    , spectrumView_ (*notchControllers_[0])
     , modeRail_ (gui::ModeRail::Orientation::Vertical)
     , deviceDrawer_ (devicePanel_)
 {
@@ -39,11 +50,20 @@ MainComponent::MainComponent()
     modeRail_.onAuto       = [this] { requestMode (AudioEngine::Mode::Auto); };
     modeRail_.onBypass     = [this] { requestMode (AudioEngine::Mode::Bypass); };
 
-    // R-3 already guards this behind ModeRail's confirmation hook.
-    modeRail_.onClearAllConfirmed = [this] { notchController_.clearAll(); };
+    // R-3 already guards this behind ModeRail's confirmation hook. Only the
+    // slots the engine has enabled hold live notches.
+    modeRail_.onClearAllConfirmed = [this]
+    {
+        for (int i = 0; i < kMaxSlots; ++i)
+            if (engine_.getSlotConfig (i).enabled)
+                notchControllers_[(std::size_t) i]->clearAll();
+    };
     modeRail_.getSoundcheckRemainingMs = [this]
     {
-        return notchController_.getSoundcheckRemainingMs();
+        double remaining = 0.0;
+        for (auto& controller : notchControllers_)
+            remaining = juce::jmax (remaining, controller->getSoundcheckRemainingMs());
+        return remaining;
     };
 
     deviceDrawer_.setStatusBadge (&statusBadge_);
@@ -53,8 +73,25 @@ MainComponent::MainComponent()
     // RESTART, and the rings are cleared on the way -- so the detector thread
     // must be joined first and relaunched after. These hooks live on the ONE
     // DevicePanel instance; re-parenting it into the drawer changed nothing.
-    devicePanel_.onBeforeRestart = [this] { notchController_.stop (1000); };
-    devicePanel_.onAfterRestart  = [this] { notchController_.start(); };
+    devicePanel_.onBeforeRestart = [this]
+    {
+        // §6.5 for EVERY slot: all detector threads must be joined before a
+        // device restart can clear the rings.
+        for (auto& controller : notchControllers_)
+            controller->stop (1000);
+    };
+    devicePanel_.onAfterRestart  = [this]
+    {
+        // setWidth() is only legal while the thread is stopped, so the width
+        // from the (freshly restarted) engine config is applied here, then
+        // the poll loop relaunches.
+        for (int i = 0; i < kMaxSlots; ++i)
+        {
+            auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setWidth (engine_.getSlotConfig (i).width);
+            controller.start();
+        }
+    };
 
     // A setting the hardware refused. Held rather than flashed: the user needs
     // to still be reading it a few seconds later.
@@ -100,8 +137,9 @@ MainComponent::~MainComponent()
     // Detach the look and feel while every child is still alive -- a
     // Component must not outlive the LookAndFeel it points at.
     setLookAndFeel (nullptr);
-    // §6.5: the detector thread must be dead before the engine tears down.
-    notchController_.stop (1000);
+    // §6.5: every detector thread must be dead before the engine tears down.
+    for (auto& controller : notchControllers_)
+        controller->stop (1000);
     engine_.stop();
 }
 
@@ -122,9 +160,15 @@ void MainComponent::startAudio()
     engine_.setAudioDeviceType (gui::chooseDefaultDeviceType (engine_.getAvailableDeviceTypeNames()));
     engine_.start();
 
-    // The device is open: the detector can start pumping. start() is a no-op
-    // if the thread already runs.
-    notchController_.start();
+    // The device is open: the detectors can start pumping. start() is a no-op
+    // if the thread already runs. Width first, for the same reason as the
+    // after-restart hook: setWidth() needs the thread stopped.
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto& controller = *notchControllers_[(std::size_t) i];
+        controller.setWidth (engine_.getSlotConfig (i).width);
+        controller.start();
+    }
 
     // Only now do getAvailableSampleRates() and getAvailableBufferSizes()
     // return anything.
