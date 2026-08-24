@@ -25,6 +25,7 @@
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "gui/StatusBar.h"
+#include "gui/theme/AzTheme.h"
 
 class MainComponent : public juce::Component,
                       private juce::Timer
@@ -59,6 +60,12 @@ private:
     // atomics precisely so a reader like this never blocks the audio thread.
     void timerCallback() override;
     void refreshStatus();
+
+    // Declared BEFORE every child component: the look and feel must outlive
+    // anything that might query it during teardown. The constructor installs
+    // it once with setLookAndFeel(); children inherit it through the normal
+    // Component::getLookAndFeel() chain.
+    az::theme::AzLookAndFeel azLookAndFeel_;
 
     AudioEngine engine_;
 

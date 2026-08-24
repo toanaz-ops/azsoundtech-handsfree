@@ -13,6 +13,10 @@ constexpr int kStatusRefreshMs = 200;
 MainComponent::MainComponent()
     : notchController_ (engine_.getTapBuffer(), engine_.getCommandQueue(), systemClock_)
 {
+    // The Console-industrial theme, applied once here and inherited by every
+    // child through the Component::getLookAndFeel() chain.
+    setLookAndFeel (&azLookAndFeel_);
+
     addAndMakeVisible (devicePanel_);
     addAndMakeVisible (statusBar_);
     addAndMakeVisible (modeBar_);
@@ -48,6 +52,9 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    // Detach the look and feel while every child is still alive -- a
+    // Component must not outlive the LookAndFeel it points at.
+    setLookAndFeel (nullptr);
     // §6.5: the detector thread must be dead before the engine tears down.
     notchController_.stop (1000);
     engine_.stop();

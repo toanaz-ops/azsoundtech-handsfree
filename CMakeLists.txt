@@ -48,6 +48,8 @@ target_sources(HandsFree PRIVATE
     src/gui/ModeBar.h
     src/gui/StatusBar.cpp
     src/gui/StatusBar.h
+    src/gui/theme/AzTheme.cpp
+    src/gui/theme/AzTheme.h
     src/dsp/Biquad.cpp
     src/dsp/Biquad.h
     src/dsp/Detector.cpp

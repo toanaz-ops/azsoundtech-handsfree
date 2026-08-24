@@ -19,6 +19,7 @@ add_executable(HandsFreeTests
     test_audioengine.cpp
     test_deviceviewmodel.cpp
     test_gui_wiring.cpp
+    test_aztheme.cpp
     test_presetmanager.cpp
     test_licensemanager.cpp
     test_clocksource.cpp
@@ -37,6 +38,7 @@ add_executable(HandsFreeTests
     ../src/gui/DevicePanel.cpp
     ../src/gui/ModeBar.cpp
     ../src/gui/StatusBar.cpp
+    ../src/gui/theme/AzTheme.cpp
     ../src/dsp/Biquad.cpp
     ../src/dsp/NotchChain.cpp
     ../src/dsp/Detector.cpp
@@ -76,6 +78,13 @@ target_include_directories(HandsFreeTests PRIVATE
 # need the repo-relative location of presets/, which only CMake knows.
 target_compile_definitions(HandsFreeTests PRIVATE
     HANDSFREE_PRESET_SOURCE_DIR="${CMAKE_SOURCE_DIR}/presets"
+)
+
+# The theme grep-test reads src/gui as text at run time (spec section 6: no
+# hex colour literal outside src/gui/theme/), so it needs the repo-relative
+# location of the GUI tree, which only CMake knows.
+target_compile_definitions(HandsFreeTests PRIVATE
+    HANDSFREE_GUI_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/gui"
 )
 
 # MSVC: silence "warning C4996: 'std::copy_n': ... was declared deprecated" etc.
