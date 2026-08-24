@@ -9,6 +9,12 @@ namespace
 {
 // Distinct from ModeRail's mode radio group so the two never interfere.
 constexpr int kLayoutRadioGroupId = 2;
+
+// Header cell widths the theme does not tokenise (they are drawer-local
+// metrics, not shared design tokens): the PERFORMANCE button is wider than
+// CLASSIC to fit its longer label, and the status badge gets a fixed slot.
+constexpr float kPerformanceCellWidth = 148.0f;
+constexpr float kBadgeCellWidth       = 120.0f;
 } // namespace
 
 DeviceDrawer::DeviceDrawer (DevicePanel& wrappedPanel)
@@ -141,13 +147,13 @@ void DeviceDrawer::resized()
                           .withWidth ((float) buttonCellWidth).withHeight (cellH)
                           .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
     header.items.add (juce::FlexItem (performanceButton_)
-                          .withWidth (148.0f).withHeight (cellH)
+                          .withWidth (kPerformanceCellWidth).withHeight (cellH)
                           .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
     header.items.add (juce::FlexItem (presetsPlaceholder_).withFlex (1.0f));
 
     if (badge_ != nullptr)
         header.items.add (juce::FlexItem (*badge_)
-                              .withWidth (120.0f).withHeight (cellH)
+                              .withWidth (kBadgeCellWidth).withHeight (cellH)
                               .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
 
     if (collapsible_)

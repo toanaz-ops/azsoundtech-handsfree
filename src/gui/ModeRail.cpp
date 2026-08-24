@@ -127,8 +127,13 @@ void ModeRail::timerCallback()
 
 void ModeRail::handleClearAllClicked()
 {
-    if (confirmHook == nullptr)
+    if (confirmHook == nullptr || confirmPending_)
         return;
+
+    // One dialog at a time: while the previous confirmation is still
+    // unanswered, further clicks are dropped -- otherwise stacked dialogs
+    // would each fire onClearAllConfirmed.
+    confirmPending_ = true;
 
     // The guard is the whole point of this button: nothing reaches
     // onClearAllConfirmed until the hook reports back confirmed == true.
@@ -141,7 +146,9 @@ void ModeRail::handleClearAllClicked()
     confirmHook ([safeThis] (bool confirmed)
     {
         if (safeThis == nullptr)
-            return;
+            return;   // rail gone -- nothing left to clear or notify
+
+        safeThis->confirmPending_ = false;   // answered: allow the next ask
 
         if (confirmed && safeThis->onClearAllConfirmed != nullptr)
             safeThis->onClearAllConfirmed();

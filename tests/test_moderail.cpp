@@ -94,6 +94,38 @@ TEST (ModeRail, ClearAllFiresNoCallbackBeforeConfirmation)
     EXPECT_EQ (cleared, 1);
 }
 
+TEST (ModeRail, DoubleClickWhileConfirmPendingAsksAndFiresOnlyOnce)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::ModeRail rail;
+    int confirmationsAsked = 0;
+    std::function<void (bool)> pending;
+
+    rail.confirmHook = [&confirmationsAsked, &pending] (std::function<void (bool)> decide)
+    {
+        ++confirmationsAsked;
+        pending = std::move (decide);
+    };
+
+    int cleared = 0;
+    rail.onClearAllConfirmed = [&cleared] { ++cleared; };
+
+    // Two clicks while the first dialog is still unanswered: the second must
+    // be dropped instead of stacking a second confirm.
+    rail.clearAllButton.onClick();
+    rail.clearAllButton.onClick();
+
+    EXPECT_EQ (confirmationsAsked, 1);
+    EXPECT_EQ (cleared, 0);
+
+    ASSERT_TRUE (pending != nullptr);
+    pending (true);
+
+    // Exactly one unanswered ask -> exactly one confirmed callback.
+    EXPECT_EQ (cleared, 1);
+}
+
 TEST (ModeRail, ConfirmCallbackArrivingAfterTheRailWasDestroyedIsHarmless)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

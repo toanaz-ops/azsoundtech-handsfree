@@ -19,7 +19,7 @@ enum class ProtectionState
 class StatusBadge : public juce::Component
 {
 public:
-    StatusBadge() = default;
+    StatusBadge();
 
     // Reflects a state; paints on the next pass. Does not drive anything.
     void setState (ProtectionState newState);
@@ -29,6 +29,7 @@ public:
 
 private:
     ProtectionState state = ProtectionState::Idle;
+    juce::Font monoFont_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StatusBadge)
 };

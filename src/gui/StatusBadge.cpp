@@ -5,6 +5,11 @@
 namespace gui
 {
 
+StatusBadge::StatusBadge()
+    : monoFont_ (az::theme::monoFont())
+{
+}
+
 void StatusBadge::setState (ProtectionState newState)
 {
     if (state == newState)
@@ -35,7 +40,7 @@ void StatusBadge::paint (juce::Graphics& g)
                    (float) getHeight() * 0.5f - dotSize * 0.5f,
                    dotSize, dotSize);
 
-    g.setFont (monoFont());
+    g.setFont (monoFont_);
     g.drawText (label,
                 getLocalBounds().toFloat().withTrimmedLeft (dotSize + spacing),
                 juce::Justification::centredLeft);

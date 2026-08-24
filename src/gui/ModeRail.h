@@ -75,6 +75,10 @@ private:
 
     Orientation orientation_;
 
+    // True while a confirmation is still unanswered: a second CLEAR ALL
+    // click must not stack another dialog (and so fire two confirms).
+    bool confirmPending_ = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModeRail)
 };
 

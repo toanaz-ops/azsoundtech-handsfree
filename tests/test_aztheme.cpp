@@ -2,10 +2,10 @@
 //
 // Two things are proven here:
 //
-// 1. The theme's contract: applyTo() really installs an AzLookAndFeel where a
-//    component can find it, the token values match the approved palette
-//    exactly, and the mono font exists for the Hz/dB/countdown draws that
-//    later tasks add.
+// 1. The theme's tokens: the values match the approved palette exactly, and
+//    the mono font exists for the Hz/dB/countdown draws that later tasks add.
+//    (The former applyTo() contract tests were removed with the dead
+//    AzTheme::applyTo path; MainComponent owns its LookAndFeel directly.)
 //
 // 2. The rule that keeps it true: NO hex colour literal anywhere in src/gui
 //    outside src/gui/theme/. The test reads the sources as text at run time,
@@ -25,38 +25,11 @@
 #include <vector>
 
 //==============================================================================
-// applyTo contract.
-
-TEST (AzTheme, ApplyToMakesTheComponentFindAnAzLookAndFeel)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    az::theme::AzLookAndFeel laf;
-    juce::Component component;
-
-    EXPECT_EQ (dynamic_cast<az::theme::AzLookAndFeel*> (&component.getLookAndFeel()), nullptr);
-
-    laf.applyTo (&component);
-
-    // The whole point of applyTo: after it returns, the component's look and
-    // feel IS the theme, so every findColour() in the subtree resolves to the
-    // Console-industrial palette.
-    EXPECT_NE (dynamic_cast<az::theme::AzLookAndFeel*> (&component.getLookAndFeel()), nullptr);
-}
-
-TEST (AzTheme, ApplyToToleratesNull)
-{
-    // A guard, not behaviour: callers pass components they were handed.
-    az::theme::AzLookAndFeel laf;
-    laf.applyTo (nullptr);
-    SUCCEED();
-}
+// The application window installs the theme's LookAndFeel exactly once, in
+// its own constructor (decision D-3 of task 0).
 
 TEST (AzTheme, MainComponentAppliesTheAzLookAndFeel)
 {
-    // Decision D-3 of task 0: the application window replaces JUCE's default
-    // LookAndFeel exactly once, in its constructor, and everything below it
-    // inherits the theme through the normal getLookAndFeel() chain.
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
     MainComponent app;

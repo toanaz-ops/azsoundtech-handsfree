@@ -253,7 +253,7 @@ void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
 
-    g.setColour (juce::Colours::white);
+    g.setColour (az::theme::text);
     g.setFont (20.0f);
     g.drawText ("AZ Soundtech Hands-free",
                 getLocalBounds().removeFromTop (36),
