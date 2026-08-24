@@ -58,6 +58,8 @@ target_sources(HandsFree PRIVATE
     src/gui/ModeBar.h
     src/gui/ModeRail.cpp
     src/gui/ModeRail.h
+    src/gui/NotchListPanel.cpp
+    src/gui/NotchListPanel.h
     src/gui/StatusBadge.cpp
     src/gui/StatusBadge.h
     src/gui/SpectrumView.cpp

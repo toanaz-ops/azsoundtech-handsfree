@@ -21,6 +21,7 @@ add_executable(HandsFreeTests
     test_gui_wiring.cpp
     test_moderail.cpp
     test_spectrumview.cpp
+    test_notchlistpanel.cpp
     test_aztheme.cpp
     test_presetmanager.cpp
     test_licensemanager.cpp
@@ -43,6 +44,7 @@ add_executable(HandsFreeTests
     ../src/gui/ModeRail.cpp
     ../src/gui/StatusBadge.cpp
     ../src/gui/SpectrumView.cpp
+    ../src/gui/NotchListPanel.cpp
     ../src/gui/StatusBar.cpp
     ../src/gui/theme/AzTheme.cpp
     ../src/dsp/Biquad.cpp

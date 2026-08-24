@@ -20,8 +20,6 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include <memory>
-
 #include "app/AudioEngine.h"
 #include "app/NotchController.h"
 #include "dsp/ClockSource.h"
@@ -29,6 +27,7 @@
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "gui/ModeRail.h"
+#include "gui/NotchListPanel.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
@@ -74,6 +73,13 @@ public:
     void setLayout (gui::ScreenLayout layout);
     [[nodiscard]] gui::ScreenLayout getLayout() const { return layout_; }
 
+    // The notch list strip. L2 Performance shows it only while toggled open
+    // (slide-out); L1 Classic pins it as a fixed bottom strip regardless of
+    // this flag (spec section 2). The panel itself is layout-agnostic --
+    // visibility and bounds are decided here and in resized().
+    void setNotchListOpen (bool open);
+    [[nodiscard]] bool isNotchListOpen() const { return notchListOpen_; }
+
     // The drawer (device controls + settings row). Public so tests can drive
     // its toggle buttons like any other component interface.
     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
@@ -82,6 +88,7 @@ public:
     // without reaching into private members.
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
+    [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -127,9 +134,10 @@ private:
     gui::StatusBadge  statusBadge_;      // hosted inside deviceDrawer_'s header
     gui::DeviceDrawer deviceDrawer_;
 
-    // Ruling R-1: NotchListPanel does not exist yet (Task 4). This slot stays
-    // null this lane; resized() tolerates that.
-    std::unique_ptr<juce::Component> notchListSlot_;
+    // Task 4: the live notch list (reads notchController_ above, so it is
+    // declared after it). Replaces the null slot reserved by ruling R-1.
+    gui::NotchListPanel notchListPanel_;
+    bool                notchListOpen_ = false;   // L2 slide-out state
 
     // Layout persistence (spec section 3): the choice survives app restarts.
     juce::ApplicationProperties appProperties_;
