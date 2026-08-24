@@ -26,6 +26,9 @@
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
+#include "test_gui_helpers.h"
+
+using gui_test::TempLayoutStore;
 
 #include <vector>
 
@@ -153,39 +156,8 @@ TEST (MainComponent, RequestingAModeReachesTheEngine)
 // sections 0 G-2, 2 and 3; test table row "Layout switch").
 //
 // Isolation: every layout test redirects persistence to a scratch directory
-// under %TEMP% via an ABSOLUTE folderName (File::getChildFile returns an
-// absolute path as-is, so PropertiesFile::Options::getDefaultFile resolves
-// there instead of %APPDATA%). A real user's saved choice is never read or
-// clobbered, and no restore step can be forgotten.
-
-namespace
-{
-class TempLayoutStore
-{
-public:
-    TempLayoutStore()
-        : directory (juce::File::getSpecialLocation (juce::File::tempDirectory)
-                         .getChildFile ("HandsFreeLayoutTests_"
-                                        + juce::String (juce::Random::getSystemRandom().nextInt())))
-    {
-        directory.createDirectory();
-    }
-
-    ~TempLayoutStore() { directory.deleteRecursively(); }
-
-    juce::PropertiesFile::Options options() const
-    {
-        juce::PropertiesFile::Options o;
-        o.applicationName = "AZ Soundtech Hands-free";   // same file NAME as production
-        o.filenameSuffix  = "xml";
-        o.folderName      = directory.getFullPathName(); // absolute: wins over app-data dir
-        return o;
-    }
-
-private:
-    juce::File directory;
-};
-} // namespace
+// under %TEMP% via TempLayoutStore (test_gui_helpers.h). A real user's saved
+// choice is never read or clobbered, and no restore step can be forgotten.
 
 TEST (MainComponent, DefaultLayoutIsPerformance)
 {

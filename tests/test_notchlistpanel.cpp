@@ -24,6 +24,10 @@
 #include "dsp/LockFreeRingBuffer.h"
 #include "gui/ModeRail.h"
 #include "gui/NotchListPanel.h"
+#include "test_gui_helpers.h"
+
+using gui_test::paintHeadless;
+using gui_test::TempLayoutStore;
 
 #include <cmath>
 #include <cstdint>
@@ -75,13 +79,9 @@ struct TwoNotchController
     }
 };
 
-void paintHeadless (juce::Component& component, const int width, const int height)
-{
-    juce::Image image (juce::Image::ARGB, width, height, true);
-    juce::Graphics g (image);
-    component.setSize (width, height);
-    component.paint (g);   // must simply not crash
-}
+// Persistence isolation: TempLayoutStore (scratch %TEMP% properties store, so
+// a real user's saved layout is never read or clobbered) lives in
+// test_gui_helpers.h and is pulled in by the using-declarations above.
 
 // Reaches the rail through the public component tree (any existing child ->
 // its parent -> siblings). MainComponent.h was write-locked by a parallel
@@ -96,35 +96,6 @@ gui::ModeRail* railOf (MainComponent& app)
                     return rail;
     return nullptr;
 }
-
-// Same isolation trick as TempLayoutStore in test_gui_wiring.cpp: persistence
-// redirected into a scratch directory so a real user's saved layout is never
-// read or clobbered.
-class TempLayoutStore
-{
-public:
-    TempLayoutStore()
-        : directory (juce::File::getSpecialLocation (juce::File::tempDirectory)
-                         .getChildFile ("HandsFreeNotchListTests_"
-                                        + juce::String (juce::Random::getSystemRandom().nextInt())))
-    {
-        directory.createDirectory();
-    }
-
-    ~TempLayoutStore() { directory.deleteRecursively(); }
-
-    juce::PropertiesFile::Options options() const
-    {
-        juce::PropertiesFile::Options o;
-        o.applicationName = "AZ Soundtech Hands-free";
-        o.filenameSuffix  = "xml";
-        o.folderName      = directory.getFullPathName(); // absolute wins over app-data
-        return o;
-    }
-
-private:
-    juce::File directory;
-};
 
 } // namespace
 
@@ -141,6 +112,14 @@ TEST (NotchListPanelFormatting, FrequencyAtOrAboveOneKilohertzUsesKilohertz)
 {
     EXPECT_EQ (gui::NotchListPanel::formatFrequency (2400.0f).toStdString(), "2.4 kHz");
     EXPECT_EQ (gui::NotchListPanel::formatFrequency (1000.0f).toStdString(), "1.0 kHz");
+}
+
+// Boundary: 999.5 Hz ROUNDS to 1000, so it must render through the kHz
+// path as "1.0 kHz" -- not as "1000 Hz" from inside the Hz branch.
+TEST (NotchListPanelFormatting, FrequencyRoundingUpToOneKilohertzUsesKilohertz)
+{
+    EXPECT_EQ (gui::NotchListPanel::formatFrequency (999.5f).toStdString(), "1.0 kHz");
+    EXPECT_EQ (gui::NotchListPanel::formatFrequency (999.4f).toStdString(), "999 Hz");
 }
 
 TEST (NotchListPanelFormatting, DepthUsesTheTypographicMinusAndOneDecimal)

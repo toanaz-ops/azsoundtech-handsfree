@@ -206,12 +206,12 @@ void ModeRail::resized()
     else
     {
         // Horizontal: the countdown takes the leftover width between the
-        // mode cells and CLEAR ALL.
+        // mode cells and CLEAR ALL. No LIST cell here: the toggle only
+        // exists in L2/Performance (MainComponent::applyLayoutState), whose
+        // rail is always vertical, so a horizontal append would be dead code.
         labelItem.withFlex (1.0f).withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
         fb.items.add (cellOf (soundcheckButton), cellOf (autoButton),
                       cellOf (bypassButton), labelItem, cellOf (clearAllButton));
-        if (listToggleButton.isVisible())
-            fb.items.add (cellOf (listToggleButton));
     }
 
     fb.performLayout (getLocalBounds());

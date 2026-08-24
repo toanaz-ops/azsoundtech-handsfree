@@ -113,7 +113,10 @@ void NotchListPanel::refreshFromSnapshot()
 
 juce::String NotchListPanel::formatFrequency (const float hz)
 {
-    if (hz < 1000.0f)
+    // The Hz branch rounds to whole hertz, so the branch itself has to test
+    // the ROUNDED value: 999.5 rounds to 1000 and must come out as "1.0 kHz",
+    // not "1000 Hz".
+    if (hz + 0.5f < 1000.0f)
         return juce::String ((int) (hz + 0.5f)) + " Hz";
     return juce::String (hz / 1000.0f, 1) + " kHz";
 }
