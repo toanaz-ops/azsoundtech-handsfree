@@ -19,6 +19,7 @@ add_executable(HandsFreeTests
     test_audioengine.cpp
     test_deviceviewmodel.cpp
     test_gui_wiring.cpp
+    test_moderail.cpp
     test_spectrumview.cpp
     test_aztheme.cpp
     test_presetmanager.cpp
@@ -38,6 +39,8 @@ add_executable(HandsFreeTests
     ../src/gui/DeviceViewModel.cpp
     ../src/gui/DevicePanel.cpp
     ../src/gui/ModeBar.cpp
+    ../src/gui/ModeRail.cpp
+    ../src/gui/StatusBadge.cpp
     ../src/gui/SpectrumView.cpp
     ../src/gui/StatusBar.cpp
     ../src/gui/theme/AzTheme.cpp
