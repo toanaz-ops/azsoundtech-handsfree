@@ -8,6 +8,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [Brief verification](brief-verification-2026-08-21.md) — brief v2 "đã sửa" vẫn còn 3 lỗi; kiểm chứng cả tên API, hợp đồng ngữ nghĩa VÀ số học của assertion.
 - [Worktree junction incident](worktree-junction-incident-2026-08-23.md) — `git worktree remove` đi theo junction và xóa JUCE dùng chung (lần 3); kiểm tra `LinkType` và rmdir junction TRƯỚC khi remove.
 - [Bridge lifecycle](bridge-lifecycle-devicepanel-2026-08-23.md) — đường restart thiết bị thật nằm ở DevicePanel; mọi đường restart mới phải bọc hook `onBeforeRestart/onAfterRestart` để giữ §6.5 (stop controller trước khi clear ring).
+- [Multi-slot routing lessons](multi-slot-routing-lessons-2026-08-24.md) — by-value member array segfault; "legacy preserved" phải kèm điều kiện device; drain budget là per-callback không per-ring; width semantics đồng bộ một điểm.
 
 ## Conventions (tóm tắt)
 
@@ -15,4 +16,4 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - Branch: `feat/<tên>` / `fix/<tên>` — 1 session = 1 branch = 1 worktree (`.worktrees/`)
 - Merge: qua Pull Request + review, không commit thẳng vào main
 - Secret-scan hook: chạy tự động mỗi commit — không commit `.env`, `*.key`, token
-- Stack: C++ / JUCE / CMake / MSVC / ASIO — xem `docs/superpowers/specs/`- [Multi-slot routing lessons](multi-slot-routing-lessons-2026-08-24.md) - by-value member array segfault, 'legacy preserved' phai ke theo device, drain budget per-callback khong per-ring, width semantics dong bo mot diem.
+- Stack: C++ / JUCE / CMake / MSVC / ASIO — xem `docs/superpowers/specs/`
