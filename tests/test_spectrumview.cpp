@@ -17,6 +17,7 @@
 #include "dsp/ClockSource.h"
 #include "dsp/Detector.h"
 #include "dsp/LockFreeRingBuffer.h"
+#include "gui/RtaProcessing.h"
 #include "gui/SpectrumView.h"
 #include "test_gui_helpers.h"
 
@@ -189,4 +190,83 @@ TEST (SpectrumView, LoudMagnitudesAboveZeroDbClampInsideThePlotFrame)
     // The clamp actually ENGAGED for this loud signal -- without it at least
     // one point would sit strictly above 0.
     EXPECT_TRUE (sawTopClamp);
+}
+
+//==============================================================================
+// RtaProcessing -- the display-side maths behind the tuning toolbar
+// (bandwidth / averaging / peak hold). Header-only and GUI-free, so these
+// run without the ScopedJuceInitialiser_GUI.
+
+TEST (RtaProcessing, AverageAlphaOffIsOneAndLongerConstantsAreSmoother)
+{
+    // Off means "replace", not smooth: alpha 1.0.
+    EXPECT_FLOAT_EQ (rta::averageAlpha (rta::AverageMode::Off, 30.0f), 1.0f);
+
+    // 1 s at ~30 fps must be a gentle pull, not a near-copy...
+    const float a1 = rta::averageAlpha (rta::AverageMode::S1, 30.0f);
+    EXPECT_GT (a1, 0.0f);
+    EXPECT_LT (a1, 0.2f);
+
+    // ...and the longer the time constant, the smaller the per-frame weight.
+    const float a3  = rta::averageAlpha (rta::AverageMode::S3, 30.0f);
+    const float a10 = rta::averageAlpha (rta::AverageMode::S10, 30.0f);
+    EXPECT_LT (a3, a1);
+    EXPECT_LT (a10, a3);
+
+    // A degenerate frame rate must not produce NaN or a negative weight.
+    EXPECT_FLOAT_EQ (rta::averageAlpha (rta::AverageMode::S1, 0.0f), 1.0f);
+}
+
+TEST (RtaProcessing, BandCentersMatchTheStandardSeries)
+{
+    const auto oct1 = rta::bandCenters (rta::BandMode::Octave1, 20.0f, 20000.0f);
+    ASSERT_EQ (oct1.size(), (std::size_t) 10);
+    EXPECT_FLOAT_EQ (oct1.front(), 31.5f);
+    EXPECT_FLOAT_EQ (oct1.back(), 16000.0f);
+
+    const auto oct3 = rta::bandCenters (rta::BandMode::Octave3, 20.0f, 20000.0f);
+    ASSERT_EQ (oct3.size(), (std::size_t) 31);
+    EXPECT_FLOAT_EQ (oct3.front(), 20.0f);
+    EXPECT_FLOAT_EQ (oct3.back(), 20000.0f);
+
+    for (const auto* centers : { &oct1, &oct3 })
+    {
+        for (std::size_t i = 0; i < centers->size(); ++i)
+        {
+            EXPECT_GE ((*centers)[i], 20.0f) << "index " << i;
+            EXPECT_LE ((*centers)[i], 20000.0f) << "index " << i;
+            if (i > 0)
+                EXPECT_GT ((*centers)[i], (*centers)[i - 1]) << "index " << i;
+        }
+    }
+
+    // Line mode has no bands at all.
+    EXPECT_TRUE (rta::bandCenters (rta::BandMode::Line, 20.0f, 20000.0f).empty());
+}
+
+TEST (RtaProcessing, BandLevelsSumPowerWithinABand)
+{
+    // hzPerBin = 10 Hz: bin 100 sits at exactly 1 kHz, inside the 1 kHz octave
+    // band (edges 707..1414 Hz). Band index of the 1 kHz center is 5
+    // (31.5 .. 16000 series).
+    std::vector<float> mags (512, 0.0f);
+    const float mag = 0.5f;   // -6.02 dB
+    mags[100] = mag;
+
+    std::vector<float> out ((std::size_t) 10, -999.0f);
+    rta::bandLevelsDb (rta::BandMode::Octave1, mags.data(), (int) mags.size(),
+                       10.0f, 20.0f, 20000.0f, out.data());
+
+    const float singleBinDb = 20.0f * std::log10 (mag);
+    EXPECT_NEAR (out[5], singleBinDb, 0.01f);
+
+    // Bands with no energy report the documented silence floor, and bins
+    // outside [minHz, maxHz] are ignored (bin 2100 -> 21 kHz > maxHz).
+    EXPECT_FLOAT_EQ (out[0], rta::kSilenceDb);
+
+    // A second equal bin in the SAME band adds in POWER: +10*log10(2) dB.
+    mags[110] = mag;   // 1.1 kHz, still inside 707..1414 Hz
+    rta::bandLevelsDb (rta::BandMode::Octave1, mags.data(), (int) mags.size(),
+                       10.0f, 20.0f, 20000.0f, out.data());
+    EXPECT_NEAR (out[5], singleBinDb + 10.0f * std::log10 (2.0f), 0.01f);
 }

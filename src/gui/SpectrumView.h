@@ -41,6 +41,7 @@
 
 #include "app/NotchController.h"
 #include "dsp/Detector.h"
+#include "gui/RtaProcessing.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -83,12 +84,17 @@ public:
     }
 
     void paint (juce::Graphics&) override;
+    void resized() override;
 
 private:
     void timerCallback() override;
 
     // Rebuilds the normalised polyline from snapshot_. Message thread only.
     void rebuildGeometry();
+
+    // Re-derives bandCenterHz_ / edges for the current bandMode_ (message
+    // thread: constructor and ComboBox onChange only, never paint).
+    void applyBandMode();
 
     // Log-frequency / dB mappings into a given plot rectangle.
     static float xForHz (float hz, const juce::Rectangle<float>& plot);
@@ -102,6 +108,43 @@ private:
     // Normalised [0..1] x/y of the spectrum polyline, pre-sized in the ctor.
     std::vector<juce::Point<float>> spectrumPoints_;
     juce::Path markerPath_;               // reused every paint, never grows
+
+    // Tuning-toolbar state (display-only: changing these never restarts the
+    // audio engine, detector or notch chain).
+    rta::BandMode bandMode_       { rta::BandMode::Line };
+    rta::AverageMode avgMode_     { rta::AverageMode::Off };
+    bool peakHold_                = false;
+
+    // Per-frame display buffers, reserved once in the constructor. newDb_ is
+    // this frame's raw dB; displayDb_ is what gets drawn (raw or EMA-smoothed
+    // towards it); peakDb_ is the decaying peak-hold trace; displayLin_
+    // mirrors displayDb_ back to linear so rta::bandLevelsDb can power-sum
+    // it; bandLevelsDb_ holds one level per active octave band.
+    std::vector<float> newDb_;
+    std::vector<float> displayDb_;
+    std::vector<float> peakDb_;
+    std::vector<float> displayLin_;
+    std::vector<float> bandLevelsDb_;
+
+    // Band geometry for the octave-bar modes, recomputed on mode change only:
+    // centers plus each band's lower/upper -3 dB-style edges in Hz.
+    std::vector<float> bandCenterHz_;
+    std::vector<float> bandEdgeLowHz_;
+    std::vector<float> bandEdgeHighHz_;
+
+    // Peak-hold trace, normalised exactly like spectrumPoints_. Empty unless
+    // peak hold is on.
+    std::vector<juce::Point<float>> peakPoints_;
+    bool peakHoldWasOn_ = false;          // seeds peakDb_ on the rising edge
+
+    // Toolbar controls. The view paints its plot around them; they live in a
+    // thin strip across the top (kToolbarHeight px, reserved in resized()).
+    static constexpr int kToolbarHeight = 30;
+    juce::Label      bandwidthLabel_;
+    juce::ComboBox   bandwidthBox_;
+    juce::Label      averageLabel_;
+    juce::ComboBox   averageBox_;
+    juce::ToggleButton peakHoldButton_;
 
     juce::Font tickFont_;                 // mono: axis numbers
     juce::Font bodyFont_;                 // "no signal" text
