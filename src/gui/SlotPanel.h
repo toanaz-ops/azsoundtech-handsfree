@@ -73,6 +73,15 @@ public:
     [[nodiscard]] Row& getRowForTest (int slotIndex) { return rows_[(std::size_t) slotIndex]; }
 
     static constexpr int kRowHeight = 26;
+    static constexpr int kCaptionHeight = 18;
+
+    // Height of the caption row plus all 8 slot rows. A hosting Viewport does
+    // NOT size its content by itself -- the parent must give the panel this
+    // height (and the visible width) or the table renders as an empty rect.
+    [[nodiscard]] static constexpr int getPreferredHeight()
+    {
+        return kCaptionHeight + kMaxSlots * kRowHeight;
+    }
 
     void resized() override;
 

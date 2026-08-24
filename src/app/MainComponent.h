@@ -107,6 +107,10 @@ public:
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
+    // The routing table's CONTENT rect -- a zero height here means the
+    // Viewport was never given a sized child (the 2026-08-24 invisible-table
+    // bug), so tests pin it to the panel's preferred height.
+    [[nodiscard]] juce::Rectangle<int> slotTableBoundsForTest() const { return slotPanel_.getBounds(); }
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range

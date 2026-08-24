@@ -23,11 +23,9 @@ constexpr int kNotchListHeight = 120;
 // ApplicationProperties key for the persisted layout (spec G-2 / section 3).
 constexpr const char* kLayoutPropertyKey = "layout";
 
-// Preferred height of the slot routing table (caption + 8 x SlotPanel::
-// kRowHeight). resized() clamps this against the space left after the
-// spectrum's own minimum is protected -- a short window scrolls the table,
-// it never starves the spectrum.
-constexpr int kSlotPanelPreferredHeight = 18 + 8 * gui::SlotPanel::kRowHeight;
+// Preferred height of the slot routing table: exactly what the panel itself
+// reports for caption + 8 rows, so the two can never drift apart.
+constexpr int kSlotPanelPreferredHeight = gui::SlotPanel::getPreferredHeight();
 } // namespace
 
 MainComponent::MainComponent (
@@ -521,6 +519,13 @@ void MainComponent::resized()
     {
         slotScroller_.setBounds (area.removeFromTop (slotHeight));
         area.removeFromTop (gap);
+
+        // A Viewport never sizes its content by itself: without this the
+        // table renders as an empty black rect (the bug the 2026-08-24
+        // screenshots showed). Full preferred height; the viewport adds a
+        // scrollbar only when the window is shorter than the table.
+        slotPanel_.setSize (juce::jmax (1, slotScroller_.getMaximumVisibleWidth()),
+                            gui::SlotPanel::getPreferredHeight());
     }
 
     if (layout_ == gui::ScreenLayout::Performance)

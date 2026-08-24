@@ -72,7 +72,10 @@ void DeviceDrawer::applyLayoutMode (ScreenLayout layout)
 {
     collapsible_ = (layout == ScreenLayout::Performance);
     gearButton_.setVisible (collapsible_);
-    open_ = ! collapsible_;   // L1 top bar always shows content; L2 starts closed
+    // Both layouts start OPEN: the device row and the routing table beneath
+    // it are the first things a soundman needs, and an invisible drawer reads
+    // as "the app lost my interface". L2 stays collapsible via the gear.
+    open_ = true;
 
     wrapped_.setVisible (open_);
     resized();

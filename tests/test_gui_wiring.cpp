@@ -218,11 +218,20 @@ TEST (MainComponent, GearToggleRelayoutsTheParentSoContentAppears)
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
     TempLayoutStore store;
-    MainComponent app (&store.options());   // L2 default, drawer starts closed
+    MainComponent app (&store.options());   // L2 default; drawer starts OPEN
+                                            // (2026-08-24 owner decision: an
+                                            // invisible device row reads as a
+                                            // broken app), L2 still collapsible.
 
     auto& drawer = app.getDeviceDrawer();
-    ASSERT_FALSE (drawer.isOpen());
-    ASSERT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
+    ASSERT_TRUE (drawer.isOpen());
+    ASSERT_FALSE (drawer.wrappedBoundsForTest().isEmpty());
+
+    drawer.setOpen (false);
+
+    EXPECT_FALSE (drawer.isOpen());
+    EXPECT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
+    EXPECT_EQ (drawer.getBounds().getHeight(), gui::DeviceDrawer::kHeaderHeight);
 
     drawer.setOpen (true);
 
@@ -234,12 +243,24 @@ TEST (MainComponent, GearToggleRelayoutsTheParentSoContentAppears)
     EXPECT_EQ (openBounds.getHeight(), gui::DeviceDrawer::kContentHeight);
     EXPECT_EQ (drawer.getBounds().getHeight(),
                gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight);
+}
 
-    drawer.setOpen (false);
+TEST (MainComponent, SlotRoutingTableGetsSizedContentInsideTheViewport)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    EXPECT_FALSE (drawer.isOpen());
-    EXPECT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
-    EXPECT_EQ (drawer.getBounds().getHeight(), gui::DeviceDrawer::kHeaderHeight);
+    TempLayoutStore store;
+    MainComponent app (&store.options());
+
+    app.setSize (900, 900);
+    app.resized();   // headless: no peer, so drive the layout pass directly
+
+    // The Viewport bug (2026-08-24) left the table a 0x0 rect -- an empty
+    // black band where the routing controls should be. Pin the content to the
+    // panel's full preferred height and a real width.
+    const auto table = app.slotTableBoundsForTest();
+    EXPECT_EQ (table.getHeight(), gui::SlotPanel::getPreferredHeight());
+    EXPECT_GT (table.getWidth(), 0);
 }
 
 TEST (MainComponent, MinimumSizeKeepsRailAndSpectrumDisjoint)
