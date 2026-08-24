@@ -152,17 +152,50 @@ TEST (MainComponent, RequestingAModeReachesTheEngine)
 // Task 3 -- L1/L2 layouts, DeviceDrawer, persistence (spec 2026-08-23
 // sections 0 G-2, 2 and 3; test table row "Layout switch").
 //
-// Note on the persistence tests: the layout is stored in the SAME file the
-// real app uses (%APPDATA%\AZ Soundtech). These tests restore the default
-// (Performance) when they finish so a human's own choice is not clobbered.
+// Isolation: every layout test redirects persistence to a scratch directory
+// under %TEMP% via an ABSOLUTE folderName (File::getChildFile returns an
+// absolute path as-is, so PropertiesFile::Options::getDefaultFile resolves
+// there instead of %APPDATA%). A real user's saved choice is never read or
+// clobbered, and no restore step can be forgotten.
+
+namespace
+{
+class TempLayoutStore
+{
+public:
+    TempLayoutStore()
+        : directory (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("HandsFreeLayoutTests_"
+                                        + juce::String (juce::Random::getSystemRandom().nextInt())))
+    {
+        directory.createDirectory();
+    }
+
+    ~TempLayoutStore() { directory.deleteRecursively(); }
+
+    juce::PropertiesFile::Options options() const
+    {
+        juce::PropertiesFile::Options o;
+        o.applicationName = "AZ Soundtech Hands-free";   // same file NAME as production
+        o.filenameSuffix  = "xml";
+        o.folderName      = directory.getFullPathName(); // absolute: wins over app-data dir
+        return o;
+    }
+
+private:
+    juce::File directory;
+};
+} // namespace
 
 TEST (MainComponent, DefaultLayoutIsPerformance)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    MainComponent app;
+    TempLayoutStore store;
+    MainComponent app (&store.options());
 
-    // G-2: L2 Performance is the shipped default.
+    // G-2: L2 Performance is the shipped default -- even when a real user on
+    // this machine has Classic saved.
     EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
 }
 
@@ -170,8 +203,10 @@ TEST (MainComponent, LayoutSwitchPersistsAcrossReconstruction)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
+    TempLayoutStore store;
+
     {
-        MainComponent app;
+        MainComponent app (&store.options());
         app.setLayout (gui::ScreenLayout::Classic);
 
         // The in-memory value AND the persisted property must agree right now.
@@ -179,21 +214,21 @@ TEST (MainComponent, LayoutSwitchPersistsAcrossReconstruction)
     }
 
     {
-        // "Restart": a fresh component must come back in the saved layout.
-        MainComponent reopened;
+        // "Restart": a fresh component reading the SAME storage must come back
+        // in the saved layout.
+        MainComponent reopened (&store.options());
         EXPECT_EQ (reopened.getLayout(), gui::ScreenLayout::Classic);
-
-        // Leave the default in place for everyone after this test.
-        reopened.setLayout (gui::ScreenLayout::Performance);
-        EXPECT_EQ (reopened.getLayout(), gui::ScreenLayout::Performance);
     }
+    // Scratch directory removed with the store: nothing to restore.
 }
 
 TEST (MainComponent, DrawerSettingsToggleSwitchesTheLayout)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    MainComponent app;
+    TempLayoutStore store;
+    MainComponent app (&store.options());
+
     ASSERT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
     EXPECT_TRUE (app.getDeviceDrawer().performanceButton_.getToggleState());
 
@@ -204,15 +239,43 @@ TEST (MainComponent, DrawerSettingsToggleSwitchesTheLayout)
 
     EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Classic);
     EXPECT_TRUE (app.getDeviceDrawer().classicButton_.getToggleState());
+}
 
-    app.setLayout (gui::ScreenLayout::Performance);   // restore the default
+TEST (MainComponent, GearToggleRelayoutsTheParentSoContentAppears)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    TempLayoutStore store;
+    MainComponent app (&store.options());   // L2 default, drawer starts closed
+
+    auto& drawer = app.getDeviceDrawer();
+    ASSERT_FALSE (drawer.isOpen());
+    ASSERT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
+
+    drawer.setOpen (true);
+
+    // The parent must have re-run its resized(): the wrapped DevicePanel gets
+    // a real rect NOW, not after some unrelated window resize.
+    EXPECT_TRUE (drawer.isOpen());
+    const auto openBounds = drawer.wrappedBoundsForTest();
+    EXPECT_FALSE (openBounds.isEmpty());
+    EXPECT_EQ (openBounds.getHeight(), gui::DeviceDrawer::kContentHeight);
+    EXPECT_EQ (drawer.getBounds().getHeight(),
+               gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight);
+
+    drawer.setOpen (false);
+
+    EXPECT_FALSE (drawer.isOpen());
+    EXPECT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
+    EXPECT_EQ (drawer.getBounds().getHeight(), gui::DeviceDrawer::kHeaderHeight);
 }
 
 TEST (MainComponent, MinimumSizeKeepsRailAndSpectrumDisjoint)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    MainComponent app;
+    TempLayoutStore store;
+    MainComponent app (&store.options());
 
     for (const auto layout : { gui::ScreenLayout::Classic, gui::ScreenLayout::Performance })
     {
@@ -234,8 +297,6 @@ TEST (MainComponent, MinimumSizeKeepsRailAndSpectrumDisjoint)
             << "rail and spectrum overlap at minimum window size, layout "
             << (int) layout;
     }
-
-    app.setLayout (gui::ScreenLayout::Performance);   // restore the default
 }
 
 //==============================================================================

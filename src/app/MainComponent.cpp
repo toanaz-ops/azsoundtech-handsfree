@@ -16,7 +16,8 @@ constexpr int kMinSpectrumHeight = 120;
 constexpr const char* kLayoutPropertyKey = "layout";
 } // namespace
 
-MainComponent::MainComponent()
+MainComponent::MainComponent (
+    const juce::PropertiesFile::Options* propertyOptionsOverride)
     : notchController_ (engine_.getTapBuffer(), engine_.getCommandQueue(), systemClock_)
     , spectrumView_ (notchController_)
     , modeRail_ (gui::ModeRail::Orientation::Vertical)
@@ -70,6 +71,9 @@ MainComponent::MainComponent()
     propertyOptions.applicationName     = "AZ Soundtech Hands-free";
     propertyOptions.filenameSuffix      = "xml";
     propertyOptions.folderName          = "AZ Soundtech";
+
+    if (propertyOptionsOverride != nullptr)
+        propertyOptions = *propertyOptionsOverride;
     appProperties_.setStorageParameters (propertyOptions);
 
     {

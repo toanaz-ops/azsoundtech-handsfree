@@ -44,7 +44,11 @@ public:
     static constexpr int kMinimumWidth  = 720;
     static constexpr int kMinimumHeight = 560;
 
-    MainComponent();
+    // propertyOptionsOverride lets tests redirect the layout persistence to a
+    // scratch directory (e.g. an absolute folderName under %TEMP%) instead of
+    // the real user settings under %APPDATA%\AZ Soundtech (null = production).
+    explicit MainComponent (
+        const juce::PropertiesFile::Options* propertyOptionsOverride = nullptr);
     ~MainComponent() override;
 
     // The engine this window owns. The bridge design (section 6) needs this to

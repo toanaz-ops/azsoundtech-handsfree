@@ -83,6 +83,12 @@ void DeviceDrawer::setOpen (bool shouldOpen)
     open_ = shouldOpen;
     wrapped_.setVisible (open_);
     resized();
+
+    // The PARENT sizes this drawer from getPreferredHeight(), so only our own
+    // resized() leaves the content squeezed out until some unrelated window
+    // resize -- the parent must re-run its layout too.
+    if (auto* parent = getParentComponent())
+        parent->resized();
 }
 
 void DeviceDrawer::toggleOpen()
@@ -151,11 +157,15 @@ void DeviceDrawer::resized()
 
     header.performLayout (headerArea);
 
-    // Content sits under the header; when the parent gave the drawer only
-    // header height (drawer closed in L2) this rect is empty.
-    wrapped_.setBounds (getLocalBounds()
-                            .removeFromTop (kHeaderHeight + kContentHeight)
-                            .removeFromBottom (kContentHeight));
+    // Content sits under the header. While closed there IS no content area --
+    // assigning a leftover rect here would hand the panel geometry it must
+    // not paint or hit-test into.
+    if (open_)
+        wrapped_.setBounds (getLocalBounds()
+                                .removeFromTop (kHeaderHeight + kContentHeight)
+                                .removeFromBottom (kContentHeight));
+    else
+        wrapped_.setBounds ({});
 }
 
 } // namespace gui
