@@ -5,11 +5,13 @@
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
                                   LockFreeRingBuffer<NotchCommand>& commands,
-                                  ClockSource& clock)
+                                  ClockSource& clock,
+                                  int slotId)
     : juce::Thread ("AZNotchDetector")
     , tap_ (tap)
     , commands_ (commands)
     , clock_ (clock)
+    , slotId_ (slotId)
     , detector_ (48000.0)
     , lastPollMs_ (clock.nowMs())
 {
@@ -34,6 +36,13 @@ void NotchController::stop (int timeoutMs)
     if (! isThreadRunning())
         return;
     stopThread (timeoutMs);
+}
+
+void NotchController::setWidth (int lanes)
+{
+    // Precondition: the detector thread is STOPPED (see header comment).
+    // No lock: width_ has no concurrent reader while run() is not running.
+    width_ = std::clamp (lanes, 1, 2);
 }
 
 void NotchController::run()
@@ -62,7 +71,8 @@ bool NotchController::setNotch (int channel, int index,
 
     const NotchCommand cmd { NotchCommandType::Set,
                              (std::uint8_t) channel, (std::uint8_t) index,
-                             (float) frequency, (float) Q, (float) depthDB };
+                             (float) frequency, (float) Q, (float) depthDB,
+                             slotId_ };
 
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
@@ -87,7 +97,7 @@ void NotchController::pushClearLocked (int channel, int index)
     n.active = false;
     outbox_.push_back ({ NotchCommandType::Clear,
                          (std::uint8_t) channel, (std::uint8_t) index,
-                         0.0f, 0.0f, 0.0f });
+                         0.0f, 0.0f, 0.0f, slotId_ });
 }
 
 void NotchController::clearNotch (int channel, int index)
@@ -111,23 +121,26 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
     int adopted = 0;
     for (const auto& p : notches)
     {
-        // Both channels or neither: a half-applied preset notch would leave
-        // one side unprotected while the GUI claims protection. setNotch
-        // validates before touching anything, so a failure here means the
-        // parameters were rejected -- skip the whole notch.
-        const bool left  = setNotch (0, p.index, p.freq, p.Q, p.depthDB, Origin::Preset);
-        const bool right = setNotch (1, p.index, p.freq, p.Q, p.depthDB, Origin::Preset);
+        // All width_ lanes or neither: a half-applied preset notch would
+        // leave one side unprotected while the GUI claims protection.
+        // setNotch validates before touching anything, so a failure here
+        // means the parameters were rejected -- skip the whole notch.
+        int appliedLanes = 0;
+        for (int lane = 0; lane < width_; ++lane)
+            if (setNotch (lane, p.index, p.freq, p.Q, p.depthDB, Origin::Preset))
+                ++appliedLanes;
 
-        if (left && right)
+        if (appliedLanes == width_)
         {
             ++adopted;
         }
-        else if (left != right)
+        else if (appliedLanes > 0)
         {
-            // Cannot happen today (validation depends only on slot + params,
-            // which are identical for both calls), but if it ever does,
-            // unwind the half-applied side rather than keep it.
-            clearNotch (left ? 0 : 1, p.index);
+            // Cannot happen today (validation depends only on index + params,
+            // which are identical across lanes), but if it ever does,
+            // unwind the half-applied lanes rather than keep them.
+            for (int lane = 0; lane < width_; ++lane)
+                clearNotch (lane, p.index);
         }
     }
     return adopted;
@@ -331,25 +344,28 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                 persistence_[(std::size_t) bin] = 0;
 
                 // KD-5: automatic notch params are fixed. KD-6: first index
-                // whose channel-0 model notch is inactive; BOTH channels take
+                // whose lane-0 model notch is inactive; ALL width_ lanes take
                 // that SAME index, or nothing.
                 const int slot = firstFreeSlotLocked();
                 if (slot >= 0)
                 {
                     const Origin origin = soundcheckActive() ? Origin::Soundcheck
                                                              : Origin::Detector;
-                    const bool left  = setNotch (0, slot, cand.frequencyHz,
-                                                 30.0, -12.0, origin);
-                    const bool right = setNotch (1, slot, cand.frequencyHz,
-                                                 30.0, -12.0, origin);
-                    // Partial-failure analysis: setNotch validates only slot
-                    // bounds + params + sample rate, identical across both
-                    // calls, so left != right has no realistic trigger today
-                    // (same reasoning as adoptPreset). If it ever happens,
-                    // unwind the half-applied side rather than leave one
-                    // channel unprotected while the GUI claims protection.
-                    if (left != right)
-                        clearNotch (left ? 0 : 1, slot);
+                    int appliedLanes = 0;
+                    for (int lane = 0; lane < width_; ++lane)
+                        if (setNotch (lane, slot, cand.frequencyHz,
+                                      30.0, -12.0, origin))
+                            ++appliedLanes;
+                    // Partial-failure analysis: setNotch validates only index
+                    // bounds + params + sample rate, identical across all
+                    // lanes, so a partial application has no realistic
+                    // trigger today (same reasoning as adoptPreset). If it
+                    // ever happens, unwind the half-applied lanes rather than
+                    // leave one lane unprotected while the GUI claims
+                    // protection.
+                    if (appliedLanes != width_ && appliedLanes > 0)
+                        for (int lane = 0; lane < width_; ++lane)
+                            clearNotch (lane, slot);
                 }
             }
         }

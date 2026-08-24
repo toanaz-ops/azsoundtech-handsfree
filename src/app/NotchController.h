@@ -77,7 +77,8 @@ public:
 
     NotchController (LockFreeRingBuffer<float>& tap,
                      LockFreeRingBuffer<NotchCommand>& commands,
-                     ClockSource& clock);
+                     ClockSource& clock,
+                     int slotId = 0);
 
     ~NotchController() override;
 
@@ -86,6 +87,14 @@ public:
     // clear the rings (bridge design §6.5 -- clear()'s precondition).
     void start();
     void stop (int timeoutMs);
+
+    // Routing-slot width: how many lanes (channels 0..width-1) THIS slot's
+    // controller drives. Accepts 1 or 2; anything else clamps into [1, 2].
+    // Default 2 (the legacy stereo behaviour). Message thread ONLY, and only
+    // while the detector thread is STOPPED -- same precondition as the policy
+    // entry points below; width_ is read unlocked by runOnce(), so writing it
+    // while the thread runs is a data race.
+    void setWidth (int lanes);
 
     // Policy entry points. Message thread. setNotch validates BEFORE touching
     // anything; false means nothing changed anywhere.
@@ -98,9 +107,9 @@ public:
     // Owner decision D-05: a preset loaded mid-show is ADOPTED -- its notches
     // enter the model with Origin::Preset and auto-release treats them like
     // any other notch (30 s un-reinforced -> released). Each preset notch is
-    // installed on BOTH channels (design §2 sizes the command burst as
-    // 2 x 16). Returns how many preset notches were adopted; a notch whose
-    // parameters fail validation on either channel is skipped entirely.
+    // installed on ALL width_ lanes of this slot (design §2 sizes the command
+    // burst as lanes x 16). Returns how many preset notches were adopted; a
+    // notch whose parameters fail validation on a lane is skipped entirely.
     int adoptPreset (const std::vector<PresetNotch>& notches);
 
     // KD-9: detection gating (Bypass must never place notches). Snapshot
@@ -177,6 +186,15 @@ private:
     LockFreeRingBuffer<float>&      tap_;
     LockFreeRingBuffer<NotchCommand>& commands_;
     ClockSource&                    clock_;
+
+    // Routing slot this controller owns; stamped onto EVERY NotchCommand it
+    // emits so the engine routes it to the right chain.
+    const int slotId_;
+    // Lanes driven by this controller (1 or 2). Written only via setWidth()
+    // with the detector thread stopped (see its comment); read from both
+    // threads afterwards, which is safe because the write happens-before the
+    // thread start/restart.
+    int width_ = 2;
 
     Detector detector_;
 

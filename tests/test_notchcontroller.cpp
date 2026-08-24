@@ -22,6 +22,36 @@ struct Harness {
     FakeClock clock;
     NotchController controller { tap, commands, clock };
 };
+
+// Same shape as Harness but with an explicit routing slot id.
+struct SlotHarness {
+    int slotId;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    FakeClock clock;
+    NotchController controller { tap, commands, clock, slotId };
+
+    explicit SlotHarness (int s) : slotId (s) {}
+};
+
+std::vector<PresetNotch> onePresetNotch (int index, double freq)
+{
+    PresetNotch n;
+    n.index   = index;
+    n.freq    = freq;
+    n.Q       = 30.0;
+    n.depthDB = -12.0;
+    return { n };
+}
+
+std::vector<PresetNotch> twoPresetNotches()
+{
+    PresetNotch a;
+    a.index = 0; a.freq = 1000.0; a.Q = 30.0; a.depthDB = -12.0;
+    PresetNotch b;
+    b.index = 1; b.freq = 1250.0; b.Q = 30.0; b.depthDB = -12.0;
+    return { a, b };
+}
 }
 
 TEST (NotchControllerValidation, RejectsBadParamsWithoutTouchingModelOrQueue)
@@ -481,4 +511,101 @@ TEST (NotchControllerDetection, SoundcheckNotchNeverAutoReleases)
 
     EXPECT_FALSE (h.controller.soundcheckActive());
     EXPECT_DOUBLE_EQ (h.controller.getSoundcheckRemainingMs(), 0.0);
+}
+
+// ===========================================================================
+// Multi-slot routing (task 4): every command carries its controller's slot
+// id, and only width_ lanes are driven.
+// ===========================================================================
+
+TEST (NotchControllerSlotAware, Width1SendsOneLaneTaggedWithSlotId)
+{
+    SlotHarness h (3);
+    h.controller.setWidth (1);
+
+    EXPECT_EQ (h.controller.adoptPreset (twoPresetNotches()), 2);
+    h.controller.runOnce();
+
+    // 2 notches x 1 lane = 2 commands (NOT 4).
+    ASSERT_EQ (h.commands.getAvailableRead(), 2u);
+    NotchCommand cmd {};
+    for (int i = 0; i < 2; ++i)
+    {
+        ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+        EXPECT_EQ (cmd.type, NotchCommandType::Set);
+        EXPECT_EQ (cmd.slot, 3);
+        EXPECT_EQ (cmd.channel, 0);   // lane 1 must never appear at width 1
+    }
+}
+
+TEST (NotchControllerSlotAware, SetWidthClampsIntoRange)
+{
+    {
+        SlotHarness h (0);
+        h.controller.setWidth (5);   // clamps to 2 lanes
+        EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (0, 1000.0)), 1);
+        h.controller.runOnce();
+        EXPECT_EQ (h.commands.getAvailableRead(), 2u);
+    }
+    {
+        SlotHarness h (0);
+        h.controller.setWidth (0);   // clamps up to 1 lane
+        EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (0, 1000.0)), 1);
+        h.controller.runOnce();
+        EXPECT_EQ (h.commands.getAvailableRead(), 1u);
+    }
+}
+
+TEST (NotchControllerSlotAware, DefaultsMatchLegacyBehaviour)
+{
+    Harness h;   // slotId 0, default width 2 -- exactly the old controller
+    EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (0, 1000.0)), 1);
+    h.controller.runOnce();
+
+    ASSERT_EQ (h.commands.getAvailableRead(), 2u);
+    NotchCommand cmd {};
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+    EXPECT_EQ (cmd.slot, 0);
+    EXPECT_EQ (cmd.channel, 0);
+    EXPECT_EQ (cmd.index, 0);
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+    EXPECT_EQ (cmd.slot, 0);
+    EXPECT_EQ (cmd.channel, 1);
+    EXPECT_EQ (cmd.index, 0);
+}
+
+TEST (NotchControllerDetection, DetectionCommandsCarrySlotIdOnBothLanes)
+{
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    FakeClock clock;
+    NotchController controller { tap, commands, clock, 5 };
+    controller.setDetectionActive (true);
+
+    auto pumpOne = [&] (const std::vector<float>& hop) {
+        ASSERT_EQ (tap.write (hop.data(), hop.size()), hop.size());
+        clock.advance (kBlockMs);
+        controller.runOnce();
+    };
+
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpOne (quiet.hop());
+
+    SineSource tone;
+    for (int i = 0; i < 40 && commands.getAvailableRead() < 2; ++i)
+        pumpOne (tone.hop());
+
+    ASSERT_GE (commands.getAvailableRead(), 2u);
+    NotchCommand cmd {};
+    bool sawLane0 = false, sawLane1 = false;
+    while (commands.read (&cmd, 1) == 1)
+    {
+        ASSERT_EQ (cmd.type, NotchCommandType::Set);
+        EXPECT_EQ (cmd.slot, 5) << "detection command not tagged with slot id";
+        if (cmd.channel == 0) sawLane0 = true;
+        if (cmd.channel == 1) sawLane1 = true;
+    }
+    EXPECT_TRUE (sawLane0);
+    EXPECT_TRUE (sawLane1);
 }
