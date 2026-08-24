@@ -55,6 +55,10 @@ MainComponent::MainComponent (
         return notchController_.getSoundcheckRemainingMs();
     };
 
+    // R-5: the rail's LIST cell slides the strip; the open/closed meaning is
+    // entirely this side's (L2 toggle vs L1 fixed strip).
+    modeRail_.onToggleNotchList = [this] (bool open) { setNotchListOpen (open); };
+
     deviceDrawer_.setStatusBadge (&statusBadge_);
     deviceDrawer_.onLayoutSelected = [this] (gui::ScreenLayout layout) { setLayout (layout); };
 
@@ -180,6 +184,12 @@ void MainComponent::setNotchListOpen (const bool open)
         return;
 
     notchListOpen_ = open;
+
+    // Keep the rail's LIST cell in step with programmatic changes. A click
+    // re-enters here already carrying the same state, and
+    // dontSendNotification cannot loop the callback.
+    modeRail_.listToggleButton.setToggleState (open, juce::dontSendNotification);
+
     resized();
 }
 
@@ -193,6 +203,10 @@ void MainComponent::applyLayoutState (gui::ScreenLayout layout)
 
     deviceDrawer_.applyLayoutMode (layout);
     deviceDrawer_.setSelectedLayout (layout);
+
+    // R-5: the LIST toggle belongs to L2 only -- L1's strip is fixed, so the
+    // cell would command nothing.
+    modeRail_.setListToggleVisible (layout == gui::ScreenLayout::Performance);
 }
 
 void MainComponent::refreshStatus()
@@ -260,7 +274,7 @@ void MainComponent::resized()
     // no-op in practice.
     const int reserveBelowDrawer = kMinSpectrumHeight + gap
                                  + (layout_ == gui::ScreenLayout::Performance
-                                        ? 320   // vertical rail: 4 cells + label + trailing gaps
+                                        ? 320   // vertical rail floor: modes + countdown + CLEAR ALL/LIST
                                         : buttonCellHeight);
     const int maxDrawerHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
     const int drawerHeight    = juce::jlimit (0, maxDrawerHeight,
@@ -283,11 +297,14 @@ void MainComponent::resized()
         // the notch strip (when open) pinned underneath.
         //
         // The row is laid out DIRECTLY on its own rectangle rather than
-        // nested inside a column FlexBox: found 2026-08-24 while wiring this
-        // panel that a nested local FlexBox loses its items mid-layout (the
-        // recursive pass saw an empty array), leaving the spectrum and rail
-        // permanently unpositioned in L2. Single-level FlexBox layout is
-        // unaffected; test NotchListPanelWiring.* guards both layouts.
+        // nested inside a column FlexBox. History: while wiring the notch
+        // strip (2026-08-24) L2 bounds came up stale under instrumentation,
+        // so this was restructured to single-level FlexBox passes; the root
+        // cause of the original mis-layout was never independently
+        // reproduced (the earlier L2 coverage passed vacuously off stale
+        // Classic bounds, since setSize() delivers no resized() callback to
+        // a peer-less component). PerformanceLayoutHidesTheStripUntilToggled
+        // guards real geometry in both layouts.
         if (listShown)
             notchListPanel_.setBounds (area.removeFromBottom (kNotchListHeight));
 

@@ -40,6 +40,15 @@ public:
     // Polled for the countdown readout (milliseconds); 0 / unset hides it.
     std::function<double()> getSoundcheckRemainingMs;
 
+    // R-5: fired by the LIST cell with its NEW state -- true = slide the
+    // notch strip out, false = stow it. The rail owns no strip knowledge;
+    // the owner decides what open/closed means per layout.
+    std::function<void (bool)> onToggleNotchList;
+
+    // L2 keeps the LIST cell on the rail; L1's fixed bottom strip needs no
+    // toggle, so the owner hides it on layout switches. Relayouts the rail.
+    void setListToggleVisible (bool visible);
+
     std::function<void()> onSoundcheck;
     std::function<void()> onAuto;
     std::function<void()> onBypass;
@@ -57,6 +66,7 @@ public:
     juce::TextButton autoButton       { "AUTO" };
     juce::TextButton bypassButton     { "BYPASS" };
     juce::TextButton clearAllButton   { "CLEAR ALL" };
+    juce::TextButton listToggleButton { "LIST" };
     juce::Label countdownLabel;
 
 private:

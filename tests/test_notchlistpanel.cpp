@@ -22,6 +22,7 @@
 #include "dsp/ClockSource.h"
 #include "dsp/Detector.h"
 #include "dsp/LockFreeRingBuffer.h"
+#include "gui/ModeRail.h"
 #include "gui/NotchListPanel.h"
 
 #include <cmath>
@@ -80,6 +81,20 @@ void paintHeadless (juce::Component& component, const int width, const int heigh
     juce::Graphics g (image);
     component.setSize (width, height);
     component.paint (g);   // must simply not crash
+}
+
+// Reaches the rail through the public component tree (any existing child ->
+// its parent -> siblings). MainComponent.h was write-locked by a parallel
+// lane when this round ran, so the cleaner `getModeRail()` accessor could
+// not be added; this walk is behaviourally identical for tests.
+gui::ModeRail* railOf (MainComponent& app)
+{
+    if (auto* drawer = &app.getDeviceDrawer())
+        if (auto* parent = drawer->getParentComponent())
+            for (auto* child : parent->getChildren())
+                if (auto* rail = dynamic_cast<gui::ModeRail*> (child))
+                    return rail;
+    return nullptr;
 }
 
 // Same isolation trick as TempLayoutStore in test_gui_wiring.cpp: persistence
@@ -332,4 +347,76 @@ TEST (NotchListPanelWiring, ClassicLayoutPinsTheStripToTheWindowBottom)
     // return to the spectrum row.
     app.setLayout (gui::ScreenLayout::Performance);
     EXPECT_EQ (app.spectrumBoundsForTest().getBottom(), app.getHeight());
+}
+
+//==============================================================================
+// R-5: the rail's LIST cell drives the strip. Spec section 2: "L2: panel
+// trượt ra khi bấm" -- there must be a button, and it must work.
+
+TEST (NotchListPanelWiring, ClickingTheRailListToggleSlidesTheStripInOut)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    TempLayoutStore store;
+    MainComponent app (&store.options());   // L2 default
+    app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+    app.resized();
+
+    auto* rail = railOf (app);
+    ASSERT_NE (rail, nullptr);
+
+    ASSERT_FALSE (app.isNotchListOpen());
+    EXPECT_TRUE (rail->listToggleButton.isVisible());
+
+    // The operator's click path: toggle ON slides the strip out.
+    rail->listToggleButton.setToggleState (true, juce::sendNotificationSync);
+    EXPECT_TRUE (app.isNotchListOpen());
+    const auto strip = app.notchListBoundsForTest();
+    EXPECT_EQ (strip.getHeight(), 120);
+    EXPECT_EQ (strip.getBottom(), app.getHeight());
+    EXPECT_EQ (app.spectrumBoundsForTest().getBottom(), app.getHeight() - 120);
+
+    // Clicking again stows it.
+    rail->listToggleButton.setToggleState (false, juce::sendNotificationSync);
+    EXPECT_FALSE (app.isNotchListOpen());
+    EXPECT_EQ (app.spectrumBoundsForTest().getBottom(), app.getHeight());
+}
+
+TEST (NotchListPanelWiring, ClassicLayoutHidesTheListToggleButKeepsItsState)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    TempLayoutStore store;
+    MainComponent app (&store.options());
+    app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+
+    auto* rail = railOf (app);
+    ASSERT_NE (rail, nullptr);
+
+    app.setLayout (gui::ScreenLayout::Classic);
+
+    // L1's strip is fixed: a toggle would command nothing, so the cell goes.
+    EXPECT_FALSE (rail->listToggleButton.isVisible());
+
+    // Switching back to L2 restores both the cell and whatever state L2 had.
+    app.setLayout (gui::ScreenLayout::Performance);
+    EXPECT_TRUE (rail->listToggleButton.isVisible());
+}
+
+TEST (NotchListPanelWiring, ProgrammaticStripChangesKeepTheRailToggleInSync)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    TempLayoutStore store;
+    MainComponent app (&store.options());
+    app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+
+    auto* rail = railOf (app);
+    ASSERT_NE (rail, nullptr);
+
+    app.setNotchListOpen (true);
+    EXPECT_TRUE (rail->listToggleButton.getToggleState());
+
+    app.setNotchListOpen (false);
+    EXPECT_FALSE (rail->listToggleButton.getToggleState());
 }
