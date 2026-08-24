@@ -515,6 +515,36 @@ TEST (MainComponent, PresetReferencedSlotIsEnabledOnEngineAndAdoptedTogether)
     EXPECT_FLOAT_EQ (cmd.frequency, 1250.0f);
 }
 
+TEST (MainComponent, EnablingASlotMidModeArmsOrDisarmsImmediately)
+{
+    // A slot enabled while a mode is ALREADY running must not wait for the
+    // next mode request: the restart cycle restores width and threads but
+    // not the detection gate. Auto arms it; Bypass keeps it disarmed.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    app.requestMode (AudioEngine::Mode::Auto);
+
+    SlotConfig enableStereo;
+    enableStereo.enabled = true;
+    enableStereo.width   = 2;
+    app.changeSlotConfig (3, enableStereo);
+
+    EXPECT_TRUE (app.getNotchControllerForTest (3)->detectionActiveForTest());
+
+    app.requestMode (AudioEngine::Mode::Bypass);
+    app.changeSlotConfig (4, enableStereo);
+    EXPECT_FALSE (app.getNotchControllerForTest (4)->detectionActiveForTest());
+
+    // Mid-Soundcheck: the new slot gets its own 15 s live-time window (each
+    // controller measures its own live clock, D-06 -- there is no shared
+    // window to inherit a remainder from).
+    app.requestMode (AudioEngine::Mode::Soundcheck);
+    app.changeSlotConfig (5, enableStereo);
+    EXPECT_GT (app.getNotchControllerForTest (5)->getSoundcheckRemainingMs(), 0.0);
+}
+
 TEST (MainComponent, SoundcheckGatingAppliesToEnabledSlotsOnly)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

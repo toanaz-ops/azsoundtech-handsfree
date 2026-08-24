@@ -675,6 +675,36 @@ TEST (PresetManager, ANotchWithANegativeSlotIsSkippedAndCounted)
     EXPECT_TRUE (result.preset.notches.empty());
 }
 
+TEST (PresetManager, AWidthOutsideOneOrTwoIsClampedNotRejectedOnTheChannelAwareLoad)
+{
+    // Engine and detector must never DISAGREE about a slot's width: the
+    // engine treats an invalid width as a disabled slot while NotchController
+    // clamps it, so the loader clamps first -- width 0 -> mono (usable), 5 ->
+    // stereo.
+    const auto result = PresetManager::fromJSON (
+        R"({"version":"1.0","device":"d","sampleRate":48000,"bufferSize":64,)"
+        R"("slots":[{"index":1,"enabled":true,"width":0,"inputChannels":[0,1],"outputChannels":[0,1]},)"
+        R"({"index":2,"enabled":true,"width":5,"inputChannels":[0,1],"outputChannels":[0,1]}],)"
+        R"("notches":[]})",
+        4, 4);
+
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    ASSERT_EQ (result.preset.slots.size(), 2u);
+
+    const PresetSlot* slot1 = nullptr;
+    const PresetSlot* slot2 = nullptr;
+    for (const auto& s : result.preset.slots)
+    {
+        if (s.index == 1) slot1 = &s;
+        if (s.index == 2) slot2 = &s;
+    }
+
+    ASSERT_NE (slot1, nullptr);
+    EXPECT_EQ (slot1->config.width, 1);
+    ASSERT_NE (slot2, nullptr);
+    EXPECT_EQ (slot2->config.width, 2);
+}
+
 TEST (PresetManager, TheChannelAwareOverloadKeepsALegacyPresetStereo)
 {
     const auto result = PresetManager::fromJSON (kValidPresetJson, 4, 4);

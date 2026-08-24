@@ -695,6 +695,41 @@ TEST (AudioEngineCommands, DrainCappedAt256PerCallback)
     EXPECT_EQ (q.getAvailableRead(), 44u);   // exactly 256 consumed this callback
 }
 
+TEST (AudioEngineCommands, DrainBudgetIsSharedAcrossAllSlots)
+{
+    // The cap is ONE budget of 256 per callback across ALL eight rings, not
+    // per ring: eight independently-capped rings would multiply the worst-
+    // case callback time by 8.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+
+    auto& q0 = engine.getCommandQueue (0);
+    auto& q1 = engine.getCommandQueue (1);
+    for (int i = 0; i < 200; ++i)
+    {
+        const NotchCommand c0 { NotchCommandType::Set, 0, (std::uint8_t) (i % 16),
+                                500.0f + i, 30.0f, -12.0f, 0 };
+        ASSERT_EQ (q0.write (&c0, 1), 1u);
+
+        const NotchCommand c1 { NotchCommandType::Set, 0, (std::uint8_t) (i % 16),
+                                900.0f + i, 30.0f, -12.0f, 1 };
+        ASSERT_EQ (q1.write (&c1, 1), 1u);
+    }
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    // Slot 0's queue drains first and eats 200 of the budget; slot 1 gets
+    // only the remaining 56 -- NOT a fresh 256 of its own. The rest waits for
+    // the next callback rather than being dropped.
+    EXPECT_EQ (q0.getAvailableRead(), 0u);
+    EXPECT_EQ (q1.getAvailableRead(), 144u);
+
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+    EXPECT_EQ (q1.getAvailableRead(), 0u);
+}
+
 //==============================================================================
 // Multi-slot routing (spec §3, Task 3).
 //

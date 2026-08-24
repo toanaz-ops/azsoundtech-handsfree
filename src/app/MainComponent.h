@@ -80,6 +80,14 @@ public:
     // refused file. Returns false (with nothing applied) when the load fails.
     bool loadPreset (const juce::File& file);
 
+    // THE one route a routing-table change takes (the SlotPanel lambda calls
+    // this): the same detector stop/apply/start cycle as a device change,
+    // then the CURRENT mode's detection gating re-applied to the changed slot,
+    // so a slot enabled mid-Auto/-Soundcheck is armed immediately instead of
+    // waiting for the next mode request. Public so tests drive the exact path
+    // the UI uses.
+    void changeSlotConfig (int slotIndex, const SlotConfig& config);
+
     // The drawer (device controls + settings row). Public so tests can drive
     // its toggle buttons like any other component interface.
     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
@@ -107,6 +115,12 @@ private:
     // drawer behaviour, button reflection). No component is ever destroyed or
     // recreated on a switch -- spec section 3.
     void applyLayoutState (gui::ScreenLayout layout);
+
+    // Applies whatever the ENGINE'S CURRENT MODE implies for ONE slot's
+    // detection gate (no-op for an out-of-range or disabled slot).
+    // requestMode() runs this for every slot; changeSlotConfig() for just the
+    // changed one.
+    void applyModeGating (int slotIndex);
 
     // Declared BEFORE every child component: the look and feel must outlive
     // anything that might query it during teardown. The constructor installs

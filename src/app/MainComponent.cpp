@@ -114,21 +114,12 @@ MainComponent::MainComponent()
 
     // The routing table never touches the engine itself: a mapping change is
     // the SAME §6.5 shape as a device change, and it goes through the ONE
-    // restart cycle wired above (devicePanel_'s hooks) rather than re-typing
-    // the thread-join/restart bodies here.
+    // restart cycle (changeSlotConfig, shared with nothing else) rather than
+    // re-typing the thread-join/restart bodies here.
     slotScroller_.setViewedComponent (&slotPanel_, false);
     slotPanel_.onSlotConfigChanged = [this] (int slotIndex, const SlotConfig& config)
     {
-        jassert (devicePanel_.onBeforeRestart != nullptr);
-
-        if (devicePanel_.onBeforeRestart != nullptr)
-            devicePanel_.onBeforeRestart();
-
-        engine_.setSlotConfig (slotIndex, config);
-
-        if (devicePanel_.onAfterRestart != nullptr)
-            devicePanel_.onAfterRestart();
-
+        changeSlotConfig (slotIndex, config);
         slotPanel_.refresh();
     };
 
@@ -237,25 +228,54 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
     // slot the engine has enabled -- a disabled slot has no live chain to
     // protect and its controller must stay silent.
     for (int i = 0; i < kMaxSlots; ++i)
+        applyModeGating (i);
+}
+
+void MainComponent::applyModeGating (int slotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= kMaxSlots)
+        return;
+
+    if (! engine_.getSlotConfig (slotIndex).enabled)
+        return;
+
+    auto& controller = *notchControllers_[(std::size_t) slotIndex];
+
+    switch (engine_.getMode())
     {
-        if (! engine_.getSlotConfig (i).enabled)
-            continue;
-
-        auto& controller = *notchControllers_[(std::size_t) i];
-
-        switch (mode)
-        {
-            case AudioEngine::Mode::Bypass:
-                controller.setDetectionActive (false);
-                break;
-            case AudioEngine::Mode::Auto:
-                controller.setDetectionActive (true);
-                break;
-            case AudioEngine::Mode::Soundcheck:
-                controller.startSoundcheck();
-                break;
-        }
+        case AudioEngine::Mode::Bypass:
+            controller.setDetectionActive (false);
+            break;
+        case AudioEngine::Mode::Auto:
+            controller.setDetectionActive (true);
+            break;
+        case AudioEngine::Mode::Soundcheck:
+            controller.startSoundcheck();
+            break;
     }
+}
+
+void MainComponent::changeSlotConfig (int slotIndex, const SlotConfig& config)
+{
+    jassert (devicePanel_.onBeforeRestart != nullptr);
+
+    if (devicePanel_.onBeforeRestart != nullptr)
+        devicePanel_.onBeforeRestart();
+
+    engine_.setSlotConfig (slotIndex, config);
+
+    if (devicePanel_.onAfterRestart != nullptr)
+        devicePanel_.onAfterRestart();
+
+    // The restart cycle above restores widths and threads but NOT the
+    // detection gate. A slot enabled or re-mapped while Auto/Soundcheck is
+    // already running would otherwise stay DEAF until the next mode request
+    // -- protection shown on screen that does not exist in the chains. Re-arm
+    // it to whatever the current mode says, right now. Soundcheck windows are
+    // measured in each controller's OWN live time (D-06), so a slot armed
+    // mid-show gets its own full 15 s live-time window; there is no shared
+    // clock to inherit a partial one from.
+    applyModeGating (slotIndex);
 }
 
 bool MainComponent::loadPreset (const juce::File& file)

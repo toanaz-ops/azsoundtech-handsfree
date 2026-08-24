@@ -183,8 +183,9 @@ public:
     std::uint64_t getTapDropCount (int slot) const;
 
     // Command channel FROM the detector threads INTO the audio thread (bridge
-    // design §2), one queue PER SLOT: the audio callback drains up to 256
-    // commands per callback PER QUEUE and applies them to that slot's notch
+    // design §2), one queue PER SLOT: the audio callback drains the queues
+    // under ONE SHARED budget of kMaxCommandsPerCallback commands per callback
+    // ACROSS ALL eight queues and applies each command to its slot's notch
     // chains. The no-argument overload is the legacy surface (slot 0).
     //
     // *** CALLER CONTRACT: write() only, and from exactly one thread per queue.
@@ -197,11 +198,12 @@ public:
     LockFreeRingBuffer<NotchCommand>& getCommandQueue();
     LockFreeRingBuffer<NotchCommand>& getCommandQueue (int slot);
 
-    // Slot routing configuration. Plain atomics, written relaxed: SAFE without
-    // a lock only because every mapping change goes through a device restart
-    // (bridge design §6.5) -- the audio callback is not running while these are
-    // stored. The callback snapshots them at the TOP of each block and uses
-    // the copy for the whole block. Thread: message thread.
+    // Slot routing configuration. Plain relaxed atomics: safe WITHOUT any
+    // restart because the audio callback snapshots them at the top of each
+    // block and re-validates every lane against the live channel counts -- a
+    // mapping change landing mid-callback degrades to at most one block with
+    // a valid-but-mixed route, never an out-of-bounds access. Thread:
+    // message thread.
     void       setSlotConfig (int slotIndex, const SlotConfig& config);
     SlotConfig getSlotConfig (int slotIndex) const;
 
@@ -281,22 +283,27 @@ private:
     };
 
     // Bound on worst-case callback time: 256 recomputes ~52 us against a
-    // 670 us budget at a 32-sample buffer / 48 kHz (<10%). Sized so the full
-    // worst-case burst (256 commands) applies within ONE callback -- a preset
-    // that half-applies across two callbacks is audible as two distinct
-    // changes.
+    // 670 us budget at a 32-sample buffer / 48 kHz (<10%). This is the TOTAL
+    // shared across all eight rings per callback -- without that, eight
+    // independently-capped rings would multiply the worst case by 8. Sized so
+    // the full worst-case burst (256 commands) still applies within ONE
+    // callback; anything beyond waits for the next one -- delayed, never
+    // dropped.
     static constexpr int kMaxCommandsPerCallback = 256;
 
-    // Audio-thread only: drains up to kMaxCommandsPerCallback commands from
-    // ONE slot's ring into that slot's chains. Called for all 8 rings, first
-    // thing in the callback.
-    void drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot);
+    // Audio-thread only: consumes up to maxCommands commands from ONE slot's
+    // ring into that slot's chains and RETURNS how many were consumed, so the
+    // caller can charge them against the shared per-callback budget. Called
+    // for all 8 rings, first thing in the callback.
+    int drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot,
+                           int maxCommands);
 
-    // Slot routing configuration. Plain atomics read relaxed by the audio
-    // callback: AN TOÀN / safe without a lock because every mapping change
-    // goes through a device restart (§6.5) -- the callback is not running at
-    // that moment, and the callback additionally snapshots into locals at the
-    // top of every block. width 0 = slot empty/disabled.
+    // Slot routing state. Read relaxed by the audio callback. No lock and no
+    // restart are needed: the callback snapshots into locals at the TOP of
+    // every block AND bounds-checks every lane index against the device's
+    // actual channel count before use, so a mapping change landing mid-
+    // callback degrades to at most ONE block running a valid-but-mixed route
+    // -- never an out-of-bounds access. width 0 = slot empty/disabled.
     std::array<std::atomic<bool>, kMaxSlots> slotEnabled_ {};
     std::array<std::atomic<int>,  kMaxSlots> slotWidth_   {};
     std::array<std::array<std::atomic<int>, kMaxSlotLanes>, kMaxSlots> slotInCh_  {};

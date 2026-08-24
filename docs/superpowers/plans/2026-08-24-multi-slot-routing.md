@@ -261,7 +261,9 @@ clear cả 8 tap + 8 command ring (precondition §6.5 giữ nguyên).
 
 Legacy: `getTapBuffer()` → `getTapBuffer(0)`, tương tự command; constructor
 khởi tạo slot 0 enabled=true stereo {0,1}→{0,1}, slot còn lại width=0/disabled
-— **hành vi ngày nay được bảo toàn khi chỉ slot 0 bật**.
+— **hành vi ngày nay được bảo toàn trên thiết bị stereo**; trên thiết bị
+>2 kênh, các kênh output không được map bởi slot nào bị tĩnh âm CỐ Ý theo
+spec §4 (owner đã duyệt).
 
 - [ ] Step 1: viết test THẤT BẠI trong `test_audioengine.cpp` (pattern hiện có gọi thẳng `audioDeviceIOCallbackWithContext` với buffer giả):
   1. Route chéo mono: slot 1 enabled width1 in{1}→out{3}; feed sóng hình sin vào in1, các in khác im lặng → out3 nhận tín hiệu lọc, out0/1/2 im lặng.

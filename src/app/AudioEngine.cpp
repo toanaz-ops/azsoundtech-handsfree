@@ -308,10 +308,11 @@ void AudioEngine::setSlotConfig (int slotIndex, const SlotConfig& config)
     if (slotIndex < 0 || slotIndex >= kMaxSlots)
         return;
 
-    // Relaxed stores are sufficient: every mapping change goes through a
-    // device restart (§6.5), so the audio callback is not running while these
-    // land. The callback additionally snapshots into locals at the top of
-    // every block.
+    // Relaxed stores are sufficient WITHOUT a restart: the audio callback
+    // snapshots the mapping at the top of every block and bounds-checks each
+    // lane against the device's actual channel counts before use, so these
+    // landing mid-callback cost at most one block with a valid-but-mixed
+    // route -- never an out-of-bounds access.
     const auto s = (std::size_t) slotIndex;
     slotEnabled_[s].store (config.enabled, std::memory_order_relaxed);
     slotWidth_[s].store  (config.width,    std::memory_order_relaxed);
@@ -376,13 +377,22 @@ const NotchChain& AudioEngine::getNotchChainForTest (int slot, int lane) const
     return notchChains_[(std::size_t) slot][(std::size_t) lane];
 }
 
-void AudioEngine::drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot)
+int AudioEngine::drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int slot,
+                                    int maxCommands)
 {
     // Real-time discipline: one bulk read into a pre-allocated stack array,
     // then apply. Bounds-check EVERY field used as an index -- content that
-    // crossed a lock-free ring is trusted only after it is checked.
+    // crossed a lock-free ring is trusted only after it is checked. The batch
+    // is capped by the caller's REMAINING shared budget, and the return value
+    // is what the caller charges against it.
+    if (maxCommands <= 0)
+        return 0;
+
     NotchCommand batch[kMaxCommandsPerCallback];
-    const std::size_t count = ring.read (batch, (std::size_t) kMaxCommandsPerCallback);
+    const std::size_t want = (std::size_t) ((maxCommands < kMaxCommandsPerCallback)
+                                                ? maxCommands
+                                                : kMaxCommandsPerCallback);
+    const std::size_t count = ring.read (batch, want);
 
     for (std::size_t i = 0; i < count; ++i)
     {
@@ -407,6 +417,8 @@ void AudioEngine::drainCommandsFrom (LockFreeRingBuffer<NotchCommand>& ring, int
                 break;
         }
     }
+
+    return (int) count;
 }
 
 //==============================================================================
@@ -445,9 +457,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Commands first (bridge design §2): a notch commanded this callback takes
     // effect on THIS callback's samples instead of being one buffer late.
-    // Every slot's queue is drained; each drain applies only to that slot.
-    for (int slot = 0; slot < kMaxSlots; ++slot)
-        drainCommandsFrom (commandQueues_[(std::size_t) slot], slot);
+    // Every slot's queue is visited under ONE SHARED budget of
+    // kMaxCommandsPerCallback across ALL eight rings -- eight per-ring caps
+    // would multiply the worst-case recompute time by 8. A ring holding more
+    // than the budget allows keeps the rest for the NEXT callback: delayed,
+    // never dropped.
+    int commandBudget = kMaxCommandsPerCallback;
+    for (int slot = 0; slot < kMaxSlots && commandBudget > 0; ++slot)
+        commandBudget -= drainCommandsFrom (commandQueues_[(std::size_t) slot],
+                                            slot, commandBudget);
 
     // Publish what this callback was ACTUALLY handed, for the status display.
     // Two relaxed stores per callback: no allocation, no lock, no ordering

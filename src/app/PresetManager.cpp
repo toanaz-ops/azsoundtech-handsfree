@@ -793,6 +793,13 @@ void routeNotchesToSlots (Preset& preset,
             slot.config.enabled = true;
         }
 
+        // Width outside {1,2} cannot survive the load: the engine treats an
+        // invalid width as a DISABLED slot while NotchController clamps 0 up
+        // to 1, so leaving the raw value would let the engine and the
+        // detector DISAGREE about the very slot this entry describes. Clamp,
+        // never reject, so a hand-edited "width": 0 stays a usable mono slot.
+        slot.config.width = std::clamp (slot.config.width, 1, 2);
+
         slot.config = slotClampedTo (slot.config, numInputChannels, numOutputChannels);
     }
 }
