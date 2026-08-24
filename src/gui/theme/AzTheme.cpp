@@ -44,12 +44,6 @@ AzLookAndFeel::AzLookAndFeel()
     setColour (juce::PopupMenu::highlightedTextColourId,       background);
 }
 
-void AzLookAndFeel::applyTo (juce::Component* component)
-{
-    if (component != nullptr)
-        component->setLookAndFeel (this);
-}
-
 void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& button,
                                           const juce::Colour& /*backgroundColour*/,
                                           bool shouldDrawButtonAsHighlighted,
@@ -121,19 +115,6 @@ void AzLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
 juce::Font AzLookAndFeel::getLabelFont (juce::Label&)
 {
     return baseFont();
-}
-
-//==============================================================================
-// Function-local static: constructed on first use, destroyed after main()
-// returns. A LookAndFeel is not a Component, so JUCE's leak detector has
-// nothing to say about it.
-
-void AzTheme::applyTo (juce::Component* component)
-{
-    static AzLookAndFeel sharedLookAndFeel;
-
-    if (component != nullptr)
-        component->setLookAndFeel (&sharedLookAndFeel);
 }
 
 } // namespace az::theme

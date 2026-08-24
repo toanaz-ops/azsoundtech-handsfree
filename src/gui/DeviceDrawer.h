@@ -61,6 +61,10 @@ public:
     // content only while open. Queried by MainComponent::resized().
     [[nodiscard]] int getPreferredHeight() const;
 
+    // TEST ACCESSORS -- let headless tests see whether the wrapped panel
+    // actually got a usable rect when the drawer opened.
+    [[nodiscard]] juce::Rectangle<int> wrappedBoundsForTest() const { return wrapped_.getBounds(); }
+
     void resized() override;
 
     static constexpr int kHeaderHeight  = 48;   // >= the 44 px touch target

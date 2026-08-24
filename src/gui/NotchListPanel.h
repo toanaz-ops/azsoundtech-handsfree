@@ -1,0 +1,123 @@
+// NotchListPanel -- Task 4 of the GUI Console redesign (spec section 2).
+//
+// A read-only table of the notches currently in the model: # / FREQ / DEPTH /
+// Q / STATUS(age). It reads the model EXACTLY through
+// NotchController::copySnapshot() (design section 4), exactly like
+// SpectrumView -- display only, it NEVER issues commands and never touches
+// the audio thread.
+//
+// Layout discipline (ruling R-1 / spec section 3): this component knows
+// NOTHING about L1 or L2. The parent sets its visibility and bounds only;
+// in L2 Performance it is shown as a slide-out strip while toggled open,
+// in L1 Classic as a fixed bottom strip.
+//
+// Notch AGE (controller ruling R-2): computed GUI-side. The panel tracks a
+// steady-clock FIRST-SEEN time per notch identity (channel, index, frequency)
+// as snapshots stream in through refreshFromSnapshot(). SnapshotBuffer is NOT
+// extended. An identity not seen for kTrackingTimeoutMs (60 s -- generous
+// against snapshot hiccups, yet far below the 30 s auto-release horizon plus
+// margin where confusion could matter... chosen simply as "long enough that
+// no live notch is ever forgotten") is dropped from tracking; if the same
+// identity reappears later its age restarts from zero.
+//
+// Determinism: the clock is injected (ClockFn returning ms). Production uses
+// std::chrono::steady_clock; tests substitute a controllable fake.
+//
+// Paint-path discipline mirrors SpectrumView: all strings are built in
+// refreshFromSnapshot() on the message thread; paint() draws pre-built
+// members only. Row click -> detail popover is OUT OF SCOPE v1 (spec §7).
+//
+// Formatting contract (binding):
+//   freq  < 1000 Hz : "987 Hz"        >= 1000 Hz : "2.4 kHz"
+//   depth           : "−12.0 dB"      (U+2212 minus, mono)
+//   Q               : "4.0"
+//   age < 60 s      : "12s"           >= 60 s    : "2m ago"
+
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
+
+#include "app/NotchController.h"
+
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <vector>
+
+namespace gui
+{
+
+class NotchListPanel : public juce::Component,
+                       private juce::Timer
+{
+public:
+    // Returns "now" in milliseconds. Default: steady_clock (production).
+    using ClockFn = std::function<double()>;
+
+    explicit NotchListPanel (const NotchController& controller,
+                             ClockFn nowMs = {});
+    ~NotchListPanel() override;
+
+    // Copies one frame out of the controller, updates first-seen tracking,
+    // rebuilds the row strings, requests a repaint. Message thread only --
+    // driven by the internal timer and by visibilityChanged().
+    void refreshFromSnapshot();
+
+    // Shared formatting truth -- the panel paints these and the tests assert
+    // them, so there is exactly one definition of each format.
+    static juce::String formatFrequency (float hz);
+    static juce::String formatDepthDb (float depthDb);
+    static juce::String formatQ (float q);
+    static juce::String formatAgeMs (double ageMs);
+
+    // How long an UNSEEN notch identity stays tracked (see header comment).
+    static constexpr double kTrackingTimeoutMs = 60000.0;
+
+    // Geometry shared with tests / parent sizing decisions.
+    static constexpr int kHeaderHeight = 22;
+    static constexpr int kRowHeight    = 26;
+
+    // TEST ACCESSORS -- the model behind the painted table.
+    struct RowText
+    {
+        juce::String id, freq, depth, q, status;
+    };
+
+    [[nodiscard]] int rowCountForTest() const { return (int) rows_.size(); }
+    [[nodiscard]] RowText rowForTest (int index) const;
+
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+    void visibilityChanged() override;
+
+    // Identity key for first-seen tracking: quantised frequency (1 Hz) plus
+    // channel and slot. Frequency participates per ruling R-2: a recycled
+    // slot set to a new frequency is a NEW notch.
+    static std::uint64_t identityKey (std::uint8_t channel, std::uint8_t index, float frequencyHz);
+
+    struct Sighting
+    {
+        double firstSeenMs = 0.0;
+        double lastSeenMs  = 0.0;
+    };
+
+    const NotchController& controller_;
+    ClockFn nowMs_;
+
+    NotchController::SnapshotBuffer snapshot_ {};
+
+    // Pre-built row strings, rebuilt every refresh (message thread).
+    std::vector<RowText> rows_;
+    juce::String noNotchesLabel_ { "no active notches" };
+    juce::Font   tableFont_;              // mono: every cell holds numbers
+
+    // First-seen ledger keyed by identity (ruling R-2).
+    std::map<std::uint64_t, Sighting> sightings_;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NotchListPanel)
+};
+
+} // namespace gui

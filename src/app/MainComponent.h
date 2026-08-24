@@ -20,8 +20,6 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include <memory>
-
 #include "app/AudioEngine.h"
 #include "app/NotchController.h"
 #include "app/SlotConfig.h"
@@ -30,6 +28,7 @@
 #include "gui/DevicePanel.h"
 #include "gui/ModeBar.h"
 #include "gui/ModeRail.h"
+#include "gui/NotchListPanel.h"
 #include "gui/SlotPanel.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
@@ -46,7 +45,11 @@ public:
     static constexpr int kMinimumWidth  = 720;
     static constexpr int kMinimumHeight = 560;
 
-    MainComponent();
+    // propertyOptionsOverride lets tests redirect the layout persistence to a
+    // scratch directory (e.g. an absolute folderName under %TEMP%) instead of
+    // the real user settings under %APPDATA%\AZ Soundtech (null = production).
+    explicit MainComponent (
+        const juce::PropertiesFile::Options* propertyOptionsOverride = nullptr);
     ~MainComponent() override;
 
     // The engine this window owns. The bridge design (section 6) needs this to
@@ -88,6 +91,13 @@ public:
     // the UI uses.
     void changeSlotConfig (int slotIndex, const SlotConfig& config);
 
+    // The notch list strip. L2 Performance shows it only while toggled open
+    // (slide-out); L1 Classic pins it as a fixed bottom strip regardless of
+    // this flag (spec section 2). The panel itself is layout-agnostic --
+    // visibility and bounds are decided here and in resized().
+    void setNotchListOpen (bool open);
+    [[nodiscard]] bool isNotchListOpen() const { return notchListOpen_; }
+
     // The drawer (device controls + settings row). Public so tests can drive
     // its toggle buttons like any other component interface.
     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
@@ -96,6 +106,7 @@ public:
     // without reaching into private members.
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
+    [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
@@ -167,9 +178,10 @@ private:
     gui::SlotPanel   slotPanel_ { engine_ };
     juce::Viewport   slotScroller_;
 
-    // Ruling R-1: NotchListPanel does not exist yet (Task 4). This slot stays
-    // null this lane; resized() tolerates that.
-    std::unique_ptr<juce::Component> notchListSlot_;
+    // The live notch list (reads notchControllers_[0] above, so it is
+    // declared after it).
+    gui::NotchListPanel notchListPanel_;
+    bool                notchListOpen_ = false;   // L2 slide-out state
 
     // Layout persistence (spec section 3): the choice survives app restarts.
     juce::ApplicationProperties appProperties_;

@@ -1,4 +1,4 @@
-# GUI "Console" Redesign Implementation Plan
+﻿# GUI "Console" Redesign Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development
 > (khuyến nghị) hoặc superpowers:executing-plans. Steps dùng checkbox (`- [ ]`).
@@ -41,15 +41,16 @@ spec §1 (màu `#0B0F14/#161E27/#232C36/#C8D6E5/#546E7A/#4FC3F7/#FF9800/#81C784/
 #FF8A65/#FFB74D`, spacing 4, rail 96, button 96×64, gap 8, corner 4, font 13);
 `class AzLookAndFeel : juce::LookAndFeel_V4` áp palette + mono cho số.
 
-- [ ] Test: `AzTheme::applyTo(component)` → component tìm được LookAndFeel là
-  `AzLookAndFeel*`; grep-test dạng unit: danh sách file `src/gui/**.cpp` không
+- [x] Test: grep-test dạng unit: danh sách file `src/gui/**.cpp` không
   chứa hex literal `#[0-9A-Fa-f]{6}` ngoài thư mục theme (đọc file như text,
-  exception list rỗng).
-- [ ] Implement theme tokens + `AzLookAndFeel` (drawButtonBackground, Label,
+  exception list rỗng). *(Phần `AzTheme::applyTo` của dòng này bị final review
+  gỡ cùng dead code — applyTo/static sharedLookAndFeel không ai dùng,
+  MainComponent giữ LAF instance riêng; ruling ghi trong SDD ledger.)*
+- [x] Implement theme tokens + `AzLookAndFeel` (drawButtonBackground, Label,
   ComboBox theo palette).
-- [ ] Áp `AzLookAndFeel` trong `MainComponent` constructor (JUCE default LAF
+- [x] Áp `AzLookAndFeel` trong `MainComponent` constructor (JUCE default LAF
   bị thay thế một lần duy nhất).
-- [ ] Build + full suite xanh → commit `feat(gui): AzTheme tokens + AzLookAndFeel`.
+- [x] Build + full suite xanh → commit `feat(gui): AzTheme tokens + AzLookAndFeel`.
 
 ### Task 1: SpectrumView
 
@@ -68,11 +69,11 @@ spec §1 (màu `#0B0F14/#161E27/#232C36/#C8D6E5/#546E7A/#4FC3F7/#FF9800/#81C784/
   height), notch "mới" (dựa thứ tự publish gần nhất — v1 đơn giản: cùng màu cam,
   ghi chú mở rộng sau) ; tần số tick vẽ mono.
 
-- [ ] Test (headless component): (a) feed snapshot giả 513 bins + 1 notch →
+- [x] Test (headless component): (a) feed snapshot giả 513 bins + 1 notch →
   sau `refreshFromSnapshot()` paint không crash và `getSequenceSeen()` trả đúng
   sequence; (b) gọi paint 100 lần trên buffer không đổi → không tăng số phần tử
   vector thành viên (assert cap cố định — chứng minh không cấp phát lặp).
-- [ ] Implement → build + suite xanh → commit `feat(gui): SpectrumView log-freq canvas with notch markers`.
+- [x] Implement → build + suite xanh → commit `feat(gui): SpectrumView log-freq canvas with notch markers`.
 
 ### Task 2: ModeRail + StatusBadge
 
@@ -89,10 +90,10 @@ Modify CMake; Test `tests/test_moderail.cpp`.
   nền ok-green; StatusBadge: `void setState(ProtectionState)` với
   `enum class ProtectionState { Protecting, Idle, Bypassed }`.
 
-- [ ] Test: bấm AUTO (gọi `triggerClick` headless) → callback phát đúng 1 lần;
+- [x] Test: bấm AUTO (gọi `triggerClick` headless) → callback phát đúng 1 lần;
   CLEAR ALL KHÔNG callback nếu chưa confirm; Soundcheck label hiển thị giây còn
   lại khi > 0.
-- [ ] Implement theo theme → commit `feat(gui): ModeRail with confirm-guarded clear-all, StatusBadge`.
+- [x] Implement theo theme → commit `feat(gui): ModeRail with confirm-guarded clear-all, StatusBadge`.
 
 ### Task 3: Layouts L1/L2 + DeviceDrawer + persistence
 
@@ -100,35 +101,39 @@ Modify CMake; Test `tests/test_moderail.cpp`.
 `src/gui/DeviceDrawer.h/.cpp`; Modify CMake; Test `tests/test_gui_wiring.cpp`
 (mở rộng).
 
-- [ ] Enum `enum class ScreenLayout { Classic /*L1*/, Performance /*L2*/ };`
+- [x] Enum `enum class ScreenLayout { Classic /*L1*/, Performance /*L2*/ };`
   lưu `ApplicationProperties` key `"layout"`, mặc định Performance.
-- [ ] `resized()` viết bằng FlexBox/Grid thuần cho cả hai layout; re-parent
+- [x] `resized()` viết bằng FlexBox/Grid thuần cho cả hai layout; re-parent
   `SpectrumView/ModeRail/StatusBadge/NotchListPanel/DeviceDrawer` theo layout;
   `setResizeLimits(...)` min window đủ rail+spectrum.
-- [ ] DeviceDrawer: bọc `DevicePanel` hiện có; L2 = toggle ⚙ mở/đóng; L1 =
+- [x] DeviceDrawer: bọc `DevicePanel` hiện có; L2 = toggle ⚙ mở/đóng; L1 =
   thanh trên như cũ. Thêm hàng Settings nhỏ: toggle L1/L2.
-- [ ] Test wiring: chuyển layout → property ghi đúng giá trị; khởi động lại
+- [x] Test wiring: chuyển layout → property ghi đúng giá trị; khởi động lại
   component → khôi phục layout đã lưu; min-size không cho phép bounds chồng lấn
   (assert bounds giao nhau = 0 giữa rail và spectrum ở size tối thiểu).
-- [ ] Commit `feat(gui): switchable L1/L2 layouts with persisted preference`.
+- [x] Commit `feat(gui): switchable L1/L2 layouts with persisted preference`.
 
 ### Task 4: NotchListPanel
 
 **Files:** Create `src/gui/NotchListPanel.h/.cpp`; Modify CMake; Test
 `tests/test_notchlistpanel.cpp`.
 
-- [ ] Bảng # / FREQ / DEPTH / Q / STATUS(kèm tuổi "12s") từ SnapshotBuffer;
+- [x] Bảng # / FREQ / DEPTH / Q / STATUS(kèm tuổi "12s") từ SnapshotBuffer;
   header mono dim; hàng cách nhau bằng viền border; L2 = panel trượt (toggle),
   L1 = đáy cố định (chỉ set visible/bounds, panel tự thân vô tri về layout).
-- [ ] Test: feed snapshot 2 notches → model rows đúng 2 dòng, format freq
+- [x] Test: feed snapshot 2 notches → model rows đúng 2 dòng, format freq
   "987 Hz" / "2.4 kHz", tuổi tính từ sequence time.
-- [ ] Commit `feat(gui): NotchListPanel from snapshot`.
+- [x] Commit `feat(gui): NotchListPanel from snapshot`.
 
 ### Task 5: Verify + closeout
 
-- [ ] Full reconfigure + Release + `ctest -C Release` — paste output.
-- [ ] Grep kiểm chứng: `rg "#[0-9A-Fa-f]{6}" src/gui --glob "!theme/*"` → rỗng.
-- [ ] Chạy app thật, chụp màn hình cả L1 + L2 gửi chủ dự án → **human look gate**.
+- [x] Full reconfigure + Release + `ctest -C Release` — **284/284 PASS**
+  (0380c74, controller chạy tay 2026-08-24); sau fix wave final review:
+  **283/283 PASS** (3d91b89).
+- [x] Grep kiểm chứng: `rg "#[0-9A-Fa-f]{6}" src/gui --glob "!theme/*"` → rỗng
+  (controller chạy lại bằng grep tool).
+- [ ] Chạy app thật, chụp màn hình cả L1 + L2 gửi chủ dự án → **human look
+  gate** — CHỜ OWNER.
 - [ ] progress.md + memory note (nếu có bài học) + handoff session kế.
 
 **Ngoài scope v1 (spec §7):** popover chi tiết notch, Link L/R UI, preset UI,

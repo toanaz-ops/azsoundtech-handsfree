@@ -36,6 +36,19 @@ ModeRail::ModeRail (Orientation orientation)
     clearAllButton.setColour (juce::TextButton::textColourOffId, background);
     addAndMakeVisible (clearAllButton);
 
+    // R-5: the LIST cell is an INDEPENDENT toggle (no radio group -- it does
+    // not fight the mode cells and may be clicked twice). Accent tint while
+    // the strip is out, matching "active / selected" in the theme.
+    listToggleButton.setClickingTogglesState (true);
+    listToggleButton.setColour (juce::TextButton::buttonOnColourId, accent);
+    listToggleButton.setColour (juce::TextButton::textColourOnId,   background);
+    addAndMakeVisible (listToggleButton);
+    listToggleButton.onClick = [this]
+    {
+        if (onToggleNotchList != nullptr)
+            onToggleNotchList (listToggleButton.getToggleState());
+    };
+
     countdownLabel.setFont (monoFont());
     countdownLabel.setColour (juce::Label::textColourId, warn);
     countdownLabel.setJustificationType (juce::Justification::centredLeft);
@@ -114,8 +127,13 @@ void ModeRail::timerCallback()
 
 void ModeRail::handleClearAllClicked()
 {
-    if (confirmHook == nullptr)
+    if (confirmHook == nullptr || confirmPending_)
         return;
+
+    // One dialog at a time: while the previous confirmation is still
+    // unanswered, further clicks are dropped -- otherwise stacked dialogs
+    // would each fire onClearAllConfirmed.
+    confirmPending_ = true;
 
     // The guard is the whole point of this button: nothing reaches
     // onClearAllConfirmed until the hook reports back confirmed == true.
@@ -128,11 +146,22 @@ void ModeRail::handleClearAllClicked()
     confirmHook ([safeThis] (bool confirmed)
     {
         if (safeThis == nullptr)
-            return;
+            return;   // rail gone -- nothing left to clear or notify
+
+        safeThis->confirmPending_ = false;   // answered: allow the next ask
 
         if (confirmed && safeThis->onClearAllConfirmed != nullptr)
             safeThis->onClearAllConfirmed();
     });
+}
+
+void ModeRail::setListToggleVisible (const bool visible)
+{
+    if (listToggleButton.isVisible() == visible)
+        return;
+
+    listToggleButton.setVisible (visible);
+    resized();   // the freed cell must return to the rail immediately
 }
 
 void ModeRail::resized()
@@ -166,13 +195,20 @@ void ModeRail::resized()
         fb.items.add (cellOf (soundcheckButton));
         fb.items.add (labelItem);
         fb.items.add (cellOf (autoButton), cellOf (bypassButton),
-                      juce::FlexItem().withFlex (1.0f), // push CLEAR ALL to the rail's end
+                      juce::FlexItem().withFlex (1.0f), // push CLEAR ALL + LIST to the rail's end
                       cellOf (clearAllButton));
+
+        // R-5: the LIST cell sits below CLEAR ALL -- but only when the owner
+        // says the layout wants it (L2; L1's fixed strip has no toggle).
+        if (listToggleButton.isVisible())
+            fb.items.add (cellOf (listToggleButton));
     }
     else
     {
         // Horizontal: the countdown takes the leftover width between the
-        // mode cells and CLEAR ALL.
+        // mode cells and CLEAR ALL. No LIST cell here: the toggle only
+        // exists in L2/Performance (MainComponent::applyLayoutState), whose
+        // rail is always vertical, so a horizontal append would be dead code.
         labelItem.withFlex (1.0f).withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
         fb.items.add (cellOf (soundcheckButton), cellOf (autoButton),
                       cellOf (bypassButton), labelItem, cellOf (clearAllButton));

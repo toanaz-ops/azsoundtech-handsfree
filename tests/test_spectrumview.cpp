@@ -18,6 +18,9 @@
 #include "dsp/Detector.h"
 #include "dsp/LockFreeRingBuffer.h"
 #include "gui/SpectrumView.h"
+#include "test_gui_helpers.h"
+
+using gui_test::paintHeadless;
 
 #include <cmath>
 #include <cstdint>
@@ -56,14 +59,6 @@ struct FedController
         }
     }
 };
-
-void paintHeadless (juce::Component& component, const int width, const int height)
-{
-    juce::Image image (juce::Image::ARGB, width, height, true);
-    juce::Graphics g (image);
-    component.setSize (width, height);
-    component.paint (g);   // must simply not crash
-}
 
 } // namespace
 

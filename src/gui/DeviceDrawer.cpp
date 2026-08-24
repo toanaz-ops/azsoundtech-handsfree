@@ -9,6 +9,12 @@ namespace
 {
 // Distinct from ModeRail's mode radio group so the two never interfere.
 constexpr int kLayoutRadioGroupId = 2;
+
+// Header cell widths the theme does not tokenise (they are drawer-local
+// metrics, not shared design tokens): the PERFORMANCE button is wider than
+// CLASSIC to fit its longer label, and the status badge gets a fixed slot.
+constexpr float kPerformanceCellWidth = 148.0f;
+constexpr float kBadgeCellWidth       = 120.0f;
 } // namespace
 
 DeviceDrawer::DeviceDrawer (DevicePanel& wrappedPanel)
@@ -83,6 +89,12 @@ void DeviceDrawer::setOpen (bool shouldOpen)
     open_ = shouldOpen;
     wrapped_.setVisible (open_);
     resized();
+
+    // The PARENT sizes this drawer from getPreferredHeight(), so only our own
+    // resized() leaves the content squeezed out until some unrelated window
+    // resize -- the parent must re-run its layout too.
+    if (auto* parent = getParentComponent())
+        parent->resized();
 }
 
 void DeviceDrawer::toggleOpen()
@@ -135,13 +147,13 @@ void DeviceDrawer::resized()
                           .withWidth ((float) buttonCellWidth).withHeight (cellH)
                           .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
     header.items.add (juce::FlexItem (performanceButton_)
-                          .withWidth (148.0f).withHeight (cellH)
+                          .withWidth (kPerformanceCellWidth).withHeight (cellH)
                           .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
     header.items.add (juce::FlexItem (presetsPlaceholder_).withFlex (1.0f));
 
     if (badge_ != nullptr)
         header.items.add (juce::FlexItem (*badge_)
-                              .withWidth (120.0f).withHeight (cellH)
+                              .withWidth (kBadgeCellWidth).withHeight (cellH)
                               .withMargin ({ 0.0f, 0.0f, 0.0f, (float) gap }));
 
     if (collapsible_)
@@ -151,11 +163,15 @@ void DeviceDrawer::resized()
 
     header.performLayout (headerArea);
 
-    // Content sits under the header; when the parent gave the drawer only
-    // header height (drawer closed in L2) this rect is empty.
-    wrapped_.setBounds (getLocalBounds()
-                            .removeFromTop (kHeaderHeight + kContentHeight)
-                            .removeFromBottom (kContentHeight));
+    // Content sits under the header. While closed there IS no content area --
+    // assigning a leftover rect here would hand the panel geometry it must
+    // not paint or hit-test into.
+    if (open_)
+        wrapped_.setBounds (getLocalBounds()
+                                .removeFromTop (kHeaderHeight + kContentHeight)
+                                .removeFromBottom (kContentHeight));
+    else
+        wrapped_.setBounds ({});
 }
 
 } // namespace gui

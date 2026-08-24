@@ -74,11 +74,6 @@ class AzLookAndFeel : public juce::LookAndFeel_V4
 public:
     AzLookAndFeel();
 
-    // Points a component (and, through Component::getLookAndFeel(), its whole
-    // child subtree) at this look and feel. After it returns,
-    // dynamic_cast<AzLookAndFeel*>(&component->getLookAndFeel()) is non-null.
-    void applyTo (juce::Component* component);
-
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour& backgroundColour,
                                bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
 
@@ -91,16 +86,6 @@ public:
     void drawLabel (juce::Graphics&, juce::Label&) override;
 
     juce::Font getLabelFont (juce::Label&) override;
-};
-
-//==============================================================================
-// The entry point the brief names: AzTheme::applyTo(&component) installs the
-// shared AzLookAndFeel on any component. MainComponent does not use this -- it
-// owns its own AzLookAndFeel member so its lifetime is unambiguous.
-
-struct AzTheme
-{
-    static void applyTo (juce::Component* component);
 };
 
 } // namespace az::theme
