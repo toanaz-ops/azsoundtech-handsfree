@@ -85,7 +85,10 @@ void SpectrumView::rebuildGeometry()
         // Stored normalised to the plot rectangle; paint() maps them with the
         // CURRENT bounds, so a resize is correct without a rebuild.
         const float nx = std::log10 (hz / kMinHz) / std::log10 (kMaxHz / kMinHz);
-        const float ny = (kMaxDb - db) / (kMaxDb - kMinDb);
+        // Clamped: loud frames exceed 0 dB, and an unclamped ny would push the
+        // line ABOVE the plot frame into the dB-label gutter.
+        const float ny = juce::jlimit (0.0f, 1.0f,
+                                       (kMaxDb - db) / (kMaxDb - kMinDb));
 
         spectrumPoints_.push_back ({ nx, ny });
     }

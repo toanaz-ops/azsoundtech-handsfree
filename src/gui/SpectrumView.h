@@ -77,6 +77,10 @@ public:
     // and the capacity of the point cache untouched.
     [[nodiscard]] std::size_t spectrumPointSizeForTest() const { return spectrumPoints_.size(); }
     [[nodiscard]] std::size_t spectrumPointCapacityForTest() const { return spectrumPoints_.capacity(); }
+    [[nodiscard]] juce::Point<float> spectrumPointForTest (std::size_t index) const
+    {
+        return spectrumPoints_[index];
+    }
 
     void paint (juce::Graphics&) override;
 

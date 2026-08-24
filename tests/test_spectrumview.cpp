@@ -149,3 +149,49 @@ TEST (SpectrumView, HundredPaintsOnAnUnchangedBufferDoNotGrowMemberContainers)
     EXPECT_EQ (view.spectrumPointSizeForTest(), sizeBefore);
     EXPECT_EQ (view.spectrumPointCapacityForTest(), capacityBefore);
 }
+
+//==============================================================================
+// Review fix 1: raw magnitudes above 0 dB must clamp to the TOP of the frame,
+// never produce normalised Y < 0 (line escaping into the dB-label gutter).
+
+TEST (SpectrumView, LoudMagnitudesAboveZeroDbClampInsideThePlotFrame)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // A near-full-scale sine: the FFT is unnormalised, so its peak bin lands
+    // far ABOVE 0 dB and would previously have driven ny negative.
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, commands, clock };
+
+    std::vector<float> hop ((std::size_t) Detector::kHopSize);
+    for (std::size_t i = 0; i < hop.size(); ++i)
+        hop[i] = 0.9f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                  * 1000.0f * (float) i / 48000.0f);
+
+    for (int block = 0; block < 8; ++block)
+    {
+        tap.write (hop.data(), hop.size());
+        controller.runOnce();
+    }
+
+    gui::SpectrumView view (controller);
+    view.refreshFromSnapshot();
+
+    ASSERT_GT (view.spectrumPointSizeForTest(), (std::size_t) 0);
+
+    bool sawTopClamp = false;
+    for (std::size_t i = 0; i < view.spectrumPointSizeForTest(); ++i)
+    {
+        const auto p = view.spectrumPointForTest (i);
+        EXPECT_GE (p.y, 0.0f) << "point " << i << " escaped ABOVE the frame";
+        EXPECT_LE (p.y, 1.0f) << "point " << i << " fell BELOW the frame";
+        if (p.y == 0.0f)
+            sawTopClamp = true;
+    }
+
+    // The clamp actually ENGAGED for this loud signal -- without it at least
+    // one point would sit strictly above 0.
+    EXPECT_TRUE (sawTopClamp);
+}
