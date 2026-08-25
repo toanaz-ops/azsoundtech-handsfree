@@ -53,7 +53,7 @@ public:
     // the analyser hardest, so the app's very first impression was its worst
     // possible layout.
     static constexpr int kDefaultWidth  = 1400;
-    static constexpr int kDefaultHeight = 900;
+    static constexpr int kDefaultHeight = 960;
 
     MainComponent();
     ~MainComponent() override;
@@ -145,6 +145,12 @@ public:
 
     void paint (juce::Graphics& g) override;
     void resized() override;
+
+    // Called when this component gains (or loses) a desktop window. That is
+    // the first moment there is a window to size, so it is where the opening
+    // height is settled -- setSize() in the constructor only states a wish,
+    // and DocumentWindow's own resize limits and border can trim it.
+    void parentHierarchyChanged() override;
 
 private:
     // How tall the bottom floor band should be given the vertical space left

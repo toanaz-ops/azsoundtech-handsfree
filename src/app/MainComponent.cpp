@@ -23,6 +23,10 @@ constexpr int kNotchListHeight = 120;
 // The largest share of the space under the transport the bottom floor may
 // take, however much its contents want. See floorHeightFor().
 constexpr float kMaxFloorShare = 0.55f;
+
+// Breathing room added to the height the floor needs, so "it fits" is visibly
+// true rather than true to the pixel. See heightThatFitsTheFloor().
+constexpr int kFloorSlack = 24;
 } // namespace
 
 MainComponent::MainComponent()
@@ -49,7 +53,12 @@ MainComponent::MainComponent()
 
     // The window sizes itself from this (DocumentWindow::setContentOwned), so
     // an unsized content component opens at the resize LIMIT instead.
-    setSize (kDefaultWidth, kDefaultHeight);
+    //
+    // Taken as the LARGER of the nominal default and the height the floor
+    // actually needs: the routing table's height depends on how many rows are
+    // showing, so a fixed number is a guess that goes stale the moment that
+    // changes. parentHierarchyChanged() re-checks once a real window exists.
+    setSize (kDefaultWidth, juce::jmax (kDefaultHeight, heightThatFitsTheFloor()));
 
     // Per-slot tuning (brief 2026-08-24): every slot starts on Global.
     slotUsesGlobalTuning_.fill (true);
@@ -662,7 +671,19 @@ int MainComponent::heightThatFitsTheFloor() const
     const int forAnalyser = chrome + kMinSpectrumHeight + gap + natural;
     const int forShare    = chrome + juce::roundToInt ((float) natural / kMaxFloorShare);
 
-    return juce::jmax (kMinimumHeight, juce::jmax (forAnalyser, forShare));
+    // Plus slack. Without it the floor fits EXACTLY, which means one pixel of
+    // rounding anywhere puts the Add row under the window edge -- and "fits
+    // exactly" is indistinguishable from "clipped" to the person looking at it.
+    return juce::jmax (kMinimumHeight, juce::jmax (forAnalyser, forShare)) + kFloorSlack;
+}
+
+void MainComponent::parentHierarchyChanged()
+{
+    // The app used to open at a height where the routing table's "+ Add slot"
+    // row landed exactly on the window's bottom edge, so the first thing a
+    // user had to do was drag the window taller. Sizing here, once a real
+    // window exists, is what makes the opening size honest.
+    growWindowToFitFloor();
 }
 
 void MainComponent::growWindowToFitFloor()

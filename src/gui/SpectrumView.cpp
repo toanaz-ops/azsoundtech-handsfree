@@ -56,8 +56,16 @@ constexpr float kFillMidAlpha      = 0.07f;
 // regardless of what colour the ramp has the marker at.
 constexpr float kKeylineWidth      = 3.0f;
 
-constexpr float kFreqTicksHz[7]    = { 50.0f, 100.0f, 250.0f, 1000.0f,
-                                       2500.0f, 5000.0f, 10000.0f };
+// A 1-2-5 ladder. rebuildTicks() keeps whichever rungs fall inside the
+// operator's chosen window, so the labels stay on round numbers however the
+// range is dragged instead of landing on 63.4 Hz.
+constexpr float kTickLadder[] = {
+    20.0f, 30.0f, 50.0f, 80.0f, 100.0f, 200.0f, 300.0f, 500.0f, 800.0f,
+    1000.0f, 2000.0f, 3000.0f, 5000.0f, 8000.0f, 10000.0f, 15000.0f, 20000.0f
+};
+
+// How close to an edge a click has to be, in the axis gutter, to grab it.
+constexpr int kEdgeGrabPx = 28;
 constexpr float kDbGridLines[4]    = { 0.0f, -30.0f, -60.0f, -90.0f };
 
 // Peak hold decays by this many dB per frame when no new peak arrives --
@@ -82,9 +90,6 @@ SpectrumView::SpectrumView (const NotchController& controller)
     : controller_ (&controller)
     , tickFont_ (az::theme::monoFont())
     , bodyFont_ (az::theme::baseFont())
-    , xTickLabels_ { juce::String ("50"),   juce::String ("100"), juce::String ("250"),
-                     juce::String ("1k"),   juce::String ("2.5k"), juce::String ("5k"),
-                     juce::String ("10k") }
     , yTickLabels_ { juce::String ("0"), juce::String ("-30"),
                      juce::String ("-60"), juce::String ("-90") }
     , noSignalLabel_ ("Waiting for signal")
@@ -145,6 +150,39 @@ SpectrumView::SpectrumView (const NotchController& controller)
         repaint();
     };
 
+    // RANGE. Two fields for a precise figure, and the axis gutter itself for a
+    // fast one -- see mouseDrag. A soundman narrowing the view during a show
+    // wants the drag; one setting the rig up beforehand wants to type 12k.
+    rangeLabel_.setText ("RANGE", juce::dontSendNotification);
+    rangeLabel_.setFont (az::theme::legendFont (az::theme::columnFontSize, true,
+                                                az::theme::trackingColumn));
+    rangeLabel_.setColour (juce::Label::textColourId, az::theme::dim);
+    rangeLabel_.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (rangeLabel_);
+
+    for (auto* field : { &lowField_, &highField_ })
+    {
+        field->setFont (az::theme::monoFont (az::theme::segmentFontSize));
+        field->setJustification (juce::Justification::centred);
+        field->setColour (juce::TextEditor::backgroundColourId, az::theme::well);
+        field->setColour (juce::TextEditor::outlineColourId,    az::theme::border);
+        field->setColour (juce::TextEditor::focusedOutlineColourId, az::theme::accent);
+        field->setColour (juce::TextEditor::textColourId,       az::theme::text);
+        field->setColour (juce::TextEditor::highlightColourId,  az::theme::accent.withAlpha (0.3f));
+        field->setSelectAllWhenFocused (true);
+
+        // Applied on Return and on losing focus -- never per keystroke, which
+        // would rebuild the geometry while somebody is still typing "1" of
+        // "16k" and briefly show a 1 Hz axis.
+        field->onReturnKey = [this] { applyRangeFromEditors(); };
+        field->onFocusLost = [this] { applyRangeFromEditors(); };
+
+        addAndMakeVisible (*field);
+    }
+
+    pushRangeToEditors();
+    rebuildTicks();
+
     bandGroup_.setSelectedIndex ((int) bandMode_);
     avgGroup_ .setSelectedIndex ((int) avgMode_);
 
@@ -201,11 +239,202 @@ void SpectrumView::resized()
     // RING RISK is pinned to the far right, its chip last.
     riskChipArea_ = strip.removeFromRight (kRiskChipWidth)
                          .withSizeKeepingCentre (kRiskChipWidth, controlH);
+    strip.removeFromRight (kRiskLegendWidth + gap);
+
+    // RANGE sits just left of it: also a readout about the ROOM rather than
+    // about the display, and typed rarely enough to belong at that end.
+    constexpr int kRangeFieldWidth = 54;
+
+    highField_.setBounds (strip.removeFromRight (kRangeFieldWidth)
+                               .withSizeKeepingCentre (kRangeFieldWidth, controlH));
+    strip.removeFromRight (spacing);
+    lowField_ .setBounds (strip.removeFromRight (kRangeFieldWidth)
+                               .withSizeKeepingCentre (kRangeFieldWidth, controlH));
+    strip.removeFromRight (spacing);
+    rangeLabel_.setBounds (strip.removeFromRight (52));
+}
+
+float SpectrumView::parseFrequency (const juce::String& text)
+{
+    auto trimmed = text.trim().toLowerCase().removeCharacters (" hz");
+    if (trimmed.isEmpty())
+        return 0.0f;
+
+    float scale = 1.0f;
+    if (trimmed.endsWithChar ('k'))
+    {
+        scale = 1000.0f;
+        trimmed = trimmed.dropLastCharacters (1);
+    }
+
+    // getFloatValue returns 0 for anything unparseable, which is exactly the
+    // "keep what you had" signal the editors want -- no exception, no dialog.
+    const float value = trimmed.getFloatValue() * scale;
+    return value > 0.0f ? value : 0.0f;
+}
+
+juce::String SpectrumView::formatFrequency (const float hz)
+{
+    if (hz < 1000.0f)
+        return juce::String (juce::roundToInt (hz));
+
+    const float k = hz / 1000.0f;
+    // 16k, not 16.0k; 1.25k keeps its decimals because dropping them would
+    // move the number.
+    return (std::abs (k - std::round (k)) < 0.05f
+                ? juce::String (juce::roundToInt (k))
+                : juce::String (k, 2).trimCharactersAtEnd ("0").trimCharactersAtEnd ("."))
+         + "k";
+}
+
+void SpectrumView::setDisplayRange (float low, float high)
+{
+    if (low > high)
+        std::swap (low, high);
+
+    low  = juce::jlimit (kMinHz, kMaxHz, low);
+    high = juce::jlimit (kMinHz, kMaxHz, high);
+
+    // Enforce the minimum span by pushing the end that is NOT pinned to a
+    // limit, so dragging one edge into the other stops rather than dragging
+    // the whole window along with it.
+    const float minSpan = std::exp2 (kMinSpanOctaves);
+    if (high < low * minSpan)
+    {
+        if (high >= kMaxHz)
+            low = high / minSpan;
+        else
+            high = low * minSpan;
+
+        low  = juce::jlimit (kMinHz, kMaxHz, low);
+        high = juce::jlimit (kMinHz, kMaxHz, high);
+    }
+
+    if (juce::approximatelyEqual (low, lowHz_) && juce::approximatelyEqual (high, highHz_))
+        return;
+
+    lowHz_  = low;
+    highHz_ = high;
+
+    // The stored polyline is normalised against the RANGE, and the octave-band
+    // edges are derived from it, so both have to be rebuilt -- not just
+    // repainted.
+    rebuildTicks();
+    applyBandMode();
+    rebuildGeometry();
+    pushRangeToEditors();
+    repaint();
+}
+
+void SpectrumView::resetDisplayRange()
+{
+    setDisplayRange (kDefaultLowHz, kDefaultHighHz);
+}
+
+void SpectrumView::applyRangeFromEditors()
+{
+    const float low  = parseFrequency (lowField_.getText());
+    const float high = parseFrequency (highField_.getText());
+
+    // Either field left unreadable keeps its current value rather than
+    // snapping the axis to something the operator did not ask for.
+    setDisplayRange (low  > 0.0f ? low  : lowHz_,
+                     high > 0.0f ? high : highHz_);
+
+    // Unconditional: setDisplayRange returns early when nothing changed, and
+    // the field still holds whatever was typed.
+    pushRangeToEditors();
+}
+
+void SpectrumView::pushRangeToEditors()
+{
+    lowField_ .setText (formatFrequency (lowHz_),  juce::dontSendNotification);
+    highField_.setText (formatFrequency (highHz_), juce::dontSendNotification);
+}
+
+void SpectrumView::rebuildTicks()
+{
+    tickHz_.clear();
+    tickLabels_.clear();
+
+    for (const float hz : kTickLadder)
+    {
+        if (hz < lowHz_ || hz > highHz_)
+            continue;
+
+        tickHz_.push_back (hz);
+        tickLabels_.push_back (formatFrequency (hz));
+    }
+}
+
+juce::Rectangle<int> SpectrumView::axisGutter() const
+{
+    const int labelH = juce::roundToInt (tickFont_.getHeight()) + 2 * az::theme::spacing;
+    return getLocalBounds().removeFromBottom (labelH).withTrimmedLeft (kLeftGutter);
+}
+
+//==============================================================================
+// Dragging the axis. The gutter under the plot IS the control: grab near an
+// end and that end follows the pointer. Double-click puts it back.
+
+void SpectrumView::mouseMove (const juce::MouseEvent& event)
+{
+    setMouseCursor (axisGutter().contains (event.getPosition())
+                        ? juce::MouseCursor::LeftRightResizeCursor
+                        : juce::MouseCursor::NormalCursor);
+}
+
+void SpectrumView::mouseDown (const juce::MouseEvent& event)
+{
+    draggingEdge_ = -1;
+
+    const auto gutter = axisGutter();
+    if (! gutter.contains (event.getPosition()))
+        return;
+
+    // Whichever end is nearer, provided the click is actually near one. A
+    // click in the middle of the axis does nothing rather than jumping an edge
+    // across the plot.
+    const int fromLeft  = std::abs (event.x - gutter.getX());
+    const int fromRight = std::abs (event.x - gutter.getRight());
+
+    if (juce::jmin (fromLeft, fromRight) > kEdgeGrabPx)
+        return;
+
+    draggingEdge_ = fromLeft <= fromRight ? 0 : 1;
+}
+
+void SpectrumView::mouseDrag (const juce::MouseEvent& event)
+{
+    if (draggingEdge_ < 0)
+        return;
+
+    const auto plot = axisGutter().toFloat();
+    if (plot.getWidth() <= 1.0f)
+        return;
+
+    const float hz = hzForX ((float) event.x, plot);
+
+    if (draggingEdge_ == 0)
+        setDisplayRange (hz, highHz_);
+    else
+        setDisplayRange (lowHz_, hz);
+}
+
+void SpectrumView::mouseUp (const juce::MouseEvent&)
+{
+    draggingEdge_ = -1;
+}
+
+void SpectrumView::mouseDoubleClick (const juce::MouseEvent& event)
+{
+    if (axisGutter().contains (event.getPosition()))
+        resetDisplayRange();
 }
 
 void SpectrumView::applyBandMode()
 {
-    bandCenterHz_   = rta::bandCenters (bandMode_, kMinHz, kMaxHz);
+    bandCenterHz_   = rta::bandCenters (bandMode_, lowHz_, highHz_);
     const int count = (int) bandCenterHz_.size();
 
     bandEdgeLowHz_.clear();
@@ -415,10 +644,10 @@ void SpectrumView::rebuildGeometry()
     for (std::size_t bin = 0; bin < count; ++bin)
     {
         const float hz = static_cast<float> (bin) * hzPerBin;
-        if (hz < kMinHz || hz > kMaxHz)
+        if (hz < lowHz_ || hz > highHz_)
             continue;
 
-        const float nx = std::log10 (hz / kMinHz) / std::log10 (kMaxHz / kMinHz);
+        const float nx = std::log10 (hz / lowHz_) / std::log10 (highHz_ / lowHz_);
         // Clamped: loud frames exceed 0 dB, and an unclamped ny would push the
         // line ABOVE the plot frame into the dB-label gutter.
         const float ny = juce::jlimit (0.0f, 1.0f,
@@ -443,14 +672,23 @@ void SpectrumView::rebuildGeometry()
 
         bandLevelsDb_.resize (bandCenterHz_.size());   // capacity pre-reserved
         rta::bandLevelsDb (bandMode_, displayLin_.data(), (int) count,
-                           hzPerBin, kMinHz, kMaxHz, bandLevelsDb_.data());
+                           hzPerBin, lowHz_, highHz_, bandLevelsDb_.data());
     }
 }
 
-float SpectrumView::xForHz (const float hz, const juce::Rectangle<float>& plot)
+float SpectrumView::xForHz (const float hz, const juce::Rectangle<float>& plot) const
 {
-    const float t = std::log10 (hz / kMinHz) / std::log10 (kMaxHz / kMinHz);
+    const float t = std::log10 (hz / lowHz_) / std::log10 (highHz_ / lowHz_);
     return plot.getX() + t * plot.getWidth();
+}
+
+float SpectrumView::hzForX (const float x, const juce::Rectangle<float>& plot) const
+{
+    if (plot.getWidth() <= 0.0f)
+        return lowHz_;
+
+    const float t = juce::jlimit (0.0f, 1.0f, (x - plot.getX()) / plot.getWidth());
+    return lowHz_ * std::pow (highHz_ / lowHz_, t);
 }
 
 float SpectrumView::yForDb (const float db, const juce::Rectangle<float>& plot)
@@ -474,7 +712,7 @@ void SpectrumView::paint (juce::Graphics& g)
 
     auto bounds            = getLocalBounds().toFloat();
     const float labelH     = tickFont_.getHeight() + 2.0f * (float) spacing;
-    const float leftGutter = 44.0f;
+    const float leftGutter = (float) kLeftGutter;
 
     //--------------------------------------------------------------------
     // Toolbar strip: a raised band carrying the section legend and the
@@ -535,7 +773,7 @@ void SpectrumView::paint (juce::Graphics& g)
     // invisible against the plot well, which is the whole reason a grid
     // exists. `grid` is its own token for exactly this.
     g.setColour (grid);
-    for (const float hz : kFreqTicksHz)
+    for (const float hz : tickHz_)
     {
         const float x = std::round (xForHz (hz, plot)) + 0.5f;
         g.drawLine (x, plot.getY(), x, plot.getBottom(), 1.0f);
@@ -552,12 +790,24 @@ void SpectrumView::paint (juce::Graphics& g)
     // Tick labels -- mono for every number (theme contract).
     g.setFont (tickFont_);
     g.setColour (faded);
-    for (int i = 0; i < 7; ++i)
+    for (std::size_t i = 0; i < tickHz_.size(); ++i)
     {
-        const float x = xForHz (kFreqTicksHz[i], plot);
-        g.drawText (xTickLabels_[i],
+        const float x = xForHz (tickHz_[i], plot);
+        g.drawText (tickLabels_[i],
                     (int) (x - 30.0f), (int) plot.getBottom() + spacing,
                     60, (int) labelH, juce::Justification::centred);
+    }
+
+    // The two grips that say the axis can be dragged. Drawn at the ends of the
+    // gutter, brighter while one is being dragged, so the affordance is
+    // visible before anybody discovers it by accident.
+    const auto gutter = axisGutter().toFloat();
+    for (int edge = 0; edge < 2; ++edge)
+    {
+        const float gx = edge == 0 ? gutter.getX() + 1.0f : gutter.getRight() - 3.0f;
+
+        g.setColour (draggingEdge_ == edge ? accent : dim.withAlpha (0.55f));
+        g.fillRect (gx, gutter.getY() + 3.0f, 2.0f, gutter.getHeight() - 6.0f);
     }
     for (int i = 0; i < 4; ++i)
     {
@@ -627,8 +877,8 @@ void SpectrumView::paint (juce::Graphics& g)
             if (bandLevelsDb_[i] <= rta::kSilenceDb)
                 continue;
 
-            const float x0 = xForHz (std::max (bandEdgeLowHz_[i],  kMinHz), plot);
-            const float x1 = xForHz (std::min (bandEdgeHighHz_[i], kMaxHz), plot);
+            const float x0 = xForHz (std::max (bandEdgeLowHz_[i],  lowHz_), plot);
+            const float x1 = xForHz (std::min (bandEdgeHighHz_[i], highHz_), plot);
             const float y  = yForDb (juce::jlimit (kMinDb, kMaxDb, bandLevelsDb_[i]), plot);
 
             // A one-pixel gutter between bars: they read as discrete bands
@@ -673,7 +923,7 @@ void SpectrumView::paint (juce::Graphics& g)
     for (std::uint32_t i = 0; i < notchCount; ++i)
     {
         const auto& notch = snapshot_.notches[i];
-        if (notch.frequency < kMinHz || notch.frequency > kMaxHz)
+        if (notch.frequency < lowHz_ || notch.frequency > highHz_)
             continue;
 
         const float heat = notchHeat (ageMsOf (notch, now));
@@ -704,7 +954,7 @@ void SpectrumView::paint (juce::Graphics& g)
     {
         const auto& notch = snapshot_.notches[i];
         const float hz = notch.frequency;
-        if (hz < kMinHz || hz > kMaxHz)
+        if (hz < lowHz_ || hz > highHz_)
             continue;
 
         const double ageMs  = ageMsOf (notch, now);

@@ -131,3 +131,6 @@ at every point on that ramp — the trace is sodium too.
 | Two summarised slot rows | Full 8-lane routing table | The real control the product needs. Drives the 0.52 split above. |
 | No slot selector | `MONITOR` tabs in the ACTIVE NOTCHES caption | One detector per slot has always existed; nothing could reach past slot 0. Placed on the notch panel, not the masthead, because that is where a user looks for it. |
 | Fixed 210 px floor | Floor capped at 55 % of the space under the transport, and the window grows when a routing row is added | The study had no scrolling table. |
+| Axis fixed at 20 Hz - 20 kHz | Operator-chosen window, 60 Hz - 16 kHz by default, dragged by the axis gutter's ends or typed into two fields | A room howls between roughly 100 Hz and 12 kHz. On the full axis every notch crowded into the middle third and the outer octaves showed nothing. |
+| Selected segment: fill only | Fill, a lift, and an accent edge | Fill alone read as a lighter gap between two dividers rather than as a selection. |
+| Combo values truncate at the end | Middle elision: `Analogue 1` becomes `Ana...1` | A channel is identified by its LAST character. Trailing truncation throws away the only part that distinguishes two ports. |

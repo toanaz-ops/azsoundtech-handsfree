@@ -25,14 +25,14 @@ constexpr int kCustomItemId = 2;
 // every field above it (DEVICE, RATE, RESPONSE, NOTCH, TRIGGER).
 constexpr int kNumberColumn = 24;
 constexpr int kEnableColumn = az::theme::gutterWidth - kNumberColumn;
-constexpr int kWidthColumn  = 70;
+constexpr int kWidthColumn  = 84;   // fits "Stereo" whole -- see elideMiddle
 
 // Wide enough for a real channel name. Interfaces report things like
 // "Analogue 1", and at 76 px that came back as "Analogue" stacked over "1" --
 // the combo's label had room for a second line and took it. The wrapping
 // itself is fixed in the LookAndFeel; this is the width that lets the name be
 // READ rather than merely fit on one line with an ellipsis.
-constexpr int kLaneColumn   = 88;
+constexpr int kLaneColumn   = 98;
 constexpr int kLedColumn    = 26;
 constexpr int kTuneColumn   = 46;   // a combo needs its caret AND its value
 

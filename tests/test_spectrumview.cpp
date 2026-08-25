@@ -270,3 +270,81 @@ TEST (RtaProcessing, BandLevelsSumPowerWithinABand)
                        10.0f, 20.0f, 20000.0f, out.data());
     EXPECT_NEAR (out[5], singleBinDb + 10.0f * std::log10 (2.0f), 0.01f);
 }
+
+//==============================================================================
+// THE DISPLAY RANGE (2026-08-25).
+//
+// The analyser used to be pinned to 20 Hz - 20 kHz. A room howls between
+// roughly 100 Hz and 12 kHz, so most of the axis was spent on octaves nothing
+// ever rings in and every notch crowded into the middle third. The window is
+// now the operator's to choose, by dragging either end of the axis gutter or
+// by typing into the two fields beside it.
+
+TEST (SpectrumView, TheDefaultWindowIsTheRangeARoomActuallyRingsIn)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController fed (false, false);
+    gui::SpectrumView view (fed.controller);
+
+    EXPECT_FLOAT_EQ (view.getDisplayLowHz(),  gui::SpectrumView::kDefaultLowHz);
+    EXPECT_FLOAT_EQ (view.getDisplayHighHz(), gui::SpectrumView::kDefaultHighHz);
+
+    // And it is a sub-range of the absolute axis, not equal to it.
+    EXPECT_GT (view.getDisplayLowHz(),  gui::SpectrumView::kMinHz);
+    EXPECT_LT (view.getDisplayHighHz(), gui::SpectrumView::kMaxHz);
+}
+
+TEST (SpectrumView, ARangeIsClampedOrderedAndKeptWideEnoughToRead)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController fed (false, false);
+    gui::SpectrumView view (fed.controller);
+
+    // Past the absolute limits: clamped, not rejected.
+    view.setDisplayRange (1.0f, 40000.0f);
+    EXPECT_FLOAT_EQ (view.getDisplayLowHz(),  gui::SpectrumView::kMinHz);
+    EXPECT_FLOAT_EQ (view.getDisplayHighHz(), gui::SpectrumView::kMaxHz);
+
+    // Handed backwards: ordered rather than ignored. Dragging one edge past
+    // the other is a normal gesture, not an error.
+    view.setDisplayRange (8000.0f, 200.0f);
+    EXPECT_LT (view.getDisplayLowHz(), view.getDisplayHighHz());
+    EXPECT_FLOAT_EQ (view.getDisplayLowHz(),  200.0f);
+    EXPECT_FLOAT_EQ (view.getDisplayHighHz(), 8000.0f);
+
+    // Collapsed to nothing: pushed back apart. Below about an octave and a
+    // half the log scale stops being readable and the notch stems merge.
+    view.setDisplayRange (1000.0f, 1001.0f);
+    const float span = view.getDisplayHighHz() / view.getDisplayLowHz();
+    EXPECT_GE (span, std::exp2 (gui::SpectrumView::kMinSpanOctaves) - 0.01f);
+}
+
+TEST (SpectrumView, TheRangeFieldsAcceptWhatASoundmanWouldType)
+{
+    // Bare hertz, a k suffix, a decimal k, and the unit typed out -- all of
+    // which somebody will type, none of which should need a manual.
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency ("60"),     60.0f);
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency ("16k"), 16000.0f);
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency ("1.25k"), 1250.0f);
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency (" 250 Hz "), 250.0f);
+
+    // Unreadable input reports 0, which the editor reads as "keep what you
+    // had" -- no dialog, no snapping the axis somewhere nobody asked for.
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency (""),       0.0f);
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency ("banana"), 0.0f);
+    EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency ("-400"),   0.0f);
+}
+
+TEST (SpectrumView, TheRangeFieldsShowRoundNumbersBack)
+{
+    EXPECT_EQ (gui::SpectrumView::formatFrequency (60.0f).toStdString(),    "60");
+    EXPECT_EQ (gui::SpectrumView::formatFrequency (16000.0f).toStdString(), "16k");
+    EXPECT_EQ (gui::SpectrumView::formatFrequency (1250.0f).toStdString(),  "1.25k");
+
+    // Round trip: what the field shows must parse back to what it shows.
+    for (const float hz : { 60.0f, 250.0f, 1250.0f, 12000.0f, 16000.0f })
+        EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency (
+                             gui::SpectrumView::formatFrequency (hz)), hz);
+}

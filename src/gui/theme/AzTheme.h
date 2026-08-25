@@ -218,6 +218,21 @@ void drawWell (juce::Graphics& g, juce::Rectangle<float> bounds, bool focused);
 // not read a manual needs.
 inline const juce::Identifier hintProperty { "azHint" };
 
+// Width of `text` set in `font`. juce::Font lost getStringWidth in this JUCE
+// version; GlyphArrangement is the replacement and this is the one wrapper.
+[[nodiscard]] float stringWidth (const juce::Font& font, const juce::String& text);
+
+// Shortens `text` to fit `maxWidth` by removing characters from the MIDDLE,
+// never the end.
+//
+// A channel is called "Analogue 1", and the part that identifies it is the
+// LAST character. Trailing truncation -- which is what every default does --
+// throws away the only part that matters and leaves two ports looking
+// identical. "Ana... 1" is readable; "Analogue" twice is not.
+[[nodiscard]] juce::String elideMiddle (const juce::Font& font,
+                                        const juce::String& text,
+                                        float maxWidth);
+
 // A section caption, in tracked uppercase silkscreen.
 void drawCaption (juce::Graphics& g, const juce::String& caption,
                   juce::Rectangle<int> bounds, juce::Colour colour);

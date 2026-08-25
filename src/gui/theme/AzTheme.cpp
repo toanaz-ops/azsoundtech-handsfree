@@ -165,6 +165,46 @@ void drawWell (juce::Graphics& g, const juce::Rectangle<float> bounds, const boo
     g.drawRoundedRectangle (bounds.reduced (0.5f), cornerRadius, 1.0f);
 }
 
+float stringWidth (const juce::Font& font, const juce::String& text)
+{
+    if (text.isEmpty())
+        return 0.0f;
+
+    juce::GlyphArrangement glyphs;
+    glyphs.addLineOfText (font, text, 0.0f, 0.0f);
+    return glyphs.getBoundingBox (0, -1, true).getWidth();
+}
+
+juce::String elideMiddle (const juce::Font& font, const juce::String& text,
+                          const float maxWidth)
+{
+    if (maxWidth <= 0.0f || stringWidth (font, text) <= maxWidth)
+        return text;
+
+    // Built from a code point: a literal ellipsis in a C++ source string comes
+    // back as mojibake through MSVC's execution charset (see
+    // NotchListPanel::minusSign, and the middle dot that shipped broken once).
+    static const juce::String ellipsis = juce::String::charToString ((juce::juce_wchar) 0x2026);
+
+    // The tail is what identifies the port, so it is protected: keep the last
+    // TWO characters ("1", " 1", "12") before giving up any of them.
+    const int length = text.length();
+    const int keepTail = juce::jmin (2, length);
+
+    for (int head = length - keepTail - 1; head >= 1; --head)
+    {
+        const auto candidate = text.substring (0, head) + ellipsis
+                             + text.substring (length - keepTail);
+
+        if (stringWidth (font, candidate) <= maxWidth)
+            return candidate;
+    }
+
+    // Nothing fits with a head at all -- show the tail alone rather than
+    // something that could be any channel.
+    return ellipsis + text.substring (length - keepTail);
+}
+
 void drawCaption (juce::Graphics& g, const juce::String& caption,
                   const juce::Rectangle<int> bounds, const juce::Colour colour)
 {
@@ -258,8 +298,14 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
     {
         if (on)
         {
-            g.setColour (raise);
+            // A lift AND an edge. Fill alone -- which is all the study had --
+            // left the chosen option looking like a slightly lighter gap
+            // between two dividers rather than like a selection.
+            g.setColour (raise.brighter (0.10f));
             g.fillRect (button.getLocalBounds());
+
+            g.setColour (accent.withAlpha (0.55f));
+            g.drawRect (button.getLocalBounds(), 1);
         }
         else if (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown)
         {
@@ -502,10 +548,20 @@ void AzLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
 {
     g.setColour (label.findColour (juce::Label::textColourId)
                      .withAlpha (label.isEnabled() ? 1.0f : 0.4f));
-    g.setFont (getLabelFont (label));
+
+    const auto font = getLabelFont (label);
+    g.setFont (font);
 
     auto textArea = label.getBorderSize().subtractedFrom (label.getLocalBounds());
-    g.drawFittedText (label.getText(), textArea,
+
+    // A ComboBox's own label holds a VALUE -- a channel name, a rate, a buffer
+    // size -- and those identify themselves by their tail. Elide the middle so
+    // the port number survives; every other label truncates normally.
+    const auto text = dynamic_cast<juce::ComboBox*> (label.getParentComponent()) != nullptr
+                          ? elideMiddle (font, label.getText(), (float) textArea.getWidth())
+                          : label.getText();
+
+    g.drawFittedText (text, textArea,
                       label.getJustificationType(),
                       juce::jmax (1, (int) ((float) textArea.getHeight() / label.getFont().getHeight())),
                       label.getMinimumHorizontalScale());

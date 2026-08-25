@@ -60,9 +60,22 @@ class SpectrumView : public juce::Component,
                      private juce::Timer
 {
 public:
-    // Axis ranges. Kept here so tests and future overlays share one truth.
+    // The ABSOLUTE limits of the axis. The visible window is a sub-range of
+    // this, chosen by the operator -- see setDisplayRange.
     static constexpr float kMinHz = 20.0f;
     static constexpr float kMaxHz = 20000.0f;
+
+    // What the analyser opens on. A room howls between roughly 100 Hz and
+    // 12 kHz; showing the full 20 Hz - 20 kHz spends most of the plot's width
+    // on octaves nothing ever rings in, which is why notches all crowded into
+    // the middle third. 60 Hz - 16 kHz keeps a margin either side of the real
+    // range without wasting half the axis.
+    static constexpr float kDefaultLowHz  = 60.0f;
+    static constexpr float kDefaultHighHz = 16000.0f;
+
+    // The narrowest window the axis may be dragged to. Below about an octave
+    // and a half the log scale stops being readable and the notch stems merge.
+    static constexpr float kMinSpanOctaves = 1.5f;
     static constexpr float kMinDb = -90.0f;
     static constexpr float kMaxDb = 0.0f;
 
@@ -74,6 +87,22 @@ public:
     // rebuilt and a repaint requested; an unchanged sequence costs one mutex-
     // guarded struct copy and nothing else (spec section 2: skip repaint).
     void refreshFromSnapshot();
+
+    // The visible frequency window. Both ends are clamped into
+    // [kMinHz, kMaxHz], ordered, and pushed apart to kMinSpanOctaves if the
+    // caller asks for something narrower. Rebuilds the geometry, because the
+    // stored polyline is normalised against THIS range.
+    void setDisplayRange (float lowHz, float highHz);
+    void resetDisplayRange();
+
+    [[nodiscard]] float getDisplayLowHz()  const { return lowHz_; }
+    [[nodiscard]] float getDisplayHighHz() const { return highHz_; }
+
+    // "60", "1.2k", "16k" -> Hz. Returns 0 for anything unparseable, which the
+    // editors treat as "keep what you had". Shared with the tests so there is
+    // one definition of what a soundman may type.
+    [[nodiscard]] static float parseFrequency (const juce::String& text);
+    [[nodiscard]] static juce::String formatFrequency (float hz);
 
     // Point this view at a different slot's detector. Everything derived from
     // the OLD slot is dropped: the age ledger (a notch at 1 kHz on slot 1 is
@@ -124,6 +153,13 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    // The axis gutter is the range control -- see mouseDown.
+    void mouseMove        (const juce::MouseEvent&) override;
+    void mouseDown        (const juce::MouseEvent&) override;
+    void mouseDrag        (const juce::MouseEvent&) override;
+    void mouseUp          (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+
 private:
     void timerCallback() override;
 
@@ -162,9 +198,36 @@ private:
 
 
 
-    // Log-frequency / dB mappings into a given plot rectangle.
-    static float xForHz (float hz, const juce::Rectangle<float>& plot);
+    // Log-frequency mapping into a given plot rectangle. NOT static any more:
+    // it reads the operator's chosen range, so every consumer -- the trace,
+    // the octave bars, the notch stems -- follows the axis automatically.
+    [[nodiscard]] float xForHz (float hz, const juce::Rectangle<float>& plot) const;
+    [[nodiscard]] float hzForX (float x, const juce::Rectangle<float>& plot) const;
+
     static float yForDb (float db, const juce::Rectangle<float>& plot);
+
+    // The axis gutter under the plot, where the range is dragged.
+    [[nodiscard]] juce::Rectangle<int> axisGutter() const;
+
+    // Ticks that actually fall inside the current window, chosen from a fixed
+    // 1-2-5 ladder so they stay on round numbers as the range changes.
+    void rebuildTicks();
+
+    void applyRangeFromEditors();
+    void pushRangeToEditors();
+
+    float lowHz_  = kDefaultLowHz;
+    float highHz_ = kDefaultHighHz;
+
+    // Which end the current drag is moving; -1 when no drag is in progress.
+    int draggingEdge_ = -1;
+
+    std::vector<float>        tickHz_;
+    std::vector<juce::String> tickLabels_;
+
+    juce::Label     rangeLabel_;
+    juce::TextEditor lowField_;
+    juce::TextEditor highField_;
 
     // A POINTER, not a reference: the view follows whichever routing slot the
     // masthead's selector is on, and a reference cannot be re-seated. Never
@@ -220,6 +283,11 @@ private:
     // Reserved at the toolbar's left for the ANALYSER legend, by BOTH paint()
     // (which draws it) and resized() (which must not lay a control over it).
     static constexpr int kCaptionWidth  = 78;
+
+    // Reserved at the plot's left for the dB labels. Shared by paint() and by
+    // axisGutter(), which must start where the plot starts or a click near the
+    // left edge would grab the wrong end.
+    static constexpr int kLeftGutter    = 44;
     // Joined segmented groups, in the study's order and wording: no separate
     // BAND / AVG legends -- the averaging group's first option carries its own
     // label. See docs/spec-ui-mockup.md section 3.
@@ -234,7 +302,7 @@ private:
 
     juce::Font tickFont_;                 // mono: axis numbers
     juce::Font bodyFont_;                 // "no signal" text
-    juce::String xTickLabels_[7];         // 50 Hz .. 10 kHz
+
     juce::String yTickLabels_[4];         // 0 / -30 / -60 / -90 dB
     juce::String noSignalLabel_;
 

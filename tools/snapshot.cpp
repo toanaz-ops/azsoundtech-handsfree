@@ -164,6 +164,23 @@ int main (int argc, char** argv)
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
     MainComponent app;
+
+    // No device is open, so the routing table would render with every channel
+    // combo empty -- and an empty table cannot show whether a real channel
+    // name survives its column. Inject the names a typical interface reports.
+    const auto channels = []
+    {
+        juce::StringArray names;
+        for (int i = 1; i <= 8; ++i)
+            names.add ("Analogue " + juce::String (i));
+        return names;
+    }();
+
+    auto& slots = app.getSlotPanelForTest();
+    slots.inputChannelNamesProvider  = [channels] { return channels; };
+    slots.outputChannelNamesProvider = [channels] { return channels; };
+    slots.refresh();
+
     app.setSize (width, height);
     app.resized();   // headless: no peer, so drive the layout pass directly
 
