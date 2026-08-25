@@ -58,6 +58,29 @@ GitHub runner’s cmake defaults to the newest Visual Studio — see
 - Submodules: clone with `--recursive`. If a submodule path is empty, run
   `git submodule update --init --recursive` before blaming the build.
 
+## GUI work is not reported without a picture
+
+Any task that changes what the console LOOKS like ends with a rendered
+screenshot handed to the owner -- not a description of the change, and not a
+green build. Owner's standing instruction, 2026-08-25.
+
+```bash
+build/tools/Release/HandsFreeSnapshot.exe shots 1440 920
+```
+
+`HandsFreeSnapshot` renders `MainComponent` offscreen through
+`juce::Component::createComponentSnapshot()`: no window, no screen capture, no
+DPI scaling, identical every run. Send `shots/console-live.png` (and
+`console-idle.png` when the empty state changed). Drop `--fast` when the notch
+age ramp matters -- it needs ~23 s of wall time to be visible.
+
+READ the image back before sending it. Every visual bug found in the rebuild --
+a button with no text, a truncated CLEAR ALL, markers burying the trace, a
+mojibake middle dot -- passed the whole test suite. A green build says nothing
+about whether the thing is legible.
+
+Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
+
 ## Source of truth
 
 1. `memory/MEMORY.md` — index of lessons. Search before re-deriving.

@@ -92,6 +92,15 @@ call `startAudio()`, which is what lets the whole object exist on a machine
 with no interface attached. The device combos therefore render empty and the
 masthead reads `Stopped`. That is correct output, not a broken snapshot.
 
+## Reporting the result
+
+**Standing instruction from the owner (2026-08-25): every task that changes
+what the UI looks like ends by sending the rendered screenshot.** Not a
+description of the change, not a list of files touched, and not a green test
+count -- the picture.
+
+Send `console-live.png`, plus `console-idle.png` when the empty state changed.
+
 ## Reading the result
 
 Read the PNG back and actually look at it. The point of the tool is to catch
