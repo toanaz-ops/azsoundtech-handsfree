@@ -12,12 +12,16 @@ PeakinessAnalyzer::PeakinessAnalyzer()
 
 void PeakinessAnalyzer::setThreshold (float peakinessThreshold)
 {
-    threshold_ = peakinessThreshold;
+    // Brief 2026-08-24: the UI offers 6..15; the hard clamp is a little wider
+    // so a preset or future panel cannot push the detector into noise-chasing
+    // territory (< 5) or deafness (> 20).
+    threshold_.store (std::clamp (peakinessThreshold, kMinThreshold, kMaxThreshold),
+                      std::memory_order_relaxed);
 }
 
 float PeakinessAnalyzer::getThreshold() const
 {
-    return threshold_;
+    return threshold_.load (std::memory_order_relaxed);
 }
 
 void PeakinessAnalyzer::setMinFrequencyHz (double hz)
@@ -130,7 +134,7 @@ PeakinessAnalyzer::Result PeakinessAnalyzer::analyse (const Detector::Spectrum& 
         // Strictly greater: spec 5.2 step 4 and plan Task 11 both say
         // "> threshold". A bin sitting exactly on the threshold is not a
         // candidate.
-        if (! (peakiness > threshold_))
+        if (! (peakiness > threshold_.load (std::memory_order_relaxed)))
         {
             continue;
         }

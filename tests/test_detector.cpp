@@ -35,10 +35,10 @@ std::vector<float> makeSine (double frequencyHz, double sampleRate, std::size_t 
 }
 } // namespace
 
-// A 1 kHz tone at 48 kHz with a 1024-point FFT lands at
-// bin = 1000 / (48000/1024) = 21.33, so bin 21 is the closest bin and must
+// A 1 kHz tone at 48 kHz with the 2048-point FFT lands at
+// bin = 1000 / (48000/2048) = 42.67, so bin 43 is the closest bin and must
 // dominate. Analytic check of the same window/tone gives
-// mag[21]/mean(all other bins) ~= 404, so the >= 5x bound has huge headroom.
+// mag[43]/mean(all other bins) far above the >= 5x bound.
 TEST (Detector, MagnitudeOfSingleTone)
 {
     constexpr double sampleRate = 48000.0;
@@ -59,7 +59,7 @@ TEST (Detector, MagnitudeOfSingleTone)
     ASSERT_EQ (spectrum.readCount, static_cast<std::size_t> (Detector::kHopSize));
     EXPECT_DOUBLE_EQ (spectrum.sampleRate, sampleRate);
 
-    constexpr int kToneBin = 21;
+    constexpr int kToneBin = 43;   // 1000 / (48000/2048) = 42.67
     double sumOfOthers = 0.0;
     for (int bin = 0; bin < Detector::kNumBins; ++bin)
         if (bin != kToneBin)
@@ -207,8 +207,9 @@ TEST (Detector, SetSampleRateUpdates)
 //
 // A rectangular window puts a DC signal entirely in bin 0: mag[1] == 0.
 // JUCE's normalised symmetric Hann spreads it in a fixed, known way --
-// analytically mag[1]/mag[0] = 0.5007 and mag[2]/mag[0] = 0.00033 for
-// N = 1024. So the 0.5 ratio is present if and only if Hann was applied.
+// analytically mag[1]/mag[0] = 0.5007 and mag[2]/mag[0] = 0.00033 (the ratio
+// is size-independent for the symmetric Hann). So the 0.5 ratio is present if
+// and only if Hann was applied.
 TEST (Detector, HannWindowApplied)
 {
     LockFreeRingBuffer<float> tap (kTapCapacity);
@@ -217,9 +218,10 @@ TEST (Detector, HannWindowApplied)
 
     Detector detector (48000.0);
 
-    // Two hops of 512 to fill the 1024-sample analysis window with DC.
-    detector.processLatestBlock (tap);
-    const auto spectrum = detector.processLatestBlock (tap);
+    // kFftSize / kHopSize hops to fill the whole analysis window with DC.
+    Detector::Spectrum spectrum {};
+    for (int i = 0; i < Detector::kFftSize / Detector::kHopSize; ++i)
+        spectrum = detector.processLatestBlock (tap);
 
     ASSERT_NE (spectrum.magnitudes, nullptr);
     ASSERT_EQ (spectrum.readCount, static_cast<std::size_t> (Detector::kHopSize));

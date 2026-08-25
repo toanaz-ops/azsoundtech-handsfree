@@ -13,6 +13,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(HandsFreeTests
     test_slotconfig.cpp
     test_slotpanel.cpp
+    test_tuningpanel.cpp
     test_ringbuffer.cpp
     test_biquad.cpp
     test_notchchain.cpp
@@ -43,6 +44,7 @@ add_executable(HandsFreeTests
     ../src/gui/DeviceDrawer.cpp
     ../src/gui/DevicePanel.cpp
     ../src/gui/SlotPanel.cpp
+    ../src/gui/TuningPanel.cpp
     ../src/gui/ModeBar.cpp
     ../src/gui/ModeRail.cpp
     ../src/gui/StatusBadge.cpp
@@ -104,6 +106,15 @@ if(MSVC)
         _CRT_SECURE_NO_WARNINGS
         _SCL_SECURE_NO_WARNINGS
     )
+endif()
+
+# The default 1 MB main-thread stack no longer fits the test rigs: since the
+# FFT went 2048-wide, one CandidateScorer's history alone is ~512 kB, and
+# HarmonicOfLockedNotchIsPenalised holds TWO Rigs (two scorers) on the stack
+# at once -- measured as a segfault at 1 MB. 8 MB removes the ceiling for any
+# future rig shape too.
+if(MSVC)
+    target_link_options(HandsFreeTests PRIVATE "/STACK:8388608")
 endif()
 
 include(GoogleTest)

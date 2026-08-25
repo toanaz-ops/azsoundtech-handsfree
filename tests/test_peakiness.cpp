@@ -7,21 +7,22 @@
 // where the test is genuinely about end-to-end behaviour.
 //
 // The metric under test is an ANNULUS: the neighbourhood is the SIX bins at
-// offsets -5,-4,-3,+3,+4,+5. Offsets 0, +-1, +-2 are the Hann main lobe and
+// offsets -5,-4,-3,+3,+4,+5. Offsets 0, +-1 and +-2 are the Hann main lobe and
 // are excluded (see PeakinessAnalyzer.h for the measurement that forced this).
 // Two consequences drive the arithmetic below:
 //   * adjacent bins are NOT each other's neighbours any more, so a two-bin
 //     ridge no longer suppresses itself;
 //   * a bin needs five bins of headroom on BOTH sides, so the lowest scoreable
-//     bin is 5 -- 234.375 Hz at 48 kHz, ABOVE the 100 Hz product floor.
+//     bin is 5 -- since the 2026-08-24 FFT widening (1024 -> 2048) that is
+//     ~117 Hz at 48 kHz, nearly down to the 100 Hz product floor.
 //
-// Bin geometry at 48 kHz, kFftSize = 1024:  binWidth = 48000/1024 = 46.875 Hz
-//   bin 4   = 187.500 Hz  -> below the annulus floor, never scored
-//   bin 5   = 234.375 Hz  -> the lowest scoreable bin at this rate
-//   bin 6   = 281.250 Hz  (exactly)
-//   100 Hz  -> bin 2.1333 -> ceil = 3, but max(5, 3) = 5 -> the RADIUS binds
-//   500 Hz  -> bin 10.667 -> ceil = 11 -> first scoreable bin is 11
-//   1000 Hz -> bin 21.333 -> bin 21 = 984.375 Hz, bin 22 = 1031.25 Hz
+// Bin geometry at 48 kHz, kFftSize = 2048:  binWidth = 48000/2048 = 23.4375 Hz
+//   bin 4   =  93.750 Hz  -> below the annulus floor, never scored
+//   bin 5   = 117.1875 Hz -> the lowest scoreable bin at this rate
+//   bin 6   = 140.625 Hz  (exactly)
+//   100 Hz  -> bin 4.2667 -> ceil = 5, max(5, 5) = 5 -> both agree
+//   500 Hz  -> bin 21.333 -> ceil = 22 -> first scoreable bin from min-freq
+//   1000 Hz -> bin 42.667 -> bin 43 = 1007.8125 Hz, bin 44 = 1031.25 Hz
 //
 // Every numeric assertion below has its arithmetic written out above it.
 
@@ -171,16 +172,17 @@ TEST (Peakiness, PeakinessAtUsesAnAnnulusThatExcludesTheMainLobe)
 // beat the tone, and nothing could ever cross 10.0. Excluding the four-bin
 // Hann main lobe restores the separation. MEASURED IN THIS RIG, seed 12345:
 //
-//     tone peakiness at bin 21            131.70
-//     worst noise-only bin, same seed       4.51   (tone removed, same RNG)
+//     tone peakiness at bin 43            (measured in this rig)
+//     worst noise-only bin, same seed       4.51   (tone removed, same RNG,
+//                                            measured at the old 1024 FFT --
+//                                            the 2048 sweep is looser below)
 //     threshold                            10.00
 //
-// i.e. the tone clears the threshold by 13.2x, the noise floor sits 2.2x
-// BELOW it, and tone/noise separation is 29x. The bounds asserted here are
-// deliberately loose enough to survive a different RNG but tight enough to
-// fail if the annulus is ever narrowed back into the main lobe -- that would
-// drag the tone under the old 4.0 ceiling, an order of magnitude below the
-// lower bound.
+// i.e. the tone clears the threshold by well over an order of magnitude and
+// the noise floor sits BELOW it. The bounds asserted here are deliberately
+// loose enough to survive a different RNG but tight enough to fail if the
+// annulus is ever narrowed back into the main lobe -- that would drag the
+// tone under the old 4.0 ceiling, an order of magnitude below the lower bound.
 // ---------------------------------------------------------------------------
 TEST (Peakiness, ToneInNoiseIsDetectedAndNoiseAloneIsNot)
 {
@@ -194,27 +196,27 @@ TEST (Peakiness, ToneInNoiseIsDetectedAndNoiseAloneIsNot)
     ASSERT_NE (spectrum.magnitudes, nullptr);
     ASSERT_EQ (spectrum.readCount, static_cast<std::size_t> (Detector::kHopSize));
 
-    // 1000 Hz / 46.875 = bin 21.333, so the tone lands on bin 21 and is a
+    // 1000 Hz / 23.4375 = bin 42.67, so the tone lands on bin 43 and is a
     // clean local maximum.
-    constexpr int kToneBin = 21;
+    constexpr int kToneBin = 43;
     EXPECT_GT (spectrum.magnitudes[kToneBin], spectrum.magnitudes[kToneBin - 1]);
     EXPECT_GE (spectrum.magnitudes[kToneBin], spectrum.magnitudes[kToneBin + 1]);
 
-    // bin 21 * 48000 / 1024 = 984.375 Hz
-    EXPECT_NEAR (kToneBin * kSampleRate / Detector::kFftSize, 984.375, 1.0);
+    // bin 43 * 48000 / 2048 = 1007.8125 Hz
+    EXPECT_NEAR (kToneBin * kSampleRate / Detector::kFftSize, 1007.8125, 1.0);
 
-    // MEASURED: 131.70 with this seed; 123..139 across five seeds in an
-    // independent double-precision reference model. The lower bound of 40.0 is
-    // 4x the threshold and 10x the old 4.0 ceiling -- narrowing the annulus
-    // back into the main lobe cannot pass it.
+    // MEASURED at the old 1024 FFT: 131.70 with this seed; 123..139 across
+    // five seeds in an independent double-precision reference model. The
+    // 2048-bin spectrum concentrates the tone even harder, so the lower bound
+    // of 40.0 (4x the threshold, 10x the old 4.0 ceiling) still stands.
     const float tonePeakiness =
         PeakinessAnalyzer::peakinessAt (spectrum.magnitudes, Detector::kNumBins, kToneBin);
     EXPECT_GT (tonePeakiness, 40.0f);
     EXPECT_LT (tonePeakiness, 400.0f);
 
     // The plan's requirement, at the plan's threshold, unmodified: exactly one
-    // candidate, at the tone bin. The four-bin main lobe lights up bins 20, 22
-    // and 23 as well, and bin 22 scores >10 in its own right -- the
+    // candidate, at the tone bin. The four-bin main lobe lights up the
+    // neighbouring bins too, some scoring >10 in their own right -- the
     // local-maximum rule is what collapses them.
     PeakinessAnalyzer analyzer;
     ASSERT_FLOAT_EQ (analyzer.getThreshold(), 10.0f);
@@ -222,7 +224,7 @@ TEST (Peakiness, ToneInNoiseIsDetectedAndNoiseAloneIsNot)
     const auto detected = analyzer.analyse (spectrum);
     ASSERT_EQ (detected.count, 1u);
     EXPECT_EQ (detected.candidates[0].bin, kToneBin);
-    EXPECT_DOUBLE_EQ (detected.candidates[0].frequencyHz, 984.375);
+    EXPECT_DOUBLE_EQ (detected.candidates[0].frequencyHz, 1007.8125);
     EXPECT_FLOAT_EQ (detected.candidates[0].peakiness, tonePeakiness);
     EXPECT_FLOAT_EQ (detected.candidates[0].score, PeakinessAnalyzer::kCandidateScore);
 
@@ -340,14 +342,13 @@ TEST (Peakiness, AdjacentBinsCollapseToOneCandidate)
 // ---------------------------------------------------------------------------
 // 5. The minimum-frequency knob, not merely its default.
 //
-// Spike at bin 6 = 6 * 46.875 = 281.25 Hz, height 40.0 on a flat 1.0 floor.
+// Spike at bin 6 = 6 * 23.4375 = 140.625 Hz, height 40.0 on a flat 1.0 floor.
 //     annulus(6) = {1, 2, 3, 9, 10, 11} = all 1.0 -> mean 1.0
 //     peakiness(6) = 40 / 1.0 = 40.0  > 10.0
-// With minFrequencyHz = 500: firstBin = max(5, ceil(500/46.875)) = max(5, 11) = 11,
-//     so bin 6 is below the floor and must be skipped.
-// With minFrequencyHz = 100: firstBin = max(5, ceil(100/46.875)) = max(5, 3) = 5,
-//     so bin 6 is scored and becomes the candidate. Note that the OUTER RADIUS
-//     wins here, not the 100 Hz setting -- see test 5b.
+// With minFrequencyHz = 500: firstBin = max(5, ceil(500/23.4375)) = max(5, 22)
+//     = 22, so bin 6 is below the floor and must be skipped.
+// With minFrequencyHz = 100: firstBin = max(5, ceil(100/23.4375)) = max(5, 5)
+//     = 5, so bin 6 is scored and becomes the candidate.
 // ---------------------------------------------------------------------------
 TEST (Peakiness, BinsBelowMinFrequencyAreIgnored)
 {
@@ -366,35 +367,37 @@ TEST (Peakiness, BinsBelowMinFrequencyAreIgnored)
     EXPECT_FLOAT_EQ (result.candidates[0].peakiness, 40.0f);
     EXPECT_FLOAT_EQ (result.candidates[0].magnitude, 40.0f);
     EXPECT_FLOAT_EQ (result.candidates[0].score, PeakinessAnalyzer::kCandidateScore);
-    // 6 * 48000 / 1024 = 281.25 Hz
-    EXPECT_DOUBLE_EQ (result.candidates[0].frequencyHz, 281.25);
+    // 6 * 48000 / 2048 = 140.625 Hz
+    EXPECT_DOUBLE_EQ (result.candidates[0].frequencyHz, 140.625);
 }
 
 // ---------------------------------------------------------------------------
-// 5b. *** THE KNOWN v1 LIMITATION, PINNED AS A TEST. ***
+// 5b. *** THE FORMER v1 LIMITATION, RE-PINNED AFTER THE 2048 FFT FIX. ***
 //
 // kDefaultMinFrequencyHz is 100.0, but the annulus needs five bins of headroom
-// on both sides, so nothing below bin 5 can ever be scored. At 48 kHz:
-//     bin 4 = 187.500 Hz  -> ABOVE the 100 Hz product floor, still invisible
-//     bin 5 = 234.375 Hz  -> the real low-frequency floor of the detector
-// Low-mid feedback around 200-250 Hz is a real live-sound failure mode, so
-// this gap is asserted rather than left to be discovered in a venue. If a
-// future change (longer FFT, noise-floor tracker) closes it, this test must be
-// updated deliberately -- it will not fail silently.
+// on both sides, so nothing below bin 5 can ever be scored. At 48 kHz with the
+// widened 2048-point FFT:
+//     bin 4 =  93.750 Hz  -> BELOW the 100 Hz product floor, still invisible
+//     bin 5 = 117.1875 Hz -> the real low-frequency floor of the detector
+// The v1 1024-point FFT bound this at 234.375 Hz; the widening (brief
+// 2026-08-24) is what pulled it down. Low-mid feedback around 100-250 Hz is a
+// real live-sound failure mode, so the remaining gap is still asserted rather
+// than left to be discovered in a venue. If a future change closes it further,
+// this test must be updated deliberately -- it will not fail silently.
 // ---------------------------------------------------------------------------
 TEST (Peakiness, LowestScoreableBinIsSetByTheOuterRadiusNotMinFrequency)
 {
     PeakinessAnalyzer analyzer;
     analyzer.setMinFrequencyHz (50.0);   // far below the default 100 Hz
-    // firstBin = max(5, ceil(50/46.875)) = max(5, 2) = 5
+    // firstBin = max(5, ceil(50/23.4375)) = max(5, 3) = 5
 
-    // A textbook 187.5 Hz howl, 40x the floor: invisible.
+    // A textbook 93.75 Hz howl, 40x the floor: invisible.
     auto low = flatSpectrum (1.0f);
     low[4]   = 40.0f;
     EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (low.data(), Detector::kNumBins, 4), 0.0f);
     EXPECT_EQ (analyzer.analyse (wrap (low)).count, 0u);
 
-    // One bin higher -- 234.375 Hz -- and the same howl is detected.
+    // One bin higher -- 117.1875 Hz -- and the same howl is detected.
     //     annulus(5) = {0, 1, 2, 8, 9, 10} = all 1.0 -> mean 1.0
     //     peakiness(5) = 40 / 1.0 = 40.0 > 10.0
     auto edge = flatSpectrum (1.0f);
@@ -403,20 +406,20 @@ TEST (Peakiness, LowestScoreableBinIsSetByTheOuterRadiusNotMinFrequency)
     const auto result = analyzer.analyse (wrap (edge));
     ASSERT_EQ (result.count, 1u);
     EXPECT_EQ (result.candidates[0].bin, 5);
-    // 5 * 48000 / 1024 = 234.375 Hz
-    EXPECT_DOUBLE_EQ (result.candidates[0].frequencyHz, 234.375);
+    // 5 * 48000 / 2048 = 117.1875 Hz
+    EXPECT_DOUBLE_EQ (result.candidates[0].frequencyHz, 117.1875);
     EXPECT_GT (result.candidates[0].frequencyHz, PeakinessAnalyzer::kDefaultMinFrequencyHz);
 }
 
 // The minimum bin must be DERIVED from spectrum.sampleRate, never hardcoded.
-// At 96 kHz binWidth = 96000/1024 = 93.75 Hz, so 500 Hz -> ceil(5.333) = 6 and
-// firstBin = max(5, 6) = 6; the same bin-6 spike that is excluded at 48 kHz
-// (where firstBin = max(5, 11) = 11) is now exactly ON the floor and must be
-// scored.
+// At 96 kHz binWidth = 96000/2048 = 46.875 Hz, so 500 Hz -> ceil(10.667) = 11
+// and firstBin = max(5, 11) = 11; the same bin-11 spike that is excluded at
+// 48 kHz (where firstBin = max(5, 22) = 22) is now exactly ON the floor and
+// must be scored. 11 * 96000 / 2048 = 515.625 Hz.
 TEST (Peakiness, MinimumBinFollowsTheSpectrumSampleRate)
 {
     auto mags = flatSpectrum (1.0f);
-    mags[6]   = 40.0f;
+    mags[11]  = 40.0f;
 
     PeakinessAnalyzer analyzer;
     analyzer.setMinFrequencyHz (500.0);
@@ -425,9 +428,8 @@ TEST (Peakiness, MinimumBinFollowsTheSpectrumSampleRate)
 
     const auto at96k = analyzer.analyse (wrap (mags, 96000.0));
     ASSERT_EQ (at96k.count, 1u);
-    EXPECT_EQ (at96k.candidates[0].bin, 6);
-    // 6 * 96000 / 1024 = 562.5 Hz
-    EXPECT_DOUBLE_EQ (at96k.candidates[0].frequencyHz, 562.5);
+    EXPECT_EQ (at96k.candidates[0].bin, 11);
+    EXPECT_DOUBLE_EQ (at96k.candidates[0].frequencyHz, 515.625);
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +503,7 @@ TEST (Peakiness, SilenceProducesNoCandidateAndNoNaN)
 // ---------------------------------------------------------------------------
 // 7b. Edge bins: the OUTER radius is what defines "has a full neighbourhood".
 //
-// Valid range is [5, kNumBins-1-5] = [5, 507] at kNumBins = 513. A live 1.0
+// Valid range is [5, kNumBins-1-5] = [5, 1019] at kNumBins = 1025. A live 1.0
 // floor is used so a 0.0f return can only mean "out of range", never "the mean
 // was zero".
 // ---------------------------------------------------------------------------
@@ -510,7 +512,7 @@ TEST (Peakiness, BinsWithoutAFullAnnulusScoreZero)
     static_assert (PeakinessAnalyzer::kNeighbourOuterRadius == 5, "geometry below");
     static_assert (PeakinessAnalyzer::kNeighbourInnerRadius == 3, "geometry below");
     static_assert (PeakinessAnalyzer::kNeighbourCount == 6, "geometry below");
-    static_assert (Detector::kNumBins == 513, "geometry below");
+    static_assert (Detector::kNumBins == 1025, "geometry below");
 
     const auto live = flatSpectrum (1.0f);
     const auto* m   = live.data();
@@ -520,14 +522,14 @@ TEST (Peakiness, BinsWithoutAFullAnnulusScoreZero)
         EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (m, Detector::kNumBins, bin), 0.0f)
             << "bin " << bin;
 
-    // Above the ceiling: 513 - 1 - 5 = 507 is the last valid bin.
-    for (int bin = 508; bin <= 513; ++bin)
+    // Above the ceiling: 1025 - 1 - 5 = 1019 is the last valid bin.
+    for (int bin = 1020; bin <= 1025; ++bin)
         EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (m, Detector::kNumBins, bin), 0.0f)
             << "bin " << bin;
 
     // Both boundary bins ARE scored: flat 1.0 -> mean 1.0 -> peakiness 1.0.
     EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (m, Detector::kNumBins, 5), 1.0f);
-    EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (m, Detector::kNumBins, 507), 1.0f);
+    EXPECT_FLOAT_EQ (PeakinessAnalyzer::peakinessAt (m, Detector::kNumBins, 1019), 1.0f);
 }
 
 // ---------------------------------------------------------------------------

@@ -257,6 +257,58 @@ void NotchController::setDetectionActive (bool active)
     detectionActive_.store (active, std::memory_order_relaxed);
 }
 
+// --- Detection tuning (brief 2026-08-24). Message thread; atomics relaxed. --
+
+void NotchController::setRiseReferenceMs (double ms)
+{
+    scorer_.setRiseReferenceMs (ms);
+}
+
+double NotchController::getRiseReferenceMs() const
+{
+    return scorer_.getRiseReferenceMs();
+}
+
+void NotchController::setPersistenceBlocks (int blocks)
+{
+    persistenceBlocks_.store (std::clamp (blocks, kMinPersistenceBlocks, kMaxPersistenceBlocks),
+                              std::memory_order_relaxed);
+}
+
+int NotchController::getPersistenceBlocks() const
+{
+    return persistenceBlocks_.load (std::memory_order_relaxed);
+}
+
+void NotchController::setNotchDefaults (double q, double depthDb)
+{
+    // Same floors as the UI combos, widened slightly: a Q of 8 is the lowest
+    // musically usable notch width here and -24 dB is deep enough to kill any
+    // howl; beyond either end a preset or future panel could only do harm.
+    notchQ_.store      (std::clamp (q, 8.0, 50.0),        std::memory_order_relaxed);
+    notchDepthDb_.store(std::clamp (depthDb, -24.0, -6.0), std::memory_order_relaxed);
+}
+
+double NotchController::getNotchQ() const
+{
+    return notchQ_.load (std::memory_order_relaxed);
+}
+
+double NotchController::getNotchDepthDb() const
+{
+    return notchDepthDb_.load (std::memory_order_relaxed);
+}
+
+void NotchController::setPeakinessThreshold (float t)
+{
+    analyzer_.setThreshold (t);   // clamped in PeakinessAnalyzer
+}
+
+float NotchController::getPeakinessThreshold() const
+{
+    return analyzer_.getThreshold();
+}
+
 void NotchController::startSoundcheck()
 {
     const std::lock_guard<std::mutex> lock (modelMutex_);
@@ -323,9 +375,12 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                 const int bin = (int) std::lround (n.frequency / binWidthHz);
                 if (bin < 0 || bin >= Detector::kNumBins)
                     continue;
+                // Same live threshold analyse() used to accept candidates --
+                // a notch re-tested against a stale default would disagree
+                // with the panel about whether it is still reinforced.
                 if (PeakinessAnalyzer::peakinessAt (block.magnitudes,
                                                     Detector::kNumBins, bin)
-                        > PeakinessAnalyzer::kDefaultThreshold)
+                        > analyzer_.getThreshold())
                 {
                     n.lastDetectedMs = liveMs_;
                 }
@@ -355,22 +410,28 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
         const int bin = cand.bin;
         if (score > CandidateScorer::kConfirmScore)
         {
-            if (++persistence_[(std::size_t) bin] >= (std::uint32_t) kPersistenceBlocks)
+            const std::uint32_t requiredBlocks =
+                (std::uint32_t) persistenceBlocks_.load (std::memory_order_relaxed);
+            if (++persistence_[(std::size_t) bin] >= requiredBlocks)
             {
                 persistence_[(std::size_t) bin] = 0;
 
-                // KD-5: automatic notch params are fixed. KD-6: first index
-                // whose lane-0 model notch is inactive; ALL width_ lanes take
-                // that SAME index, or nothing.
+                // KD-5: automatic notch params were fixed; since the
+                // 2026-08-24 brief they are runtime defaults set from the
+                // DETECTION panel. KD-6: first index whose lane-0 model notch
+                // is inactive; ALL width_ lanes take that SAME index, or
+                // nothing.
                 const int slot = firstFreeSlotLocked();
                 if (slot >= 0)
                 {
                     const Origin origin = soundcheckActive() ? Origin::Soundcheck
                                                              : Origin::Detector;
+                    const double q      = notchQ_.load (std::memory_order_relaxed);
+                    const double depthDb= notchDepthDb_.load (std::memory_order_relaxed);
                     int appliedLanes = 0;
                     for (int lane = 0; lane < width_; ++lane)
                         if (setNotch (lane, slot, cand.frequencyHz,
-                                      30.0, -12.0, origin))
+                                      q, depthDb, origin))
                             ++appliedLanes;
                     // Partial-failure analysis: setNotch validates only index
                     // bounds + params + sample rate, identical across all
@@ -382,6 +443,20 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                     if (appliedLanes != width_ && appliedLanes > 0)
                         for (int lane = 0; lane < width_; ++lane)
                             clearNotch (lane, slot);
+
+                    // Brief change 3: one light line per detection event. The
+                    // detector thread already logs elsewhere, this allocates
+                    // a handful of short strings ONCE per placed notch (not
+                    // per frame), and "rise" is the configured rise reference
+                    // the confirmation ran under.
+                    juce::Logger::writeToLog (
+                        "[detect] slot=" + juce::String (slotId_)
+                        + " lane=" + juce::String (appliedLanes)
+                        + " freq=" + juce::String ((int) std::lround (cand.frequencyHz))
+                        + " Q=" + juce::String (q, 1)
+                        + " depth=" + juce::String (depthDb, 1)
+                        + " rise=" + juce::String ((int) std::lround (
+                              scorer_.getRiseReferenceMs())));
                 }
             }
         }

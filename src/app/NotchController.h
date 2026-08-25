@@ -72,8 +72,15 @@ public:
 
     static constexpr double kSoundcheckDurationMs = 15000.0;
     // Spec 5.2 step 6: a candidate must persist this many consecutive blocks
-    // before a Set is emitted (~30 ms at a 10.67 ms hop).
+    // before a Set is emitted (~30 ms at a 10.67 ms hop). Runtime-tunable
+    // (brief 2026-08-24); kPersistenceBlocks is only the DEFAULT.
     static constexpr int kPersistenceBlocks       = 3;
+    static constexpr int kMinPersistenceBlocks    = 1;
+    static constexpr int kMaxPersistenceBlocks    = 10;
+    // Automatic-notch defaults (KD-5), runtime-tunable per the brief. Q in
+    // [8, 50], depth dB in [-24, -6]; clamped on set.
+    static constexpr double kDefaultNotchQ      = 30.0;
+    static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
 
     NotchController (LockFreeRingBuffer<float>& tap,
                      LockFreeRingBuffer<NotchCommand>& commands,
@@ -125,6 +132,20 @@ public:
     // One synchronous pump step: drain the spectrum, advance the live clock,
     // apply auto-release, flush the outbox.
     void runOnce();
+
+    // Detection tuning (brief 2026-08-24). Message thread; every value lives
+    // in an atomic loaded relaxed by the detector thread, so these are safe
+    // WHILE the controller runs -- unlike setWidth(). Each forwards to the
+    // owning analyzer/scorer or to this controller's own notch defaults.
+    void   setRiseReferenceMs (double ms);        // clamped 100..1000, -> scorer
+    double getRiseReferenceMs() const;
+    void   setPersistenceBlocks (int blocks);     // clamped 1..10
+    int    getPersistenceBlocks() const;
+    void   setNotchDefaults (double q, double depthDb);   // Q 8..50, depth -24..-6
+    double getNotchQ() const;
+    double getNotchDepthDb() const;
+    void   setPeakinessThreshold (float t);       // clamped 5..20, -> analyzer
+    float  getPeakinessThreshold() const;
 
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
@@ -208,6 +229,11 @@ private:
     PeakinessAnalyzer analyzer_;
     CandidateScorer   scorer_;
     std::atomic<bool> detectionActive_ { false };
+    // Runtime tuning state (brief 2026-08-24): message thread writes, the
+    // detector thread loads relaxed inside processSpectrumForDetection().
+    std::atomic<int>    persistenceBlocks_ { kPersistenceBlocks };
+    std::atomic<double> notchQ_      { kDefaultNotchQ };
+    std::atomic<double> notchDepthDb_ { kDefaultNotchDepthDb };
     // Atomic is belt-and-braces only: ALWAYS accessed under modelMutex_
     // together with liveMs_, which is what actually serialises it.
     std::atomic<double> soundcheckEndsAtLiveMs_ { -1.0 };

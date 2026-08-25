@@ -36,8 +36,9 @@
 //
 // Why +-3..+-5 specifically
 // =========================
-// Independent double-precision reference model, 48 kHz, N = 1024, 1 kHz tone
-// at 26 dB SNR, worst noise-only local maximum over 50 seeds:
+// Independent double-precision reference model, 48 kHz, N = 1024 (the FFT size
+// when this was measured), 1 kHz tone at 26 dB SNR, worst noise-only local
+// maximum over 50 seeds:
 //
 //   annulus    1 kHz tone   worst noise local max   ratio   low-freq floor
 //   +-3..+-4      100.3          10.37 (FALSE POSITIVE)  9.7x    187.5 Hz
@@ -49,6 +50,12 @@
 // up another 47 Hz for no detection benefit that matters. +-3..+-5 is the
 // chosen trade-off.
 //
+// NOTE (2026-08-24 tuning brief): the detector FFT is now 2048 points, so the
+// bin width HALVED and every low-frequency floor quoted here moved down by
+// 2x (~117 Hz at 48 kHz). The annulus shape itself is unchanged; the numeric
+// sweep above predates the wider FFT and should be re-run before anyone
+// retunes kDefaultThreshold from it.
+//
 // Confirmed in the real rig (Detector + JUCE FFT, tests/test_peakiness.cpp):
 // the 1 kHz tone scores 131.70 and the worst noise-only bin over seeds 1..60
 // is 7.35, with zero false candidates at the 10.0 threshold. The usable
@@ -56,18 +63,17 @@
 // seed list suggests -- do not raise the annulus's inner radius or lower
 // kDefaultThreshold without re-running that sweep.
 //
-// *** KNOWN v1 LIMITATION: the detector is blind below ~234 Hz at 48 kHz ***
+// *** FORMER v1 LIMITATION, FIXED 2026-08-24: the blind spot moved down ***
 // ========================================================================
 // A bin needs a full annulus on BOTH sides, so the lowest scoreable bin is
-// kNeighbourOuterRadius = 5. At 48 kHz binWidth is 46.875 Hz, so bin 5 is
-// 234.375 Hz -- and the outer radius, NOT kDefaultMinFrequencyHz, is what
-// binds. The 100 Hz product floor is therefore NOT reached. The blind spot
-// scales with the sample rate: ~215 Hz at 44.1 kHz, ~469 Hz at 96 kHz.
-//
-// Low-mid feedback around 200-250 Hz is real in live sound (stage wash,
-// floor-coupled wedges), so this is a genuine coverage gap, not a rounding
-// detail. Anyone tuning this detector should know it before blaming the
-// threshold for a missed howl.
+// kNeighbourOuterRadius = 5. The v1 1024-point FFT made that ~234 Hz at
+// 48 kHz -- above the 100 Hz product floor and a genuine coverage gap for
+// low-mid feedback. The tuning brief widened the FFT to 2048 points, so the
+// same radius now binds at ~117 Hz (48 kHz) / ~107 Hz (44.1 kHz) / ~234 Hz
+// (96 kHz): the 100 Hz floor is nearly reached at the common rates. The gap
+// still scales with the sample rate; anyone retuning should recompute it as
+// 5 * sampleRate / Detector::kFftSize before blaming the threshold for a
+// missed howl.
 //
 // Rejected alternative: a one-sided (upper-only) annulus near the low edge
 // would extend coverage down to bin 0. It is NOT implemented, because the
@@ -89,6 +95,7 @@
 #include "dsp/Detector.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 
 class PeakinessAnalyzer
@@ -109,7 +116,13 @@ public:
                                                            - kNeighbourInnerRadius + 1);  // 6
 
     static constexpr double kDefaultMinFrequencyHz  = 100.0;  // spec 5.2 step 4
-    static constexpr float  kDefaultThreshold       = 10.0f;  // plan Task 11
+    // Runtime-tunable (brief 2026-08-24). 10.0 was MEASURED for the old
+    // 1024-point geometry (see above); with the 2048-point FFT it has NOT yet
+    // been re-swept against real-room logs -- expect a field calibration pass
+    // before this default is trusted. Clamped on set to [5, 20].
+    static constexpr float  kDefaultThreshold       = 10.0f;
+    static constexpr float  kMinThreshold           = 5.0f;
+    static constexpr float  kMaxThreshold           = 20.0f;
     static constexpr float  kCandidateScore         = 0.5f;   // plan Task 11
     static constexpr int    kMaxCandidates          = 32;
 
@@ -135,6 +148,7 @@ public:
 
     PeakinessAnalyzer();
 
+    // Message thread writes, detector thread loads relaxed (brief 2026-08-24).
     void   setThreshold (float peakinessThreshold);
     float  getThreshold() const;
     void   setMinFrequencyHz (double hz);
@@ -151,7 +165,7 @@ public:
     static float peakinessAt (const float* magnitudes, int numBins, int bin);
 
 private:
-    float  threshold_;
+    std::atomic<float> threshold_;
     double minFrequencyHz_;
     std::array<Candidate, kMaxCandidates> candidates_;  // pre-allocated
 };

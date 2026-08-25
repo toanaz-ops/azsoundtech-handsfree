@@ -33,6 +33,7 @@
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
+#include "gui/TuningPanel.h"
 #include "gui/theme/AzTheme.h"
 
 class MainComponent : public juce::Component,
@@ -112,6 +113,11 @@ public:
     // bug), so tests pin it to the panel's preferred height.
     [[nodiscard]] juce::Rectangle<int> slotTableBoundsForTest() const { return slotPanel_.getBounds(); }
 
+    // The DETECTION tuning strip (brief 2026-08-24) and its bounds -- same
+    // headless-test pattern as the accessors above.
+    [[nodiscard]] gui::TuningPanel& getTuningPanel() { return tuningPanel_; }
+    [[nodiscard]] juce::Rectangle<int> tuningPanelBoundsForTest() const { return tuningPanel_.getBounds(); }
+
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
     // slot; never null for [0, kMaxSlots).
@@ -152,11 +158,11 @@ private:
     // One detector controller per routing slot; element i is wired to
     // engine_'s slot-i tap and command queue (see the constructor).
     //
-    // Heap-held (unique_ptr) deliberately: a NotchController is ~280 kB
-    // (the scorer's 128x513-float history dominates), so eight BY VALUE
-    // would put ~2.3 MB on this object's owner's stack -- over the default
-    // 1 MB Windows thread stack, measured as a segfault in every
-    // MainComponent-constructing test.
+    // Heap-held (unique_ptr) deliberately: a NotchController is ~550 kB
+    // since the FFT went 2048-wide (the scorer's 128x1025-float history
+    // dominates), so eight BY VALUE would put ~4.4 MB on this object's
+    // owner's stack -- over the default 1 MB Windows thread stack, measured
+    // as a segfault in every MainComponent-constructing test.
     std::array<std::unique_ptr<NotchController>, kMaxSlots> notchControllers_;
 
     gui::DevicePanel devicePanel_ { engine_ };
@@ -181,6 +187,10 @@ private:
     // too short to show them.
     gui::SlotPanel   slotPanel_ { engine_ };
     juce::Viewport   slotScroller_;
+
+    // The DETECTION tuning strip (brief 2026-08-24): sits directly above the
+    // routing table in both layouts; changes loop over every controller.
+    gui::TuningPanel tuningPanel_;
 
     // The live notch list (reads notchControllers_[0] above, so it is
     // declared after it).

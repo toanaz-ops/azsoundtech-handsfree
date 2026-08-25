@@ -8,11 +8,15 @@
 //
 // Analysis geometry
 // =================
-// 1024-point FFT with 50% overlap, i.e. a 512-sample hop (plan Task 10). Each
-// call to processLatestBlock() pulls at most kHopSize NEW samples off the tap,
-// slides them into a kFftSize-sample history window, and transforms the whole
-// window. Consecutive spectra therefore share half their input, which is what
-// gives a new spectrum every ~10.7 ms at 48 kHz instead of every ~21.3 ms.
+// 2048-point FFT with 25% overlap, i.e. a 512-sample hop (plan Task 10; the
+// FFT was widened 1024 -> 2048 by the 2026-08-24 tuning brief to halve the
+// bin width and pull the low-frequency blind spot down from ~234 Hz to
+// ~117 Hz at 48 kHz). Each call to processLatestBlock() pulls at most
+// kHopSize NEW samples off the tap, slides them into a kFftSize-sample
+// history window, and transforms the whole window. The HOP is unchanged, so
+// the block rate is still one spectrum per ~10.7 ms at 48 kHz -- the wider
+// window costs analysis latency (~21 ms more) and ~2x CPU on the DETECTOR
+// thread, never on the audio thread.
 //
 // Why performFrequencyOnlyForwardTransform
 // ========================================
@@ -24,11 +28,11 @@
 //
 // JUCE 9 API contract (verified against external/JUCE/modules/juce_dsp/frequency/)
 // ==============================================================================
-// - juce::dsp::FFT (int order); order 10 => 1024 points.
+// - juce::dsp::FFT (int order); order 11 => 2048 points.
 // - performFrequencyOnlyForwardTransform (float* inOut, bool onlyNonNegative):
-//   *** the array passed in must be 2 * getSize() floats ***, i.e. 2048 for a
-//   1024-point FFT, even though only the first kNumBins entries are read back.
-//   fftBuffer_ is sized accordingly; sizing it kFftSize would overrun by 4 KB.
+//   *** the array passed in must be 2 * getSize() floats ***, i.e. 4096 for a
+//   2048-point FFT, even though only the first kNumBins entries are read back.
+//   fftBuffer_ is sized accordingly; sizing it kFftSize would overrun by 8 KB.
 // - juce::dsp::WindowingFunction<float> (size_t size, WindowingMethod,
 //   bool normalise = true, FloatType beta = 0), applied via
 //   multiplyWithWindowingTable (float* samples, size_t size).
@@ -59,10 +63,10 @@
 class Detector
 {
 public:
-    static constexpr int kFftSize = 1024;
+    static constexpr int kFftSize = 2048;
     static constexpr int kHopSize = 512;
-    static constexpr int kNumBins = kFftSize / 2 + 1;   // 513
-    static constexpr int kFftOrder = 10;                // 2^10 == kFftSize
+    static constexpr int kNumBins = kFftSize / 2 + 1;   // 1025
+    static constexpr int kFftOrder = 11;                // 2^11 == kFftSize
 
     struct Spectrum
     {

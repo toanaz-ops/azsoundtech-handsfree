@@ -10,7 +10,7 @@
 //
 //   peakiness : bin_mag / mean(annulus +-3..+-5), threshold 10.0 (measured --
 //               see PeakinessAnalyzer.h; do not retune without the 60-seed sweep)
-//   rise      : mag_now / mag_~500ms_ago, threshold 1.5x
+//   rise      : mag_now / mag_~250ms_ago (runtime-tunable), threshold 1.5x
 //   novelty   : log-ratio against a per-bin EMA baseline (~3 s time constant)
 //   harmonic  : x0.5 when the candidate sits at 1.4x..4.1x of a LOCKED notch
 //               (plan Task 12) -- harmonics of an already-notched fundamental
@@ -25,14 +25,23 @@
 #include "dsp/PeakinessAnalyzer.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 
 class CandidateScorer
 {
 public:
     static constexpr double kBaselineTimeConstantMs = 3000.0;
-    static constexpr double kRiseReferenceMs        = 500.0;
-    static constexpr double kRiseHistoryWindowMs    = 800.0;
+    // Runtime-tunable (brief 2026-08-24): the rise reference is how far back
+    // the scorer looks for its "was" magnitude; lower reacts faster. The
+    // DEFAULT dropped from 500 ms to 250 ms (owner-approved tuning package).
+    // Clamped on set; message thread writes, detector thread loads relaxed.
+    static constexpr double kDefaultRiseReferenceMs = 250.0;
+    static constexpr double kMinRiseReferenceMs     = 100.0;
+    static constexpr double kMaxRiseReferenceMs     = 1000.0;
+    // Must cover kMaxRiseReferenceMs plus the minimum-age margin:
+    // kMaxHistoryFrames x ~10.7 ms ~= 1365 ms >= 1200 ms.
+    static constexpr double kRiseHistoryWindowMs    = 1200.0;
     static constexpr double kRiseThreshold          = 1.5;
     static constexpr float  kHarmonicPenalty        = 0.5f;
     // A candidate whose peakiness does not clear the analyzer threshold is
@@ -49,6 +58,11 @@ public:
     };
 
     CandidateScorer();
+
+    // Runtime rise reference (see constants above). Message thread; the
+    // detector thread reads it relaxed in scoreCandidate().
+    void   setRiseReferenceMs (double ms);
+    double getRiseReferenceMs() const;
 
     // Call once per detector pump BEFORE scoring candidates. Sizes the
     // internal buffers on the first call (allocation-free afterwards).
@@ -74,6 +88,7 @@ private:
     double sampleRate_     = 48000.0;
     double clockMs_        = 0.0;
     bool   buffersReady_   = false;
+    std::atomic<double>    riseReferenceMs_ { kDefaultRiseReferenceMs };
 
     std::array<double, kBins> baselineEma_ {};
 

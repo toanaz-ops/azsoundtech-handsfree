@@ -7,8 +7,9 @@
 // Simulated time advances via the elapsedMs argument of commitBlock
 // (kFrameMs = 512/48000 s = 10.667 ms per hop); nothing sleeps.
 //
-// Bin geometry at 48 kHz (see test_peakiness.cpp for the full table):
-//   1 kHz -> bin 21 (984.375 Hz), 2 kHz -> bin 43 (2015.625 Hz).
+// Bin geometry at 48 kHz with the 2048-point FFT (see test_peakiness.cpp for
+// the full table): binWidth = 23.4375 Hz,
+//   1 kHz -> bin 43 (1007.8125 Hz), 2 kHz -> bin 85 (1992.1875 Hz).
 
 #include <gtest/gtest.h>
 
@@ -202,7 +203,7 @@ TEST (CandidateScorer, FreshHowlScoresAboveConfirm)
         bestEarly = std::max (bestEarly, rig.cycle (howl,
                                                     static_cast<std::size_t> (h) * static_cast<std::size_t> (kHop)));
 
-    EXPECT_EQ (rig.lastTopBin, 21);              // 1 kHz lands on bin 21
+    EXPECT_EQ (rig.lastTopBin, 43);              // 1 kHz lands on bin 43
     EXPECT_GT (bestEarly, CandidateScorer::kConfirmScore)
         << "best early score " << bestEarly;
 }
@@ -251,7 +252,7 @@ TEST (CandidateScorer, SteadyToneScoreDecays)
 // 4. A candidate near 4x a LOCKED notch frequency is penalised exactly x0.5.
 //    Two identical rigs (same seeds, same signals): the only difference is the
 //    locked-frequency view. 500 Hz locked -> window (700, 2050) Hz contains
-//    the ~2 kHz candidate (bin 42 = 1968.75 Hz or bin 43 = 2015.625 Hz).
+//    the ~2 kHz candidate (bin 85 = 1992.1875 Hz or bin 86 = 2015.625 Hz).
 // ---------------------------------------------------------------------------
 TEST (CandidateScorer, HarmonicOfLockedNotchIsPenalised)
 {
@@ -318,6 +319,49 @@ TEST (CandidateScorer, YoungHistoryDoesNotClaimARise)
 
     // Positive control: the howl WAS seen as a peakiness candidate, so the
     // zero comes from the rise gate, not from an empty analysis.
-    ASSERT_EQ (rig.lastTopBin, 21);
+    ASSERT_EQ (rig.lastTopBin, 43);
     EXPECT_FLOAT_EQ (score, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// 5b. Runtime rise reference (brief 2026-08-24): with the reference dropped to
+//     100 ms, the SAME young history that test 5 rejects now qualifies --
+//     minAge = 0.45 * 100 = 45 ms and the oldest frame (~10.7 ms) clears it.
+// ---------------------------------------------------------------------------
+TEST (CandidateScorer, LowerRiseReferenceLetsYoungHistoryClaimARise)
+{
+    Rig rig;
+    constexpr unsigned kSeed = 777u;
+
+    rig.scorer.setRiseReferenceMs (100.0);
+
+    const auto quiet = makeToneInNoise (0.0, 0.0f, 0.05f, kSeed, samplesFor (5));
+    rig.feedHops (quiet, 5);
+
+    const auto howl = makeToneInNoise (1000.0, 1.0f, 0.05f, kSeed + 1, samplesFor (8));
+
+    // The analysis window needs a few hops to purge its quiet prefix, and the
+    // confirm must land while the newest >= 45 ms-old reference frame is still
+    // a QUIET one (a tonal reference means the tone is no longer rising).
+    // That window is cycles ~4-6 at this hop rate; take the best of 8.
+    float best = 0.0f;
+    for (std::size_t h = 0; h < 8; ++h)
+        best = std::max (best, rig.cycle (howl,
+                                          static_cast<std::size_t> (h) * static_cast<std::size_t> (kHop)));
+
+    // Positive control identical to test 5's: the howl IS a candidate...
+    ASSERT_EQ (rig.lastTopBin, 43);
+    // ...and this time the rise gate OPENS far enough to confirm.
+    EXPECT_GT (best, CandidateScorer::kConfirmScore);
+}
+
+TEST (CandidateScorer, RiseReferenceClamps)
+{
+    Rig rig;
+    rig.scorer.setRiseReferenceMs (50.0);
+    EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 100.0);
+    rig.scorer.setRiseReferenceMs (2000.0);
+    EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 1000.0);
+    rig.scorer.setRiseReferenceMs (400.0);
+    EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 400.0);
 }

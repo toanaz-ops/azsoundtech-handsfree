@@ -299,7 +299,7 @@ constexpr int    kWarmupBlocks = 64;   // ~683 ms of scorer history (>= 450 ms r
 
 struct SineSource
 {
-    double freq       = 1000.0;   // bin 21 = 984.375 Hz at 48 kHz
+    double freq       = 1000.0;   // bin 43 = 1007.8125 Hz at 48 kHz (2048 FFT)
     float  amp        = 1.0f;     // loud howl, ~26 dB over the quiet floor
     double nextSample = 0.0;
 
@@ -415,10 +415,10 @@ TEST (NotchControllerDetection, PersistentHowlSetsNotchOnBothChannels)
     EXPECT_EQ (cmd.type, NotchCommandType::Set);
     EXPECT_EQ (cmd.channel, 1);
     EXPECT_EQ (cmd.index, slot);
-    // KD-5: fixed automatic params.
+    // Runtime defaults (brief 2026-08-24): Q 30, depth -18.
     EXPECT_FLOAT_EQ (cmd.Q, 30.0f);
-    EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
-    // Frequency within half a bin (23.44 Hz) of the 1 kHz tone.
+    EXPECT_FLOAT_EQ (cmd.depthDB, -18.0f);
+    // Frequency within half a bin (11.72 Hz) of the 1 kHz tone.
     EXPECT_NEAR (cmd.frequency, 1000.0, 0.5 * kTestSr / Detector::kFftSize);
 }
 
@@ -622,6 +622,144 @@ TEST (NotchControllerSlotAware, DefaultsMatchLegacyBehaviour)
     EXPECT_EQ (cmd.slot, 0);
     EXPECT_EQ (cmd.channel, 1);
     EXPECT_EQ (cmd.index, 0);
+}
+
+// ===========================================================================
+// Detection tuning (brief 2026-08-24): runtime rise reference, persistence
+// blocks, notch defaults and peakiness threshold.
+// ===========================================================================
+
+TEST (NotchControllerTuning, RiseReferenceClamps)
+{
+    Harness h;
+    h.controller.setRiseReferenceMs (50.0);
+    EXPECT_DOUBLE_EQ (h.controller.getRiseReferenceMs(), 100.0);
+    h.controller.setRiseReferenceMs (2000.0);
+    EXPECT_DOUBLE_EQ (h.controller.getRiseReferenceMs(), 1000.0);
+    h.controller.setRiseReferenceMs (400.0);
+    EXPECT_DOUBLE_EQ (h.controller.getRiseReferenceMs(), 400.0);
+}
+
+TEST (NotchControllerTuning, PersistenceBlocksClamps)
+{
+    Harness h;
+    h.controller.setPersistenceBlocks (0);
+    EXPECT_EQ (h.controller.getPersistenceBlocks(), 1);
+    h.controller.setPersistenceBlocks (99);
+    EXPECT_EQ (h.controller.getPersistenceBlocks(), 10);
+    h.controller.setPersistenceBlocks (4);
+    EXPECT_EQ (h.controller.getPersistenceBlocks(), 4);
+}
+
+TEST (NotchControllerTuning, NotchDefaultsClamp)
+{
+    Harness h;
+    h.controller.setNotchDefaults (5.0, -2.0);   // under both floors
+    EXPECT_DOUBLE_EQ (h.controller.getNotchQ(), 8.0);
+    EXPECT_DOUBLE_EQ (h.controller.getNotchDepthDb(), -6.0);
+    h.controller.setNotchDefaults (80.0, -30.0); // over both ceilings
+    EXPECT_DOUBLE_EQ (h.controller.getNotchQ(), 50.0);
+    EXPECT_DOUBLE_EQ (h.controller.getNotchDepthDb(), -24.0);
+}
+
+TEST (NotchControllerTuning, PeakinessThresholdForwardsAndClamps)
+{
+    Harness h;
+    h.controller.setPeakinessThreshold (15.0f);
+    EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold(), 15.0f);
+    h.controller.setPeakinessThreshold (1.0f);
+    EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold(), 5.0f);
+    h.controller.setPeakinessThreshold (99.0f);
+    EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold(), 20.0f);
+}
+
+TEST (NotchControllerDetection, LowerRiseReferenceConfirmsFromYoungHistory)
+{
+    // Mirror of CandidateScorer::YoungHistoryDoesNotClaimARise: with the old
+    // 500 ms / default 250 ms reference, ~64 ms of history is too young to
+    // claim a rise from, so no notch can appear within a few tone blocks.
+    // With the reference dropped to 100 ms the SAME history qualifies.
+    auto placeWithin = [] (int howlBudget)
+    {
+        Harness h;
+        h.controller.setDetectionActive (true);
+        // Persistence 1: this test isolates the RISE reference; the
+        // persistence knob has its own test below.
+        h.controller.setPersistenceBlocks (1);
+
+        NoiseSource quiet;
+        for (int i = 0; i < 6; ++i)          // ~64 ms of scorer history
+            pump (h, quiet.hop());
+
+        SineSource tone;
+        for (int i = 0; i < howlBudget; ++i)
+        {
+            pump (h, tone.hop());
+            if (h.commands.getAvailableRead() >= 2)
+                return true;
+        }
+        return false;
+    };
+
+    EXPECT_TRUE (placeWithin (8));
+}
+
+TEST (NotchControllerDetection, DefaultRiseReferenceStillNeedsDeepHistory)
+{
+    // The control half: identical rig, DEFAULT reference -- the same budget
+    // must NOT place, because every history frame is younger than the
+    // minimum age (0.45 * 250 ms = 112.5 ms).
+    Harness h;
+    h.controller.setDetectionActive (true);
+
+    NoiseSource quiet;
+    for (int i = 0; i < 6; ++i)
+        pump (h, quiet.hop());
+
+    SineSource tone;
+    for (int i = 0; i < 4; ++i)
+        pump (h, tone.hop());
+    EXPECT_EQ (h.commands.getAvailableRead(), 0u);
+}
+
+TEST (NotchControllerDetection, PersistenceBlocksOnePlacesAfterSingleConfirm)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setPersistenceBlocks (1);
+
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    SineSource tone;
+    bool placed = false;
+    for (int i = 0; i < 20 && ! placed; ++i)
+    {
+        pump (h, tone.hop());
+        placed = h.commands.getAvailableRead() > 0;
+    }
+    ASSERT_TRUE (placed);
+
+    NotchCommand cmd {};
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+    EXPECT_EQ (cmd.type, NotchCommandType::Set);
+}
+
+TEST (NotchControllerDetection, SetNotchDefaultsFlowIntoPlacedNotch)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (20.0, -24.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+
+    NotchCommand cmd {};
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+    EXPECT_FLOAT_EQ (cmd.Q, 20.0f);
+    EXPECT_FLOAT_EQ (cmd.depthDB, -24.0f);
 }
 
 TEST (NotchControllerDetection, DetectionCommandsCarrySlotIdOnBothLanes)

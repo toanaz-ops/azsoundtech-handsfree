@@ -130,6 +130,32 @@ MainComponent::MainComponent (
         slotPanel_.refresh();
     };
 
+    // Detection tuning (brief 2026-08-24): the panel never touches a
+    // controller -- a Params change loops over ALL eight controllers here,
+    // exactly like modeRail_'s CLEAR ALL loop. Slot 0 is also the read-back
+    // source: every controller carries the same values because every change
+    // fans out to all of them.
+    addAndMakeVisible (tuningPanel_);
+    tuningPanel_.onTuningChanged = [this] (const gui::TuningPanel::Params& p)
+    {
+        for (auto& controller : notchControllers_)
+        {
+            controller->setRiseReferenceMs ((double) p.riseReferenceMs);
+            controller->setPersistenceBlocks (p.persistenceBlocks);
+            controller->setNotchDefaults ((double) p.q, (double) p.depthDb);
+            controller->setPeakinessThreshold (p.peakinessThreshold);
+        }
+    };
+    tuningPanel_.paramsProvider = [this]
+    {
+        const auto& c = *notchControllers_[0];
+        return gui::TuningPanel::Params { (int) c.getRiseReferenceMs(),
+                                          c.getPersistenceBlocks(),
+                                          (int) c.getNotchDepthDb(),
+                                          (int) c.getNotchQ(),
+                                          c.getPeakinessThreshold() };
+    };
+
     // Layout persistence (spec section 3). Stored under %APPDATA%\AZ Soundtech,
     // read back on every launch; G-2 fixes the default at Performance.
     juce::PropertiesFile::Options propertyOptions;
@@ -495,6 +521,12 @@ void MainComponent::resized()
     // layout-agnostic -- it just receives visibility and bounds.
     const bool listShown = (layout_ == gui::ScreenLayout::Classic) || notchListOpen_;
     notchListPanel_.setVisible (listShown);
+
+    // The DETECTION strip sits directly above the routing table in BOTH
+    // layouts (brief 2026-08-24): a fixed ~34 px band carved before the slot
+    // block below, so the same code serves L1 and L2.
+    tuningPanel_.setBounds (area.removeFromTop (gui::TuningPanel::kPanelHeight));
+    area.removeFromTop (gap);
 
     // The routing table sits under the drawer, scrollable, and yields first:
     // its height is whatever remains once the spectrum's own minimum (and the

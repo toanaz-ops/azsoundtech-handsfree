@@ -5,6 +5,17 @@
 
 CandidateScorer::CandidateScorer() = default;
 
+void CandidateScorer::setRiseReferenceMs (double ms)
+{
+    riseReferenceMs_.store (std::clamp (ms, kMinRiseReferenceMs, kMaxRiseReferenceMs),
+                            std::memory_order_relaxed);
+}
+
+double CandidateScorer::getRiseReferenceMs() const
+{
+    return riseReferenceMs_.load (std::memory_order_relaxed);
+}
+
 void CandidateScorer::beginBlock (double sampleRate)
 {
     sampleRate_ = sampleRate;
@@ -36,17 +47,18 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
                   / 9.0f;
     pNorm = std::min (std::max (pNorm, 0.0f), 1.0f);
 
-    // Axis 2 -- rise rate against the frame closest to ~500 ms ago.
+    // Axis 2 -- rise rate against the frame closest to ~riseReferenceMs ago.
     //
-    // History semantics (plan KD-2): a reference OLDER than 450 ms is real
+    // History semantics (plan KD-2, amended by the 2026-08-24 tuning brief):
+    // a reference OLDER than 45% of the configured rise reference is real
     // history and is compared normally; frames younger than that are not deep
     // enough in time to claim a rise from. Three cases:
     //   * no history at all  -> everything is "rising" by definition (rNorm 1),
     //     otherwise a howl on the very first frames after startup would be
     //     invisible for its first half second;
-    //   * history exists but every frame is younger than 450 ms -> we simply do
-    //     not KNOW whether this rose, so rNorm 0 (conservative);
-    //   * otherwise compare against the newest frame at least 450 ms old --
+    //   * history exists but every frame is younger than the minimum age ->
+    //     we simply do not KNOW whether this rose, so rNorm 0 (conservative);
+    //   * otherwise compare against the newest frame at least that old --
     //     newest-first scan, because commitBlock stamps monotonically
     //     increasing times, so the first hit IS the largest qualifying timeMs.
     float rNorm = 0.0f;
@@ -56,7 +68,7 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
     }
     else
     {
-        const double minAgeMs = 0.45 * kRiseReferenceMs;
+        const double minAgeMs = 0.45 * riseReferenceMs_.load (std::memory_order_relaxed);
         const float* reference = nullptr;
         for (std::size_t i = 0; i < historyCount_; ++i)
         {
@@ -133,8 +145,8 @@ void CandidateScorer::commitBlock (const float* magnitudes, double elapsedMs)
     }
 
     // Push this frame into the rise-history ring, overwriting the oldest entry
-    // once full. kMaxHistoryFrames x ~10.7 ms covers the ~500 ms reference with
-    // room to spare.
+    // once full. kMaxHistoryFrames x ~10.7 ms covers the maximum rise
+    // reference (1200 ms) with room to spare.
     auto& slot      = history_[historyHead_];
     slot.timeMs     = clockMs_;
     std::copy_n (magnitudes, kBins, slot.magnitudes.data());
