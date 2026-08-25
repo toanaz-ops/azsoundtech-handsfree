@@ -87,6 +87,15 @@ public:
     //
     // ALL of these are safe to call with no device open, which is the state the
     // GUI is in while it populates its combo boxes at startup.
+    // Share of the audio callback's budget currently being used, 0..1.
+    //
+    // Straight from juce::AudioDeviceManager, which measures the callback
+    // itself -- so it is the figure that matters (is the DSP about to
+    // overrun?) rather than the process's share of the whole CPU. Safe from
+    // the message thread; the manager keeps it as a plain double updated in
+    // the callback.
+    [[nodiscard]] double getCpuUsage() const;
+
     // juce::AudioDeviceManager returns nullptr from getCurrentAudioDevice()
     // until start() succeeds, so every one of these guards it.
     //

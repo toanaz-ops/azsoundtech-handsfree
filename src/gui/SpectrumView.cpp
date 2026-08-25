@@ -121,9 +121,36 @@ SpectrumView::SpectrumView (const NotchController& controller)
 
     avgGroup_.onSelected = [this] (int index)
     {
+        // The segment index IS the mode: AverageMode is ordered Off, 0.1, 0.3,
+        // 0.5, 1 -- see RtaProcessing.h.
         avgMode_ = static_cast<rta::AverageMode> (index);
+
+        // The long-average combo is showing something else now.
+        avgLongBox_.setSelectedId (0, juce::dontSendNotification);
         repaint();
     };
+
+    avgLongBox_.addItem ("3 s",  1);
+    avgLongBox_.addItem ("5 s",  2);
+    avgLongBox_.addItem ("10 s", 3);
+    avgLongBox_.setTextWhenNothingSelected ("3 s +");
+    avgLongBox_.setWantsKeyboardFocus (false);
+    avgLongBox_.onChange = [this]
+    {
+        switch (avgLongBox_.getSelectedId())
+        {
+            case 1:  avgMode_ = rta::AverageMode::S3;  break;
+            case 2:  avgMode_ = rta::AverageMode::S5;  break;
+            case 3:  avgMode_ = rta::AverageMode::S10; break;
+            default: return;   // cleared by a segment click, not by the user
+        }
+
+        // Picking a long average deselects every quick segment: they are one
+        // choice split across two controls, not two independent settings.
+        avgGroup_.setSelectedIndex (-1);
+        repaint();
+    };
+    addAndMakeVisible (avgLongBox_);
 
     // A one-segment group used as a latch: clicking the selected segment must
     // TOGGLE it, which a radio group on its own will not do.
@@ -234,6 +261,13 @@ void SpectrumView::resized()
 
     place (bandGroup_);
     place (avgGroup_);
+
+    // The long-average combo butts against the averaging group it extends.
+    constexpr int kAvgLongWidth = 74;
+    avgLongBox_.setBounds (strip.removeFromLeft (kAvgLongWidth)
+                                .withSizeKeepingCentre (kAvgLongWidth, controlH));
+    strip.removeFromLeft (gap);
+
     place (peakGroup_);
 
     // RING RISK is pinned to the far right, its chip last.
@@ -822,9 +856,10 @@ void SpectrumView::paint (juce::Graphics& g)
     // says what the app is doing, not what is absent.
     if (snapshot_.sequence == 0)
     {
-        g.setColour (faded);
-        g.setFont (bodyFont_);
-        g.drawText (noSignalLabel_, plot, juce::Justification::centred);
+        // Same reasoning as the notch table's empty state: a label, not prose.
+        g.setColour (dim);
+        g.setFont (legendFont (captionFontSize, true, trackingCaption));
+        g.drawText (noSignalLabel_.toUpperCase(), plot, juce::Justification::centred);
         return;
     }
 

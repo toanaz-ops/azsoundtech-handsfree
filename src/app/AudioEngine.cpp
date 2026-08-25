@@ -126,6 +126,11 @@ int AudioEngine::getCurrentBufferSize() const
     return currentBufferSize_.load (std::memory_order_acquire);
 }
 
+double AudioEngine::getCpuUsage() const
+{
+    return deviceManager_.getCpuUsage();
+}
+
 double AudioEngine::getCurrentLatency() const
 {
     if (auto* device = deviceManager_.getCurrentAudioDevice())

@@ -45,15 +45,18 @@ public:
     // now a TWO-COLUMN split (notch table beside the rig controls) instead of
     // a stack of full-width bands, and below ~940 the two columns start
     // truncating each other's values rather than merely tightening.
-    static constexpr int kMinimumWidth  = 1024;
+    // Wide enough that the routing table never scrolls sideways: that table
+    // is the widest fixed thing in the app, and a control you have to scroll
+    // to reach is one you will not reach mid-show.
+    static constexpr int kMinimumWidth  = 1200;
     static constexpr int kMinimumHeight = 700;
 
     // The size the window OPENS at. Without this the window opened at exactly
     // the minimum -- which is the one size where the fixed rig column crowds
     // the analyser hardest, so the app's very first impression was its worst
     // possible layout.
-    static constexpr int kDefaultWidth  = 1400;
-    static constexpr int kDefaultHeight = 960;
+    static constexpr int kDefaultWidth  = 1520;
+    static constexpr int kDefaultHeight = 980;
 
     MainComponent();
     ~MainComponent() override;
@@ -257,6 +260,28 @@ private:
     // stopped device mid-show is a fault, not a neutral state.
     bool rigIsHealthy_ = false;
 
+    // The two readouts added beside the protection badge, both rebuilt by
+    // refreshStatus() so paint() never formats a string.
+    //
+    // deviceLine_ answers "is the interface there at all?" -- separate from
+    // the protection badge, which answers "is it filtering?". Those are
+    // different questions and a stopped device with BYPASSED showing looked
+    // like a deliberate choice rather than a fault.
+    //
+    // cpuLine_ is the AUDIO CALLBACK's share of its budget, not the process's
+    // share of the machine. That is the figure that predicts a dropout.
+    juce::String deviceLine_ { "NO DEVICE" };
+    juce::String cpuLine_;
+    bool deviceIsUp_ = false;
+    bool cpuIsHot_   = false;
+
+    static constexpr int kDeviceChipWidth = 128;
+    static constexpr int kCpuChipWidth    = 86;
+
+    // Above this share of the callback budget the figure turns amber: past
+    // roughly three quarters, a transient spike is what produces a dropout.
+    static constexpr double kCpuWarnFraction = 0.75;
+
     // The slot both display panels are pointed at. 0 until the user picks
     // another, which is the slot every rig has.
     int displayedSlot_ = 0;
@@ -281,11 +306,13 @@ private:
     // column, because it is the answer and the rig is the setup. The first
     // implementation inverted it and gave the table 38 %.
     //
-    // 0.52 rather than the study's 0.556: the shipped rig column carries a
-    // full 8-lane routing table the study did not have, and that table has a
-    // hard minimum width. This is as close to the study as the real control
-    // allows. See docs/spec-ui-mockup.md section 5.
-    static constexpr float kNotchColumnFraction = 0.52f;
+    // 0.44 rather than the study's 0.556. The study's rig column held two
+    // summarised rows; the shipped one holds a full 8-lane routing table, and
+    // at 0.52 that table scrolled sideways while the notch column sat half
+    // empty beside it -- the notch table is only ever as tall as the number of
+    // notches, so extra WIDTH there buys nothing. The width goes where the
+    // controls are. See docs/spec-ui-mockup.md section 5.
+    static constexpr float kNotchColumnFraction = 0.44f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

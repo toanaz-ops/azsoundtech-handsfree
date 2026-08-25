@@ -348,3 +348,53 @@ TEST (SpectrumView, TheRangeFieldsShowRoundNumbersBack)
         EXPECT_FLOAT_EQ (gui::SpectrumView::parseFrequency (
                              gui::SpectrumView::formatFrequency (hz)), hz);
 }
+
+//==============================================================================
+// The averaging ladder gained short times (2026-08-25). A soundman chasing a
+// ring needs 0.1-0.5 s; the long ones are for reading a room and moved behind
+// a combo at the end of the group.
+
+TEST (RtaProcessing, ShorterAveragingReactsFaster)
+{
+    // The property that matters is the ORDER, not the individual numbers: a
+    // shorter time constant must always weight the newest frame more heavily,
+    // or the labels on the toolbar lie about what they do.
+    const float fps = 30.0f;
+
+    const float off   = rta::averageAlpha (rta::AverageMode::Off,  fps);
+    const float a0_1  = rta::averageAlpha (rta::AverageMode::S0_1, fps);
+    const float a0_3  = rta::averageAlpha (rta::AverageMode::S0_3, fps);
+    const float a0_5  = rta::averageAlpha (rta::AverageMode::S0_5, fps);
+    const float a1    = rta::averageAlpha (rta::AverageMode::S1,   fps);
+    const float a3    = rta::averageAlpha (rta::AverageMode::S3,   fps);
+    const float a5    = rta::averageAlpha (rta::AverageMode::S5,   fps);
+    const float a10   = rta::averageAlpha (rta::AverageMode::S10,  fps);
+
+    EXPECT_FLOAT_EQ (off, 1.0f);          // Off takes the new frame whole
+    EXPECT_GT (off,  a0_1);
+    EXPECT_GT (a0_1, a0_3);
+    EXPECT_GT (a0_3, a0_5);
+    EXPECT_GT (a0_5, a1);
+    EXPECT_GT (a1,   a3);
+    EXPECT_GT (a3,   a5);
+    EXPECT_GT (a5,   a10);
+
+    // Every one of them is a usable weight, not a degenerate 0 or 1.
+    for (const float alpha : { a0_1, a0_3, a0_5, a1, a3, a5, a10 })
+    {
+        EXPECT_GT (alpha, 0.0f);
+        EXPECT_LT (alpha, 1.0f);
+    }
+}
+
+TEST (RtaProcessing, TheFirstFiveModesAreTheToolbarsSegmentsInOrder)
+{
+    // SpectrumView casts a segment index straight to an AverageMode, so the
+    // enum's first five entries ARE the five quick segments. If that ordering
+    // ever changes, clicking "0.3 s" would silently select something else.
+    EXPECT_EQ (static_cast<int> (rta::AverageMode::Off),  0);
+    EXPECT_EQ (static_cast<int> (rta::AverageMode::S0_1), 1);
+    EXPECT_EQ (static_cast<int> (rta::AverageMode::S0_3), 2);
+    EXPECT_EQ (static_cast<int> (rta::AverageMode::S0_5), 3);
+    EXPECT_EQ (static_cast<int> (rta::AverageMode::S1),   4);
+}

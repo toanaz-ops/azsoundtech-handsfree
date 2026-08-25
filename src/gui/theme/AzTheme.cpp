@@ -298,14 +298,12 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
     {
         if (on)
         {
-            // A lift AND an edge. Fill alone -- which is all the study had --
-            // left the chosen option looking like a slightly lighter gap
-            // between two dividers rather than like a selection.
+            // FILL ONLY. The selected segment's accent edge is drawn by the
+            // SegmentedControl in paintOverChildren, after the dividers --
+            // drawn here it was painted over on whichever side a divider fell,
+            // which is why the highlight came out missing an edge.
             g.setColour (raise.brighter (0.10f));
             g.fillRect (button.getLocalBounds());
-
-            g.setColour (accent.withAlpha (0.55f));
-            g.drawRect (button.getLocalBounds(), 1);
         }
         else if (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown)
         {
@@ -413,7 +411,7 @@ void AzLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button,
     // has been given the middle.
     juce::Rectangle<int> hintArea;
     if (hint.isNotEmpty() && area.getHeight() >= 40)
-        hintArea = area.removeFromBottom (14);
+        hintArea = area.removeFromBottom (16);
 
     g.setColour (colour);
     g.setFont (getTextButtonFont (button, button.getHeight()));

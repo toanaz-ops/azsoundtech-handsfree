@@ -292,7 +292,14 @@ private:
     // BAND / AVG legends -- the averaging group's first option carries its own
     // label. See docs/spec-ui-mockup.md section 3.
     SegmentedControl bandGroup_ { { "Line", "1/1 oct", "1/3 oct" } };
-    SegmentedControl avgGroup_  { { "Avg off", "1 s", "3 s", "10 s" } };
+    // The five quick picks, in AverageMode's own order so a segment index IS
+    // the mode. Chasing a ring wants 0.1-0.5 s within reach.
+    SegmentedControl avgGroup_  { { "Avg off", "0.1 s", "0.3 s", "0.5 s", "1 s" } };
+
+    // The long averages, which are for READING a room rather than reacting to
+    // one. Behind a combo because reaching for them is never urgent, and five
+    // more segments would push the toolbar past the window.
+    juce::ComboBox avgLongBox_;
 
     // Peak hold is not in the study -- it is a real feature the study omitted.
     // Drawn in the same joined style so it belongs to the row, and it carries

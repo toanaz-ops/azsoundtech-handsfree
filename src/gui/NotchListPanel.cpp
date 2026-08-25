@@ -289,9 +289,14 @@ void NotchListPanel::paint (juce::Graphics& g)
     // Empty state: an invitation, not a void.
     if (rows_.empty())
     {
-        g.setColour (faded);
-        g.setFont (baseFont());
-        g.drawText (noNotchesLabel_, area, juce::Justification::centred, false);
+        // The legend face, not the body face. This is a LABEL for an empty
+        // table, sitting among tracked uppercase legends and monospaced
+        // numbers -- setting it in the prose face made it the only sentence on
+        // screen and it read as a stray piece of another design.
+        g.setColour (dim);
+        g.setFont (legendFont (captionFontSize, true, trackingCaption));
+        g.drawText (noNotchesLabel_.toUpperCase(), area,
+                    juce::Justification::centred, false);
         return;
     }
 

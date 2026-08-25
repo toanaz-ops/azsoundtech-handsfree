@@ -164,17 +164,25 @@ inline constexpr float trackingSwitch   = 0.15f;  // transport switch legends
 // Condensed with its own hinting. Set at 11/10.5 in the app the same face came
 // out noticeably smaller, so both are up one step. The RATIO between them --
 // caption above column heading -- is what the study actually fixes.
-inline constexpr float captionFontSize  = 13.0f;   // section caption
-inline constexpr float columnFontSize   = 11.5f;   // column heading
-inline constexpr float switchFontSize   = 16.0f;   // transport switch legend
-inline constexpr float hintFontSize     = 10.0f;   // switch second line (mono)
-inline constexpr float brandFontSize     = 14.0f;  // HANDS-FREE
-inline constexpr float segmentFontSize  = 11.0f;   // toolbar segment (mono, sentence case)
+// Raised again after a second look at the running app. Saira Condensed is a
+// CONDENSED face: at the study's browser figures it renders both smaller and
+// lighter than the study did, and the small legends came out reading as a grey
+// haze rather than as words. The RATIOS are what the study fixes; the absolute
+// sizes have to suit the face actually being drawn.
+inline constexpr float captionFontSize  = 14.5f;   // section caption
+inline constexpr float columnFontSize   = 13.0f;   // column heading
+
+// A 168 x 62 switch carried a 16 px legend, which left it looking like a large
+// button with small writing on it. The legend is the whole point of the cell.
+inline constexpr float switchFontSize   = 21.0f;   // transport switch legend
+inline constexpr float hintFontSize     = 11.0f;   // switch second line (mono)
+inline constexpr float brandFontSize    = 16.0f;   // HANDS-FREE
+inline constexpr float segmentFontSize  = 12.0f;   // toolbar segment (mono, sentence case)
 inline constexpr float tableFontSize    = 12.5f;   // notch table cell (mono)
 inline constexpr float readoutFontSize  = 12.0f;   // masthead rig line (mono)
 inline constexpr float countdownFontSize = 26.0f;  // soundcheck number (mono medium)
-inline constexpr float chipFontSize     = 11.5f;   // ghost chip (mono, sentence case)
-inline constexpr float dangerFontSize   = 13.0f;   // CLEAR ALL
+inline constexpr float chipFontSize     = 12.5f;   // ghost chip (mono, sentence case)
+inline constexpr float dangerFontSize   = 16.0f;   // CLEAR ALL
 
 inline constexpr float cornerRadius     = 3.0f;   // fields, wells, chips
 inline constexpr float switchRadius     = 4.0f;   // transport switches

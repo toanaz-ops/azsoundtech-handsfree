@@ -17,7 +17,12 @@ namespace rta
 {
 
 enum class BandMode    { Line, Octave1, Octave3 };
-enum class AverageMode { Off, S1, S3, S10 };
+// Ordered SHORTEST first, and the first five are exactly the segments the
+// analyser toolbar shows. The long ones live in a combo at the end of that
+// group: a soundman chasing a ring wants 0.1-0.5 s within reach, and reaches
+// for 3 s or more only when reading a room, which is not something done in a
+// hurry.
+enum class AverageMode { Off, S0_1, S0_3, S0_5, S1, S3, S5, S10 };
 
 // Level reported for a band that received no bins. Not the plot floor --
 // just an unambiguous "empty" value callers can clamp or skip.
@@ -38,9 +43,13 @@ inline float averageAlpha (AverageMode mode, float framesPerSecond)
     float tauSeconds = 0.0f;
     switch (mode)
     {
-        case AverageMode::S1:  tauSeconds = 1.0f;  break;
-        case AverageMode::S3:  tauSeconds = 3.0f;  break;
-        case AverageMode::S10: tauSeconds = 10.0f; break;
+        case AverageMode::S0_1: tauSeconds = 0.1f;  break;
+        case AverageMode::S0_3: tauSeconds = 0.3f;  break;
+        case AverageMode::S0_5: tauSeconds = 0.5f;  break;
+        case AverageMode::S1:   tauSeconds = 1.0f;  break;
+        case AverageMode::S3:   tauSeconds = 3.0f;  break;
+        case AverageMode::S5:   tauSeconds = 5.0f;  break;
+        case AverageMode::S10:  tauSeconds = 10.0f; break;
         case AverageMode::Off:
         default:               return 1.0f;
     }

@@ -506,6 +506,18 @@ void MainComponent::refreshStatus()
     // when the interface is gone, its sample rate is not the news.
     rigIsHealthy_ = status.running && message.isEmpty();
 
+    // Device presence, stated separately from protection state.
+    deviceIsUp_ = status.running;
+    deviceLine_ = engine_.getLastDeviceError().isNotEmpty() ? "DEVICE ERROR"
+                : status.running                           ? "DEVICE OK"
+                                                           : "NO DEVICE";
+
+    const double cpu = engine_.getCpuUsage();
+    cpuIsHot_ = cpu >= kCpuWarnFraction;
+    cpuLine_  = status.running
+                    ? "CPU " + juce::String (juce::roundToInt (cpu * 100.0)) + "%"
+                    : juce::String ("CPU --");
+
     const auto next = message.isNotEmpty() ? message
                                            : gui::formatStatusLine (status);
 
@@ -593,10 +605,49 @@ void MainComponent::paint (juce::Graphics& g)
     g.drawText ("AZ SOUNDTECH", mark.removeFromLeft (kCompanyWidth),
                 juce::Justification::centredLeft, false);
 
-    // The rig readout fills whatever sits between the mark and the badge.
-    auto rigArea = masthead.reduced (kEdgePad, 0)
-                           .withTrimmedLeft (kMarkWidth)
-                           .withTrimmedRight (kBadgeWidth + gap);
+    // Right of the masthead, reading outward from the protection badge:
+    //
+    //     ... rig line ...   CPU 12%   [• DEVICE OK]   [• PROTECTING]
+    //
+    // The badge itself is a child and was positioned in resized(); everything
+    // else here is painted, because none of it is interactive.
+    auto right = masthead.reduced (kEdgePad, 0);
+    right.removeFromRight (kBadgeWidth + gap);
+
+    const auto deviceChip = right.removeFromRight (kDeviceChipWidth)
+                                 .withSizeKeepingCentre (kDeviceChipWidth, kBadgeHeight);
+    right.removeFromRight (gap);
+
+    const auto deviceColour = deviceLine_ == "DEVICE ERROR" ? danger
+                            : deviceIsUp_                   ? ok
+                                                            : dim;
+
+    g.setColour (well);
+    g.fillRoundedRectangle (deviceChip.toFloat(), cornerRadius);
+    g.setColour (border);
+    g.drawRoundedRectangle (deviceChip.toFloat().reduced (0.5f), cornerRadius, 1.0f);
+
+    constexpr float dotSize = 8.0f;
+    g.setColour (deviceColour);
+    g.fillEllipse ((float) deviceChip.getX() + 10.0f,
+                   (float) deviceChip.getCentreY() - dotSize * 0.5f,
+                   dotSize, dotSize);
+
+    g.setFont (legendFont (columnFontSize, true, trackingColumn));
+    g.drawText (deviceLine_, deviceChip.withTrimmedLeft (24),
+                juce::Justification::centredLeft, false);
+
+    // CPU: a number, so mono, and no chrome around it -- it is a reading, not
+    // a state.
+    const auto cpuArea = right.removeFromRight (kCpuChipWidth);
+    right.removeFromRight (gap);
+
+    g.setColour (cpuIsHot_ ? warn : dim);
+    g.setFont (monoFont (readoutFontSize));
+    g.drawText (cpuLine_, cpuArea, juce::Justification::centredRight, false);
+
+    // The rig readout fills whatever is left between the mark and those.
+    auto rigArea = right.withTrimmedLeft (kMarkWidth);
     if (rigArea.getWidth() > 0)
     {
         g.setColour (rigIsHealthy_ ? dim : warn);

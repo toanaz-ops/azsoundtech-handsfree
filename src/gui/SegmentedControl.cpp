@@ -57,7 +57,11 @@ SegmentedControl::SegmentedControl (const juce::StringArray& labels)
 
 void SegmentedControl::setSelectedIndex (const int index)
 {
-    if (! juce::isPositiveAndBelow (index, (int) buttons_.size()))
+    // -1 clears the group. A segmented control that EXTENDS into another
+    // control (the analyser's long-average combo) has to be able to show that
+    // the choice currently lives over there, rather than lighting a segment
+    // that is not what the plot is doing.
+    if (index != -1 && ! juce::isPositiveAndBelow (index, (int) buttons_.size()))
         return;
 
     selected_ = index;
@@ -115,6 +119,22 @@ void SegmentedControl::paintOverChildren (juce::Graphics& g)
     {
         const float x = (float) buttons_[i]->getX() - 0.5f;
         g.drawLine (x, 1.0f, x, (float) getHeight() - 1.0f, 1.0f);
+    }
+
+    // The selection's edge, drawn LAST so no divider and no neighbouring
+    // segment can clip it. Drawn here rather than by the button's own
+    // LookAndFeel for exactly that reason -- there it lost whichever side a
+    // divider landed on.
+    if (juce::isPositiveAndBelow (selected_, (int) buttons_.size()))
+    {
+        auto edge = buttons_[(std::size_t) selected_]->getBounds().toFloat();
+
+        // Nudged inside the group's own border on the outer segments, so the
+        // accent sits beside the frame rather than on top of it.
+        edge = edge.getUnion (edge).reduced (0.5f, 0.5f);
+
+        g.setColour (accent.withAlpha (0.75f));
+        g.drawRect (edge, 1.0f);
     }
 }
 
