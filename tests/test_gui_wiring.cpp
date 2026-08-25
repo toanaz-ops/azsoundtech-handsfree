@@ -573,3 +573,56 @@ TEST (MainComponent, SoundcheckGatingAppliesToEnabledSlotsOnly)
     app.requestMode (AudioEngine::Mode::Bypass);
     SUCCEED();
 }
+
+//==============================================================================
+// Per-slot tuning (brief 2026-08-24): a slot switched to Custom keeps its own
+// detector parameters when the global DETECTION strip changes; Global slots
+// still follow the strip.
+
+TEST (MainComponent, GlobalTuningChangeSkipsCustomSlots)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto& panel = app.getSlotPanelForTest();
+
+    // Switch slot 3 to Custom through the panel's own path -- MainComponent's
+    // wiring records the flag and seeds the controller from its own values.
+    panel.getRowForTest (3).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+
+    // Edit the custom set: rise 250 ms -> 750 ms (combo id 4).
+    panel.getDetailForTest (3).rise.setSelectedId (4, juce::sendNotificationSync);
+
+    auto* custom = app.getNotchControllerForTest (3);
+    ASSERT_NE (custom, nullptr);
+    EXPECT_DOUBLE_EQ (custom->getRiseReferenceMs(), 750.0);
+    // The provider reads back what the controller holds.
+    const auto seeded = panel.slotTuningProvider (3);
+    EXPECT_FALSE (seeded.usesGlobal);
+    EXPECT_DOUBLE_EQ (seeded.riseMs, 750.0);
+
+    // A change on the global DETECTION strip: rise -> 1000 ms (id 5).
+    app.getTuningPanel().getRiseComboForTest().setSelectedId (5,
+        juce::sendNotificationSync);
+
+    // Slot 0 (still Global) followed the strip...
+    auto* globalSlot = app.getNotchControllerForTest (0);
+    ASSERT_NE (globalSlot, nullptr);
+    EXPECT_DOUBLE_EQ (globalSlot->getRiseReferenceMs(), 1000.0);
+    // ...and the Custom slot kept its own value.
+    EXPECT_DOUBLE_EQ (custom->getRiseReferenceMs(), 750.0);
+
+    // Switching slot 3 back to G re-attaches it: the next global change lands
+    // on its controller again...
+    panel.getRowForTest (3).tune.setSelectedId (1 /* G */, juce::sendNotificationSync);
+    app.getTuningPanel().getPersistComboForTest().setSelectedId (5,
+        juce::sendNotificationSync);
+    EXPECT_EQ (custom->getPersistenceBlocks(), 5);
+
+    // ...and choosing C again seeds the editor FROM the controller's current
+    // state (persist 5), not from the struct defaults.
+    panel.getRowForTest (3).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+    EXPECT_FALSE (panel.slotTuningProvider (3).usesGlobal);
+    EXPECT_EQ (custom->getPersistenceBlocks(), 5);
+    EXPECT_EQ (panel.getDetailForTest (3).persist.getSelectedId(), 5);
+}

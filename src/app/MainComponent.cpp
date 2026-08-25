@@ -43,6 +43,9 @@ MainComponent::MainComponent()
     // child through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
 
+    // Per-slot tuning (brief 2026-08-24): every slot starts on Global.
+    slotUsesGlobalTuning_.fill (true);
+
     addAndMakeVisible (spectrumView_);
     addAndMakeVisible (modeRail_);
     addAndMakeVisible (deviceDrawer_);
@@ -124,20 +127,66 @@ MainComponent::MainComponent()
         slotPanel_.refresh();
     };
 
+    // Per-slot tuning (brief 2026-08-24): the panel reports a COMPLETE
+    // SlotTuning; here is where it means something. Global just flips the
+    // flag -- the strip keeps driving the controller. Custom applies the five
+    // values to THAT slot's controller through the existing clamping setters.
+    slotPanel_.onSlotTuningChanged = [this] (int slotIndex,
+                                             const gui::SlotPanel::SlotTuning& t)
+    {
+        if (slotIndex < 0 || slotIndex >= kMaxSlots)
+            return;
+
+        auto& controller = *notchControllers_[(std::size_t) slotIndex];
+        slotUsesGlobalTuning_[(std::size_t) slotIndex] = t.usesGlobal;
+
+        if (! t.usesGlobal)
+        {
+            controller.setRiseReferenceMs (t.riseMs);
+            controller.setPersistenceBlocks (t.persist);
+            controller.setNotchDefaults (t.q, t.depthDb);
+            controller.setPeakinessThreshold ((float) t.thr);
+        }
+    };
+
+    // The editor seeds itself from the slot's controller plus its mode flag.
+    slotPanel_.slotTuningProvider = [this] (int slotIndex) -> gui::SlotPanel::SlotTuning
+    {
+        if (slotIndex < 0 || slotIndex >= kMaxSlots)
+            return {};
+
+        const auto& c = *notchControllers_[(std::size_t) slotIndex];
+
+        gui::SlotPanel::SlotTuning t;
+        t.usesGlobal = slotUsesGlobalTuning_[(std::size_t) slotIndex];
+        t.riseMs  = c.getRiseReferenceMs();
+        t.persist = c.getPersistenceBlocks();
+        t.depthDb = c.getNotchDepthDb();
+        t.q       = c.getNotchQ();
+        t.thr     = (double) c.getPeakinessThreshold();
+        return t;
+    };
+
     // Detection tuning (brief 2026-08-24): the panel never touches a
-    // controller -- a Params change loops over ALL eight controllers here,
-    // exactly like modeRail_'s CLEAR ALL loop. Slot 0 is also the read-back
-    // source: every controller carries the same values because every change
-    // fans out to all of them.
+    // controller -- a Params change loops over the controllers HERE, exactly
+    // like modeRail_'s CLEAR ALL loop. Per-slot tuning (brief 2026-08-24):
+    // a slot switched to Custom is SKIPPED -- it keeps its own values until
+    // its Tune combo goes back to G. Slot 0 is also the read-back source for
+    // the strip: every Global controller carries the same values because every
+    // change fans out to all of them.
     addAndMakeVisible (tuningPanel_);
     tuningPanel_.onTuningChanged = [this] (const gui::TuningPanel::Params& p)
     {
-        for (auto& controller : notchControllers_)
+        for (int i = 0; i < kMaxSlots; ++i)
         {
-            controller->setRiseReferenceMs ((double) p.riseReferenceMs);
-            controller->setPersistenceBlocks (p.persistenceBlocks);
-            controller->setNotchDefaults ((double) p.q, (double) p.depthDb);
-            controller->setPeakinessThreshold (p.peakinessThreshold);
+            if (! slotUsesGlobalTuning_[(std::size_t) i])
+                continue;
+
+            auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setRiseReferenceMs ((double) p.riseReferenceMs);
+            controller.setPersistenceBlocks (p.persistenceBlocks);
+            controller.setNotchDefaults ((double) p.q, (double) p.depthDb);
+            controller.setPeakinessThreshold (p.peakinessThreshold);
         }
     };
     tuningPanel_.paramsProvider = [this]

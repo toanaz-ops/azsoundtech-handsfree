@@ -1,5 +1,6 @@
 #include "gui/SlotPanel.h"
 
+#include "gui/TuningPanel.h"
 #include "gui/theme/AzTheme.h"
 
 namespace gui
@@ -10,6 +11,9 @@ namespace
 constexpr int kMonoItemId   = 1;
 constexpr int kStereoItemId = 2;
 
+constexpr int kGlobalItemId = 1;
+constexpr int kCustomItemId = 2;
+
 // Column metrics, shared by the caption row and the 8 data rows so the two
 // can never drift apart.
 constexpr int kNumberColumn = 24;
@@ -17,6 +21,9 @@ constexpr int kEnableColumn = 40;
 constexpr int kWidthColumn  = 84;
 constexpr int kLaneColumn   = 96;
 constexpr int kLedColumn    = 28;
+constexpr int kTuneColumn   = 44;
+
+constexpr int kDetailLabelWidth = 46;
 
 // One channel combo = the device's names, item id = channel index + 1.
 void fillChannelCombo (juce::ComboBox& box, const juce::StringArray& names, int selectedChannel)
@@ -56,12 +63,18 @@ SlotPanel::SlotPanel (AudioEngine& engine)
     using namespace az::theme;
 
     for (auto* label : { &widthCaption_, &inACaption_, &inBCaption_,
-                         &outACaption_, &outBCaption_, &ledCaption_ })
+                         &outACaption_, &outBCaption_, &ledCaption_,
+                         &tuneCaption_ })
         addAndMakeVisible (*label);
+
+    // The five custom-tuning combos share TuningPanel's choice lists and id
+    // mappings, so a custom value and its global-strip twin are the same
+    // vocabulary (riseMsForId etc.).
 
     for (int i = 0; i < kMaxSlots; ++i)
     {
         auto& row = rows_[(std::size_t) i];
+        auto& detail = details_[(std::size_t) i];
 
         row.number.setText (juce::String (i + 1), juce::dontSendNotification);
         row.number.setFont (monoFont());
@@ -74,6 +87,29 @@ SlotPanel::SlotPanel (AudioEngine& engine)
         row.width.addItem ("Mono",   kMonoItemId);
         row.width.addItem ("Stereo", kStereoItemId);
         addAndMakeVisible (row.width);
+
+        row.tune.addItem ("G", kGlobalItemId);
+        row.tune.addItem ("C", kCustomItemId);
+        row.tune.setSelectedId (kGlobalItemId, juce::dontSendNotification);
+        addAndMakeVisible (row.tune);
+
+        for (int b = 1; b <= 6; ++b)
+            detail.persist.addItem (juce::String (b), b);
+        for (int c = 1; c <= 5; ++c)
+        {
+            detail.rise .addItem (juce::String (TuningPanel::riseMsForId (c)) + " ms", c);
+            detail.q    .addItem (juce::String (TuningPanel::qForId (c)), c);
+            detail.thr  .addItem (juce::String (TuningPanel::thresholdForId (c), 1), c);
+            if (c <= 4)   // Depth offers four values: -6/-12/-18/-24 dB.
+                detail.depth.addItem (juce::String (TuningPanel::depthDbForId (c)) + " dB", c);
+        }
+
+        for (auto* label : { &detail.riseLabel, &detail.persistLabel,
+                             &detail.depthLabel, &detail.qLabel, &detail.thrLabel })
+            addAndMakeVisible (*label);
+        for (auto* box : { &detail.rise, &detail.persist, &detail.depth,
+                           &detail.q, &detail.thr })
+            addAndMakeVisible (*box);
 
         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
         {
@@ -90,6 +126,14 @@ SlotPanel::SlotPanel (AudioEngine& engine)
 
         row.enable.onClick  = onChange;
         row.width.onChange  = onChange;
+        row.tune.onChange   = [this, i] { handleTuneChanged (i); };
+
+        const auto onDetailChange = [this] { handleDetailChanged(); };
+        detail.rise.onChange    = onDetailChange;
+        detail.persist.onChange = onDetailChange;
+        detail.depth.onChange   = onDetailChange;
+        detail.q.onChange       = onDetailChange;
+        detail.thr.onChange     = onDetailChange;
 
         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
         {
@@ -159,6 +203,14 @@ void SlotPanel::refresh()
 
         row.width.setEnabled (haveChannels);
 
+        // Reflect the slot's tuning mode (Global or Custom) without firing:
+        // refresh() reports reality, it never invents a change.
+        const SlotTuning tuning = slotTuningProvider != nullptr
+                                      ? slotTuningProvider (i)
+                                      : SlotTuning();
+        row.tune.setSelectedId (tuning.usesGlobal ? kGlobalItemId : kCustomItemId,
+                                juce::dontSendNotification);
+
         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
         {
             row.inLanes[lane].setEnabled (haveChannels);
@@ -173,6 +225,11 @@ void SlotPanel::refresh()
         row.led.on = config.enabled;
         row.led.repaint();
     }
+
+    // The open editor re-seeds too: the receiver may have applied new values
+    // to the slot's controller since it opened.
+    if (openDetailSlot_ >= 0)
+        seedDetailFrom (openDetailSlot_);
 
     resized();
 }
@@ -233,6 +290,116 @@ void SlotPanel::handleRowChanged (int slotIndex)
         onSlotConfigChanged (slotIndex, config);
 }
 
+//==============================================================================
+// Per-slot tuning (brief 2026-08-24).
+
+void SlotPanel::seedDetailFrom (int slotIndex)
+{
+    const SlotTuning t = slotTuningProvider != nullptr
+                             ? slotTuningProvider (slotIndex)
+                             : SlotTuning();
+
+    auto& d = details_[(std::size_t) slotIndex];
+
+    // dontSendNotification: seeding is reflection -- a notification would
+    // report the values straight back as if the user had typed them.
+    d.rise  .setSelectedId (TuningPanel::idForRiseMs ((int) t.riseMs),
+                            juce::dontSendNotification);
+    d.persist.setSelectedId (t.persist, juce::dontSendNotification);
+    d.depth .setSelectedId (TuningPanel::idForDepthDb ((int) t.depthDb),
+                            juce::dontSendNotification);
+    d.q     .setSelectedId (TuningPanel::idForQ ((int) t.q),
+                            juce::dontSendNotification);
+    d.thr   .setSelectedId (TuningPanel::idForThreshold ((float) t.thr),
+                            juce::dontSendNotification);
+}
+
+SlotPanel::SlotTuning SlotPanel::currentTuning() const
+{
+    SlotTuning t;
+
+    if (openDetailSlot_ < 0)
+        return t;
+
+    const auto& d = details_[(std::size_t) openDetailSlot_];
+
+    t.usesGlobal = false;
+    t.riseMs  = TuningPanel::riseMsForId (d.rise.getSelectedId());
+    t.persist = d.persist.getSelectedId();
+    t.depthDb = TuningPanel::depthDbForId (d.depth.getSelectedId());
+    t.q       = TuningPanel::qForId (d.q.getSelectedId());
+    t.thr     = TuningPanel::thresholdForId (d.thr.getSelectedId());
+    return t;
+}
+
+void SlotPanel::handleDetailChanged()
+{
+    if (onSlotTuningChanged == nullptr || openDetailSlot_ < 0)
+        return;
+
+    onSlotTuningChanged (openDetailSlot_, currentTuning());
+}
+
+void SlotPanel::handleTuneChanged (int slotIndex)
+{
+    if (rows_[(std::size_t) slotIndex].tune.getSelectedId() == kCustomItemId)
+        openDetailFor (slotIndex);
+    else
+        closeDetail();
+}
+
+void SlotPanel::openDetailFor (int slotIndex)
+{
+    // Only ONE editor at a time: opening this slot's detail collapses any
+    // other -- but that slot STAYS Custom (its combo keeps showing C and its
+    // controller keeps its values); only the editor moved.
+    const bool reopening = (openDetailSlot_ == slotIndex);
+
+    openDetailSlot_ = slotIndex;
+    seedDetailFrom (slotIndex);
+
+    // First switch to C reports the seeded set immediately: the receiver
+    // stores the flag and the values in one atomic snapshot.
+    if (! reopening && onSlotTuningChanged != nullptr)
+    {
+        auto t = currentTuning();
+        t.usesGlobal = false;
+        onSlotTuningChanged (slotIndex, t);
+    }
+
+    notifyPreferredHeightChanged();   // one extra row below the slot's row
+}
+
+void SlotPanel::closeDetail()
+{
+    if (openDetailSlot_ < 0)
+        return;
+
+    const int closedSlot = openDetailSlot_;
+
+    // Report Global with the values still showing, so the receiver flips the
+    // flag without losing the custom numbers for the next C.
+    auto t = currentTuning();
+    t.usesGlobal = true;
+
+    openDetailSlot_ = -1;
+
+    if (onSlotTuningChanged != nullptr)
+        onSlotTuningChanged (closedSlot, t);
+
+    notifyPreferredHeightChanged();
+}
+
+void SlotPanel::notifyPreferredHeightChanged()
+{
+    if (onPreferredHeightChanged != nullptr)
+        onPreferredHeightChanged();
+    else if (auto* parent = getParentComponent())
+        parent->resized();
+    else
+        resized();
+}
+
 void SlotPanel::setVisibleRowCount (int n)
 {
     const auto clamped = juce::jlimit (1, kMaxSlots, n);
@@ -259,8 +426,10 @@ int SlotPanel::getPreferredHeight() const
 
     // theme margins (reduced gap/spacing top+bottom) + caption + spacing
     // between caption and rows, then one kRowHeight per visible row plus the
-    // Add row while any of the 8 is still hidden.
-    const int rows = visibleRows_ + (visibleRows_ < kMaxSlots ? 1 : 0);
+    // Add row while any of the 8 is still hidden -- and one more while a
+    // slot's custom-tuning detail row is open below its row.
+    const int rows = visibleRows_ + (visibleRows_ < kMaxSlots ? 1 : 0)
+                   + (openDetailSlot_ >= 0 ? 1 : 0);
 
     return 2 * spacing + kCaptionHeight + spacing + rows * kRowHeight;
 }
@@ -300,6 +469,9 @@ void SlotPanel::resized()
     ledCaption_.setBounds (captions.removeFromLeft (kLedColumn));
     ledCaption_.setJustificationType (juce::Justification::centredLeft);
 
+    tuneCaption_.setBounds (captions.removeFromLeft (kTuneColumn));
+    tuneCaption_.setJustificationType (juce::Justification::centredLeft);
+
     area.removeFromTop (spacing);
 
     for (int i = 0; i < kMaxSlots; ++i)
@@ -313,9 +485,16 @@ void SlotPanel::resized()
             row.number.setBounds ({});
             row.enable .setBounds ({});
             row.width  .setBounds ({});
+            row.tune   .setBounds ({});
             row.inLanes[0].setBounds ({});  row.inLanes[1] .setBounds ({});
             row.outLanes[0].setBounds ({}); row.outLanes[1].setBounds ({});
             row.led.setBounds ({});
+
+            auto& hiddenDetail = details_[(std::size_t) i];
+            for (auto* c : { &hiddenDetail.rise, &hiddenDetail.persist,
+                             &hiddenDetail.depth, &hiddenDetail.q,
+                             &hiddenDetail.thr })
+                c->setBounds ({});
             continue;
         }
 
@@ -342,6 +521,44 @@ void SlotPanel::resized()
                                        : juce::Rectangle<int>());
 
         row.led.setBounds (rowArea.removeFromLeft (kLedColumn));
+
+        row.tune.setBounds (rowArea.removeFromLeft (kTuneColumn).reduced (2, 1));
+
+        // The custom-tuning editor occupies the extra row DIRECTLY below this
+        // slot's row -- and only for the one slot whose Tune combo reads C.
+        auto& detail = details_[(std::size_t) i];
+
+        if (openDetailSlot_ == i)
+        {
+            auto detailArea = area.removeFromTop (kRowHeight);
+
+            const std::pair<juce::Label*, juce::ComboBox*> pairs[] = {
+                { &detail.riseLabel,    &detail.rise },
+                { &detail.persistLabel, &detail.persist },
+                { &detail.depthLabel,   &detail.depth },
+                { &detail.qLabel,       &detail.q },
+                { &detail.thrLabel,     &detail.thr },
+            };
+
+            const int cellWidth = juce::jmax (80, detailArea.getWidth() / 5);
+
+            for (const auto& pair : pairs)
+            {
+                auto cell = detailArea.removeFromLeft (cellWidth).reduced (2, 1);
+                pair.first->setBounds (cell.removeFromLeft (kDetailLabelWidth));
+                pair.second->setBounds (cell);
+            }
+        }
+        else
+        {
+            for (auto* c : { &detail.rise, &detail.persist, &detail.depth,
+                             &detail.q, &detail.thr })
+                c->setBounds ({});
+            for (auto* l : { &detail.riseLabel, &detail.persistLabel,
+                             &detail.depthLabel, &detail.qLabel,
+                             &detail.thrLabel })
+                l->setBounds ({});
+        }
     }
 
     // The Add row occupies the slot right after the last visible row and

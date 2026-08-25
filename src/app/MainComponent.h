@@ -147,6 +147,11 @@ private:
     // as a segfault in every MainComponent-constructing test.
     std::array<std::unique_ptr<NotchController>, kMaxSlots> notchControllers_;
 
+    // Per-slot tuning mode (brief 2026-08-24): true = the slot's detector
+    // follows the global DETECTION strip; false = Custom, its controller is
+    // driven only by the slot panel's per-slot values. All Global at start.
+    std::array<bool, kMaxSlots> slotUsesGlobalTuning_ {};
+
     gui::DevicePanel devicePanel_ { engine_ };
 
     // Old console components. Kept ALIVE but HIDDEN while the new console UI

@@ -12,6 +12,7 @@
 
 #include "app/AudioEngine.h"
 #include "gui/SlotPanel.h"
+#include "gui/theme/AzTheme.h"
 
 #include <array>
 
@@ -112,4 +113,190 @@ TEST (SlotPanel, StereoShowsBothLaneCombosMonoHidesTheSecond)
 
     EXPECT_TRUE (panel.getRowForTest (1).inLanes[1].isVisible());
     EXPECT_TRUE (panel.getRowForTest (1).outLanes[1].isVisible());
+}
+
+//==============================================================================
+// Per-slot tuning (brief 2026-08-24): each row ends in a Tune combo -- G follows
+// the global DETECTION strip, C gives the slot its own parameter set edited in
+// a detail row below the slot's row.
+
+namespace
+{
+gui::SlotPanel::SlotTuning makeSeededTuning()
+{
+    gui::SlotPanel::SlotTuning t;
+    t.usesGlobal = true;
+    t.riseMs   = 750.0;   // combo id 4
+    t.persist  = 5;
+    t.depthDb  = -12.0;   // combo id 2
+    t.q        = 20.0;    // combo id 2
+    t.thr      = 8.0;     // combo id 2
+    return t;
+}
+} // namespace
+
+TEST (SlotPanel, TuneComboDefaultsToGlobalOnEveryRow)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_EQ (1, panel.getRowForTest (i).tune.getSelectedId()) << "row " << i;
+
+    EXPECT_FALSE (panel.isDetailOpenForTest (0));
+}
+
+TEST (SlotPanel, ChoosingCustomFiresCallbackAndOpensTheSeededDetailRow)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeSeededTuning(); };
+
+    int reportedSlot = -1;
+    gui::SlotPanel::SlotTuning reported;
+
+    panel.onSlotTuningChanged = [&reportedSlot, &reported] (
+                                    int slotIndex, const gui::SlotPanel::SlotTuning& tuning)
+    {
+        reportedSlot = slotIndex;
+        reported     = tuning;
+    };
+
+    // A user can only reach the Tune combo of a REVEALED row.
+    panel.setVisibleRowCount (3);
+
+    const int heightBefore = panel.getPreferredHeight();
+
+    panel.getRowForTest (2).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+
+    EXPECT_EQ (2, reportedSlot);
+    EXPECT_FALSE (reported.usesGlobal);
+    // Seeded FROM the provider on first switch, not from the struct defaults.
+    EXPECT_DOUBLE_EQ (reported.riseMs,  750.0);
+    EXPECT_EQ (reported.persist, 5);
+    EXPECT_DOUBLE_EQ (reported.depthDb, -12.0);
+    EXPECT_DOUBLE_EQ (reported.q,       20.0);
+    EXPECT_DOUBLE_EQ (reported.thr,      8.0);
+
+    // The detail row opened BELOW slot 2's row and got real rects.
+    EXPECT_TRUE (panel.isDetailOpenForTest (2));
+    const auto& detail = panel.getDetailForTest (2);
+    EXPECT_FALSE (detail.rise.getBounds().isEmpty());
+    EXPECT_FALSE (detail.persist.getBounds().isEmpty());
+    EXPECT_FALSE (detail.depth.getBounds().isEmpty());
+    EXPECT_FALSE (detail.q.getBounds().isEmpty());
+    EXPECT_FALSE (detail.thr.getBounds().isEmpty());
+
+    // Combos show the seeded values (rise 750 -> id 4, persist 5, depth -12 ->
+    // id 2, Q 20 -> id 2, Thr 8 -> id 2).
+    EXPECT_EQ (4, detail.rise.getSelectedId());
+    EXPECT_EQ (5, detail.persist.getSelectedId());
+    EXPECT_EQ (2, detail.depth.getSelectedId());
+    EXPECT_EQ (2, detail.q.getSelectedId());
+    EXPECT_EQ (2, detail.thr.getSelectedId());
+
+    // Preferred height grew by exactly one detail row.
+    EXPECT_EQ (heightBefore + gui::SlotPanel::kRowHeight,
+               panel.getPreferredHeight());
+}
+
+TEST (SlotPanel, EditingACustomComboReportsTheCompleteNewTuning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeSeededTuning(); };
+
+    int reportedSlot = -1;
+    gui::SlotPanel::SlotTuning reported;
+
+    panel.onSlotTuningChanged = [&reportedSlot, &reported] (
+                                    int slotIndex, const gui::SlotPanel::SlotTuning& tuning)
+    {
+        reportedSlot = slotIndex;
+        reported     = tuning;
+    };
+
+    panel.getRowForTest (1).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+
+    // Depth: -12 dB (id 2) -> -24 dB (id 4).
+    panel.getDetailForTest (1).depth.setSelectedId (4, juce::sendNotificationSync);
+
+    EXPECT_EQ (1, reportedSlot);
+    EXPECT_FALSE (reported.usesGlobal);
+    EXPECT_DOUBLE_EQ (reported.depthDb, -24.0);
+    // Everything else rides along unchanged from the seed.
+    EXPECT_DOUBLE_EQ (reported.riseMs,  750.0);
+    EXPECT_EQ (reported.persist, 5);
+    EXPECT_DOUBLE_EQ (reported.q,       20.0);
+    EXPECT_DOUBLE_EQ (reported.thr,      8.0);
+}
+
+TEST (SlotPanel, ChoosingGlobalCollapsesTheDetailRow)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeSeededTuning(); };
+
+    gui::SlotPanel::SlotTuning reported;
+    panel.onSlotTuningChanged = [&reported] (int, const gui::SlotPanel::SlotTuning& tuning)
+    { reported = tuning; };
+
+    panel.getRowForTest (0).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+    EXPECT_TRUE (panel.isDetailOpenForTest (0));
+    EXPECT_FALSE (panel.getDetailForTest (0).rise.getBounds().isEmpty());
+
+    panel.getRowForTest (0).tune.setSelectedId (1 /* G */, juce::sendNotificationSync);
+
+    EXPECT_TRUE (reported.usesGlobal);
+    EXPECT_FALSE (panel.isDetailOpenForTest (0));
+    // Laid out nowhere: every detail control has an EMPTY rect again.
+    EXPECT_TRUE (panel.getDetailForTest (0).rise.getBounds().isEmpty());
+    EXPECT_TRUE (panel.getDetailForTest (0).thr.getBounds().isEmpty());
+    EXPECT_EQ (panel.getPreferredHeight(),
+               gui::SlotPanel::kCaptionHeight + 3 * gui::SlotPanel::kRowHeight
+                   + 3 * az::theme::spacing);   // back to the 2-row + Add baseline
+}
+
+TEST (SlotPanel, OnlyOneDetailRowIsOpenAtATime)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeSeededTuning(); };
+
+    int reports = 0;
+    panel.onSlotTuningChanged = [&reports] (int, const gui::SlotPanel::SlotTuning&)
+    { ++reports; };
+
+    panel.setVisibleRowCount (4);
+
+    panel.getRowForTest (0).tune.setSelectedId (2, juce::sendNotificationSync);
+    panel.getRowForTest (3).tune.setSelectedId (2, juce::sendNotificationSync);
+
+    // Slot 3 took over the single detail row; slot 0's collapsed. Both stay
+    // CUSTOM (their tune combos keep showing C) -- only the editor moved.
+    EXPECT_TRUE  (panel.isDetailOpenForTest (3));
+    EXPECT_FALSE (panel.isDetailOpenForTest (0));
+    EXPECT_TRUE  (panel.getDetailForTest (0).rise.getBounds().isEmpty());
+    EXPECT_FALSE (panel.getDetailForTest (3).rise.getBounds().isEmpty());
+    // Slot 0 stays Custom even though its editor collapsed.
+    EXPECT_EQ (2, panel.getRowForTest (0).tune.getSelectedId());
+    EXPECT_EQ (2, panel.getRowForTest (3).tune.getSelectedId());
 }

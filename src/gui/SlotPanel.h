@@ -30,6 +30,18 @@ namespace gui
 class SlotPanel : public juce::Component
 {
 public:
+    // One slot's detection-tuning snapshot (brief 2026-08-24): Global follows
+    // the DETECTION strip; Custom carries the slot's own five parameters.
+    struct SlotTuning
+    {
+        bool   usesGlobal = true;
+        double riseMs     = 250;
+        int    persist    = 3;
+        double depthDb    = -18;
+        double q          = 30;
+        double thr        = 10;
+    };
+
     explicit SlotPanel (AudioEngine& engine);
 
     // Repopulate every row from the providers (or the engine) and select what
@@ -48,11 +60,20 @@ public:
     // size. Null fallback: resized() on the direct parent, then on self.
     std::function<void()> onPreferredHeightChanged;
 
+    // Per-slot tuning (brief 2026-08-24): any Tune-combo or custom-parameter
+    // change lands here as a COMPLETE SlotTuning for one slot. The receiver
+    // owns what it means (MainComponent applies the five values to that
+    // slot's NotchController); this panel never touches a controller.
+    std::function<void (int slotIndex, const SlotTuning&)> onSlotTuningChanged;
+
     // Overridable sources. Tests inject light fakes here; when null each falls
     // back to the engine member below.
     std::function<juce::StringArray()> inputChannelNamesProvider;
     std::function<juce::StringArray()> outputChannelNamesProvider;
     std::function<SlotConfig (int)>    slotConfigProvider;
+    // Seeds/refreshes a row's tuning state (the flag plus the values its
+    // controller currently holds). Null -> defaults, Global.
+    std::function<SlotTuning (int)>    slotTuningProvider;
 
     struct Row
     {
@@ -61,6 +82,9 @@ public:
 
         // Item ids 1 = Mono, 2 = Stereo.
         juce::ComboBox  width;
+
+        // Item ids 1 = G (global DETECTION strip), 2 = C (custom per-slot set).
+        juce::ComboBox  tune;
 
         juce::ComboBox  inLanes [kMaxSlotLanes];
         juce::ComboBox  outLanes[kMaxSlotLanes];
@@ -74,9 +98,40 @@ public:
         Led led;
     };
 
+    // The custom-tuning editor shown BELOW a slot's row while its Tune combo
+    // reads C: the five mini combos (rise / persist / depth / Q / threshold),
+    // same choice lists as TuningPanel's global strip.
+    struct DetailRow
+    {
+        juce::Label riseLabel   { {}, "Rise" };
+        juce::Label persistLabel{ {}, "Persist" };
+        juce::Label depthLabel  { {}, "Depth" };
+        juce::Label qLabel      { {}, "Q" };
+        juce::Label thrLabel    { {}, "Thr" };
+
+        juce::ComboBox rise;     // 100/250/500/750/1000 ms, id = position+1
+        juce::ComboBox persist;  // 1..6, id == value
+        juce::ComboBox depth;    // -6/-12/-18/-24 dB, id = position+1
+        juce::ComboBox q;        // 10..50, id = position+1
+        juce::ComboBox thr;      // 6/8/10/12/15, id = position+1
+    };
+
     // TEST ACCESSOR ONLY -- row i of the fixed 8-row table. Non-const so a
     // test can drive the controls directly.
     [[nodiscard]] Row& getRowForTest (int slotIndex) { return rows_[(std::size_t) slotIndex]; }
+
+    // TEST ACCESSOR ONLY -- the custom-tuning editor of row i.
+    [[nodiscard]] DetailRow& getDetailForTest (int slotIndex)
+    {
+        return details_[(std::size_t) slotIndex];
+    }
+
+    // True while slot i's detail row is the ONE open editor (laid out below
+    // its own row). At most one of the eight is ever true.
+    [[nodiscard]] bool isDetailOpenForTest (int slotIndex) const
+    {
+        return openDetailSlot_ == slotIndex;
+    }
 
     // How many of the 8 rows are shown. Starts at 2 -- the stereo In1/In2
     // pair most rigs need. The Add button reveals the next row, up to all 8;
@@ -98,6 +153,14 @@ public:
 
 private:
     void handleRowChanged (int slotIndex);
+    void handleTuneChanged (int slotIndex);
+    void handleDetailChanged();
+    void openDetailFor (int slotIndex);
+    void closeDetail();
+    void seedDetailFrom (int slotIndex);
+    void notifyPreferredHeightChanged();
+
+    [[nodiscard]] SlotTuning currentTuning() const;
 
     [[nodiscard]] juce::StringArray inputChannelNames() const;
     [[nodiscard]] juce::StringArray outputChannelNames() const;
@@ -107,6 +170,11 @@ private:
 
     int visibleRows_ = 2;
     std::array<Row, kMaxSlots> rows_;
+    std::array<DetailRow, kMaxSlots> details_;
+
+    // The one slot whose detail editor is open; -1 when none is. The slot
+    // itself stays Custom when its editor is closed by another slot opening.
+    int openDetailSlot_ = -1;
 
     // Sits in the row slot after the last visible one while any row is
     // hidden; reveals one more row per click.
@@ -118,6 +186,7 @@ private:
     juce::Label outACaption_  { {}, "Out A" };
     juce::Label outBCaption_  { {}, "Out B" };
     juce::Label ledCaption_   { {}, "Active" };
+    juce::Label tuneCaption_  { {}, "Tune" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SlotPanel)
 };
