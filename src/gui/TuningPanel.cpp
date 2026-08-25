@@ -137,7 +137,7 @@ TuningPanel::TuningPanel()
     for (auto* label : { &responseLabel_, &notchLabel_, &triggerLabel_ })
     {
         label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
-        label->setFont (legendFont (legendFontSize - 1.0f));
+        label->setFont (legendFont (captionFontSize - 1.0f, true, trackingColumn));
         label->setColour (juce::Label::textColourId, dim);
         label->setJustificationType (juce::Justification::centredLeft);
     }
@@ -146,8 +146,8 @@ TuningPanel::TuningPanel()
                          &qLabel_, &thrLabel_ })
     {
         label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
-        label->setFont (legendFont (legendFontSize - 2.0f));
-        label->setColour (juce::Label::textColourId, faded);
+        label->setFont (legendFont (columnFontSize, true, trackingColumn));
+        label->setColour (juce::Label::textColourId, dim);
         label->setJustificationType (juce::Justification::centredLeft);
     }
 

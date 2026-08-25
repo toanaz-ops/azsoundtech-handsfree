@@ -95,7 +95,11 @@ MainComponent::MainComponent()
     // MEANS is owned here, in setDisplayedSlot.
     slotTabs_.setSlotCount (slotPanel_.getVisibleRowCount());
     slotTabs_.onSlotSelected = [this] (int slot) { setDisplayedSlot (slot); };
-    addAndMakeVisible (slotTabs_);
+
+    // Hosted BY the notch panel, so it sits directly above the table it
+    // changes. It re-points the analyser too -- that is this class's job to
+    // know, not the panel's.
+    notchListPanel_.setSlotTabs (&slotTabs_);
 
     // Seed the display at slot 0 through the SAME route a click takes, so the
     // notch table's caption names its slot from the first frame instead of
@@ -151,6 +155,11 @@ MainComponent::MainComponent()
 
         if (displayedSlot_ >= slotPanel_.getVisibleRowCount())
             setDisplayedSlot (0);
+
+        // The "+ Add slot" button revealed a row; the window takes the height
+        // to show it rather than pushing the button under a scrollbar. Called
+        // BEFORE resized() so the layout runs once, at the final size.
+        growWindowToFitFloor();
 
         resized();
     };
@@ -565,24 +574,24 @@ void MainComponent::paint (juce::Graphics& g)
     mark.removeFromLeft (10);
 
     g.setColour (text);
-    g.setFont (legendFont (15.0f));
+    g.setFont (legendFont (brandFontSize, true, trackingCaption));
     g.drawText ("HANDS-FREE", mark.removeFromLeft (kNameWidth),
                 juce::Justification::centredLeft, false);
     mark.removeFromLeft (gap + spacing);
 
-    g.setColour (faded);
-    g.setFont (legendFont (11.0f, false));
+    g.setColour (dim);
+    g.setFont (legendFont (columnFontSize, false, trackingCaption));
     g.drawText ("AZ SOUNDTECH", mark.removeFromLeft (kCompanyWidth),
                 juce::Justification::centredLeft, false);
 
     // The rig readout fills whatever sits between the mark and the badge.
     auto rigArea = masthead.reduced (kEdgePad, 0)
-                           .withTrimmedLeft (kMarkWidth + slotTabs_.getWidth() + gap)
+                           .withTrimmedLeft (kMarkWidth)
                            .withTrimmedRight (kBadgeWidth + gap);
     if (rigArea.getWidth() > 0)
     {
         g.setColour (rigIsHealthy_ ? dim : warn);
-        g.setFont (monoFont (baseFontSize - 1.0f));
+        g.setFont (monoFont (readoutFontSize));
         g.drawText (rigLine_, rigArea, juce::Justification::centredRight, true);
     }
 
@@ -628,7 +637,7 @@ void MainComponent::paint (juce::Graphics& g)
 // middling slice between seven equal-weight full-width strips, which is most
 // of why nothing on screen read as more important than anything else.
 
-int MainComponent::floorHeightFor (const int available) const
+int MainComponent::naturalFloorHeight() const
 {
     using namespace az::theme;
 
@@ -637,7 +646,54 @@ int MainComponent::floorHeightFor (const int available) const
                         + gap + gui::TuningPanel::kPanelHeight
                         + gap + slotPanel_.getPreferredHeight();
 
-    const int wanted = juce::jmax (kNotchListHeight, rigColumn) + 2 * gap;
+    return juce::jmax (kNotchListHeight, rigColumn) + 2 * gap;
+}
+
+int MainComponent::heightThatFitsTheFloor() const
+{
+    using namespace az::theme;
+
+    const int natural = naturalFloorHeight();
+    const int chrome  = mastheadHeight + transportHeight;
+
+    // BOTH ceilings in floorHeightFor have to clear, or the floor is trimmed
+    // anyway and the extra height goes to the analyser instead of to the row
+    // the user just asked for.
+    const int forAnalyser = chrome + kMinSpectrumHeight + gap + natural;
+    const int forShare    = chrome + juce::roundToInt ((float) natural / kMaxFloorShare);
+
+    return juce::jmax (kMinimumHeight, juce::jmax (forAnalyser, forShare));
+}
+
+void MainComponent::growWindowToFitFloor()
+{
+    // Headless (and in every test): a component with no desktop peer is its
+    // own top level, and there is no window to grow.
+    auto* window = getTopLevelComponent();
+    if (window == nullptr || window == this)
+        return;
+
+    const int wanted = heightThatFitsTheFloor();
+    if (wanted <= getHeight())
+        return;
+
+    // Never past the display the window is on. A window taller than the screen
+    // puts the row the user just revealed under the taskbar, which is the
+    // problem this is here to solve.
+    const auto* display = juce::Desktop::getInstance().getDisplays()
+                              .getDisplayForRect (window->getScreenBounds());
+
+    const int grown = window->getHeight() + (wanted - getHeight());
+    const int ceiling = display != nullptr ? display->userArea.getHeight() : grown;
+
+    window->setSize (window->getWidth(), juce::jmin (ceiling, grown));
+}
+
+int MainComponent::floorHeightFor (const int available) const
+{
+    using namespace az::theme;
+
+    const int wanted = naturalFloorHeight();
 
     // TWO ceilings, and the floor gets the lower of them.
     //
@@ -680,13 +736,10 @@ void MainComponent::resized()
     statusBadge_.setBounds (masthead.removeFromRight (kBadgeWidth)
                                     .withSizeKeepingCentre (kBadgeWidth, kBadgeHeight));
 
-    // The slot selector sits after the brand block. Width is ASKED FOR rather
-    // than assumed: the chip count follows the routing table's visible rows
-    // and changes while the app runs.
-    slotTabs_.setBounds (masthead.withTrimmedLeft (kMarkWidth + gap + spacing)
-                                 .withWidth (slotTabs_.getPreferredWidth())
-                                 .withSizeKeepingCentre (slotTabs_.getPreferredWidth(),
-                                                         kBadgeHeight));
+    // The selector's WIDTH is set here and its position by its host panel:
+    // the chip count follows the routing table's visible rows and changes
+    // while the app runs, so the width is asked for rather than assumed.
+    slotTabs_.setSize (slotTabs_.getPreferredWidth(), kBadgeHeight);
 
     //--------------------------------------------------------------------
     // 2. Transport. The rail owns its internal grid; all this owes it is a
@@ -711,6 +764,7 @@ void MainComponent::resized()
 
     const int notchWidth = juce::roundToInt ((float) inner.getWidth() * kNotchColumnFraction);
     notchListPanel_.setBounds (inner.removeFromLeft (notchWidth));
+    notchListPanel_.resized();   // re-place the hosted selector at the new width
     inner.removeFromLeft (2 * gap + 2);   // the painted groove lives in here
 
     const int drawerHeight = juce::jmin (deviceDrawer_.getPreferredHeight(),
@@ -741,7 +795,10 @@ void MainComponent::resized()
         // renders as an empty black rect (the 2026-08-24 bug). Full preferred
         // height for the CURRENT visible row count; the viewport adds a
         // scrollbar only when the column is shorter than the table.
-        slotPanel_.setSize (juce::jmax (1, slotScroller_.getMaximumVisibleWidth()),
+        // At LEAST the table's own preferred width: below that the Viewport
+        // scrolls sideways rather than clipping the TUNE column off the edge.
+        slotPanel_.setSize (juce::jmax (slotScroller_.getMaximumVisibleWidth(),
+                                        slotPanel_.getPreferredWidth()),
                             slotPanel_.getPreferredHeight());
     }
 }

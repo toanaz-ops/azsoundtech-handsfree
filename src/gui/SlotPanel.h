@@ -152,6 +152,11 @@ public:
     // -- the parent must hand the panel this height or it renders empty.
     [[nodiscard]] int getPreferredHeight() const;
 
+    // Width the whole fixed-column grid needs. The hosting Viewport sizes this
+    // panel to at least this, so a narrow window SCROLLS the table sideways
+    // instead of clipping its last columns off the edge.
+    [[nodiscard]] int getPreferredWidth() const;
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 

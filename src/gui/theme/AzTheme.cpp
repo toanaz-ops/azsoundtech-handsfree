@@ -1,5 +1,7 @@
 #include "gui/theme/AzTheme.h"
 
+#include <BinaryData.h>
+
 #include <cmath>
 
 namespace az::theme
@@ -31,6 +33,7 @@ constexpr float kLegendMinScale = 0.8f;
 const juce::Identifier azStyleProperty { "azStyle" };
 const juce::String     styleDanger     { "danger" };
 const juce::String     styleGhost      { "ghost" };
+const juce::String     styleSegment    { "segment" };
 
 juce::String styleOf (const juce::Button& b)
 {
@@ -41,30 +44,68 @@ juce::String styleOf (const juce::Button& b)
 //==============================================================================
 // Fonts.
 
-juce::Font baseFont()
+namespace
 {
-    return juce::Font (juce::FontOptions ("Segoe UI Variable Text", baseFontSize, juce::Font::plain)
-                           .withFallbacks ({ "Segoe UI", "Tahoma" }));
+// Each face is turned into a Typeface ONCE and kept. createSystemTypefaceFor
+// parses the whole font file, so doing it per Font would re-parse a 100 kB
+// TTF on every drawText.
+juce::Typeface::Ptr embedded (const void* data, const int size)
+{
+    return juce::Typeface::createSystemTypefaceFor (data, (std::size_t) size);
 }
 
-juce::Font monoFont (const float height)
+const juce::Typeface::Ptr& legendSemiBold()
 {
-    return juce::Font (juce::FontOptions ("Cascadia Mono", height, juce::Font::plain)
-                           .withFallbacks ({ "Consolas", "Courier New" }));
+    static const juce::Typeface::Ptr face = embedded (BinaryData::SairaCondensedSemiBold_ttf,
+                                                      BinaryData::SairaCondensedSemiBold_ttfSize);
+    return face;
 }
 
-juce::Font legendFont (const float height, const bool bold)
+const juce::Typeface::Ptr& legendBold()
 {
-    // Bahnschrift is DIN 1451 -- the face silkscreened onto real touring gear.
-    // Its weight axis is exposed through the named instances, so the bold
-    // variant is requested by NAME with the plain style, then tracked out.
-    const juce::String family = bold ? "Bahnschrift SemiBold" : "Bahnschrift";
+    static const juce::Typeface::Ptr face = embedded (BinaryData::SairaCondensedBold_ttf,
+                                                      BinaryData::SairaCondensedBold_ttfSize);
+    return face;
+}
 
-    auto font = juce::Font (juce::FontOptions (family, height, juce::Font::plain)
-                                .withFallbacks ({ "Bahnschrift",
-                                                  bold ? "Segoe UI Semibold" : "Segoe UI",
-                                                  "Segoe UI" }));
-    return font.withExtraKerningFactor (kLegendTracking);
+const juce::Typeface::Ptr& bodyRegular()
+{
+    static const juce::Typeface::Ptr face = embedded (BinaryData::IBMPlexSansRegular_ttf,
+                                                      BinaryData::IBMPlexSansRegular_ttfSize);
+    return face;
+}
+
+const juce::Typeface::Ptr& monoRegular()
+{
+    static const juce::Typeface::Ptr face = embedded (BinaryData::IBMPlexMonoRegular_ttf,
+                                                      BinaryData::IBMPlexMonoRegular_ttfSize);
+    return face;
+}
+
+const juce::Typeface::Ptr& monoMedium()
+{
+    static const juce::Typeface::Ptr face = embedded (BinaryData::IBMPlexMonoMedium_ttf,
+                                                      BinaryData::IBMPlexMonoMedium_ttfSize);
+    return face;
+}
+} // namespace
+
+juce::Font baseFont (const float height)
+{
+    return juce::Font (juce::FontOptions (bodyRegular()).withHeight (height));
+}
+
+juce::Font monoFont (const float height, const bool medium)
+{
+    return juce::Font (juce::FontOptions (medium ? monoMedium() : monoRegular())
+                           .withHeight (height));
+}
+
+juce::Font legendFont (const float height, const bool bold, const float tracking)
+{
+    auto font = juce::Font (juce::FontOptions (bold ? legendBold() : legendSemiBold())
+                                .withHeight (height));
+    return font.withExtraKerningFactor (tracking);
 }
 
 //==============================================================================
@@ -128,7 +169,7 @@ void drawCaption (juce::Graphics& g, const juce::String& caption,
                   const juce::Rectangle<int> bounds, const juce::Colour colour)
 {
     g.setColour (colour);
-    g.setFont (legendFont (legendFontSize - 1.0f));
+    g.setFont (legendFont (captionFontSize, true, trackingCaption));
     g.drawText (caption.toUpperCase(), bounds, juce::Justification::centredLeft, false);
 }
 
@@ -208,6 +249,26 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
         return;
     }
 
+    // Segment: one option inside a SegmentedControl. It paints a FILL and
+    // nothing else -- the box around the group and the dividers between the
+    // options belong to the group, which draws them itself. A per-button
+    // border here is exactly what made the toolbar read as several separate
+    // controls instead of one choice.
+    if (style == styleSegment)
+    {
+        if (on)
+        {
+            g.setColour (raise);
+            g.fillRect (button.getLocalBounds());
+        }
+        else if (shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown)
+        {
+            g.setColour (raise.withAlpha (0.45f));
+            g.fillRect (button.getLocalBounds());
+        }
+        return;
+    }
+
     // Ghost: the small chips in a toolbar. Flat, no lamp -- they are display
     // options, not transport, and must not compete with the transport.
     //
@@ -277,6 +338,24 @@ void AzLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button,
     if (! button.isEnabled())
         colour = colour.withAlpha (0.4f);
 
+    // Segments and chips are set in the NUMERIC face, in SENTENCE CASE, and
+    // untracked: they sit directly beside the data they modify and must not
+    // shout over it. Only switches and the destructive control are uppercase
+    // tracked legends.
+    const auto buttonStyle = styleOf (button);
+
+    if (buttonStyle == styleSegment || buttonStyle == styleGhost)
+    {
+        g.setColour (button.findColour (button.getToggleState()
+                                            ? juce::TextButton::textColourOnId
+                                            : juce::TextButton::textColourOffId)
+                         .withAlpha (button.isEnabled() ? 1.0f : 0.4f));
+        g.setFont (getTextButtonFont (button, button.getHeight()));
+        g.drawFittedText (button.getButtonText(), button.getLocalBounds(),
+                          juce::Justification::centred, 1, 0.9f);
+        return;
+    }
+
     const auto hint = button.getProperties()
                             .getWithDefault (hintProperty, juce::String()).toString();
 
@@ -308,11 +387,25 @@ void AzLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button,
 
 juce::Font AzLookAndFeel::getTextButtonFont (juce::TextButton& button, const int buttonHeight)
 {
-    // Transport switches carry a legend big enough to read across a room; the
-    // small chips stay at caption size. The 40 px split is the boundary
-    // between "a switch" and "a control in a strip".
-    juce::ignoreUnused (button);
-    return legendFont (buttonHeight >= 40 ? 16.0f : legendFontSize);
+    // Every size and tracking below is transcribed from the design study --
+    // docs/spec-ui-mockup.md section 1. They are NOT one scale: a segment is
+    // set in the numeric face and a switch in the tracked legend face, and
+    // using one for both is what made the toolbar shout over the plot.
+    const auto style = styleOf (button);
+
+    if (style == styleSegment)
+        return monoFont (segmentFontSize);
+
+    if (style == styleGhost)
+        return monoFont (chipFontSize);
+
+    if (style == styleDanger)
+        return legendFont (dangerFontSize, true, trackingSwitch);
+
+    // A transport switch, or a smaller default button in a strip. The 40 px
+    // split is the boundary between "a switch" and "a control in a row".
+    return buttonHeight >= 40 ? legendFont (switchFontSize, true, trackingSwitch)
+                              : legendFont (columnFontSize, true, trackingColumn);
 }
 
 //==============================================================================
@@ -326,8 +419,19 @@ juce::Font AzLookAndFeel::getComboBoxFont (juce::ComboBox&)
 
 void AzLookAndFeel::positionComboBoxText (juce::ComboBox& box, juce::Label& label)
 {
-    label.setBounds (gap, 0, box.getWidth() - gap - (int) (box.getHeight() * 0.6f), box.getHeight());
-    label.setFont (getComboBoxFont (box));
+    // The label is given a ONE-LINE height, centred, not the combo's full
+    // height. juce::Label fits as many lines as its height allows, so a 26 px
+    // combo holding a 13 px face wrapped "Analogue 1" onto two lines and
+    // showed "Analogue" over "1". A value that wraps is a value you cannot
+    // read at a glance, which is the entire job of this control.
+    const auto font = getComboBoxFont (box);
+    const int  lineHeight = juce::roundToInt (font.getHeight()) + 2;
+
+    label.setBounds (gap, (box.getHeight() - lineHeight) / 2,
+                     juce::jmax (1, box.getWidth() - gap - (int) (box.getHeight() * 0.6f)),
+                     lineHeight);
+    label.setFont (font);
+    label.setMinimumHorizontalScale (0.85f);
 }
 
 void AzLookAndFeel::drawComboBox (juce::Graphics& g, const int width, const int height,

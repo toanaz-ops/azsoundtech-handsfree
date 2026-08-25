@@ -75,7 +75,11 @@ std::vector<float> makeHop (int hopIndex)
         // Scaled to land the trace in the MIDDLE of the -90..0 dB window. At
         // unity the partials clamp along the top edge, which is honest
         // behaviour but makes a poor picture of how the plot reads.
-        hop[i] = (float) (sample * 0.012);
+        // Lands the trace across roughly -25..-70 dB, where real programme
+        // material sits. At the previous 0.012 it ran along the top of the
+        // window and the area fill covered most of the plot, which said more
+        // about the test signal than about the design.
+        hop[i] = (float) (sample * 0.0016);
     }
 
     return hop;

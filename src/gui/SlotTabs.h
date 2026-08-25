@@ -12,9 +12,11 @@
 // MEANS -- re-pointing both display panels -- exactly the way it owns what a
 // routing change or a tuning change means.
 //
-// It lives in the masthead rather than in either panel, because the selection
-// governs BOTH of them: putting it inside one would imply it only applied
-// there.
+// PLACEMENT (owner, 2026-08-25): it sits in the ACTIVE NOTCHES caption row,
+// not in the masthead. It governs the analyser too, so the masthead was the
+// semantically tidier home -- and nobody found it there. A control nobody
+// finds is a control that does not exist. It now sits directly above the
+// table whose contents it changes, and the table's caption names the slot.
 
 #pragma once
 
@@ -62,7 +64,7 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    static constexpr int kChipWidth   = 32;
+    static constexpr int kChipWidth   = 30;
     static constexpr int kLegendWidth = 62;
 
 private:

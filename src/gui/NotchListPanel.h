@@ -74,6 +74,12 @@ public:
     // read; setController does that.
     void setDisplayedSlot (int slotIndex);
 
+    // Hosts the slot selector in this panel's caption row (ownership stays
+    // with the caller; layout tolerates null). The selector is not owned here
+    // because selecting a slot re-points the ANALYSER as well, and this panel
+    // has no business knowing that.
+    void setSlotTabs (juce::Component* tabsOrNull);
+
     // Shared formatting truth -- the panel paints these and the tests assert
     // them, so there is exactly one definition of each format.
     static juce::String formatFrequency (float hz);
@@ -105,6 +111,7 @@ public:
     [[nodiscard]] RowText rowForTest (int index) const;
 
     void paint (juce::Graphics&) override;
+    void resized() override;
 
 private:
     void timerCallback() override;
@@ -138,6 +145,8 @@ private:
 
     // Rebuilt by setDisplayedSlot so paint() never formats a string.
     juce::String caption_ { "Active notches" };
+
+    juce::Component* slotTabs_ = nullptr;   // NOT owned
 
     // First-seen ledger keyed by identity (ruling R-2).
     std::map<std::uint64_t, Sighting> sightings_;

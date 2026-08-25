@@ -151,6 +151,31 @@ inline constexpr float fieldSplit       = 0.42f;
 // Two radii, not one. A field is a machined slot and stays tight at 3; a
 // switch is a moulded cap and reads softer at 4. Using one figure for both
 // makes the switches look like oversized text boxes.
+// Tracking, per element, transcribed from the design study (docs/spec-ui-mockup.md
+// section 1). One global figure was wrong: a section caption is set wider than
+// a column heading, and a switch legend tighter than either.
+inline constexpr float trackingCaption  = 0.20f;  // section captions, brand
+inline constexpr float trackingColumn   = 0.16f;  // column headings, small legends
+inline constexpr float trackingSwitch   = 0.15f;  // transport switch legends
+
+// Type sizes, same source. Named rather than typed at each call site so the
+// scale can be checked against the spec table in one place.
+// The study's figures were measured against a browser rendering Saira
+// Condensed with its own hinting. Set at 11/10.5 in the app the same face came
+// out noticeably smaller, so both are up one step. The RATIO between them --
+// caption above column heading -- is what the study actually fixes.
+inline constexpr float captionFontSize  = 13.0f;   // section caption
+inline constexpr float columnFontSize   = 11.5f;   // column heading
+inline constexpr float switchFontSize   = 16.0f;   // transport switch legend
+inline constexpr float hintFontSize     = 10.0f;   // switch second line (mono)
+inline constexpr float brandFontSize     = 14.0f;  // HANDS-FREE
+inline constexpr float segmentFontSize  = 11.0f;   // toolbar segment (mono, sentence case)
+inline constexpr float tableFontSize    = 12.5f;   // notch table cell (mono)
+inline constexpr float readoutFontSize  = 12.0f;   // masthead rig line (mono)
+inline constexpr float countdownFontSize = 26.0f;  // soundcheck number (mono medium)
+inline constexpr float chipFontSize     = 11.5f;   // ghost chip (mono, sentence case)
+inline constexpr float dangerFontSize   = 13.0f;   // CLEAR ALL
+
 inline constexpr float cornerRadius     = 3.0f;   // fields, wells, chips
 inline constexpr float switchRadius     = 4.0f;   // transport switches
 inline constexpr float baseFontSize     = 14.0f;
@@ -169,9 +194,11 @@ inline constexpr float legendFontSize   = 12.0f;
 //
 // baseFont() is prose -- dialog copy, empty states.
 
-[[nodiscard]] juce::Font baseFont();
-[[nodiscard]] juce::Font monoFont   (float height = baseFontSize);
-[[nodiscard]] juce::Font legendFont (float height = legendFontSize, bool bold = true);
+[[nodiscard]] juce::Font baseFont   (float height = baseFontSize);
+[[nodiscard]] juce::Font monoFont   (float height = baseFontSize, bool medium = false);
+[[nodiscard]] juce::Font legendFont (float height = legendFontSize,
+                                     bool  bold     = true,
+                                     float tracking = trackingColumn);
 
 //==============================================================================
 // Shared drawing primitives. These exist so "an engraved divider" or "a

@@ -40,6 +40,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <melatonin_blur/melatonin_blur.h>
 
+#include "gui/SegmentedControl.h"
+
 #include "app/NotchController.h"
 #include "dsp/Detector.h"
 #include "gui/RtaProcessing.h"
@@ -158,12 +160,7 @@ private:
 
     juce::Rectangle<int> riskChipArea_;
 
-    // Lights exactly one chip of a segmented group and clears the rest.
-    // Explicit rather than leaning on the radio group, for the reason
-    // ModeRail::setDisplayedMode documents: the group's own clearing runs
-    // through the notification path this is trying not to fire.
-    template <std::size_t N>
-    static void reflectChips (std::array<juce::TextButton, N>& chips, int selected);
+
 
     // Log-frequency / dB mappings into a given plot rectangle.
     static float xForHz (float hz, const juce::Rectangle<float>& plot);
@@ -223,22 +220,17 @@ private:
     // Reserved at the toolbar's left for the ANALYSER legend, by BOTH paint()
     // (which draws it) and resized() (which must not lay a control over it).
     static constexpr int kCaptionWidth  = 78;
-    // Segmented chips, not dropdowns. These are DISPLAY options a soundman
-    // flips while looking at the plot, so the current one has to be readable
-    // without opening anything, and the next one has to be one click away.
-    // A 26 px combo is neither.
-    juce::Label      bandwidthLabel_;
-    std::array<juce::TextButton, 3> bandChips_ { juce::TextButton { "Line" },
-                                                 juce::TextButton { "1/1 oct" },
-                                                 juce::TextButton { "1/3 oct" } };
-    juce::Label      averageLabel_;
-    std::array<juce::TextButton, 4> avgChips_ { juce::TextButton { "Off" },
-                                                juce::TextButton { "1s" },
-                                                juce::TextButton { "3s" },
-                                                juce::TextButton { "10s" } };
-    // A chip like the segmented groups beside it, not a tick box: it belongs to
-    // the same row of display options and is hit the same way.
-    juce::TextButton peakHoldButton_ { "Peak hold" };
+    // Joined segmented groups, in the study's order and wording: no separate
+    // BAND / AVG legends -- the averaging group's first option carries its own
+    // label. See docs/spec-ui-mockup.md section 3.
+    SegmentedControl bandGroup_ { { "Line", "1/1 oct", "1/3 oct" } };
+    SegmentedControl avgGroup_  { { "Avg off", "1 s", "3 s", "10 s" } };
+
+    // Peak hold is not in the study -- it is a real feature the study omitted.
+    // Drawn in the same joined style so it belongs to the row, and it carries
+    // `peak` when on so the control and the trace it produces read as one
+    // thing.
+    SegmentedControl peakGroup_ { { "Peak hold" } };
 
     juce::Font tickFont_;                 // mono: axis numbers
     juce::Font bodyFont_;                 // "no signal" text

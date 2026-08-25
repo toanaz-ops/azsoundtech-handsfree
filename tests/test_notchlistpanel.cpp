@@ -269,10 +269,19 @@ TEST (NotchListPanelWiring, TableIsTheFloorsLeftColumnAndNeverOverlapsTheAnalyse
 
     EXPECT_FALSE (strip.isEmpty());
 
-    // A COLUMN, not a band: it takes well under half the window's width, and
-    // the rig controls occupy the rest of the floor beside it.
-    EXPECT_LT (strip.getWidth(), MainComponent::kMinimumWidth / 2);
+    // A COLUMN, not a band: the rig controls occupy the rest of the floor
+    // beside it, so it never reaches the window's right edge.
     EXPECT_LT (strip.getRight(), MainComponent::kMinimumWidth);
+
+    // And it is the WIDER of the two columns. The design study splits the
+    // floor 1.25 : 1 in the notch table's favour -- it is the answer, the rig
+    // is the setup. An earlier build inverted this and gave the table 38 %,
+    // which is the defect this assertion exists to catch.
+    EXPECT_GT (strip.getWidth(), MainComponent::kMinimumWidth / 2);
+
+    // Still leaves a usable rig column: "wider" must not become "nearly all".
+    EXPECT_LT (strip.getWidth(),
+               juce::roundToInt (MainComponent::kMinimumWidth * 0.62));
 
     // Wholly inside the window, at its bottom.
     EXPECT_GE (strip.getX(), 0);

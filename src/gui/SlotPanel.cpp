@@ -23,12 +23,18 @@ constexpr int kCustomItemId = 2;
 // The slot number and its enable toggle together fill the rig column's shared
 // legend gutter, so the table's first CONTROL column starts at the same x as
 // every field above it (DEVICE, RATE, RESPONSE, NOTCH, TRIGGER).
-constexpr int kNumberColumn = 26;
+constexpr int kNumberColumn = 24;
 constexpr int kEnableColumn = az::theme::gutterWidth - kNumberColumn;
-constexpr int kWidthColumn  = 76;
-constexpr int kLaneColumn   = 76;
-constexpr int kLedColumn    = 30;
-constexpr int kTuneColumn   = 54;   // a combo needs its caret AND its value
+constexpr int kWidthColumn  = 70;
+
+// Wide enough for a real channel name. Interfaces report things like
+// "Analogue 1", and at 76 px that came back as "Analogue" stacked over "1" --
+// the combo's label had room for a second line and took it. The wrapping
+// itself is fixed in the LookAndFeel; this is the width that lets the name be
+// READ rather than merely fit on one line with an ellipsis.
+constexpr int kLaneColumn   = 88;
+constexpr int kLedColumn    = 26;
+constexpr int kTuneColumn   = 46;   // a combo needs its caret AND its value
 
 // The section legend, drawn in paint() over the caption row's left gutter --
 // the columns there label nothing, so the section name costs no width.
@@ -91,8 +97,8 @@ SlotPanel::SlotPanel (AudioEngine& engine)
     {
         // Column captions are silkscreen: tracked uppercase, quiet.
         label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
-        label->setFont (legendFont (legendFontSize - 2.0f));
-        label->setColour (juce::Label::textColourId, faded);
+        label->setFont (legendFont (columnFontSize, true, trackingColumn));
+        label->setColour (juce::Label::textColourId, dim);
         addAndMakeVisible (*label);
     }
 
@@ -506,6 +512,17 @@ void SlotPanel::paint (juce::Graphics& g)
         g.setColour (shade);
         g.fillRect (captionRow.getX(), cell.getY() - 1, captionRow.getWidth(), 1);
     }
+}
+
+int SlotPanel::getPreferredWidth() const
+{
+    using namespace az::theme;
+
+    // Both lane-B columns are ALWAYS reserved (see resized()), so the width is
+    // the same whether any slot is stereo or not -- the table must not change
+    // width when a slot's width combo moves.
+    return 2 * gap + kNumberColumn + kEnableColumn + kWidthColumn
+         + 4 * kLaneColumn + kLedColumn + kTuneColumn;
 }
 
 void SlotPanel::resized()

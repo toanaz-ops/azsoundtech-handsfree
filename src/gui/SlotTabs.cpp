@@ -94,7 +94,7 @@ void SlotTabs::paint (juce::Graphics& g)
 {
     az::theme::drawCaption (g, "Monitor",
                             getLocalBounds().withWidth (kLegendWidth),
-                            az::theme::faded);
+                            az::theme::dim);
 }
 
 void SlotTabs::resized()

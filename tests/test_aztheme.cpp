@@ -115,15 +115,46 @@ TEST (AzTheme, EveryTransportSwitchClearsTheTouchTarget)
     EXPECT_GE (az::theme::clearCellWidth,   az::theme::touchTarget);
 }
 
-TEST (AzTheme, MonoFontIsCascadiaAtTheBaseSizeByDefault)
+TEST (AzTheme, EveryFaceIsEmbeddedRatherThanResolvedFromTheMachine)
+{
+    // The design was approved in Saira Condensed / IBM Plex Sans / IBM Plex
+    // Mono, and all three ship in assets/fonts/ as binary data. Naming them in
+    // a fallback list instead would give the design on a machine that happens
+    // to have them and something else everywhere else -- which is not a
+    // design, it is a lottery.
+    //
+    // This asserts the TYPEFACE NAMES that come back, which is the only way to
+    // tell an embedded face from a silent substitution: a missing font does
+    // not fail, it falls back.
+    EXPECT_EQ (az::theme::monoFont().getTypefaceName(),   juce::String ("IBM Plex Mono"));
+    EXPECT_EQ (az::theme::baseFont().getTypefaceName(),   juce::String ("IBM Plex Sans"));
+    EXPECT_EQ (az::theme::legendFont().getTypefaceName(), juce::String ("Saira Condensed"));
+}
+
+TEST (AzTheme, MonoFontHonoursTheRequestedSize)
 {
     // Numbers must not shift width while counting down -- hence a monospaced
-    // face. Cascadia Mono first for its modern figures, with Consolas behind
-    // it for the Windows 10 machines that do not ship Cascadia.
-    const auto font = az::theme::monoFont();
+    // face -- and the countdown is drawn far larger than the base size.
+    EXPECT_FLOAT_EQ (az::theme::monoFont().getHeight(), az::theme::baseFontSize);
+    EXPECT_FLOAT_EQ (az::theme::monoFont (32.0f).getHeight(), 32.0f);
+}
 
-    EXPECT_EQ (font.getTypefaceName(), juce::String ("Cascadia Mono"));
-    EXPECT_FLOAT_EQ (font.getHeight(), az::theme::baseFontSize);
+TEST (AzTheme, TheTypeScaleKeepsTheStudysOrdering)
+{
+    // The study fixes the RATIOS between these, not their absolute pixel
+    // values (docs/spec-ui-mockup.md section 1). Asserting the order means a
+    // future size tweak stays a tweak instead of flattening the hierarchy.
+    using namespace az::theme;
+
+    EXPECT_GT (switchFontSize,  brandFontSize);      // a switch shouts loudest
+    EXPECT_GT (brandFontSize,   captionFontSize);
+    EXPECT_GT (captionFontSize, columnFontSize);     // section above column
+    EXPECT_GT (columnFontSize,  hintFontSize);
+    EXPECT_GT (countdownFontSize, switchFontSize);   // the number beats them all
+
+    // Tracking widens as the label gets more architectural.
+    EXPECT_GT (trackingCaption, trackingColumn);
+    EXPECT_GT (trackingColumn,  trackingSwitch);
 }
 
 //==============================================================================

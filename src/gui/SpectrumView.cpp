@@ -45,8 +45,8 @@ constexpr int kAverageRadioGroupId = 12;
 
 // The signal's area fill. Sodium, and deliberately faint: it gives the trace
 // body without turning the lower half of the plot into a solid block.
-constexpr float kFillTopAlpha      = 0.26f;
-constexpr float kFillMidAlpha      = 0.08f;
+constexpr float kFillTopAlpha      = 0.24f;
+constexpr float kFillMidAlpha      = 0.07f;
 
 // A marker sits ON the trace, and now that the trace is sodium too, hue alone
 // no longer separates them -- a fresh (sodium) notch drawn straight onto a
@@ -104,92 +104,55 @@ SpectrumView::SpectrumView (const NotchController& controller)
     bandEdgeLowHz_.reserve   ((std::size_t) 31);
     bandEdgeHighHz_.reserve  ((std::size_t) 31);
 
-    // Toolbar: two segmented groups and a toggle, pure display state. Nothing
-    // here reaches the audio engine, the detector or the notch chain.
-    bandwidthLabel_.setText ("BAND", juce::dontSendNotification);
-
-    for (std::size_t i = 0; i < bandChips_.size(); ++i)
+    // Toolbar, in the study's order: the display groups sit LEFT next to the
+    // section caption, ring risk sits far right. Nothing here reaches the
+    // audio engine, the detector or the notch chain.
+    bandGroup_.onSelected = [this] (int index)
     {
-        auto& chip = bandChips_[i];
-        chip.setClickingTogglesState (true);
-        chip.setRadioGroupId (kBandRadioGroupId);
-        chip.getProperties().set ("azStyle", "ghost");
-        chip.onClick = [this, i]
-        {
-            if (! bandChips_[i].getToggleState())
-                return;                     // the group turning the OLD one off
+        bandMode_ = static_cast<rta::BandMode> (index);
+        applyBandMode();
+        repaint();   // stale data keeps showing until the next frame lands
+    };
 
-            bandMode_ = static_cast<rta::BandMode> ((int) i);
-            applyBandMode();
-            repaint();   // stale data keeps showing until the next frame lands
-        };
-    }
-
-    averageLabel_.setText ("AVG", juce::dontSendNotification);
-
-    for (std::size_t i = 0; i < avgChips_.size(); ++i)
+    avgGroup_.onSelected = [this] (int index)
     {
-        auto& chip = avgChips_[i];
-        chip.setClickingTogglesState (true);
-        chip.setRadioGroupId (kAverageRadioGroupId);
-        chip.getProperties().set ("azStyle", "ghost");
-        chip.onClick = [this, i]
-        {
-            if (! avgChips_[i].getToggleState())
-                return;
+        avgMode_ = static_cast<rta::AverageMode> (index);
+        repaint();
+    };
 
-            avgMode_ = static_cast<rta::AverageMode> ((int) i);
-            repaint();
-        };
-    }
-
-    reflectChips (bandChips_, (int) bandMode_);
-    reflectChips (avgChips_,  (int) avgMode_);
-
-    peakHoldButton_.setButtonText ("Peak hold");
-    peakHoldButton_.setClickingTogglesState (true);
-    peakHoldButton_.setToggleState (false, juce::dontSendNotification);
-
-    // The chip carries the colour of the trace it turns on, so the control and
-    // the line it produces are visibly the same thing. `peak` is a cool
-    // near-white precisely so it can do that without claiming to be one of the
-    // semantic states (sodium, LED green, red, ice).
-    peakHoldButton_.setColour (juce::TextButton::buttonOnColourId, az::theme::peak);
-    peakHoldButton_.setColour (juce::TextButton::textColourOnId,   az::theme::peak);
-    peakHoldButton_.onClick = [this]
+    // A one-segment group used as a latch: clicking the selected segment must
+    // TOGGLE it, which a radio group on its own will not do.
+    peakGroup_.getSegmentForTest (0).setRadioGroupId (0);
+    peakGroup_.getSegmentForTest (0).setColour (juce::TextButton::textColourOnId,
+                                                az::theme::peak);
+    peakGroup_.onSelected = [this] (int)
     {
-        peakHold_ = peakHoldButton_.getToggleState();
+        peakHold_ = peakGroup_.getSegmentForTest (0).getToggleState();
+
         // The rising edge seeds peakDb_ inside rebuildGeometry, so turning it
         // on starts from the CURRENT frame instead of a decayed history.
+        if (! peakHold_)
+            peakPoints_.clear();
+
+        repaint();
+    };
+    peakGroup_.getSegmentForTest (0).setToggleState (false, juce::dontSendNotification);
+    peakGroup_.getSegmentForTest (0).onClick = [this]
+    {
+        peakHold_ = peakGroup_.getSegmentForTest (0).getToggleState();
         if (! peakHold_)
             peakPoints_.clear();
         repaint();
     };
 
-    for (auto* c : { (juce::Component*) &bandwidthLabel_,
-                     (juce::Component*) &averageLabel_,
-                     (juce::Component*) &peakHoldButton_ })
-    {
-        c->setWantsKeyboardFocus (false);
-        addAndMakeVisible (*c);
-    }
+    bandGroup_.setSelectedIndex ((int) bandMode_);
+    avgGroup_ .setSelectedIndex ((int) avgMode_);
 
-    for (auto* chip : { &bandChips_[0], &bandChips_[1], &bandChips_[2],
-                        &avgChips_[0], &avgChips_[1], &avgChips_[2], &avgChips_[3] })
+    for (auto* group : { &bandGroup_, &avgGroup_, &peakGroup_ })
     {
-        chip->setWantsKeyboardFocus (false);
-        addAndMakeVisible (*chip);
+        group->setWantsKeyboardFocus (false);
+        addAndMakeVisible (*group);
     }
-    // Toolbar legends are silkscreen, and the peak toggle is a chip rather
-    // than a switch: these change what the plot SHOWS, never what the DSP does,
-    // so none of them may carry a lit lamp.
-    for (auto* label : { &bandwidthLabel_, &averageLabel_ })
-    {
-        label->setFont (az::theme::legendFont (az::theme::legendFontSize - 2.0f));
-        label->setColour (juce::Label::textColourId, az::theme::faded);
-        label->setJustificationType (juce::Justification::centredLeft);
-    }
-    peakHoldButton_.getProperties().set ("azStyle", "ghost");
 
     applyBandMode();
 
@@ -202,12 +165,6 @@ SpectrumView::~SpectrumView()
     stopTimer();
 }
 
-template <std::size_t N>
-void SpectrumView::reflectChips (std::array<juce::TextButton, N>& chips, const int selected)
-{
-    for (std::size_t i = 0; i < N; ++i)
-        chips[i].setToggleState ((int) i == selected, juce::dontSendNotification);
-}
 
 void SpectrumView::resized()
 {
@@ -218,46 +175,32 @@ void SpectrumView::resized()
     // The ANALYSER caption is painted at the strip's left (see paint()); the
     // controls start after it and sit at the strip's RIGHT end, so the eye
     // meets the section name first and the display options last.
-    auto strip = getLocalBounds().removeFromTop (kToolbarHeight).reduced (gap, spacing);
+    // Left to right, exactly as the study lays it out (spec section 3):
+    //
+    //   ANALYSER  [Line|1/1 oct|1/3 oct]  [Avg off|1 s|3 s|10 s]  [Peak hold]
+    //                                     ...spacer...   RING RISK  [ N/A ]
+    //
+    // The first cut mirrored this -- display groups right, risk left -- and
+    // wrapped each option in its own rounded chip.
+    auto strip = getLocalBounds().removeFromTop (kToolbarHeight).reduced (gap + spacing, 0);
+
+    const int controlH = kToolbarHeight - 2 * spacing;
+    auto place = [&strip, controlH] (SegmentedControl& group)
+    {
+        group.setBounds (strip.removeFromLeft (group.getPreferredWidth())
+                              .withSizeKeepingCentre (group.getPreferredWidth(), controlH));
+        strip.removeFromLeft (gap);
+    };
+
     strip.removeFromLeft (kCaptionWidth);
 
-    // RING RISK sits at the strip's LEFT, next to the section name: it is the
-    // one readout here that is about the ROOM rather than about the display,
-    // and the display options are all pinned to the right.
-    strip.removeFromLeft (kRiskLegendWidth);
-    riskChipArea_ = strip.removeFromLeft (kRiskChipWidth)
-                         .withSizeKeepingCentre (kRiskChipWidth, fieldHeight - 4);
-    strip.removeFromLeft (gap);
+    place (bandGroup_);
+    place (avgGroup_);
+    place (peakGroup_);
 
-    constexpr int controlH = 22;
-
-    peakHoldButton_.setBounds (strip.removeFromRight (96)
-                                    .withSizeKeepingCentre (96, controlH));
-    strip.removeFromRight (gap + spacing);
-
-    // Segmented groups are laid out RIGHT to LEFT, so they stay pinned to the
-    // strip's end as the window widens, and their chips butt against each
-    // other with a hairline gap rather than floating apart.
-    // Sized to the LONGEST legend in each group at the tracked legend face:
-    // "1/3 OCT" needs 70, "10S" needs 44. Sizing to the average instead is
-    // what truncated the third band chip to "1/3 O...".
-    constexpr int kAvgChipWidth  = 44;
-    constexpr int kBandChipWidth = 70;
-
-    for (int i = (int) avgChips_.size() - 1; i >= 0; --i)
-        avgChips_[(std::size_t) i]
-            .setBounds (strip.removeFromRight (kAvgChipWidth)
-                             .withSizeKeepingCentre (kAvgChipWidth - 1, controlH));
-
-    averageLabel_.setBounds (strip.removeFromRight (34));
-    strip.removeFromRight (gap);
-
-    for (int i = (int) bandChips_.size() - 1; i >= 0; --i)
-        bandChips_[(std::size_t) i]
-            .setBounds (strip.removeFromRight (kBandChipWidth)
-                             .withSizeKeepingCentre (kBandChipWidth - 1, controlH));
-
-    bandwidthLabel_.setBounds (strip.removeFromRight (38));
+    // RING RISK is pinned to the far right, its chip last.
+    riskChipArea_ = strip.removeFromRight (kRiskChipWidth)
+                         .withSizeKeepingCentre (kRiskChipWidth, controlH);
 }
 
 void SpectrumView::applyBandMode()
@@ -548,7 +491,7 @@ void SpectrumView::paint (juce::Graphics& g)
         drawCaption (g, "Ring risk",
                      riskChipArea_.withX (riskChipArea_.getX() - kRiskLegendWidth)
                                   .withWidth (kRiskLegendWidth),
-                     faded);
+                     dim);
 
         const auto riskColour = ringRiskColour (ringRisk_);
         const auto chip = riskChipArea_.toFloat().reduced (0.5f);
@@ -566,7 +509,7 @@ void SpectrumView::paint (juce::Graphics& g)
         g.drawRoundedRectangle (chip, cornerRadius, 1.0f);
 
         g.setColour (riskColour);
-        g.setFont (legendFont (legendFontSize - 2.0f));
+        g.setFont (monoFont (segmentFontSize));
         g.drawText (ringRiskLabel (ringRisk_), riskChipArea_,
                     juce::Justification::centred, false);
     }
@@ -581,9 +524,11 @@ void SpectrumView::paint (juce::Graphics& g)
         return;
 
     //--------------------------------------------------------------------
-    // The plot well. A hair darker than the canvas so the trace sits INSIDE
-    // something, and so the grid has a ground of its own to be faint against.
-    g.setColour (well);
+    // The plot's ground is the CANVAS colour, not a separate well. The study
+    // paints the analyser on the same black as the page, and the extra value
+    // step of a well was enough to make the amber fill read as a brown slab
+    // rather than a wash over the background.
+    g.setColour (background);
     g.fillRect (plot);
 
     // The grid is READ, not felt: at the groove colour it was all but

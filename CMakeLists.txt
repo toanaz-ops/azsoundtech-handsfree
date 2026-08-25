@@ -17,6 +17,24 @@ add_subdirectory(external/JUCE)
 # just-fired notch. Declared BEFORE juce_add_gui_app, per the module docs.
 juce_add_module(${CMAKE_SOURCE_DIR}/external/melatonin_blur)
 
+# THE TYPEFACES, embedded rather than resolved from the machine.
+#
+# The design was approved in Saira Condensed / IBM Plex Sans / IBM Plex Mono.
+# Naming them in a FontOptions fallback list would give the design on a machine
+# that happens to have them and something else everywhere else -- which is not
+# a design, it is a lottery. All three are OFL; the licences ship beside the
+# files in assets/fonts/.
+#
+# Declared BEFORE juce_add_gui_app so the generated BinaryData target exists
+# for every consumer below.
+juce_add_binary_data(HandsFreeFonts SOURCES
+    ${CMAKE_SOURCE_DIR}/assets/fonts/SairaCondensed-SemiBold.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/SairaCondensed-Bold.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/IBMPlexSans-Regular.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/IBMPlexMono-Regular.ttf
+    ${CMAKE_SOURCE_DIR}/assets/fonts/IBMPlexMono-Medium.ttf
+)
+
 # ASIO SDK path
 set(JUCE_ASIO_SDK_PATH "${CMAKE_SOURCE_DIR}/external/asiosdk" CACHE PATH "Path to ASIO SDK")
 
@@ -72,6 +90,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.h
     ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SegmentedControl.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SegmentedControl.h
     ${CMAKE_SOURCE_DIR}/src/gui/SlotTabs.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/SlotTabs.h
     ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.h
@@ -123,6 +143,7 @@ target_include_directories(HandsFree PRIVATE
 # Link JUCE modules
 target_link_libraries(HandsFree
     PRIVATE
+        HandsFreeFonts
         melatonin_blur
         juce::juce_audio_devices
         juce::juce_audio_utils

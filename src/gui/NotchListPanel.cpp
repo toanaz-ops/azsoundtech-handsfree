@@ -130,6 +130,34 @@ void NotchListPanel::setController (const NotchController& controller)
     refreshFromSnapshot();
 }
 
+void NotchListPanel::setSlotTabs (juce::Component* tabsOrNull)
+{
+    slotTabs_ = tabsOrNull;
+
+    if (slotTabs_ != nullptr)
+        addAndMakeVisible (*slotTabs_);
+
+    resized();
+}
+
+void NotchListPanel::resized()
+{
+    if (slotTabs_ == nullptr)
+        return;
+
+    // Right-aligned in the caption band, opposite the section name. The count
+    // chip moves left of it -- see paint().
+    auto caption = getLocalBounds().removeFromTop (kCaptionHeight);
+
+    const int wanted = slotTabs_->getWidth() > 0
+                           ? slotTabs_->getWidth()
+                           : caption.getWidth() / 2;
+
+    slotTabs_->setBounds (caption.removeFromRight (juce::jmin (wanted, caption.getWidth()))
+                                 .withSizeKeepingCentre (juce::jmin (wanted, caption.getWidth()),
+                                                         az::theme::fieldHeight - 4));
+}
+
 void NotchListPanel::setDisplayedSlot (const int slotIndex)
 {
     // Named in the caption rather than shown as a separate field: the table
@@ -216,6 +244,10 @@ void NotchListPanel::paint (juce::Graphics& g)
     auto caption = area.removeFromTop (kCaptionHeight);
     drawCaption (g, caption_, caption.withTrimmedLeft ((int) kLeftPad), dim);
 
+    // The count chip sits left of the slot selector when one is hosted here.
+    if (slotTabs_ != nullptr)
+        caption.removeFromRight (slotTabs_->getWidth() + gap);
+
     if (! rows_.empty())
     {
         const auto chip = caption.removeFromRight (46).withSizeKeepingCentre (34, 17);
@@ -242,8 +274,8 @@ void NotchListPanel::paint (juce::Graphics& g)
     const float statusW = juce::jmax (0.0f, frame.getRight() - x4 - kLeftPad);
 
     auto header = area.removeFromTop (kHeaderHeight);
-    g.setColour (faded);
-    g.setFont (legendFont (legendFontSize - 2.0f));
+    g.setColour (dim);
+    g.setFont (legendFont (columnFontSize, true, trackingColumn));
     g.drawText ("#",     (int) x0, header.getY(), (int) kColIdW,    header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("FREQ",  (int) x1, header.getY(), (int) kColFreqW,  header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("DEPTH", (int) x2, header.getY(), (int) kColDepthW, header.getHeight(), juce::Justification::centredLeft);

@@ -45,15 +45,15 @@ public:
     // now a TWO-COLUMN split (notch table beside the rig controls) instead of
     // a stack of full-width bands, and below ~940 the two columns start
     // truncating each other's values rather than merely tightening.
-    static constexpr int kMinimumWidth  = 940;
+    static constexpr int kMinimumWidth  = 1024;
     static constexpr int kMinimumHeight = 700;
 
     // The size the window OPENS at. Without this the window opened at exactly
     // the minimum -- which is the one size where the fixed rig column crowds
     // the analyser hardest, so the app's very first impression was its worst
     // possible layout.
-    static constexpr int kDefaultWidth  = 1280;
-    static constexpr int kDefaultHeight = 880;
+    static constexpr int kDefaultWidth  = 1400;
+    static constexpr int kDefaultHeight = 900;
 
     MainComponent();
     ~MainComponent() override;
@@ -151,6 +151,17 @@ private:
     // under the transport. paint() and resized() BOTH need this figure and it
     // must agree between them, so neither computes it inline.
     [[nodiscard]] int floorHeightFor (int available) const;
+
+    // What the floor's tallest column WANTS, before either ceiling is applied.
+    [[nodiscard]] int naturalFloorHeight() const;
+
+    // The window height at which nothing in the floor has to scroll. Used to
+    // grow the window when a routing row is revealed.
+    [[nodiscard]] int heightThatFitsTheFloor() const;
+
+    // Grows the OWNING WINDOW so the floor's content fits. No-op with no
+    // window (headless) and never past the display the window is on.
+    void growWindowToFitFloor();
 
     // The floor's rect in this component's coordinates, for paint(). resized()
     // carves the same rect out of its own running area rectangle.
@@ -258,8 +269,17 @@ private:
     // frame needs a margin the inner grid does not.
     static constexpr int kEdgePad        = 12;
     // Share of the floor's width the notch table takes; the rig column gets
-    // the rest. The table needs less than the four device combos beside it.
-    static constexpr float kNotchColumnFraction = 0.38f;
+    // the rest.
+    //
+    // The design study splits these 1.25 : 1 -- the NOTCH TABLE is the wider
+    // column, because it is the answer and the rig is the setup. The first
+    // implementation inverted it and gave the table 38 %.
+    //
+    // 0.52 rather than the study's 0.556: the shipped rig column carries a
+    // full 8-lane routing table the study did not have, and that table has a
+    // hard minimum width. This is as close to the study as the real control
+    // allows. See docs/spec-ui-mockup.md section 5.
+    static constexpr float kNotchColumnFraction = 0.52f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

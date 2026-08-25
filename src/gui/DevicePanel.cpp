@@ -15,7 +15,8 @@ DevicePanel::DevicePanel (AudioEngine& engine)
         // value they name. The value is what gets read; the legend only has to
         // be findable.
         label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
-        label->setFont (az::theme::legendFont (az::theme::legendFontSize - 1.0f));
+        label->setFont (az::theme::legendFont (az::theme::columnFontSize, true,
+                                               az::theme::trackingColumn));
         label->setColour (juce::Label::textColourId, az::theme::dim);
         label->setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (*label);

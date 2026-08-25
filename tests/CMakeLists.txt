@@ -57,6 +57,7 @@ add_executable(HandsFreeTests
 # defined, and never noticed.
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
+    HandsFreeFonts
     melatonin_blur
     juce::juce_audio_devices
     juce::juce_gui_basics

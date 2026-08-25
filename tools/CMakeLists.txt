@@ -19,6 +19,7 @@ target_include_directories(HandsFreeSnapshot PRIVATE
 # AudioEngine needs juce_audio_devices, Detector needs juce_dsp, and the
 # LookAndFeel and PNG writer come with juce_gui_basics/juce_graphics.
 target_link_libraries(HandsFreeSnapshot PRIVATE
+    HandsFreeFonts
     melatonin_blur
     juce::juce_audio_devices
     juce::juce_gui_basics
