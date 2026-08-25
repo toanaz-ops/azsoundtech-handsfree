@@ -23,12 +23,18 @@
          back so a red build does not silently consume a version number.
       5. makensis.
       6. Copy to the drop folder.
+      7. Prune superseded builds there, newest -Keep retained.
 
 .PARAMETER Part
     Which component to bump: patch (default), minor or major.
 
 .PARAMETER DropFolder
     Where the testers collect builds. Defaults to the team's shared drive.
+
+.PARAMETER Keep
+    How many builds to leave in the drop folder, newest first. Older ones are
+    deleted after a successful publish so the testers are never choosing from a
+    list of superseded builds. 0 keeps everything.
 
 .PARAMETER SkipTests
     Package without running the suite. There is no good reason to use this for
@@ -45,6 +51,8 @@ param(
     [string]$Part = 'patch',
 
     [string]$DropFolder = 'Z:\My Drive\RELEASE\ALPHA TEST',
+
+    [int]$Keep = 3,
 
     [switch]$SkipTests
 )
@@ -178,6 +186,20 @@ try {
 
     Copy-Item $setup -Destination $DropFolder -Force
     $dropped = Join-Path $DropFolder "AZSoundtech-Handsfree-Setup-$version.exe"
+
+    # ── 7. prune ────────────────────────────────────────────────────────
+    # Only AFTER the new build is safely in place: a folder that briefly holds
+    # nothing is worse than one holding one build too many. Newest kept.
+    if ($Keep -gt 0) {
+        $stale = Get-ChildItem -LiteralPath $DropFolder -Filter 'AZSoundtech-Handsfree-Setup-*.exe' |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -Skip $Keep
+
+        foreach ($old in $stale) {
+            Remove-Item -LiteralPath $old.FullName -Force
+            Write-Host "    pruned $($old.Name)"
+        }
+    }
 
     Write-Host ""
     Write-Host "OK    $version published" -ForegroundColor Green

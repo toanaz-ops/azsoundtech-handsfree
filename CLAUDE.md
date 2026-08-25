@@ -85,6 +85,10 @@ Three things about it that are deliberate:
   number would have the testers asking what happened to it.
 - **The bump is a source change.** Commit `CMakeLists.txt` after a release, or
   the next run bumps from the same number again.
+- **The drop folder is pruned** to the newest three builds, after the new one
+  is safely in place. `-Keep 0` disables it. Testers choosing from a list of
+  superseded builds is how a bug gets reported against a version nobody is
+  looking at any more.
 
 This is live-sound DSP: a build the team installs reaches a PA system. The
 gate is the point, not the convenience.
