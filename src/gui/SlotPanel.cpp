@@ -242,9 +242,12 @@ void SlotPanel::setVisibleRowCount (int n)
 
     visibleRows_ = clamped;
 
-    // The parent owns this panel's size (it hosts the Viewport), so the
-    // height change has to go through the parent's layout pass.
-    if (auto* parent = getParentComponent())
+    // The owner's layout pass owns this panel's size (it hosts the Viewport),
+    // so the height change has to reach IT -- the Viewport parent itself
+    // never re-sizes its content.
+    if (onPreferredHeightChanged != nullptr)
+        onPreferredHeightChanged();
+    else if (auto* parent = getParentComponent())
         parent->resized();
     else
         resized();

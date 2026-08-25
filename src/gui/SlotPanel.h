@@ -42,6 +42,12 @@ public:
     // refresh() so the panel re-reads reality (the honest-revert pattern).
     std::function<void (int slotIndex, const SlotConfig&)> onSlotConfigChanged;
 
+    // Fired by setVisibleRowCount after the preferred height changes. The
+    // direct parent is a Viewport, whose resized() never re-sizes its
+    // content -- only the owner's layout pass hands this panel its new
+    // size. Null fallback: resized() on the direct parent, then on self.
+    std::function<void()> onPreferredHeightChanged;
+
     // Overridable sources. Tests inject light fakes here; when null each falls
     // back to the engine member below.
     std::function<juce::StringArray()> inputChannelNamesProvider;

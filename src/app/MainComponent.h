@@ -118,6 +118,10 @@ public:
     [[nodiscard]] gui::TuningPanel& getTuningPanel() { return tuningPanel_; }
     [[nodiscard]] juce::Rectangle<int> tuningPanelBoundsForTest() const { return tuningPanel_.getBounds(); }
 
+    // TEST ACCESSOR ONLY -- lets a headless test drive the routing table's
+    // row count exactly as the "+ Add slot" button does.
+    [[nodiscard]] gui::SlotPanel& getSlotPanelForTest() { return slotPanel_; }
+
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
     // slot; never null for [0, kMaxSlots).

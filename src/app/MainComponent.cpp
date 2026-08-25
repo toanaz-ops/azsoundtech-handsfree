@@ -124,6 +124,10 @@ MainComponent::MainComponent (
     // restart cycle (changeSlotConfig, shared with nothing else) rather than
     // re-typing the thread-join/restart bodies here.
     slotScroller_.setViewedComponent (&slotPanel_, false);
+    // The Add button grows the table through this callback: MainComponent::
+    // resized() is what sizes slotPanel_ from getPreferredHeight(), and the
+    // Viewport parent alone never would.
+    slotPanel_.onPreferredHeightChanged = [this] { resized(); };
     slotPanel_.onSlotConfigChanged = [this] (int slotIndex, const SlotConfig& config)
     {
         changeSlotConfig (slotIndex, config);

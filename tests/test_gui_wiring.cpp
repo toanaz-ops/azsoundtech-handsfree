@@ -246,6 +246,35 @@ TEST (MainComponent, GearToggleRelayoutsTheParentSoContentAppears)
                gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight);
 }
 
+TEST (MainComponent, ClickingAddSlotGrowsTheTableImmediately)
+{
+    // The 2026-08-25 bug: "+ Add slot" only took effect after cycling the
+    // L1/L2 layouts. Root cause: SlotPanel::setVisibleRowCount resized its
+    // DIRECT parent -- the Viewport, whose resized() never re-sizes the
+    // content. Only MainComponent::resized() hands slotPanel_ its size, so
+    // the height change must reach THIS component's resized() immediately.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    app.setSize (900, 900);
+    app.resized();   // headless: no peer, so drive the layout pass directly
+
+    const int twoRowHeight = app.slotTableBoundsForTest().getHeight();
+    EXPECT_GT (twoRowHeight, 0);
+
+    // The Add button's own path: reveal row 3. The table must be taller NOW,
+    // with no further layout pass and no layout switching.
+    app.getSlotPanelForTest().setVisibleRowCount (3);
+
+    const auto table = app.slotTableBoundsForTest();
+    EXPECT_EQ (table.getHeight(),
+               gui::SlotPanel::kCaptionHeight
+                 + 4 * gui::SlotPanel::kRowHeight
+                 + 3 * az::theme::spacing);
+    EXPECT_GT (table.getHeight(), twoRowHeight);
+}
+
 TEST (MainComponent, SlotRoutingTableGetsSizedContentInsideTheViewport)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
