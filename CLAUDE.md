@@ -58,6 +58,37 @@ GitHub runner’s cmake defaults to the newest Visual Studio — see
 - Submodules: clone with `--recursive`. If a submodule path is empty, run
   `git submodule update --init --recursive` before blaming the build.
 
+## Every finished change ships a build to the testers
+
+Owner's standing instruction, 2026-08-26. When a change is DONE -- built,
+suite green, screenshot sent -- it also gets packaged and dropped where the
+alpha test team collects builds. One command does all of it:
+
+```bash
+pwsh -File installer\release-alpha.ps1
+```
+
+It bumps the PATCH in `CMakeLists.txt`, reconfigures, builds Release, runs
+`ctest` **as a gate**, packages with NSIS, and copies the installer to
+`Z:\My Drive\RELEASE\ALPHA TEST`. Use `-Part minor` or `-Part major` when the
+change warrants it.
+
+Three things about it that are deliberate:
+
+- **The version lives in exactly one place**: the `project(HandsFree VERSION
+  x.y.z)` line. `handsfree.nsi` reads that line with `!searchparse`, so the
+  filename, `PRODUCT_VERSION` and the Apps & Features entry all follow it. Never
+  hand-edit a version anywhere else, and never pass `/DPRODUCT_VERSION` -- a
+  build stamped with a number the source does not carry is untraceable, and one
+  such orphan (`...-Setup-1.2.0.exe`) already exists to prove it.
+- **A red suite publishes nothing**, and rolls the version back. A skipped
+  number would have the testers asking what happened to it.
+- **The bump is a source change.** Commit `CMakeLists.txt` after a release, or
+  the next run bumps from the same number again.
+
+This is live-sound DSP: a build the team installs reaches a PA system. The
+gate is the point, not the convenience.
+
 ## GUI work is not reported without a picture
 
 Any task that changes what the console LOOKS like ends with a rendered

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(HandsFree VERSION 1.0.0)
+project(HandsFree VERSION 1.0.3)
 
 # C++17 minimum standard
 set(CMAKE_CXX_STANDARD 17)
@@ -50,7 +50,16 @@ juce_add_gui_app(HandsFree
     PRODUCT_NAME "AZ Soundtech Hands-free"
     COMPANY_NAME "AZ Soundtech"
     BUNDLE_ID "com.azsoundtech.handsfree"
-    VERSION "1.0.0"
+
+    # From project() above, NOT a literal. This target used to carry its own
+    # copy of "1.0.0", so bumping the project version renamed the installer
+    # while the binary inside it kept the old number -- caught 2026-08-26 when
+    # AZSoundtech-Handsfree-Setup-1.0.1.exe shipped a 1.0.0 executable.
+    #
+    # There is now exactly ONE version in this repo: the project() line.
+    # handsfree.nsi !searchparses that same line, so the filename, the Apps &
+    # Features entry and the binary's own resource all follow it together.
+    VERSION ${PROJECT_VERSION}
 )
 
 # ASIO support lives behind the JUCE_ASIO compile definition on the app target.
