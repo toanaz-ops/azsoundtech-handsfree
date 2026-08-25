@@ -17,7 +17,6 @@
 // target could never include it -- which is exactly how AudioEngine::
 // getTapBuffer() was once declared, never defined, and never noticed. Every
 // component in this app is therefore reachable from the test target.
-#include <juce_data_structures/juce_data_structures.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "app/AudioEngine.h"
@@ -41,16 +40,12 @@ class MainComponent : public juce::Component,
 {
 public:
     // Minimum window size, enforced by the owning DocumentWindow (see
-    // main.cpp): must fit the 96 px rail next to / above a usable spectrum
-    // with no overlap at either layout (spec section 3).
+    // main.cpp): must fit the 96 px rail above a usable spectrum with no
+    // overlap (spec section 3).
     static constexpr int kMinimumWidth  = 720;
     static constexpr int kMinimumHeight = 560;
 
-    // propertyOptionsOverride lets tests redirect the layout persistence to a
-    // scratch directory (e.g. an absolute folderName under %TEMP%) instead of
-    // the real user settings under %APPDATA%\AZ Soundtech (null = production).
-    explicit MainComponent (
-        const juce::PropertiesFile::Options* propertyOptionsOverride = nullptr);
+    MainComponent();
     ~MainComponent() override;
 
     // The engine this window owns. The bridge design (section 6) needs this to
@@ -71,11 +66,6 @@ public:
     // detector exists.
     void requestMode (AudioEngine::Mode mode);
 
-    // L1/L2 (spec G-2): switches the arrangement, persists it under the
-    // ApplicationProperties key "layout", default Performance.
-    void setLayout (gui::ScreenLayout layout);
-    [[nodiscard]] gui::ScreenLayout getLayout() const { return layout_; }
-
     // Loads a preset file through the CHANNEL-AWARE PresetManager path, with
     // the open device's channel counts (stereo when no device is open):
     // every declared routing config lands in the engine, each notch is
@@ -92,15 +82,8 @@ public:
     // the UI uses.
     void changeSlotConfig (int slotIndex, const SlotConfig& config);
 
-    // The notch list strip. L2 Performance shows it only while toggled open
-    // (slide-out); L1 Classic pins it as a fixed bottom strip regardless of
-    // this flag (spec section 2). The panel itself is layout-agnostic --
-    // visibility and bounds are decided here and in resized().
-    void setNotchListOpen (bool open);
-    [[nodiscard]] bool isNotchListOpen() const { return notchListOpen_; }
-
     // The drawer (device controls + settings row). Public so tests can drive
-    // its toggle buttons like any other component interface.
+    // its controls like any other component interface.
     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
 
     // TEST ACCESSORS -- let headless tests assert rail/spectrum geometry
@@ -135,11 +118,6 @@ private:
     // atomics precisely so a reader like this never blocks the audio thread.
     void timerCallback() override;
     void refreshStatus();
-
-    // Applies a layout choice to the EXISTING components (rail orientation,
-    // drawer behaviour, button reflection). No component is ever destroyed or
-    // recreated on a switch -- spec section 3.
-    void applyLayoutState (gui::ScreenLayout layout);
 
     // Applies whatever the ENGINE'S CURRENT MODE implies for ONE slot's
     // detection gate (no-op for an out-of-range or disabled slot).
@@ -197,13 +175,8 @@ private:
     gui::TuningPanel tuningPanel_;
 
     // The live notch list (reads notchControllers_[0] above, so it is
-    // declared after it).
+    // declared after it). Always visible: a fixed bottom strip.
     gui::NotchListPanel notchListPanel_;
-    bool                notchListOpen_ = false;   // L2 slide-out state
-
-    // Layout persistence (spec section 3): the choice survives app restarts.
-    juce::ApplicationProperties appProperties_;
-    gui::ScreenLayout           layout_ = gui::ScreenLayout::Performance;
 
     // A message the GUI itself produced -- a setting the hardware refused.
     // Device errors come from the engine and take precedence over it.

@@ -173,40 +173,6 @@ TEST (ModeRail, CountdownLabelShowsRemainingSecondsWhileAboveZero)
     EXPECT_TRUE (rail.countdownLabel.getText().isEmpty());
 }
 
-TEST (ModeRail, ListToggleFiresOnToggleNotchListWithItsNewState)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    gui::ModeRail rail;
-    std::vector<bool> reported;
-    rail.onToggleNotchList = [&reported] (bool open) { reported.push_back (open); };
-
-    // Same inline-dispatch trick as the mode cells: setToggleState with
-    // sendNotificationSync runs onClick synchronously, no message pump.
-    rail.listToggleButton.setToggleState (true, juce::sendNotificationSync);
-    rail.listToggleButton.setToggleState (false, juce::sendNotificationSync);
-
-    EXPECT_EQ (reported, (std::vector<bool> { true, false }));
-}
-
-TEST (ModeRail, SetListToggleVisibleRemovesTheCellAndRelayouts)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    gui::ModeRail rail;
-    ASSERT_TRUE (rail.listToggleButton.isVisible());
-
-    rail.setListToggleVisible (false);
-
-    EXPECT_FALSE (rail.listToggleButton.isVisible());
-    // The parent re-ran resized(): a hidden-but-positioned cell would leave
-    // a ghost rectangle in the rail's flex flow.
-    EXPECT_TRUE (rail.listToggleButton.getBounds().isEmpty());
-
-    rail.setListToggleVisible (true);
-    EXPECT_TRUE (rail.listToggleButton.isVisible());
-}
-
 //==============================================================================
 
 TEST (StatusBadge, SetStateIsReflectedInGetState)

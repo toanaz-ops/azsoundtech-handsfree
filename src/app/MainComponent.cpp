@@ -19,13 +19,9 @@ constexpr int kMinSpectrumHeight = 120;
 // Height of the notch list strip (Task 4): header row plus ~3 visible notch
 // rows. The same figure the R-1 slot reservation assumed.
 constexpr int kNotchListHeight = 120;
-
-// ApplicationProperties key for the persisted layout (spec G-2 / section 3).
-constexpr const char* kLayoutPropertyKey = "layout";
 } // namespace
 
-MainComponent::MainComponent (
-    const juce::PropertiesFile::Options* propertyOptionsOverride)
+MainComponent::MainComponent()
     : notchControllers_ ([this]
       {
           // Heap allocation per slot -- see the member comment in the header
@@ -39,7 +35,7 @@ MainComponent::MainComponent (
           return controllers;
       }())
     , spectrumView_ (*notchControllers_[0])
-    , modeRail_ (gui::ModeRail::Orientation::Vertical)
+    , modeRail_ (gui::ModeRail::Orientation::Horizontal)
     , notchListPanel_ (*notchControllers_[0])
     , deviceDrawer_ (devicePanel_)
 {
@@ -51,8 +47,7 @@ MainComponent::MainComponent (
     addAndMakeVisible (modeRail_);
     addAndMakeVisible (deviceDrawer_);
     addAndMakeVisible (slotScroller_);
-    // The notch list is added but its VISIBILITY is layout business:
-    // resized() shows it only per the L1/L2 rules.
+    // The notch list is a FIXED bottom strip -- always visible.
     addAndMakeVisible (notchListPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
 
@@ -80,12 +75,7 @@ MainComponent::MainComponent (
         return remaining;
     };
 
-    // R-5: the rail's LIST cell slides the strip; the open/closed meaning is
-    // entirely this side's (L2 toggle vs L1 fixed strip).
-    modeRail_.onToggleNotchList = [this] (bool open) { setNotchListOpen (open); };
-
     deviceDrawer_.setStatusBadge (&statusBadge_);
-    deviceDrawer_.onLayoutSelected = [this] (gui::ScreenLayout layout) { setLayout (layout); };
 
     // Bridge design §6.5: a device change in the panel is always an engine
     // RESTART, and the rings are cleared on the way -- so the detector thread
@@ -159,27 +149,6 @@ MainComponent::MainComponent (
                                           (int) c.getNotchQ(),
                                           c.getPeakinessThreshold() };
     };
-
-    // Layout persistence (spec section 3). Stored under %APPDATA%\AZ Soundtech,
-    // read back on every launch; G-2 fixes the default at Performance.
-    juce::PropertiesFile::Options propertyOptions;
-    propertyOptions.applicationName     = "AZ Soundtech Hands-free";
-    propertyOptions.filenameSuffix      = "xml";
-    propertyOptions.folderName          = "AZ Soundtech";
-
-    if (propertyOptionsOverride != nullptr)
-        propertyOptions = *propertyOptionsOverride;
-    appProperties_.setStorageParameters (propertyOptions);
-
-    {
-        const int saved = appProperties_.getUserSettings()
-                              ->getIntValue (kLayoutPropertyKey, (int) gui::ScreenLayout::Performance);
-        layout_ = (saved == (int) gui::ScreenLayout::Classic)
-                      ? gui::ScreenLayout::Classic
-                      : gui::ScreenLayout::Performance;
-    }
-
-    applyLayoutState (layout_);
 
     // Enumeration is safe with no device open -- every AudioEngine query used
     // here guards getCurrentAudioDevice() being null. The rate and buffer
@@ -396,54 +365,6 @@ bool MainComponent::loadPreset (const juce::File& file)
     return true;
 }
 
-void MainComponent::setLayout (gui::ScreenLayout layout)
-{
-    if (layout == layout_)
-        return;
-
-    layout_ = layout;
-
-    // Persist immediately: a crash or power cut mid-show must not lose the
-    // operator's arrangement choice.
-    auto* storedProperties = appProperties_.getUserSettings();
-    storedProperties->setValue (kLayoutPropertyKey, (int) layout);
-    storedProperties->saveIfNeeded();
-
-    applyLayoutState (layout);
-    resized();
-}
-
-void MainComponent::setNotchListOpen (const bool open)
-{
-    if (open == notchListOpen_)
-        return;
-
-    notchListOpen_ = open;
-
-    // Keep the rail's LIST cell in step with programmatic changes. A click
-    // re-enters here already carrying the same state, and
-    // dontSendNotification cannot loop the callback.
-    modeRail_.listToggleButton.setToggleState (open, juce::dontSendNotification);
-
-    resized();
-}
-
-void MainComponent::applyLayoutState (gui::ScreenLayout layout)
-{
-    // Same components, different arrangement -- nothing is destroyed or
-    // recreated here (spec section 3).
-    modeRail_.setOrientation (layout == gui::ScreenLayout::Performance
-                                  ? gui::ModeRail::Orientation::Vertical
-                                  : gui::ModeRail::Orientation::Horizontal);
-
-    deviceDrawer_.applyLayoutMode (layout);
-    deviceDrawer_.setSelectedLayout (layout);
-
-    // R-5: the LIST toggle belongs to L2 only -- L1's strip is fixed, so the
-    // cell would command nothing.
-    modeRail_.setListToggleVisible (layout == gui::ScreenLayout::Performance);
-}
-
 void MainComponent::refreshStatus()
 {
     gui::DeviceStatus status;
@@ -507,10 +428,7 @@ void MainComponent::resized()
     // drawer so a too-small window shrinks the drawer instead of overlapping
     // siblings (spec section 3). setResizeLimits should make the clamp a
     // no-op in practice.
-    const int reserveBelowDrawer = kMinSpectrumHeight + gap
-                                 + (layout_ == gui::ScreenLayout::Performance
-                                        ? 320   // vertical rail floor: modes + countdown + CLEAR ALL/LIST
-                                        : buttonCellHeight);
+    const int reserveBelowDrawer = kMinSpectrumHeight + gap + buttonCellHeight;
     const int maxDrawerHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
     const int drawerHeight    = juce::jlimit (0, maxDrawerHeight,
                                               deviceDrawer_.getPreferredHeight());
@@ -520,15 +438,11 @@ void MainComponent::resized()
     deviceDrawer_.setBounds (area.removeFromTop (drawerHeight));
     area.removeFromTop (gap);
 
-    // Task 4: the notch list strip. L1 Classic pins it to the bottom; L2
-    // Performance shows it only while toggled open. The panel itself stays
-    // layout-agnostic -- it just receives visibility and bounds.
-    const bool listShown = (layout_ == gui::ScreenLayout::Classic) || notchListOpen_;
-    notchListPanel_.setVisible (listShown);
+    // Task 4: the notch list strip -- a FIXED bottom strip, always visible.
+    notchListPanel_.setVisible (true);
 
-    // The DETECTION strip sits directly above the routing table in BOTH
-    // layouts (brief 2026-08-24): a fixed ~34 px band carved before the slot
-    // block below, so the same code serves L1 and L2.
+    // The DETECTION strip sits directly above the routing table (brief
+    // 2026-08-24): a fixed ~34 px band carved before the slot block below.
     tuningPanel_.setBounds (area.removeFromTop (gui::TuningPanel::kPanelHeight));
     area.removeFromTop (gap);
 
@@ -547,8 +461,7 @@ void MainComponent::resized()
     slotScroller_.setVisible (slotHeight > 0);
 
     // Bounds are carved from the remaining area up front (a full-width strip
-    // under the drawer) so the SAME code serves both layouts: L2 then lays the
-    // spectrum/rail row into what is left, L1 lays its FlexBox column.
+    // under the drawer).
     if (slotHeight > 0)
     {
         slotScroller_.setBounds (area.removeFromTop (slotHeight));
@@ -563,42 +476,15 @@ void MainComponent::resized()
                             slotPreferred);
     }
 
-    if (layout_ == gui::ScreenLayout::Performance)
-    {
-        // L2: big spectrum with the fixed-width rail down the right edge,
-        // the notch strip (when open) pinned underneath.
-        //
-        // The row is laid out DIRECTLY on its own rectangle rather than
-        // nested inside a column FlexBox. History: while wiring the notch
-        // strip (2026-08-24) L2 bounds came up stale under instrumentation,
-        // so this was restructured to single-level FlexBox passes; the root
-        // cause of the original mis-layout was never independently
-        // reproduced (the earlier L2 coverage passed vacuously off stale
-        // Classic bounds, since setSize() delivers no resized() callback to
-        // a peer-less component). PerformanceLayoutHidesTheStripUntilToggled
-        // guards real geometry in both layouts.
-        if (listShown)
-            notchListPanel_.setBounds (area.removeFromBottom (kNotchListHeight));
+    // Single Classic arrangement: horizontal rail strip, spectrum below,
+    // fixed notch list pinned to the window bottom.
+    notchListPanel_.setBounds (area.removeFromBottom (kNotchListHeight));
 
-        juce::FlexBox row;
-        row.flexDirection = juce::FlexBox::Direction::row;
-        row.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
-        row.items.add (juce::FlexItem (modeRail_).withWidth ((float) railWidth));
-        row.performLayout (area.toFloat());
-    }
-    else
-    {
-        // L1: horizontal rail strip under the device bar, spectrum below,
-        // fixed notch strip at the bottom.
-        juce::FlexBox main;
-        main.flexDirection = juce::FlexBox::Direction::column;
-        main.items.add (juce::FlexItem (modeRail_)
-                            .withHeight ((float) buttonCellHeight)
-                            .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
-        main.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
-        if (listShown)
-            main.items.add (juce::FlexItem (notchListPanel_)
-                                .withHeight ((float) kNotchListHeight));
-        main.performLayout (area);
-    }
+    juce::FlexBox main;
+    main.flexDirection = juce::FlexBox::Direction::column;
+    main.items.add (juce::FlexItem (modeRail_)
+                        .withHeight ((float) buttonCellHeight)
+                        .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
+    main.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
+    main.performLayout (area);
 }

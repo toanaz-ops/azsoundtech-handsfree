@@ -9,7 +9,6 @@
 
 #pragma once
 
-#include <juce_data_structures/juce_data_structures.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 namespace gui_test
@@ -23,39 +22,5 @@ inline void paintHeadless (juce::Component& component, const int width, const in
     component.setSize (width, height);
     component.paint (g);   // must simply not crash
 }
-
-// Persistence redirected into a scratch directory under %TEMP% via an ABSOLUTE
-// folderName (File::getChildFile returns an absolute path as-is, so
-// PropertiesFile::Options::getDefaultFile resolves there instead of
-// %APPDATA%). A real user's saved layout is never read or clobbered, and the
-// scratch directory is removed with the store -- no restore step to forget.
-class TempLayoutStore
-{
-public:
-    TempLayoutStore()
-        : directory (juce::File::getSpecialLocation (juce::File::tempDirectory)
-                         .getChildFile ("HandsFreeGuiTests_"
-                                        + juce::String (juce::Random::getSystemRandom().nextInt())))
-    {
-        directory.createDirectory();
-    }
-
-    ~TempLayoutStore() { directory.deleteRecursively(); }
-
-    TempLayoutStore (const TempLayoutStore&) = delete;
-    TempLayoutStore& operator= (const TempLayoutStore&) = delete;
-
-    juce::PropertiesFile::Options options() const
-    {
-        juce::PropertiesFile::Options o;
-        o.applicationName = "AZ Soundtech Hands-free";   // same file NAME as production
-        o.filenameSuffix  = "xml";
-        o.folderName      = directory.getFullPathName(); // absolute: wins over app-data dir
-        return o;
-    }
-
-private:
-    juce::File directory;
-};
 
 } // namespace gui_test

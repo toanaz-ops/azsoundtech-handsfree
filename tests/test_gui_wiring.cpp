@@ -29,8 +29,6 @@
 #include "gui/ModeBar.h"
 #include "test_gui_helpers.h"
 
-using gui_test::TempLayoutStore;
-
 #include <vector>
 
 //==============================================================================
@@ -153,97 +151,26 @@ TEST (MainComponent, RequestingAModeReachesTheEngine)
 }
 
 //==============================================================================
-// Task 3 -- L1/L2 layouts, DeviceDrawer, persistence (spec 2026-08-23
-// sections 0 G-2, 2 and 3; test table row "Layout switch").
-//
-// Isolation: every layout test redirects persistence to a scratch directory
-// under %TEMP% via TempLayoutStore (test_gui_helpers.h). A real user's saved
-// choice is never read or clobbered, and no restore step can be forgotten.
+// Single Classic layout (2026-08-25 owner decision): the L1/L2 switching
+// mechanism is gone. The drawer is always open with no collapse gear, and
+// there is no setLayout API left to call.
 
-TEST (MainComponent, DefaultLayoutIsPerformance)
+TEST (MainComponent, DrawerIsAlwaysOpenWithFullHeight)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    TempLayoutStore store;
-    MainComponent app (&store.options());
-
-    // G-2: L2 Performance is the shipped default -- even when a real user on
-    // this machine has Classic saved.
-    EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
-}
-
-TEST (MainComponent, LayoutSwitchPersistsAcrossReconstruction)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    TempLayoutStore store;
-
-    {
-        MainComponent app (&store.options());
-        app.setLayout (gui::ScreenLayout::Classic);
-
-        // The in-memory value AND the persisted property must agree right now.
-        EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Classic);
-    }
-
-    {
-        // "Restart": a fresh component reading the SAME storage must come back
-        // in the saved layout.
-        MainComponent reopened (&store.options());
-        EXPECT_EQ (reopened.getLayout(), gui::ScreenLayout::Classic);
-    }
-    // Scratch directory removed with the store: nothing to restore.
-}
-
-TEST (MainComponent, DrawerSettingsToggleSwitchesTheLayout)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    TempLayoutStore store;
-    MainComponent app (&store.options());
-
-    ASSERT_EQ (app.getLayout(), gui::ScreenLayout::Performance);
-    EXPECT_TRUE (app.getDeviceDrawer().performanceButton_.getToggleState());
-
-    // Clicking the L1 cell in the drawer's settings row drives the same path
-    // the operator uses. sendNotificationSync dispatches inline: no message
-    // pump needed with modal loops off.
-    app.getDeviceDrawer().classicButton_.setToggleState (true, juce::sendNotificationSync);
-
-    EXPECT_EQ (app.getLayout(), gui::ScreenLayout::Classic);
-    EXPECT_TRUE (app.getDeviceDrawer().classicButton_.getToggleState());
-}
-
-TEST (MainComponent, GearToggleRelayoutsTheParentSoContentAppears)
-{
-    const juce::ScopedJuceInitialiser_GUI juceInit;
-
-    TempLayoutStore store;
-    MainComponent app (&store.options());   // L2 default; drawer starts OPEN
-                                            // (2026-08-24 owner decision: an
-                                            // invisible device row reads as a
-                                            // broken app), L2 still collapsible.
+    MainComponent app;
+    app.setSize (900, 900);
+    app.resized();
 
     auto& drawer = app.getDeviceDrawer();
-    ASSERT_TRUE (drawer.isOpen());
-    ASSERT_FALSE (drawer.wrappedBoundsForTest().isEmpty());
-
-    drawer.setOpen (false);
-
-    EXPECT_FALSE (drawer.isOpen());
-    EXPECT_TRUE (drawer.wrappedBoundsForTest().isEmpty());
-    EXPECT_EQ (drawer.getBounds().getHeight(), gui::DeviceDrawer::kHeaderHeight);
-
-    drawer.setOpen (true);
-
-    // The parent must have re-run its resized(): the wrapped DevicePanel gets
-    // a real rect NOW, not after some unrelated window resize.
-    EXPECT_TRUE (drawer.isOpen());
-    const auto openBounds = drawer.wrappedBoundsForTest();
-    EXPECT_FALSE (openBounds.isEmpty());
-    EXPECT_EQ (openBounds.getHeight(), gui::DeviceDrawer::kContentHeight);
     EXPECT_EQ (drawer.getBounds().getHeight(),
                gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight);
+
+    // The wrapped DevicePanel always has a real rect -- never squeezed out.
+    const auto wrapped = drawer.wrappedBoundsForTest();
+    EXPECT_FALSE (wrapped.isEmpty());
+    EXPECT_EQ (wrapped.getHeight(), gui::DeviceDrawer::kContentHeight);
 }
 
 TEST (MainComponent, ClickingAddSlotGrowsTheTableImmediately)
@@ -279,8 +206,7 @@ TEST (MainComponent, SlotRoutingTableGetsSizedContentInsideTheViewport)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    TempLayoutStore store;
-    MainComponent app (&store.options());
+    MainComponent app;
 
     app.setSize (900, 900);
     app.resized();   // headless: no peer, so drive the layout pass directly
@@ -300,29 +226,23 @@ TEST (MainComponent, MinimumSizeKeepsRailAndSpectrumDisjoint)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    TempLayoutStore store;
-    MainComponent app (&store.options());
+    MainComponent app;
 
-    for (const auto layout : { gui::ScreenLayout::Classic, gui::ScreenLayout::Performance })
-    {
-        app.setLayout (layout);
-        app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+    app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
+    app.resized();
 
-        const auto rail     = app.railBoundsForTest();
-        const auto spectrum = app.spectrumBoundsForTest();
+    const auto rail     = app.railBoundsForTest();
+    const auto spectrum = app.spectrumBoundsForTest();
 
-        // Both must actually be laid out before the non-overlap claim means
-        // anything.
-        EXPECT_FALSE (rail.isEmpty());
-        EXPECT_FALSE (spectrum.isEmpty());
+    // Both must actually be laid out before the non-overlap claim means
+    // anything.
+    EXPECT_FALSE (rail.isEmpty());
+    EXPECT_FALSE (spectrum.isEmpty());
 
-        // The binding assertion: zero intersecting pixels between the fixed
-        // rail and the spectrum at the smallest window we allow.
-        const auto overlap = rail.getIntersection (spectrum);
-        EXPECT_EQ (overlap.getWidth() * overlap.getHeight(), 0)
-            << "rail and spectrum overlap at minimum window size, layout "
-            << (int) layout;
-    }
+    // The binding assertion: zero intersecting pixels between the fixed
+    // rail and the spectrum at the smallest window we allow.
+    const auto overlap = rail.getIntersection (spectrum);
+    EXPECT_EQ (overlap.getWidth() * overlap.getHeight(), 0);
 }
 
 //==============================================================================
