@@ -32,6 +32,22 @@ T valueForId (const T (&choices)[N], int id)
         return choices[(std::size_t) (id - 1)];
     return choices[0];   // no selection -> first item
 }
+
+// ONE KNOB preset table (brief 2026-08-24): item id == array position + 1.
+constexpr TuningPanel::Params kPresets[] = {
+    { 500, 4, -12, 40, 12.0f },   // 1 SAFE
+    { 250, 3, -18, 30, 10.0f },   // 2 BALANCED (matches the param defaults)
+    { 100, 1, -24, 20,  8.0f },   // 3 AGGRESSIVE
+};
+
+bool paramsEqual (const TuningPanel::Params& a, const TuningPanel::Params& b)
+{
+    return a.riseReferenceMs   == b.riseReferenceMs
+        && a.persistenceBlocks == b.persistenceBlocks
+        && a.depthDb           == b.depthDb
+        && a.q                 == b.q
+        && a.peakinessThreshold == b.peakinessThreshold;
+}
 } // namespace
 
 //==============================================================================
@@ -56,6 +72,13 @@ TuningPanel::TuningPanel()
     addAndMakeVisible (caption_);
     caption_.setFont (monoFont());
 
+    addAndMakeVisible (oneKnobLabel_);
+    oneKnobLabel_.setFont (monoFont());
+    oneKnob_.addItem ("SAFE", 1);
+    oneKnob_.addItem ("BALANCED", 2);
+    oneKnob_.addItem ("AGGRESSIVE", 3);
+    oneKnob_.addItem ("CUSTOM", kPresetCustomId);
+
     for (auto* label : { &riseLabel_, &persistLabel_, &depthLabel_,
                          &qLabel_, &thrLabel_ })
         addAndMakeVisible (*label);
@@ -71,14 +94,21 @@ TuningPanel::TuningPanel()
     for (int i = 0; i < (int) std::size (kThrChoices); ++i)
         thr_.addItem (juce::String (kThrChoices[i], 1), i + 1);
 
-    const auto onChange = [this] { handleChanged(); };
-    rise_.onChange    = onChange;
-    persist_.onChange = onChange;
-    depth_.onChange   = onChange;
-    q_.onChange       = onChange;
-    thr_.onChange     = onChange;
+    oneKnob_.onChange = [this] { handleOneKnobChanged(); };
 
-    for (auto* box : { &rise_, &persist_, &depth_, &q_, &thr_ })
+    const auto onParamChange = [this]
+    {
+        // Any manual param edit leaves the curated preset space.
+        oneKnob_.setSelectedId (kPresetCustomId, juce::dontSendNotification);
+        handleChanged();
+    };
+    rise_.onChange    = onParamChange;
+    persist_.onChange = onParamChange;
+    depth_.onChange   = onParamChange;
+    q_.onChange       = onParamChange;
+    thr_.onChange     = onParamChange;
+
+    for (auto* box : { &oneKnob_, &rise_, &persist_, &depth_, &q_, &thr_ })
         addAndMakeVisible (*box);
 
     // Select the defaults without firing the callback: nothing has changed.
@@ -95,6 +125,49 @@ void TuningPanel::refresh()
     q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
     thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
                             juce::dontSendNotification);
+
+    updateOneKnobFor (p);
+}
+
+void TuningPanel::updateOneKnobFor (const Params& p)
+{
+    for (int i = 0; i < (int) std::size (kPresets); ++i)
+        if (paramsEqual (p, kPresets[i]))
+        {
+            oneKnob_.setSelectedId (i + 1, juce::dontSendNotification);
+            return;
+        }
+    oneKnob_.setSelectedId (kPresetCustomId, juce::dontSendNotification);
+}
+
+void TuningPanel::handleOneKnobChanged()
+{
+    const int id = oneKnob_.getSelectedId();
+    if (id >= 1 && id < kPresetCustomId)
+        applyPreset (id);
+}
+
+void TuningPanel::applyPreset (int presetId)
+{
+    const Params p = kPresets[(std::size_t) (presetId - 1)];
+
+    // Apply silently: the knob change is the user gesture, the five combos
+    // just follow it -- otherwise refresh() would loop back through
+    // handleChanged() five more times.
+    rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
+    persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
+    depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
+    q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
+    thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
+                            juce::dontSendNotification);
+
+    // One callback per parameter, each carrying the complete snapshot --
+    // same contract as a manual combo edit.
+    if (onTuningChanged != nullptr)
+        for (int i = 0; i < 5; ++i)
+            onTuningChanged (p);
+
+    repaint();
 }
 
 TuningPanel::Params TuningPanel::currentParams() const
@@ -118,11 +191,17 @@ void TuningPanel::resized()
 {
     auto area = getLocalBounds();
 
-    caption_.setBounds (area.removeFromLeft (96).reduced (2));
+    const int labelWidth = 44;
+
+    // ONE KNOB sits at the far left, then the DETECTION caption.
+    auto knobCell = area.removeFromLeft (96).reduced (2);
+    oneKnobLabel_.setBounds (knobCell.removeFromLeft (labelWidth));
+    oneKnob_.setBounds (knobCell);
+
+    caption_.setBounds (area.removeFromLeft (72).reduced (2));
 
     // Five label+combo pairs share what is left evenly.
     const int pairWidth = area.getWidth() / 5;
-    const int labelWidth = 44;
 
     const std::pair<juce::Label*, juce::ComboBox*> pairs[] = {
         { &riseLabel_, &rise_ },   { &persistLabel_, &persist_ },

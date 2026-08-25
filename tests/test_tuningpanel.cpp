@@ -13,6 +13,11 @@
 
 namespace
 {
+constexpr int kOneKnobSafe       = 1;
+constexpr int kOneKnobBalanced   = 2;
+constexpr int kOneKnobAggressive = 3;
+constexpr int kOneKnobCustom     = 4;
+
 gui::TuningPanel::Params paramsFrom (const juce::ComboBox& rise,
                                      const juce::ComboBox& persist,
                                      const juce::ComboBox& depth,
@@ -102,4 +107,75 @@ TEST (TuningPanel, IdHelpersRoundTripEveryComboItem)
     const float thrs[] = { 6.0f, 8.0f, 10.0f, 12.0f, 15.0f };
     for (int i = 0; i < 5; ++i)
         EXPECT_FLOAT_EQ (gui::TuningPanel::thresholdForId (i + 1), thrs[i]) << "thr " << i;
+}
+
+TEST (TuningPanel, OneKnobDefaultsToBalancedMatchingParamCombos)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    EXPECT_EQ (panel.getOneKnobComboForTest().getSelectedId(), kOneKnobBalanced);
+
+    // BALANCED row of the preset table: 250 / 3 / -18 / 30 / 10.
+    EXPECT_EQ (gui::TuningPanel::riseMsForId    (panel.getRiseComboForTest().getSelectedId()),  250);
+    EXPECT_EQ (panel.getPersistComboForTest().getSelectedId(), 3);
+    EXPECT_EQ (gui::TuningPanel::depthDbForId   (panel.getDepthComboForTest().getSelectedId()), -18);
+    EXPECT_EQ (gui::TuningPanel::qForId         (panel.getQComboForTest().getSelectedId()),     30);
+    EXPECT_FLOAT_EQ (gui::TuningPanel::thresholdForId (panel.getThrComboForTest().getSelectedId()), 10.0f);
+}
+
+TEST (TuningPanel, SelectingAggressiveAppliesAllFiveParamsThroughCallback)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    int callbackCount = 0;
+    gui::TuningPanel::Params reported;
+
+    panel.onTuningChanged = [&] (const gui::TuningPanel::Params& p)
+    {
+        ++callbackCount;
+        reported = p;
+    };
+
+    panel.getOneKnobComboForTest().setSelectedId (kOneKnobAggressive, juce::sendNotificationSync);
+
+    // AGGRESSIVE row: 100 / 1 / -24 / 20 / 8. The callback fires once per
+    // parameter (5 times), each carrying the full snapshot.
+    EXPECT_EQ (callbackCount, 5);
+    EXPECT_EQ (reported.riseReferenceMs,   100);
+    EXPECT_EQ (reported.persistenceBlocks, 1);
+    EXPECT_EQ (reported.depthDb,           -24);
+    EXPECT_EQ (reported.q,                 20);
+    EXPECT_FLOAT_EQ (reported.peakinessThreshold, 8.0f);
+
+    // The five param combos now show the AGGRESSIVE values...
+    EXPECT_EQ (gui::TuningPanel::riseMsForId    (panel.getRiseComboForTest().getSelectedId()),  100);
+    EXPECT_EQ (panel.getPersistComboForTest().getSelectedId(), 1);
+    EXPECT_EQ (gui::TuningPanel::depthDbForId   (panel.getDepthComboForTest().getSelectedId()), -24);
+    EXPECT_EQ (gui::TuningPanel::qForId         (panel.getQComboForTest().getSelectedId()),     20);
+    EXPECT_FLOAT_EQ (gui::TuningPanel::thresholdForId (panel.getThrComboForTest().getSelectedId()), 8.0f);
+
+    // ...and the knob itself still reads AGGRESSIVE.
+    EXPECT_EQ (panel.getOneKnobComboForTest().getSelectedId(), kOneKnobAggressive);
+}
+
+TEST (TuningPanel, ManualParamEditSwitchesOneKnobToCustom)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    panel.onTuningChanged = [] (const gui::TuningPanel::Params&) {};
+
+    EXPECT_EQ (panel.getOneKnobComboForTest().getSelectedId(), kOneKnobBalanced);
+
+    panel.getDepthComboForTest().setSelectedId (2, juce::sendNotificationSync);   // -12 dB
+
+    EXPECT_EQ (panel.getOneKnobComboForTest().getSelectedId(), kOneKnobCustom);
 }

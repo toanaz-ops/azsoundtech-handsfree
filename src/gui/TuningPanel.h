@@ -68,6 +68,7 @@ public:
 
     // TEST ACCESSORS ONLY -- drive the controls directly, like SlotPanel's
     // getRowForTest().
+    [[nodiscard]] juce::ComboBox& getOneKnobComboForTest() { return oneKnob_; }
     [[nodiscard]] juce::ComboBox& getRiseComboForTest()    { return rise_; }
     [[nodiscard]] juce::ComboBox& getPersistComboForTest() { return persist_; }
     [[nodiscard]] juce::ComboBox& getDepthComboForTest()   { return depth_; }
@@ -78,9 +79,16 @@ public:
 
 private:
     void handleChanged();
+    void handleOneKnobChanged();
+    void applyPreset (int presetId);
+    void updateOneKnobFor (const Params& p);
 
     Params currentParams() const;
 
+    // ONE KNOB combo item ids: 1 SAFE, 2 BALANCED, 3 AGGRESSIVE, 4 CUSTOM.
+    static constexpr int kPresetCustomId = 4;
+
+    juce::Label oneKnobLabel_ { {}, "ONE KNOB" };
     juce::Label caption_ { {}, "DETECTION" };
     juce::Label riseLabel_    { {}, "Rise" };
     juce::Label persistLabel_ { {}, "Persist" };
@@ -88,6 +96,7 @@ private:
     juce::Label qLabel_       { {}, "Q" };
     juce::Label thrLabel_     { {}, "Thr" };
 
+    juce::ComboBox oneKnob_;
     juce::ComboBox rise_;
     juce::ComboBox persist_;
     juce::ComboBox depth_;
