@@ -210,6 +210,10 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
 
     // Ghost: the small chips in a toolbar. Flat, no lamp -- they are display
     // options, not transport, and must not compete with the transport.
+    //
+    // A ghost chip that is ON takes its edge from buttonOnColourId, so a chip
+    // whose state HAS a colour elsewhere on screen (peak hold, whose trace is
+    // drawn in `peak`) can say so, while a plain segmented chip just brightens.
     if (style == styleGhost)
     {
         if (on || shouldDrawButtonAsHighlighted || shouldDrawButtonAsDown)
@@ -218,22 +222,24 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
             g.fillRoundedRectangle (bounds, cornerRadius);
         }
 
-        g.setColour (on ? border.brighter (0.25f) : border);
+        const auto edge = on ? backgroundColour.withAlpha (0.75f) : border;
+        g.setColour (edge);
         g.drawRoundedRectangle (bounds, cornerRadius, 1.0f);
         return;
     }
 
-    // The default: a latching switch.
+    // The default: a latching switch. Softer corner than a field -- see the
+    // two radii in the header.
     auto face = raise;
     if (on)                                 face = face.brighter (kOnLift);
     if (shouldDrawButtonAsHighlighted)      face = face.brighter (kHoverLift);
     if (shouldDrawButtonAsDown)             face = face.darker   (0.10f);
 
     g.setColour (face);
-    g.fillRoundedRectangle (bounds, cornerRadius);
+    g.fillRoundedRectangle (bounds, switchRadius);
 
     g.setColour (on ? border.brighter (0.35f) : border);
-    g.drawRoundedRectangle (bounds, cornerRadius, 1.0f);
+    g.drawRoundedRectangle (bounds, switchRadius, 1.0f);
 
     if (! on)
         return;
@@ -246,7 +252,7 @@ void AzLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& butto
 
     juce::Path bar;
     bar.addRoundedRectangle (top.getX(), top.getY(), top.getWidth(), top.getHeight(),
-                             cornerRadius, cornerRadius, true, true, false, false);
+                             switchRadius, switchRadius, true, true, false, false);
     g.setColour (lamp);
     g.fillPath (bar);
 
@@ -271,14 +277,33 @@ void AzLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button,
     if (! button.isEnabled())
         colour = colour.withAlpha (0.4f);
 
+    const auto hint = button.getProperties()
+                            .getWithDefault (hintProperty, juce::String()).toString();
+
+    auto area = button.getLocalBounds().reduced (gap, spacing);
+
+    // A switch with a hint splits its face: legend on top, hint beneath. The
+    // legend keeps the optical centre, so the pair does not read as having
+    // slid upward -- the hint band is carved off the bottom AFTER the legend
+    // has been given the middle.
+    juce::Rectangle<int> hintArea;
+    if (hint.isNotEmpty() && area.getHeight() >= 40)
+        hintArea = area.removeFromBottom (14);
+
     g.setColour (colour);
     g.setFont (getTextButtonFont (button, button.getHeight()));
 
     // Legends are silkscreen: uppercase, tracked. The tracking already comes
     // from the font, so the only job here is the case and the fit.
-    g.drawFittedText (button.getButtonText().toUpperCase(),
-                      button.getLocalBounds().reduced (gap, spacing),
+    g.drawFittedText (button.getButtonText().toUpperCase(), area,
                       juce::Justification::centred, 1, kLegendMinScale);
+
+    if (hintArea.isEmpty())
+        return;
+
+    g.setColour (faded.withAlpha (button.isEnabled() ? 1.0f : 0.4f));
+    g.setFont (monoFont (10.0f));
+    g.drawFittedText (hint, hintArea, juce::Justification::centred, 1, 0.8f);
 }
 
 juce::Font AzLookAndFeel::getTextButtonFont (juce::TextButton& button, const int buttonHeight)

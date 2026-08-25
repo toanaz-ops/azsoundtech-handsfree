@@ -10,6 +10,12 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# The test binary compiles every test file plus THE shared source list from the
+# root CMakeLists (HANDSFREE_CORE_SOURCES) -- not a hand-maintained copy of it.
+#
+# It used to carry its own list of ../src/... paths, and a new component added
+# to the app was simply absent here until someone noticed the link error. That
+# is what happened to src/gui/SlotTabs.cpp on 2026-08-25.
 add_executable(HandsFreeTests
     test_slotconfig.cpp
     test_slotpanel.cpp
@@ -33,30 +39,7 @@ add_executable(HandsFreeTests
     test_notchcontroller.cpp
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
-    ../src/app/LicenseManager.cpp
-    ../src/app/LicenseViewModel.cpp
-    ../src/app/PresetFirstRun.cpp
-    ../src/app/NotchController.cpp
-    ../src/app/AudioEngine.cpp
-    ../src/app/MainComponent.cpp
-    ../src/app/PresetManager.cpp
-    ../src/gui/DeviceViewModel.cpp
-    ../src/gui/DeviceDrawer.cpp
-    ../src/gui/DevicePanel.cpp
-    ../src/gui/SlotPanel.cpp
-    ../src/gui/TuningPanel.cpp
-    ../src/gui/ModeBar.cpp
-    ../src/gui/ModeRail.cpp
-    ../src/gui/StatusBadge.cpp
-    ../src/gui/SpectrumView.cpp
-    ../src/gui/NotchListPanel.cpp
-    ../src/gui/StatusBar.cpp
-    ../src/gui/theme/AzTheme.cpp
-    ../src/dsp/Biquad.cpp
-    ../src/dsp/NotchChain.cpp
-    ../src/dsp/Detector.cpp
-    ../src/dsp/PeakinessAnalyzer.cpp
-    ../src/dsp/CandidateScorer.cpp
+    ${HANDSFREE_CORE_SOURCES}
 )
 
 # Detector uses juce::dsp::FFT / WindowingFunction, so the test target needs

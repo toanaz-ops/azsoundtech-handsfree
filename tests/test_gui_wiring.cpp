@@ -626,3 +626,112 @@ TEST (MainComponent, GlobalTuningChangeSkipsCustomSlots)
     EXPECT_EQ (custom->getPersistenceBlocks(), 5);
     EXPECT_EQ (panel.getDetailForTest (3).persist.getSelectedId(), 5);
 }
+
+//==============================================================================
+// PER-SLOT MONITORING (2026-08-25).
+//
+// The app has always run one NotchController per routing slot, but the GUI
+// could only ever display slot 0's: SpectrumView and NotchListPanel were
+// handed notchControllers_[0] at construction with no way to be re-pointed.
+// A rig with a vocal mic on slot 1 and a lectern on slot 2 could see one of
+// them. The masthead selector is the route that changes it.
+
+TEST (MainComponent, TheDisplayStartsOnSlotZero)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    EXPECT_EQ (app.getDisplayedSlot(), 0);
+    EXPECT_EQ (app.getSlotTabsForTest().getSelected(), 0);
+}
+
+TEST (MainComponent, SelectingASlotMovesTheSelectorAndIsReportedBack)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    app.setDisplayedSlot (1);
+
+    EXPECT_EQ (app.getDisplayedSlot(), 1);
+    EXPECT_EQ (app.getSlotTabsForTest().getSelected(), 1);
+}
+
+TEST (MainComponent, ASlotWithNoRoutingRowCannotBeMonitored)
+{
+    // Slots past the routing table's visible row count have no controls the
+    // user could act on, so pointing the analyser at one would show a spectrum
+    // they cannot do anything about. The request is IGNORED rather than
+    // clamped -- clamping would quietly show a different slot's notches.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    ASSERT_EQ (app.getSlotPanelForTest().getVisibleRowCount(), 2);
+
+    app.setDisplayedSlot (5);
+    EXPECT_EQ (app.getDisplayedSlot(), 0);
+
+    app.setDisplayedSlot (-1);
+    EXPECT_EQ (app.getDisplayedSlot(), 0);
+}
+
+TEST (MainComponent, RevealingARoutingRowMakesThatSlotSelectable)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    EXPECT_EQ (app.getSlotTabsForTest().getSlotCount(), 2);
+
+    app.getSlotPanelForTest().setVisibleRowCount (4);
+
+    EXPECT_EQ (app.getSlotTabsForTest().getSlotCount(), 4);
+
+    app.setDisplayedSlot (3);
+    EXPECT_EQ (app.getDisplayedSlot(), 3);
+}
+
+TEST (MainComponent, HidingTheMonitoredRowFallsBackToSlotZero)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    app.getSlotPanelForTest().setVisibleRowCount (4);
+    app.setDisplayedSlot (3);
+    ASSERT_EQ (app.getDisplayedSlot(), 3);
+
+    // The table shrinks back under the monitored slot: the display must not be
+    // left pointed at a slot that no longer has a row.
+    app.getSlotPanelForTest().setVisibleRowCount (2);
+
+    EXPECT_EQ (app.getDisplayedSlot(), 0);
+    EXPECT_EQ (app.getSlotTabsForTest().getSlotCount(), 2);
+}
+
+//==============================================================================
+// RING RISK -- the readout exists, its data source does not yet.
+
+TEST (MainComponent, RingRiskReadsUnavailableUntilSomethingProvidesIt)
+{
+    // The honest default, and the one thing about this readout that MUST NOT
+    // regress: an unwired risk indicator that reads "low" is worse than one
+    // that reads "n/a", because a soundman would act on it. See
+    // docs/spec-ring-risk.md.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Unavailable);
+}

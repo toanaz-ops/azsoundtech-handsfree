@@ -94,3 +94,46 @@ mới là cái có tác dụng thật.
 Kèm theo: `MainComponent` trước đây không gọi `setSize()` → `setContentOwned`
 mở cửa sổ đúng bằng `setResizeLimits` tối thiểu, tức là app luôn khởi động ở
 đúng cỡ layout tệ nhất của nó. Giờ có `kDefaultWidth/kDefaultHeight`.
+
+## 7. Literal UTF-8 trong source C++ bị MSVC nuốt (rule 6, ở phía compiler)
+
+`juce::String ("Active notches  \u00b7  Slot ")` render ra màn hình thành
+**"ACTIVE NOTCHES Â· SLOT 01"**. MSVC đọc literal qua execution charset; hai
+byte UTF-8 của dấu chấm giữa (0xC2 0xB7) bị hiểu là hai ký tự Latin-1.
+
+Repo đã có sẵn cách đúng và có ghi lý do — `NotchListPanel::minusSign()` dựng
+U+2212 từ **code point**:
+
+```cpp
+juce::String::charToString ((juce::juce_wchar) 0x00b7)
+```
+
+Rule 6 lâu nay chỉ nói về script đọc-ghi file. Nó áp dụng cả cho **lần đọc của
+compiler**. Không viết ký tự ngoài ASCII vào string literal C++ trong repo này.
+
+Cách bắt: chỉ nhìn ảnh render mới thấy. Build xanh, 354 test xanh.
+
+## 8. Danh sách source của test target là bản chép tay thứ hai
+
+`tests/CMakeLists.txt` liệt kê tay từng `../src/...`. Thêm
+`src/gui/SlotTabs.cpp` vào root CMakeLists thì app + tool build được, còn test
+target **link fail** vì file đó đơn giản là không tồn tại với nó.
+
+Đã sửa tận gốc: cả ba target (app, test, tool) giờ dùng chung
+`HANDSFREE_CORE_SOURCES` khai báo ở root, đường dẫn **tuyệt đối**
+(`${CMAKE_SOURCE_DIR}/...`) — vì `tests/` và `tools/` giải đường dẫn tương đối
+theo thư mục của CHÍNH NÓ.
+
+## 9. Đổi hướng thiết kế: đường tín hiệu màu sodium, không phải xám
+
+Bản đầu tôi vẽ đường phổ đơn sắc để dành riêng màu cho notch. Chủ dự án chọn
+theo mockup: đường sodium + gradient fill. Hệ quả phải xử lý:
+
+- notch **mới** (cũng sodium) chìm vào đường tín hiệu → mọi marker giờ vẽ trên
+  một **keyline tối** (`background`, dày 3 px) rồi mới tô màu lên. Đây là cách
+  máy phân tích phần cứng tách cursor khỏi trace, và nó đúng với mọi màu mà
+  ramp đang ở.
+- ngược lại notch **đã ổn định** (ice) nổi bật hơn hẳn so với nền xám cũ —
+  tương phản mạnh nhất màn hình. Hướng của chủ dự án hoá ra tốt hơn.
+- lưới phải có token riêng (`grid` #1D2128). Dùng `shade` (#060709) thì lưới
+  gần như tàng hình — mà lưới sinh ra để ĐỌC.

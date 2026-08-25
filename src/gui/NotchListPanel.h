@@ -64,6 +64,16 @@ public:
     // driven by the internal timer and by visibilityChanged().
     void refreshFromSnapshot();
 
+    // Point this table at a different slot's detector. The first-seen ledger
+    // and the built rows both describe the OLD slot and are dropped: an
+    // identity key is only unique WITHIN one detector, so carrying it across
+    // would age a new slot's notch from the previous slot's sighting.
+    void setController (const NotchController& controller);
+
+    // Which slot the caption names. Display only -- it does not change what is
+    // read; setController does that.
+    void setDisplayedSlot (int slotIndex);
+
     // Shared formatting truth -- the panel paints these and the tests assert
     // them, so there is exactly one definition of each format.
     static juce::String formatFrequency (float hz);
@@ -111,7 +121,9 @@ private:
         double lastSeenMs  = 0.0;
     };
 
-    const NotchController& controller_;
+    // A POINTER for the same reason SpectrumView's is: the table follows the
+    // masthead's slot selector. Never null.
+    const NotchController* controller_;
     ClockFn nowMs_;
 
     NotchController::SnapshotBuffer snapshot_ {};
@@ -123,6 +135,9 @@ private:
     // it means the room is behaving. Say that, rather than reporting absence.
     juce::String noNotchesLabel_ { "Nothing ringing" };
     juce::Font   tableFont_;              // mono: every cell holds numbers
+
+    // Rebuilt by setDisplayedSlot so paint() never formats a string.
+    juce::String caption_ { "Active notches" };
 
     // First-seen ledger keyed by identity (ruling R-2).
     std::map<std::uint64_t, Sighting> sightings_;

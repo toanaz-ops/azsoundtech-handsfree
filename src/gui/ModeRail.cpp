@@ -12,6 +12,9 @@ namespace
 // Any non-zero id makes the three mode buttons mutually exclusive and keeps
 // the pressed one ON when clicked again rather than toggling off.
 constexpr int kModeRadioGroupId = 1;
+
+// Room reserved above the countdown number for its painted caption.
+constexpr int kCountdownCaptionHeight = 14;
 } // namespace
 
 ModeRail::ModeRail (Orientation orientation)
@@ -28,18 +31,24 @@ ModeRail::ModeRail (Orientation orientation)
     //
     // The theme's LookAndFeel reads buttonOnColourId to draw the lamp, so a
     // component says what ON means without knowing how a switch is drawn.
-    const std::pair<juce::TextButton*, juce::Colour> modes[] = {
-        { &soundcheckButton, warn   },
-        { &autoButton,       ok     },
-        { &bypassButton,     danger },
+    // The hint is the second line on each switch. A legend names the mode; the
+    // hint says what it DOES, which is what somebody who has not read a manual
+    // actually needs at the moment they are deciding which one to hit.
+    struct Mode { juce::TextButton* button; juce::Colour lamp; const char* hint; };
+
+    const Mode modes[] = {
+        { &soundcheckButton, warn,   "sweep the room" },
+        { &autoButton,       ok,     "catch and hold" },
+        { &bypassButton,     danger, "filters out"    },
     };
 
-    for (const auto& [button, lamp] : modes)
+    for (const auto& mode : modes)
     {
-        button->setClickingTogglesState (true);
-        button->setRadioGroupId (kModeRadioGroupId);
-        button->setColour (juce::TextButton::buttonOnColourId, lamp);
-        addAndMakeVisible (*button);
+        mode.button->setClickingTogglesState (true);
+        mode.button->setRadioGroupId (kModeRadioGroupId);
+        mode.button->setColour (juce::TextButton::buttonOnColourId, mode.lamp);
+        mode.button->getProperties().set (hintProperty, mode.hint);
+        addAndMakeVisible (*mode.button);
     }
 
     // CLEAR ALL is destructive and is NOT drawn as a switch: an outline that
@@ -49,10 +58,11 @@ ModeRail::ModeRail (Orientation orientation)
     addAndMakeVisible (clearAllButton);
 
     // The countdown is a NUMBER, so it is mono and it is big: it is read at a
-    // glance from across a room while the room is being swept.
-    countdownLabel.setFont (monoFont (18.0f));
+    // glance from across a room while the room is being swept. Its caption is
+    // painted above it (see paint()).
+    countdownLabel.setFont (monoFont (26.0f));
     countdownLabel.setColour (juce::Label::textColourId, warn);
-    countdownLabel.setJustificationType (juce::Justification::centred);
+    countdownLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (countdownLabel);
 
     // The radio group deselects the previous mode through setToggleState with
@@ -99,6 +109,11 @@ ModeRail::ModeRail (Orientation orientation)
             [done = std::move (done)] (int result) { done (result == 1); });
     };
 
+    // Seed the readout NOW rather than leaving it blank until the first timer
+    // tick 250 ms later -- and, more usefully, so a headless render (which
+    // pumps no timers at all) shows the real resting state.
+    updateCountdown();
+
     startTimerHz (4);
 }
 
@@ -119,6 +134,8 @@ void ModeRail::setDisplayedMode (const Mode mode)
 
 void ModeRail::updateCountdown()
 {
+    using namespace az::theme;
+
     const double remainingMs = (getSoundcheckRemainingMs != nullptr)
                                    ? getSoundcheckRemainingMs()
                                    : 0.0;
@@ -126,9 +143,16 @@ void ModeRail::updateCountdown()
                             ? (int) std::ceil (remainingMs / 1000.0)
                             : 0;
 
-    countdownLabel.setText (seconds > 0 ? juce::String ("SOUNDCHECK ") + juce::String (seconds) + "s"
-                                        : juce::String(),
+    // An em dash rather than an empty string when nothing is counting: a cell
+    // that empties itself reads as a control that vanished. A dash reads as a
+    // readout with nothing to report, which is what it is.
+    const bool counting = seconds > 0;
+
+    countdownLabel.setText (counting ? juce::String (seconds) + " s"
+                                     : juce::String::charToString ((juce::juce_wchar) 0x2014),
                             juce::dontSendNotification);
+    countdownLabel.setColour (juce::Label::textColourId, counting ? warn : faded);
+    repaint();
 }
 
 void ModeRail::timerCallback()
@@ -166,6 +190,19 @@ void ModeRail::handleClearAllClicked()
     });
 }
 
+void ModeRail::paint (juce::Graphics& g)
+{
+    using namespace az::theme;
+
+    // The countdown's caption. Painted rather than given its own Label because
+    // it never changes, and a Label for a constant string is a component and a
+    // layout pass bought for nothing.
+    if (countdownCaptionArea_.isEmpty())
+        return;
+
+    drawCaption (g, "Soundcheck", countdownCaptionArea_, dim);
+}
+
 void ModeRail::resized()
 {
     using namespace az::theme;
@@ -197,16 +234,50 @@ void ModeRail::resized()
     // The countdown takes the slack between the modes and CLEAR ALL, so the
     // destructive control is always pinned at the far end of the transport --
     // as far from the three switches a hand reaches for as the row allows.
-    auto readout = juce::FlexItem (countdownLabel).withFlex (1.0f);
-    readout = vertical ? readout.withWidth (cellW).withMargin ({ 0.0f, 0.0f, gapPx, 0.0f })
-                       : readout.withHeight (cellH).withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
-    fb.items.add (readout);
+    // A BARE spacer, not the countdown label. The countdown is a two-part
+    // block -- a caption over a number -- and FlexBox lays out one component
+    // per item, so the block is positioned by hand out of the gap the spacer
+    // leaves behind. Doing it the other way (label in the flex, caption
+    // offset from the label's bounds) is what put the caption outside the
+    // rail entirely.
+    fb.items.add (juce::FlexItem().withFlex (1.0f)
+                      .withMargin (vertical ? juce::FlexItem::Margin { 0.0f, 0.0f, gapPx, 0.0f }
+                                            : juce::FlexItem::Margin { 0.0f, gapPx, 0.0f, 0.0f }));
 
     fb.items.add (juce::FlexItem (clearAllButton)
                       .withWidth ((float) (vertical ? railWidth : clearCellWidth))
                       .withHeight (cellH));
 
     fb.performLayout (getLocalBounds());
+
+    // The gap the spacer left, between the last mode switch and CLEAR ALL.
+    auto block = vertical
+                     ? juce::Rectangle<int> (0, bypassButton.getBottom() + gap,
+                                             railWidth,
+                                             juce::jmax (0, clearAllButton.getY() - gap
+                                                            - (bypassButton.getBottom() + gap)))
+                     : juce::Rectangle<int> (bypassButton.getRight() + gap, 0,
+                                             juce::jmax (0, clearAllButton.getX() - gap
+                                                            - (bypassButton.getRight() + gap)),
+                                             getHeight());
+
+    if (block.getWidth() <= 0 || block.getHeight() <= 0)
+    {
+        countdownCaptionArea_ = {};
+        countdownLabel.setBounds ({});
+        return;
+    }
+
+    // Vertically centred as a PAIR inside that gap, so the block sits on the
+    // switches' optical centre line rather than hanging from the rail's top.
+    constexpr int numberHeight = 32;
+    const int blockHeight = kCountdownCaptionHeight + numberHeight;
+
+    auto stacked = block.withSizeKeepingCentre (block.getWidth(),
+                                                juce::jmin (block.getHeight(), blockHeight));
+
+    countdownCaptionArea_ = stacked.removeFromTop (kCountdownCaptionHeight);
+    countdownLabel.setBounds (stacked);
 }
 
 } // namespace gui

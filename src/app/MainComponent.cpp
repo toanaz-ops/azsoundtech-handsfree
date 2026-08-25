@@ -91,6 +91,17 @@ MainComponent::MainComponent()
     // the one band that is always visible and never scrolls.
     addAndMakeVisible (statusBadge_);
 
+    // The masthead's slot selector. It reflects and reports; what a selection
+    // MEANS is owned here, in setDisplayedSlot.
+    slotTabs_.setSlotCount (slotPanel_.getVisibleRowCount());
+    slotTabs_.onSlotSelected = [this] (int slot) { setDisplayedSlot (slot); };
+    addAndMakeVisible (slotTabs_);
+
+    // Seed the display at slot 0 through the SAME route a click takes, so the
+    // notch table's caption names its slot from the first frame instead of
+    // only after the user has picked something.
+    setDisplayedSlot (0);
+
     // Bridge design §6.5: a device change in the panel is always an engine
     // RESTART, and the rings are cleared on the way -- so the detector thread
     // must be joined first and relaunched after. These hooks live on the ONE
@@ -131,7 +142,18 @@ MainComponent::MainComponent()
     // The Add button grows the table through this callback: MainComponent::
     // resized() is what sizes slotPanel_ from getPreferredHeight(), and the
     // Viewport parent alone never would.
-    slotPanel_.onPreferredHeightChanged = [this] { resized(); };
+    slotPanel_.onPreferredHeightChanged = [this]
+    {
+        // Revealing a routing row also makes that slot selectable: a slot with
+        // no row in the table is a slot the user has no way to configure, and
+        // monitoring one would show a spectrum they cannot act on.
+        slotTabs_.setSlotCount (slotPanel_.getVisibleRowCount());
+
+        if (displayedSlot_ >= slotPanel_.getVisibleRowCount())
+            setDisplayedSlot (0);
+
+        resized();
+    };
     slotPanel_.onSlotConfigChanged = [this] (int slotIndex, const SlotConfig& config)
     {
         changeSlotConfig (slotIndex, config);
@@ -425,6 +447,25 @@ bool MainComponent::loadPreset (const juce::File& file)
     return true;
 }
 
+void MainComponent::setDisplayedSlot (const int slotIndex)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, slotPanel_.getVisibleRowCount()))
+        return;
+
+    displayedSlot_ = slotIndex;
+
+    auto& controller = *notchControllers_[(std::size_t) slotIndex];
+
+    // BOTH panels, together. Each drops everything it derived from the slot it
+    // was on -- see their setController comments for why an age ledger cannot
+    // cross a slot boundary.
+    spectrumView_.setController (controller);
+    notchListPanel_.setController (controller);
+    notchListPanel_.setDisplayedSlot (slotIndex);
+
+    slotTabs_.setSelected (slotIndex);
+}
+
 void MainComponent::refreshStatus()
 {
     gui::DeviceStatus status;
@@ -536,7 +577,7 @@ void MainComponent::paint (juce::Graphics& g)
 
     // The rig readout fills whatever sits between the mark and the badge.
     auto rigArea = masthead.reduced (kEdgePad, 0)
-                           .withTrimmedLeft (kMarkWidth)
+                           .withTrimmedLeft (kMarkWidth + slotTabs_.getWidth() + gap)
                            .withTrimmedRight (kBadgeWidth + gap);
     if (rigArea.getWidth() > 0)
     {
@@ -638,6 +679,14 @@ void MainComponent::resized()
     auto masthead = area.removeFromTop (mastheadHeight).reduced (kEdgePad, 0);
     statusBadge_.setBounds (masthead.removeFromRight (kBadgeWidth)
                                     .withSizeKeepingCentre (kBadgeWidth, kBadgeHeight));
+
+    // The slot selector sits after the brand block. Width is ASKED FOR rather
+    // than assumed: the chip count follows the routing table's visible rows
+    // and changes while the app runs.
+    slotTabs_.setBounds (masthead.withTrimmedLeft (kMarkWidth + gap + spacing)
+                                 .withWidth (slotTabs_.getPreferredWidth())
+                                 .withSizeKeepingCentre (slotTabs_.getPreferredWidth(),
+                                                         kBadgeHeight));
 
     //--------------------------------------------------------------------
     // 2. Transport. The rail owns its internal grid; all this owes it is a

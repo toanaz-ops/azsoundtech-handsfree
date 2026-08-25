@@ -61,10 +61,17 @@ public:
     // is the primary state signal in this design, was simply wrong.
     void setDisplayedMode (Mode mode);
 
-    // Polls getSoundcheckRemainingMs now ("SOUNDCHECK 7s" while > 0). The rail
-    // also runs a low-rate timer calling this; owners may call it directly too.
+    // Polls getSoundcheckRemainingMs now. The rail also runs a low-rate timer
+    // calling this; owners may call it directly too.
+    //
+    // The label holds the NUMBER only ("7 s"), and an em dash when nothing is
+    // counting. The word SOUNDCHECK is painted above it as a caption instead
+    // of being concatenated into the string: the number is read across a room
+    // and wants to be large, the caption only has to be findable, and one
+    // Label cannot be two sizes.
     void updateCountdown();
 
+    void paint (juce::Graphics& g) override;
     void resized() override;
 
     // Public: they ARE this component's interface; wiring and headless tests
@@ -80,6 +87,13 @@ private:
     void handleClearAllClicked();
 
     Orientation orientation_;
+
+    // Where paint() draws the SOUNDCHECK caption. Computed in resized() and
+    // stored, rather than derived from countdownLabel's bounds inside paint():
+    // the label is positioned INSIDE this rect, so deriving one from the other
+    // in the opposite direction is circular and drifted by exactly the
+    // caption's height.
+    juce::Rectangle<int> countdownCaptionArea_;
 
     // True while a confirmation is still unanswered: a second CLEAR ALL
     // click must not stack another dialog (and so fire two confirms).

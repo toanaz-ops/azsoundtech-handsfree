@@ -69,6 +69,9 @@ TEST (AzTheme, PaletteTokensMatchTheSpecifiedValues)
     expectArgb (az::theme::warn,       0xffffc24du, "warn");
     expectArgb (az::theme::ok,         0xff6ee7a0u, "ok");
     expectArgb (az::theme::danger,     0xffff5a4eu, "danger");
+    expectArgb (az::theme::trace,      0xffffb552u, "trace");
+    expectArgb (az::theme::grid,       0xff1d2128u, "grid");
+    expectArgb (az::theme::peak,       0xffdde6f0u, "peak");
     expectArgb (az::theme::marker,     0xffff9f1cu, "marker");
     expectArgb (az::theme::cooling,    0xffc9d1d9u, "cooling");
     expectArgb (az::theme::settled,    0xff5fc9ffu, "settled");
@@ -97,6 +100,7 @@ TEST (AzTheme, MetricTokensMatchTheSpecifiedValues)
     EXPECT_FLOAT_EQ (az::theme::fieldSplit, 0.42f);
 
     EXPECT_FLOAT_EQ (az::theme::cornerRadius,   3.0f);
+    EXPECT_FLOAT_EQ (az::theme::switchRadius,   4.0f);
     EXPECT_FLOAT_EQ (az::theme::baseFontSize,  14.0f);
     EXPECT_FLOAT_EQ (az::theme::legendFontSize, 12.0f);
 }

@@ -166,11 +166,19 @@ TEST (ModeRail, CountdownLabelShowsRemainingSecondsWhileAboveZero)
     rail.getSoundcheckRemainingMs = [&remainingMs] { return remainingMs; };
 
     rail.updateCountdown();
-    EXPECT_EQ (rail.countdownLabel.getText(), juce::String ("SOUNDCHECK 7s"));
+
+    // The label holds the NUMBER only; the word SOUNDCHECK is painted above it
+    // as a caption, because one Label cannot be two type sizes and the number
+    // is the part read across a room.
+    EXPECT_EQ (rail.countdownLabel.getText(), juce::String ("7 s"));
 
     remainingMs = 0.0;
     rail.updateCountdown();
-    EXPECT_TRUE (rail.countdownLabel.getText().isEmpty());
+
+    // Not empty: an em dash. A readout cell that blanks itself reads as a
+    // control that disappeared, rather than as one with nothing to report.
+    EXPECT_EQ (rail.countdownLabel.getText(),
+               juce::String::charToString ((juce::juce_wchar) 0x2014));
 }
 
 //==============================================================================

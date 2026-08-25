@@ -52,6 +52,9 @@ inline constexpr juce::uint32 accentArgb     = 0xffff9f1cu; // sodium vapour -- 
 inline constexpr juce::uint32 warnArgb       = 0xffffc24du; // caution
 inline constexpr juce::uint32 okArgb         = 0xff6ee7a0u; // LED SIG green: PROTECTING only
 inline constexpr juce::uint32 dangerArgb     = 0xffff5a4eu; // destructive / clipping
+inline constexpr juce::uint32 traceArgb      = 0xffffb552u; // the signal itself: lit sodium
+inline constexpr juce::uint32 gridArgb       = 0xff1d2128u; // analyser grid -- READ, not felt
+inline constexpr juce::uint32 peakArgb       = 0xffdde6f0u; // peak-hold ceiling trace
 inline constexpr juce::uint32 markerArgb     = 0xffff9f1cu; // a notch the instant it fires
 inline constexpr juce::uint32 coolingArgb    = 0xffc9d1d9u; // the ramp's midpoint: pale steel
 inline constexpr juce::uint32 settledArgb    = 0xff5fc9ffu; // a notch that has held: ICE
@@ -69,6 +72,9 @@ inline const juce::Colour accent     { accentArgb };
 inline const juce::Colour warn       { warnArgb };
 inline const juce::Colour ok         { okArgb };
 inline const juce::Colour danger     { dangerArgb };
+inline const juce::Colour trace      { traceArgb };
+inline const juce::Colour grid       { gridArgb };
+inline const juce::Colour peak       { peakArgb };
 inline const juce::Colour marker     { markerArgb };
 inline const juce::Colour cooling    { coolingArgb };
 inline const juce::Colour settled    { settledArgb };
@@ -77,6 +83,12 @@ inline const juce::Colour settled    { settledArgb };
 // faint light line under it -- the bevel that reads as "milled into the panel"
 // rather than "a box drawn on top of it".
 inline const juce::Colour sheen = juce::Colours::white.withAlpha (0.045f);
+
+//==============================================================================
+// Peak hold is the SAME signal, held -- so it is deliberately not given a
+// saturated hue of its own. A cool near-white reads as a ceiling line above an
+// amber trace without claiming to be a semantic state the way sodium, LED
+// green, red and ice all do.
 
 //==============================================================================
 // THE RAMP. A notch's age in milliseconds -> its colour: sodium at 0, ice from
@@ -136,7 +148,11 @@ inline constexpr int   inlineLegendWidth = 58;
 // made the pre-rebuild device panel look ragged.
 inline constexpr float fieldSplit       = 0.42f;
 
-inline constexpr float cornerRadius     = 3.0f;
+// Two radii, not one. A field is a machined slot and stays tight at 3; a
+// switch is a moulded cap and reads softer at 4. Using one figure for both
+// makes the switches look like oversized text boxes.
+inline constexpr float cornerRadius     = 3.0f;   // fields, wells, chips
+inline constexpr float switchRadius     = 4.0f;   // transport switches
 inline constexpr float baseFontSize     = 14.0f;
 inline constexpr float legendFontSize   = 12.0f;
 
@@ -167,6 +183,13 @@ void drawEngravedDivider (juce::Graphics& g, juce::Rectangle<int> band);
 
 // A recessed field: what a combo box, a value readout or a text well sits in.
 void drawWell (juce::Graphics& g, juce::Rectangle<float> bounds, bool focused);
+
+// The component property a caller sets to give a switch its second line:
+//     button.getProperties().set (az::theme::hintProperty, "sweep the room");
+// Drawn under the legend, quiet and small. A switch legend says WHAT the mode
+// is called; the hint says what it does, which is the part a soundman who has
+// not read a manual needs.
+inline const juce::Identifier hintProperty { "azHint" };
 
 // A section caption, in tracked uppercase silkscreen.
 void drawCaption (juce::Graphics& g, const juce::String& caption,

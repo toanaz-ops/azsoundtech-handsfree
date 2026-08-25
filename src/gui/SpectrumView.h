@@ -44,7 +44,9 @@
 #include "dsp/Detector.h"
 #include "gui/RtaProcessing.h"
 
+#include <array>
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -71,6 +73,14 @@ public:
     // guarded struct copy and nothing else (spec section 2: skip repaint).
     void refreshFromSnapshot();
 
+    // Point this view at a different slot's detector. Everything derived from
+    // the OLD slot is dropped: the age ledger (a notch at 1 kHz on slot 1 is
+    // not the notch at 1 kHz on slot 2), the polylines, and the sequence
+    // watermark that suppresses redundant rebuilds. Without that reset the
+    // first frame after a switch would either be skipped as "unchanged" or
+    // drawn with the previous slot's notch ages.
+    void setController (const NotchController& controller);
+
     // Sequence number of the most recently COPIED snapshot (whether or not it
     // was new). Test hook and cheap liveness probe.
     [[nodiscard]] std::uint64_t getSequenceSeen() const { return seenSequence_; }
@@ -84,6 +94,30 @@ public:
     {
         return spectrumPoints_[index];
     }
+
+    //==========================================================================
+    // RING RISK -- how close the room is to ringing right now.
+    //
+    // THE DATA SOURCE DOES NOT EXIST YET. NotchController::SnapshotBuffer
+    // publishes magnitudes and placed notches, and nothing that scores how
+    // close the room is to howling. Wiring this to something derived GUI-side
+    // would put a SECOND, different peakiness number on screen next to the
+    // detector's own, which is worse than showing nothing.
+    //
+    // So the control is built, laid out and painted, and `ringRiskProvider`
+    // is null until the DSP side publishes a score. Null renders as
+    // Unavailable -- an explicit "n/a", never a reassuring "low".
+    //
+    // Contract for whoever fills this in: docs/spec-ring-risk.md.
+    enum class RingRisk { Unavailable, Low, Rising, Critical };
+
+    // Polled once per frame by the same timer that refreshes the plot. Null
+    // means Unavailable. Must not block: it runs on the message thread.
+    std::function<RingRisk()> ringRiskProvider;
+
+    // What the readout currently shows. Exposed so a headless test can assert
+    // the honest default without reaching into paint().
+    [[nodiscard]] RingRisk getRingRisk() const { return ringRisk_; }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -108,14 +142,37 @@ private:
                                   double nowMs) const;
 
     // Re-derives bandCenterHz_ / edges for the current bandMode_ (message
-    // thread: constructor and ComboBox onChange only, never paint).
+    // thread: constructor and chip clicks only, never paint).
     void applyBandMode();
+
+    // The chip's word and colour for a state, in one place so paint() reads as
+    // layout rather than as a switch wrapped around drawing calls.
+    [[nodiscard]] static juce::String ringRiskLabel (RingRisk);
+    [[nodiscard]] static juce::Colour ringRiskColour (RingRisk);
+
+    RingRisk ringRisk_ = RingRisk::Unavailable;
+
+    // Reserved at the toolbar's left, after the ANALYSER caption.
+    static constexpr int kRiskLegendWidth = 74;
+    static constexpr int kRiskChipWidth   = 78;
+
+    juce::Rectangle<int> riskChipArea_;
+
+    // Lights exactly one chip of a segmented group and clears the rest.
+    // Explicit rather than leaning on the radio group, for the reason
+    // ModeRail::setDisplayedMode documents: the group's own clearing runs
+    // through the notification path this is trying not to fire.
+    template <std::size_t N>
+    static void reflectChips (std::array<juce::TextButton, N>& chips, int selected);
 
     // Log-frequency / dB mappings into a given plot rectangle.
     static float xForHz (float hz, const juce::Rectangle<float>& plot);
     static float yForDb (float db, const juce::Rectangle<float>& plot);
 
-    const NotchController& controller_;
+    // A POINTER, not a reference: the view follows whichever routing slot the
+    // masthead's selector is on, and a reference cannot be re-seated. Never
+    // null -- the constructor takes a reference and setController takes one.
+    const NotchController* controller_;
 
     // One consistent frame, copied under the controller's snapshot mutex.
     NotchController::SnapshotBuffer snapshot_ {};
@@ -166,11 +223,22 @@ private:
     // Reserved at the toolbar's left for the ANALYSER legend, by BOTH paint()
     // (which draws it) and resized() (which must not lay a control over it).
     static constexpr int kCaptionWidth  = 78;
+    // Segmented chips, not dropdowns. These are DISPLAY options a soundman
+    // flips while looking at the plot, so the current one has to be readable
+    // without opening anything, and the next one has to be one click away.
+    // A 26 px combo is neither.
     juce::Label      bandwidthLabel_;
-    juce::ComboBox   bandwidthBox_;
+    std::array<juce::TextButton, 3> bandChips_ { juce::TextButton { "Line" },
+                                                 juce::TextButton { "1/1 oct" },
+                                                 juce::TextButton { "1/3 oct" } };
     juce::Label      averageLabel_;
-    juce::ComboBox   averageBox_;
-    juce::ToggleButton peakHoldButton_;
+    std::array<juce::TextButton, 4> avgChips_ { juce::TextButton { "Off" },
+                                                juce::TextButton { "1s" },
+                                                juce::TextButton { "3s" },
+                                                juce::TextButton { "10s" } };
+    // A chip like the segmented groups beside it, not a tick box: it belongs to
+    // the same row of display options and is hit the same way.
+    juce::TextButton peakHoldButton_ { "Peak hold" };
 
     juce::Font tickFont_;                 // mono: axis numbers
     juce::Font bodyFont_;                 // "no signal" text

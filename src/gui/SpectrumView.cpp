@@ -39,6 +39,23 @@ constexpr float kGlowRadius        = 16.0f;
 constexpr float kGlowAlpha         = 0.40f;
 constexpr float kGlowFloor         = 0.05f;  // below this heat, no blur at all
 
+// Non-zero ids make each segmented group mutually exclusive.
+constexpr int kBandRadioGroupId    = 11;
+constexpr int kAverageRadioGroupId = 12;
+
+// The signal's area fill. Sodium, and deliberately faint: it gives the trace
+// body without turning the lower half of the plot into a solid block.
+constexpr float kFillTopAlpha      = 0.26f;
+constexpr float kFillMidAlpha      = 0.08f;
+
+// A marker sits ON the trace, and now that the trace is sodium too, hue alone
+// no longer separates them -- a fresh (sodium) notch drawn straight onto a
+// lit sodium curve disappears into it. Every marker is therefore drawn over a
+// dark keyline: the canvas colour, one pixel proud on each side. It is how a
+// hardware analyser separates its cursors from its trace, and it works
+// regardless of what colour the ramp has the marker at.
+constexpr float kKeylineWidth      = 3.0f;
+
 constexpr float kFreqTicksHz[7]    = { 50.0f, 100.0f, 250.0f, 1000.0f,
                                        2500.0f, 5000.0f, 10000.0f };
 constexpr float kDbGridLines[4]    = { 0.0f, -30.0f, -60.0f, -90.0f };
@@ -62,7 +79,7 @@ constexpr float kHighlightRelWidth = 0.004f;
 } // namespace
 
 SpectrumView::SpectrumView (const NotchController& controller)
-    : controller_ (controller)
+    : controller_ (&controller)
     , tickFont_ (az::theme::monoFont())
     , bodyFont_ (az::theme::baseFont())
     , xTickLabels_ { juce::String ("50"),   juce::String ("100"), juce::String ("250"),
@@ -87,34 +104,58 @@ SpectrumView::SpectrumView (const NotchController& controller)
     bandEdgeLowHz_.reserve   ((std::size_t) 31);
     bandEdgeHighHz_.reserve  ((std::size_t) 31);
 
-    // Toolbar: two combos and a toggle, pure display state.
+    // Toolbar: two segmented groups and a toggle, pure display state. Nothing
+    // here reaches the audio engine, the detector or the notch chain.
     bandwidthLabel_.setText ("BAND", juce::dontSendNotification);
-    bandwidthBox_.addItem ("Line",    1);   // ids match rta::BandMode order
-    bandwidthBox_.addItem ("1/1 Oct", 2);
-    bandwidthBox_.addItem ("1/3 Oct", 3);
-    bandwidthBox_.setSelectedItemIndex (0, juce::dontSendNotification);
-    bandwidthBox_.onChange = [this]
+
+    for (std::size_t i = 0; i < bandChips_.size(); ++i)
     {
-        bandMode_ = static_cast<rta::BandMode> (bandwidthBox_.getSelectedId() - 1);
-        applyBandMode();
-        repaint();   // stale data keeps showing until the next frame lands
-    };
+        auto& chip = bandChips_[i];
+        chip.setClickingTogglesState (true);
+        chip.setRadioGroupId (kBandRadioGroupId);
+        chip.getProperties().set ("azStyle", "ghost");
+        chip.onClick = [this, i]
+        {
+            if (! bandChips_[i].getToggleState())
+                return;                     // the group turning the OLD one off
+
+            bandMode_ = static_cast<rta::BandMode> ((int) i);
+            applyBandMode();
+            repaint();   // stale data keeps showing until the next frame lands
+        };
+    }
 
     averageLabel_.setText ("AVG", juce::dontSendNotification);
-    averageBox_.addItem ("Off", 1);         // ids match rta::AverageMode order
-    averageBox_.addItem ("1s",  2);
-    averageBox_.addItem ("3s",  3);
-    averageBox_.addItem ("10s", 4);
-    averageBox_.setSelectedItemIndex (0, juce::dontSendNotification);
-    averageBox_.onChange = [this]
+
+    for (std::size_t i = 0; i < avgChips_.size(); ++i)
     {
-        avgMode_ = static_cast<rta::AverageMode> (averageBox_.getSelectedId() - 1);
-        repaint();
-    };
+        auto& chip = avgChips_[i];
+        chip.setClickingTogglesState (true);
+        chip.setRadioGroupId (kAverageRadioGroupId);
+        chip.getProperties().set ("azStyle", "ghost");
+        chip.onClick = [this, i]
+        {
+            if (! avgChips_[i].getToggleState())
+                return;
+
+            avgMode_ = static_cast<rta::AverageMode> ((int) i);
+            repaint();
+        };
+    }
+
+    reflectChips (bandChips_, (int) bandMode_);
+    reflectChips (avgChips_,  (int) avgMode_);
 
     peakHoldButton_.setButtonText ("Peak hold");
     peakHoldButton_.setClickingTogglesState (true);
     peakHoldButton_.setToggleState (false, juce::dontSendNotification);
+
+    // The chip carries the colour of the trace it turns on, so the control and
+    // the line it produces are visibly the same thing. `peak` is a cool
+    // near-white precisely so it can do that without claiming to be one of the
+    // semantic states (sodium, LED green, red, ice).
+    peakHoldButton_.setColour (juce::TextButton::buttonOnColourId, az::theme::peak);
+    peakHoldButton_.setColour (juce::TextButton::textColourOnId,   az::theme::peak);
     peakHoldButton_.onClick = [this]
     {
         peakHold_ = peakHoldButton_.getToggleState();
@@ -125,12 +166,19 @@ SpectrumView::SpectrumView (const NotchController& controller)
         repaint();
     };
 
-    for (auto* c : { (juce::Component*) &bandwidthLabel_, (juce::Component*) &bandwidthBox_,
-                     (juce::Component*) &averageLabel_,   (juce::Component*) &averageBox_,
+    for (auto* c : { (juce::Component*) &bandwidthLabel_,
+                     (juce::Component*) &averageLabel_,
                      (juce::Component*) &peakHoldButton_ })
     {
         c->setWantsKeyboardFocus (false);
         addAndMakeVisible (*c);
+    }
+
+    for (auto* chip : { &bandChips_[0], &bandChips_[1], &bandChips_[2],
+                        &avgChips_[0], &avgChips_[1], &avgChips_[2], &avgChips_[3] })
+    {
+        chip->setWantsKeyboardFocus (false);
+        addAndMakeVisible (*chip);
     }
     // Toolbar legends are silkscreen, and the peak toggle is a chip rather
     // than a switch: these change what the plot SHOWS, never what the DSP does,
@@ -154,6 +202,13 @@ SpectrumView::~SpectrumView()
     stopTimer();
 }
 
+template <std::size_t N>
+void SpectrumView::reflectChips (std::array<juce::TextButton, N>& chips, const int selected)
+{
+    for (std::size_t i = 0; i < N; ++i)
+        chips[i].setToggleState ((int) i == selected, juce::dontSendNotification);
+}
+
 void SpectrumView::resized()
 {
     // Thin strip across the top; the plot paints below it (paint trims the
@@ -166,17 +221,42 @@ void SpectrumView::resized()
     auto strip = getLocalBounds().removeFromTop (kToolbarHeight).reduced (gap, spacing);
     strip.removeFromLeft (kCaptionWidth);
 
+    // RING RISK sits at the strip's LEFT, next to the section name: it is the
+    // one readout here that is about the ROOM rather than about the display,
+    // and the display options are all pinned to the right.
+    strip.removeFromLeft (kRiskLegendWidth);
+    riskChipArea_ = strip.removeFromLeft (kRiskChipWidth)
+                         .withSizeKeepingCentre (kRiskChipWidth, fieldHeight - 4);
+    strip.removeFromLeft (gap);
+
     constexpr int controlH = 22;
 
     peakHoldButton_.setBounds (strip.removeFromRight (96)
                                     .withSizeKeepingCentre (96, controlH));
+    strip.removeFromRight (gap + spacing);
+
+    // Segmented groups are laid out RIGHT to LEFT, so they stay pinned to the
+    // strip's end as the window widens, and their chips butt against each
+    // other with a hairline gap rather than floating apart.
+    // Sized to the LONGEST legend in each group at the tracked legend face:
+    // "1/3 OCT" needs 70, "10S" needs 44. Sizing to the average instead is
+    // what truncated the third band chip to "1/3 O...".
+    constexpr int kAvgChipWidth  = 44;
+    constexpr int kBandChipWidth = 70;
+
+    for (int i = (int) avgChips_.size() - 1; i >= 0; --i)
+        avgChips_[(std::size_t) i]
+            .setBounds (strip.removeFromRight (kAvgChipWidth)
+                             .withSizeKeepingCentre (kAvgChipWidth - 1, controlH));
+
+    averageLabel_.setBounds (strip.removeFromRight (34));
     strip.removeFromRight (gap);
-    averageBox_    .setBounds (strip.removeFromRight (72)
-                                    .withSizeKeepingCentre (72, controlH));
-    averageLabel_  .setBounds (strip.removeFromRight (32));
-    strip.removeFromRight (gap);
-    bandwidthBox_  .setBounds (strip.removeFromRight (86)
-                                    .withSizeKeepingCentre (86, controlH));
+
+    for (int i = (int) bandChips_.size() - 1; i >= 0; --i)
+        bandChips_[(std::size_t) i]
+            .setBounds (strip.removeFromRight (kBandChipWidth)
+                             .withSizeKeepingCentre (kBandChipWidth - 1, controlH));
+
     bandwidthLabel_.setBounds (strip.removeFromRight (38));
 }
 
@@ -216,6 +296,27 @@ std::uint64_t SpectrumView::notchKey (const std::uint8_t channel,
     return (quantised << 16) | ((std::uint64_t) channel << 8) | (std::uint64_t) index;
 }
 
+void SpectrumView::setController (const NotchController& controller)
+{
+    if (controller_ == &controller)
+        return;
+
+    controller_ = &controller;
+
+    // Everything below describes the slot we just left.
+    firstSeenMs_.clear();
+    spectrumPoints_.clear();
+    peakPoints_.clear();
+    peakDb_.clear();
+    peakHoldWasOn_ = false;
+    snapshot_ = {};
+    seenSequence_  = 0;
+    drawnSequence_ = 0;
+
+    refreshFromSnapshot();
+    repaint();
+}
+
 void SpectrumView::updateNotchAges()
 {
     const double now = juce::Time::getMillisecondCounterHiRes();
@@ -243,7 +344,7 @@ void SpectrumView::updateNotchAges()
 
 void SpectrumView::refreshFromSnapshot()
 {
-    controller_.copySnapshot (snapshot_);
+    controller_->copySnapshot (snapshot_);
     seenSequence_ = snapshot_.sequence;
 
     updateNotchAges();
@@ -263,10 +364,52 @@ void SpectrumView::refreshFromSnapshot()
         repaint();
 }
 
+juce::String SpectrumView::ringRiskLabel (const RingRisk risk)
+{
+    switch (risk)
+    {
+        case RingRisk::Low:      return "LOW";
+        case RingRisk::Rising:   return "RISING";
+        case RingRisk::Critical: return "CRITICAL";
+        case RingRisk::Unavailable: break;
+    }
+
+    // NOT "low". An unwired readout that reads reassuring is worse than one
+    // that admits it has nothing, because a soundman would act on it.
+    return "N/A";
+}
+
+juce::Colour SpectrumView::ringRiskColour (const RingRisk risk)
+{
+    using namespace az::theme;
+
+    switch (risk)
+    {
+        case RingRisk::Low:      return dim;
+        case RingRisk::Rising:   return warn;
+        case RingRisk::Critical: return danger;
+        case RingRisk::Unavailable: break;
+    }
+    return faded;
+}
+
 void SpectrumView::timerCallback()
 {
-    if (isVisible())
-        refreshFromSnapshot();
+    if (! isVisible())
+        return;
+
+    // Resolved on the plot's own poll: the readout describes the same instant
+    // the trace does, and a provider that is null stays Unavailable forever
+    // without any special casing further down.
+    const auto risk = ringRiskProvider != nullptr ? ringRiskProvider()
+                                                  : RingRisk::Unavailable;
+    if (risk != ringRisk_)
+    {
+        ringRisk_ = risk;
+        repaint (riskChipArea_.expanded (az::theme::gap));
+    }
+
+    refreshFromSnapshot();
 }
 
 void SpectrumView::rebuildGeometry()
@@ -399,6 +542,35 @@ void SpectrumView::paint (juce::Graphics& g)
     drawCaption (g, "Analyser",
                  toolbar.toNearestInt().withTrimmedLeft (gap).withWidth (kCaptionWidth),
                  dim);
+
+    if (! riskChipArea_.isEmpty())
+    {
+        drawCaption (g, "Ring risk",
+                     riskChipArea_.withX (riskChipArea_.getX() - kRiskLegendWidth)
+                                  .withWidth (kRiskLegendWidth),
+                     faded);
+
+        const auto riskColour = ringRiskColour (ringRisk_);
+        const auto chip = riskChipArea_.toFloat().reduced (0.5f);
+
+        // An UNAVAILABLE chip gets no fill at all -- a hollow outline reads as
+        // "nothing to report", where a filled chip in any colour reads as a
+        // measurement.
+        if (ringRisk_ != RingRisk::Unavailable)
+        {
+            g.setColour (riskColour.withAlpha (0.16f));
+            g.fillRoundedRectangle (chip, cornerRadius);
+        }
+
+        g.setColour (riskColour.withAlpha (ringRisk_ == RingRisk::Unavailable ? 0.35f : 0.7f));
+        g.drawRoundedRectangle (chip, cornerRadius, 1.0f);
+
+        g.setColour (riskColour);
+        g.setFont (legendFont (legendFontSize - 2.0f));
+        g.drawText (ringRiskLabel (ringRisk_), riskChipArea_,
+                    juce::Justification::centred, false);
+    }
+
     drawEngravedDivider (g, toolbar.toNearestInt());
 
     const auto plot   = bounds.withTrimmedLeft (leftGutter).withTrimmedBottom (labelH);
@@ -414,7 +586,10 @@ void SpectrumView::paint (juce::Graphics& g)
     g.setColour (well);
     g.fillRect (plot);
 
-    g.setColour (shade);
+    // The grid is READ, not felt: at the groove colour it was all but
+    // invisible against the plot well, which is the whole reason a grid
+    // exists. `grid` is its own token for exactly this.
+    g.setColour (grid);
     for (const float hz : kFreqTicksHz)
     {
         const float x = std::round (xForHz (hz, plot)) + 0.5f;
@@ -480,13 +655,22 @@ void SpectrumView::paint (juce::Graphics& g)
         fillPath_.lineTo (plot.getX() + spectrumPoints_[0].x * plotW,     plot.getBottom());
         fillPath_.closeSubPath();
 
-        g.setGradientFill ({ text.withAlpha (0.16f), plot.getX(), plot.getY(),
-                             text.withAlpha (0.0f),  plot.getX(), plot.getBottom(),
-                             false });
+        // Sodium, with the fill dying away well before the floor: the signal
+        // reads as lit rather than as a grey plot line, and the plot still has
+        // air in it. The notch markers stay legible on top because they are
+        // SOLID and carry flags and stems, and because a settled one is ice --
+        // which on an amber field is the strongest contrast on screen.
+        juce::ColourGradient body (accent.withAlpha (kFillTopAlpha),
+                                   plot.getX(), plot.getY(),
+                                   accent.withAlpha (0.0f),
+                                   plot.getX(), plot.getBottom(),
+                                   false);
+        body.addColour (0.55, accent.withAlpha (kFillMidAlpha));
+        g.setGradientFill (body);
         g.fillPath (fillPath_);
 
-        g.setColour (text.withAlpha (0.88f));
-        g.strokePath (tracePath_, juce::PathStrokeType (1.3f));
+        g.setColour (trace);
+        g.strokePath (tracePath_, juce::PathStrokeType (1.4f));
     }
     else if (bandMode_ != rta::BandMode::Line)
     {
@@ -503,10 +687,11 @@ void SpectrumView::paint (juce::Graphics& g)
             const float y  = yForDb (juce::jlimit (kMinDb, kMaxDb, bandLevelsDb_[i]), plot);
 
             // A one-pixel gutter between bars: they read as discrete bands
-            // rather than as a solid block with notches cut in it.
-            g.setColour (text.withAlpha (0.30f));
+            // rather than as a solid block with notches cut in it. Lit cap on
+            // a dimmer body, same sodium the line trace uses.
+            g.setColour (accent.withAlpha (0.26f));
             g.fillRect (x0, y, juce::jmax (1.0f, x1 - x0 - 1.0f), bottom - y);
-            g.setColour (text.withAlpha (0.75f));
+            g.setColour (trace);
             g.fillRect (x0, y, juce::jmax (1.0f, x1 - x0 - 1.0f), 1.5f);
         }
     }
@@ -514,7 +699,7 @@ void SpectrumView::paint (juce::Graphics& g)
     // Peak hold: a thin dim trace above the signal, below the markers.
     if (peakHold_ && peakPoints_.size() > 1)
     {
-        g.setColour (dim.withAlpha (0.8f));
+        g.setColour (peak.withAlpha (0.9f));
         const std::size_t n = peakPoints_.size();
         for (std::size_t i = 1; i < n; ++i)
         {
@@ -591,16 +776,25 @@ void SpectrumView::paint (juce::Graphics& g)
         const float apexY = juce::jmin (plot.getBottom(), top + length);
 
         // The stem runs the full plot height so the notch's frequency is
-        // readable against the trace even where the trace is loud.
+        // readable against the trace even where the trace is loud. Dark
+        // keyline first, colour on top -- see kKeylineWidth.
+        const float stemX = std::round (x) + 0.5f;
+
+        g.setColour (background.withAlpha (0.85f));
+        g.drawLine (stemX, top, stemX, plot.getBottom(), kKeylineWidth);
+
         g.setColour (colour.withAlpha (kStemAlphaSettled
                                        + (kStemAlphaFresh - kStemAlphaSettled) * heat));
-        g.drawLine (std::round (x) + 0.5f, top, std::round (x) + 0.5f, plot.getBottom(), 1.0f);
+        g.drawLine (stemX, top, stemX, plot.getBottom(), 1.0f);
 
         markerPath_.clear();
         markerPath_.startNewSubPath (x - kMarkerHalfWidth, top);
         markerPath_.lineTo (x + kMarkerHalfWidth, top);
         markerPath_.lineTo (x, apexY);
         markerPath_.closeSubPath();
+
+        g.setColour (background.withAlpha (0.85f));
+        g.strokePath (markerPath_, juce::PathStrokeType (kKeylineWidth));
 
         g.setColour (colour);
         g.fillPath (markerPath_);
@@ -620,6 +814,8 @@ void SpectrumView::paint (juce::Graphics& g)
         {
             const juce::Rectangle<float> flag (x - flagW * 0.5f, plot.getY(),
                                                flagW, kFlagHeight);
+            g.setColour (background.withAlpha (0.85f));
+            g.fillRect (flag.expanded (1.0f));
             g.setColour (colour);
             g.fillRect (flag);
             g.setColour (background);

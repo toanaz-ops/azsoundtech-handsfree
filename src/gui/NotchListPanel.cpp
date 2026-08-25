@@ -34,7 +34,7 @@ juce::String minusSign()
 } // namespace
 
 NotchListPanel::NotchListPanel (const NotchController& controller, ClockFn nowMs)
-    : controller_ (controller),
+    : controller_ (&controller),
       nowMs_ (nowMs ? std::move (nowMs)
                     : ClockFn { [] {
                           return std::chrono::duration<double,
@@ -67,7 +67,7 @@ std::uint64_t NotchListPanel::identityKey (const std::uint8_t channel,
 
 void NotchListPanel::refreshFromSnapshot()
 {
-    controller_.copySnapshot (snapshot_);
+    controller_->copySnapshot (snapshot_);
 
     const double now = nowMs_();
     const std::uint32_t count = std::min<std::uint32_t> (
@@ -113,6 +113,41 @@ void NotchListPanel::refreshFromSnapshot()
         else
             ++it;
     }
+
+    repaint();
+}
+
+void NotchListPanel::setController (const NotchController& controller)
+{
+    if (controller_ == &controller)
+        return;
+
+    controller_ = &controller;
+
+    sightings_.clear();
+    rows_.clear();
+
+    refreshFromSnapshot();
+}
+
+void NotchListPanel::setDisplayedSlot (const int slotIndex)
+{
+    // Named in the caption rather than shown as a separate field: the table
+    // has one subject, and "which slot" is part of what it is, not a property
+    // of it. The separator is a middle dot, not a colon -- these are two
+    // labels, not a label and a value.
+    // The separator is built from a CODE POINT, not written into the literal.
+    // MSVC reads a source literal through the execution charset, and a middle
+    // dot written inline comes back as "A-circumflex, middle dot" on screen --
+    // the same trap minusSign() above exists to dodge. Repo rule: UTF-8 has to
+    // survive every read-modify-write, and that includes the compiler's read.
+    const auto separator = juce::String ("  ")
+                         + juce::String::charToString ((juce::juce_wchar) 0x00b7)
+                         + juce::String ("  ");
+
+    caption_ = juce::String ("Active notches") + separator
+             + juce::String ("Slot ")
+             + juce::String (slotIndex + 1).paddedLeft ('0', 2);
 
     repaint();
 }
@@ -179,7 +214,7 @@ void NotchListPanel::paint (juce::Graphics& g)
     // is the number a soundman actually wants off this panel at a distance --
     // "how many is it holding" -- so it gets the accent and its own outline.
     auto caption = area.removeFromTop (kCaptionHeight);
-    drawCaption (g, "Active notches", caption.withTrimmedLeft ((int) kLeftPad), dim);
+    drawCaption (g, caption_, caption.withTrimmedLeft ((int) kLeftPad), dim);
 
     if (! rows_.empty())
     {

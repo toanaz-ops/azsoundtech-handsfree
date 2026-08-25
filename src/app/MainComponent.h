@@ -29,6 +29,7 @@
 #include "gui/ModeRail.h"
 #include "gui/NotchListPanel.h"
 #include "gui/SlotPanel.h"
+#include "gui/SlotTabs.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
@@ -104,6 +105,22 @@ public:
     // Viewport was never given a sized child (the 2026-08-24 invisible-table
     // bug), so tests pin it to the panel's preferred height.
     [[nodiscard]] juce::Rectangle<int> slotTableBoundsForTest() const { return slotPanel_.getBounds(); }
+
+    // Which routing slot the analyser and the notch table are showing.
+    //
+    // The app has always had one detector per slot; until the masthead grew a
+    // selector, the GUI could only ever display slot 0's. This is the ONE
+    // route that changes it -- both display panels are re-pointed together,
+    // because showing one slot's spectrum beside another slot's notch list
+    // would be worse than showing neither.
+    //
+    // Out-of-range indices, and slots with no row in the routing table, are
+    // ignored rather than clamped.
+    void setDisplayedSlot (int slotIndex);
+    [[nodiscard]] int getDisplayedSlot() const { return displayedSlot_; }
+
+    // TEST ACCESSOR ONLY -- drive the masthead selector directly.
+    [[nodiscard]] gui::SlotTabs& getSlotTabsForTest() { return slotTabs_; }
 
     // The DETECTION tuning strip (brief 2026-08-24) and its bounds -- same
     // headless-test pattern as the accessors above.
@@ -191,6 +208,7 @@ private:
     gui::SpectrumView spectrumView_;
     gui::ModeRail     modeRail_;
     gui::StatusBadge  statusBadge_;      // masthead furniture (see the ctor)
+    gui::SlotTabs     slotTabs_;         // masthead furniture likewise
     gui::DeviceDrawer deviceDrawer_;
 
     // The 8-slot routing table (Task 7). Reads the engine in refresh();
@@ -221,6 +239,10 @@ private:
     // The masthead readout turns amber when the engine is NOT running: a
     // stopped device mid-show is a fault, not a neutral state.
     bool rigIsHealthy_ = false;
+
+    // The slot both display panels are pointed at. 0 until the user picks
+    // another, which is the slot every rig has.
+    int displayedSlot_ = 0;
 
     // Same figure paint() and resized() both need: the cell the status badge
     // occupies at the masthead's right end.

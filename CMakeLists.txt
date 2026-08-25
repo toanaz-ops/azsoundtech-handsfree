@@ -72,6 +72,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.h
     ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SlotTabs.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SlotTabs.h
     ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.h
