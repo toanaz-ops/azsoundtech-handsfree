@@ -2,6 +2,8 @@
 
 #include "gui/theme/AzTheme.h"
 
+#include <utility>
+
 namespace gui
 {
 
@@ -17,28 +19,40 @@ ModeRail::ModeRail (Orientation orientation)
 {
     using namespace az::theme;
 
-    for (auto* button : { &soundcheckButton, &autoButton, &bypassButton })
+    // Each mode is a latching switch, and the LAMP COLOUR is what its ON state
+    // means -- not decoration, and not the same for all three:
+    //
+    //   SOUNDCHECK  amber   a timed state that will end on its own
+    //   AUTO        green   the LED SIG green; the only green in the app
+    //   BYPASS      red     filters out, which mid-show is a warning
+    //
+    // The theme's LookAndFeel reads buttonOnColourId to draw the lamp, so a
+    // component says what ON means without knowing how a switch is drawn.
+    const std::pair<juce::TextButton*, juce::Colour> modes[] = {
+        { &soundcheckButton, warn   },
+        { &autoButton,       ok     },
+        { &bypassButton,     danger },
+    };
+
+    for (const auto& [button, lamp] : modes)
     {
         button->setClickingTogglesState (true);
         button->setRadioGroupId (kModeRadioGroupId);
-
-        // Spec section 2: the active mode gets an ok-green background tint so
-        // "is it protecting?" reads from across the room. Text switches to the
-        // background colour for contrast on that tint.
-        button->setColour (juce::TextButton::buttonOnColourId, ok);
-        button->setColour (juce::TextButton::textColourOnId,   background);
-
+        button->setColour (juce::TextButton::buttonOnColourId, lamp);
         addAndMakeVisible (*button);
     }
 
-    // Destructive action: danger colour, dark text for contrast.
-    clearAllButton.setColour (juce::TextButton::buttonColourId,  danger);
-    clearAllButton.setColour (juce::TextButton::textColourOffId, background);
+    // CLEAR ALL is destructive and is NOT drawn as a switch: an outline that
+    // only fills under the pointer. A filled red slab beside three filled mode
+    // slabs is a slab somebody eventually hits by accident, in the dark.
+    clearAllButton.getProperties().set ("azStyle", "danger");
     addAndMakeVisible (clearAllButton);
 
-    countdownLabel.setFont (monoFont());
+    // The countdown is a NUMBER, so it is mono and it is big: it is read at a
+    // glance from across a room while the room is being swept.
+    countdownLabel.setFont (monoFont (18.0f));
     countdownLabel.setColour (juce::Label::textColourId, warn);
-    countdownLabel.setJustificationType (juce::Justification::centredLeft);
+    countdownLabel.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (countdownLabel);
 
     // The radio group deselects the previous mode through setToggleState with
@@ -91,6 +105,16 @@ ModeRail::ModeRail (Orientation orientation)
 ModeRail::~ModeRail()
 {
     stopTimer();
+}
+
+void ModeRail::setDisplayedMode (const Mode mode)
+{
+    // All three set EXPLICITLY rather than relying on the radio group to clear
+    // the others: the group's own clearing runs through the notification path
+    // this method exists to avoid.
+    soundcheckButton.setToggleState (mode == Mode::Soundcheck, juce::dontSendNotification);
+    autoButton      .setToggleState (mode == Mode::Auto,       juce::dontSendNotification);
+    bypassButton    .setToggleState (mode == Mode::Bypass,     juce::dontSendNotification);
 }
 
 void ModeRail::updateCountdown()
@@ -146,44 +170,41 @@ void ModeRail::resized()
 {
     using namespace az::theme;
 
-    constexpr float cellW  = (float) buttonCellWidth;
-    constexpr float cellH  = (float) buttonCellHeight;
-    constexpr float gapPx  = (float) gap;
-    constexpr float labelH = 20.0f;
-
     juce::FlexBox fb;
     fb.flexDirection = orientation_ == Orientation::Vertical
                            ? juce::FlexBox::Direction::column
                            : juce::FlexBox::Direction::row;
+    fb.alignItems = juce::FlexBox::AlignItems::stretch;
 
-    auto cellOf = [&cellW, &cellH, &gapPx, orientation = orientation_] (juce::Component& c)
+    const bool vertical = orientation_ == Orientation::Vertical;
+    const float cellW   = (float) (vertical ? railWidth : buttonCellWidth);
+    const float cellH   = (float) buttonCellHeight;
+    const float gapPx   = (float) gap;
+
+    // A trailing gap on every cell but the last keeps the row on the 8 px grid
+    // without the FlexBox gap property (which this JUCE version lacks).
+    auto cell = [vertical, gapPx] (juce::Component& c, float w, float h)
     {
-        auto item = juce::FlexItem (c).withWidth (cellW).withHeight (cellH);
-        if (orientation == Orientation::Vertical)
-            item.withMargin ({ 0.0f, 0.0f, gapPx, 0.0f }); // trailing gap keeps cells on the 8px grid
-        else
-            item.withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
-        return item;
+        auto item = juce::FlexItem (c).withWidth (w).withHeight (h);
+        return vertical ? item.withMargin ({ 0.0f, 0.0f, gapPx, 0.0f })
+                        : item.withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
     };
 
-    auto labelItem = juce::FlexItem (countdownLabel).withHeight (labelH);
-    if (orientation_ == Orientation::Vertical)
-    {
-        labelItem.withWidth (cellW).withMargin ({ 0.0f, 0.0f, gapPx, 0.0f });
-        fb.items.add (cellOf (soundcheckButton));
-        fb.items.add (labelItem);
-        fb.items.add (cellOf (autoButton), cellOf (bypassButton),
-                      juce::FlexItem().withFlex (1.0f), // push CLEAR ALL to the rail's end
-                      cellOf (clearAllButton));
-    }
-    else
-    {
-        // Horizontal: the countdown takes the leftover width between the
-        // mode cells and CLEAR ALL.
-        labelItem.withFlex (1.0f).withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
-        fb.items.add (cellOf (soundcheckButton), cellOf (autoButton),
-                      cellOf (bypassButton), labelItem, cellOf (clearAllButton));
-    }
+    fb.items.add (cell (soundcheckButton, cellW, cellH));
+    fb.items.add (cell (autoButton,       cellW, cellH));
+    fb.items.add (cell (bypassButton,     cellW, cellH));
+
+    // The countdown takes the slack between the modes and CLEAR ALL, so the
+    // destructive control is always pinned at the far end of the transport --
+    // as far from the three switches a hand reaches for as the row allows.
+    auto readout = juce::FlexItem (countdownLabel).withFlex (1.0f);
+    readout = vertical ? readout.withWidth (cellW).withMargin ({ 0.0f, 0.0f, gapPx, 0.0f })
+                       : readout.withHeight (cellH).withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
+    fb.items.add (readout);
+
+    fb.items.add (juce::FlexItem (clearAllButton)
+                      .withWidth ((float) (vertical ? railWidth : clearCellWidth))
+                      .withHeight (cellH));
 
     fb.performLayout (getLocalBounds());
 }

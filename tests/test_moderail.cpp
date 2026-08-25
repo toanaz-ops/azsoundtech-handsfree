@@ -187,3 +187,52 @@ TEST (StatusBadge, SetStateIsReflectedInGetState)
     badge.setState (gui::ProtectionState::Bypassed);
     EXPECT_EQ (badge.getState(), gui::ProtectionState::Bypassed);
 }
+
+//==============================================================================
+// Reflecting the ENGINE's mode, added 2026-08-25 with the console rebuild.
+//
+// The lit lamp on a switch is the primary "what mode am I in" signal in this
+// design. Before setDisplayedMode existed the rail only ever showed the last
+// click it received, so a freshly-launched window read BYPASSED on the status
+// badge with no switch lit at all.
+
+TEST (ModeRail, SetDisplayedModeLightsExactlyOneSwitch)
+{
+    gui::ModeRail rail;
+
+    rail.setDisplayedMode (gui::ModeRail::Mode::Bypass);
+    EXPECT_FALSE (rail.soundcheckButton.getToggleState());
+    EXPECT_FALSE (rail.autoButton.getToggleState());
+    EXPECT_TRUE  (rail.bypassButton.getToggleState());
+
+    rail.setDisplayedMode (gui::ModeRail::Mode::Auto);
+    EXPECT_FALSE (rail.soundcheckButton.getToggleState());
+    EXPECT_TRUE  (rail.autoButton.getToggleState());
+    EXPECT_FALSE (rail.bypassButton.getToggleState());
+
+    rail.setDisplayedMode (gui::ModeRail::Mode::Soundcheck);
+    EXPECT_TRUE  (rail.soundcheckButton.getToggleState());
+    EXPECT_FALSE (rail.autoButton.getToggleState());
+    EXPECT_FALSE (rail.bypassButton.getToggleState());
+}
+
+TEST (ModeRail, SetDisplayedModeNeverRequestsTheModeItIsShowing)
+{
+    // The whole point of a separate reflect path: it must not loop back into
+    // the engine. A rail that re-requested what it was told to display would
+    // fight anything else that sets the mode.
+    gui::ModeRail rail;
+
+    int soundchecks = 0, autos = 0, bypasses = 0;
+    rail.onSoundcheck = [&soundchecks] { ++soundchecks; };
+    rail.onAuto       = [&autos]       { ++autos; };
+    rail.onBypass     = [&bypasses]    { ++bypasses; };
+
+    rail.setDisplayedMode (gui::ModeRail::Mode::Bypass);
+    rail.setDisplayedMode (gui::ModeRail::Mode::Auto);
+    rail.setDisplayedMode (gui::ModeRail::Mode::Soundcheck);
+
+    EXPECT_EQ (soundchecks, 0);
+    EXPECT_EQ (autos,       0);
+    EXPECT_EQ (bypasses,    0);
+}

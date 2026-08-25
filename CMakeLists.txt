@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.22)
 
 project(HandsFree VERSION 1.0.0)
 
@@ -8,6 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Add JUCE as subdirectory
 add_subdirectory(external/JUCE)
+
+# melatonin_blur -- MIT, https://github.com/sudara/melatonin_blur
+# Figma/CSS-accurate drop and inner shadows on JUCE paths, with an internal
+# multi-layer cache so a shadow that has not changed is a blit, not a blur.
+# JUCE ships no usable soft shadow (DropShadowEffect is a bilinear smear), and
+# the console UI leans on elevation and on the sodium glow around a
+# just-fired notch. Declared BEFORE juce_add_gui_app, per the module docs.
+juce_add_module(${CMAKE_SOURCE_DIR}/external/melatonin_blur)
 
 # ASIO SDK path
 set(JUCE_ASIO_SDK_PATH "${CMAKE_SOURCE_DIR}/external/asiosdk" CACHE PATH "Path to ASIO SDK")
@@ -35,56 +43,70 @@ if(HANDSFREE_HAVE_ASIO)
     target_compile_definitions(HandsFree PRIVATE JUCE_ASIO=1)
 endif()
 
-# Source files
+# THE source list, shared by all three targets that compile this code: the
+# app, the test binary and the snapshot tool. It was duplicated by hand in
+# tests/CMakeLists.txt before, which is how a file can end up compiled into one
+# target and not another.
+#
+# Paths are ABSOLUTE: tools/CMakeLists.txt and tests/CMakeLists.txt resolve a
+# relative path against their OWN directory, so a bare "src/..." here would
+# silently not exist for them.
+#
+# src/main.cpp is NOT here -- it is the app's entry point, and the other two
+# targets bring their own.
+set(HANDSFREE_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/LicenseManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/LicenseViewModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/PresetFirstRun.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/LicenseManager.h
+    ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.h
+    ${CMAKE_SOURCE_DIR}/src/app/PresetManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/PresetManager.h
+    ${CMAKE_SOURCE_DIR}/src/app/MainComponent.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/MainComponent.h
+    ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
+    ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DeviceViewModel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SlotPanel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/ModeBar.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/ModeBar.h
+    ${CMAKE_SOURCE_DIR}/src/gui/ModeRail.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/ModeRail.h
+    ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.h
+    ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.h
+    ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.h
+    ${CMAKE_SOURCE_DIR}/src/gui/theme/AzTheme.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/theme/AzTheme.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/Biquad.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/Biquad.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/Detector.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/Detector.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/PeakinessAnalyzer.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/PeakinessAnalyzer.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/CandidateScorer.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/CandidateScorer.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/NotchCommand.h
+    ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
+)
+
 target_sources(HandsFree PRIVATE
     src/main.cpp
-    src/app/AudioEngine.cpp
-    src/app/LicenseManager.cpp
-    src/app/LicenseViewModel.cpp
-    src/app/PresetFirstRun.cpp
-    src/app/LicenseManager.h
-    src/app/AudioEngine.h
-    src/app/PresetManager.cpp
-    src/app/PresetManager.h
-    src/app/MainComponent.cpp
-    src/app/MainComponent.h
-    src/gui/DeviceDrawer.cpp
-    src/gui/DeviceDrawer.h
-    src/gui/DevicePanel.cpp
-    src/gui/DevicePanel.h
-    src/gui/DeviceViewModel.cpp
-    src/gui/DeviceViewModel.h
-    src/gui/SlotPanel.cpp
-    src/gui/SlotPanel.h
-    src/gui/TuningPanel.cpp
-    src/gui/TuningPanel.h
-    src/gui/ModeBar.cpp
-    src/gui/ModeBar.h
-    src/gui/ModeRail.cpp
-    src/gui/ModeRail.h
-    src/gui/NotchListPanel.cpp
-    src/gui/NotchListPanel.h
-    src/gui/StatusBadge.cpp
-    src/gui/StatusBadge.h
-    src/gui/SpectrumView.cpp
-    src/gui/SpectrumView.h
-    src/gui/StatusBar.cpp
-    src/gui/StatusBar.h
-    src/gui/theme/AzTheme.cpp
-    src/gui/theme/AzTheme.h
-    src/dsp/Biquad.cpp
-    src/dsp/Biquad.h
-    src/dsp/Detector.cpp
-    src/dsp/Detector.h
-    src/dsp/PeakinessAnalyzer.cpp
-    src/dsp/PeakinessAnalyzer.h
-    src/dsp/CandidateScorer.cpp
-    src/dsp/CandidateScorer.h
-    src/dsp/NotchChain.cpp
-    src/dsp/NotchChain.h
-    src/dsp/NotchCommand.h
-    src/app/NotchController.cpp
-    src/app/NotchController.h
+    ${HANDSFREE_CORE_SOURCES}
 )
 
 # Generates JuceLibraryCode/JuceHeader.h for this target. Without it the
@@ -99,6 +121,7 @@ target_include_directories(HandsFree PRIVATE
 # Link JUCE modules
 target_link_libraries(HandsFree
     PRIVATE
+        melatonin_blur
         juce::juce_audio_devices
         juce::juce_audio_utils
         juce::juce_cryptography
@@ -121,3 +144,8 @@ target_compile_definitions(HandsFree
 # Enable testing
 enable_testing()
 add_subdirectory(tests)
+
+# Dev tooling. Not part of the shipped product: HandsFreeSnapshot renders the
+# console to PNG with no window, so a GUI change can be reviewed without
+# screen-capturing a live app.
+add_subdirectory(tools)

@@ -63,10 +63,13 @@ private:
 
     AudioEngine& engine_;
 
-    juce::Label deviceTypeLabel_ { {}, "Audio Device:" };
-    juce::Label deviceLabel_     { {}, "Device:" };
-    juce::Label sampleRateLabel_ { {}, "Sample Rate:" };
-    juce::Label bufferSizeLabel_ { {}, "Buffer:" };
+    // Panel legends, not sentences: silkscreen on real gear does not end in a
+    // colon and does not repeat the word "audio" three times. The combo beside
+    // each one already says what it holds.
+    juce::Label deviceTypeLabel_ { {}, "Driver" };
+    juce::Label deviceLabel_     { {}, "Device" };
+    juce::Label sampleRateLabel_ { {}, "Rate" };
+    juce::Label bufferSizeLabel_ { {}, "Buffer" };
 
     // Kept alongside the combos so a selection maps back to a value without
     // parsing the item text we just formatted.

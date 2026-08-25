@@ -13,11 +13,16 @@ namespace
 // Column widths, left to right. STATUS takes whatever remains. Chosen so the
 // narrowest sensible panel (~360 px) still fits every formatted cell without
 // truncation at the theme's 13 px mono face.
-constexpr float kLeftPad    = 6.0f;
-constexpr float kColIdW     = 30.0f;
-constexpr float kColFreqW   = 88.0f;
-constexpr float kColDepthW  = 96.0f;
-constexpr float kColQW      = 44.0f;
+constexpr float kLeftPad    = 10.0f;
+constexpr float kColIdW     = 26.0f;
+constexpr float kColFreqW   = 96.0f;   // includes the age dot ahead of the value
+constexpr float kColDepthW  = 88.0f;
+constexpr float kColQW      = 40.0f;
+
+// The age dot: the same hot-to-ice ramp the analyser's notch stems use, so a
+// row and its stem always read as the same object.
+constexpr float kDotSize    = 7.0f;
+constexpr float kDotGap     = 9.0f;
 
 // The typographic minus of the depth format. Built from a code point rather
 // than a string literal so the compiler's execution charset can never mangle
@@ -92,11 +97,12 @@ void NotchListPanel::refreshFromSnapshot()
         if (const auto it = sightings_.find (key); it != sightings_.end())
             ageMs = now - it->second.firstSeenMs;
 
-        rows_.push_back ({ juce::String (i + 1),
+        rows_.push_back ({ juce::String (i + 1).paddedLeft ('0', 2),
                            formatFrequency (notch.frequency),
                            formatDepthDb (notch.depthDB),
                            formatQ (notch.Q),
-                           formatAgeMs (juce::jmax (0.0, ageMs)) });
+                           formatAgeMs (juce::jmax (0.0, ageMs)),
+                           juce::jmax (0.0, ageMs) });
     }
 
     // 3. Expire identities not seen recently (documented timeout above).
@@ -162,56 +168,117 @@ void NotchListPanel::visibilityChanged()
 
 void NotchListPanel::paint (juce::Graphics& g)
 {
-    g.fillAll (az::theme::background);
+    using namespace az::theme;
 
-    const auto frame = getLocalBounds().toFloat();
-    g.setColour (az::theme::border);
-    g.drawRect (frame, 1.0f);
+    g.fillAll (panel);
 
-    // Column origins.
+    auto area = getLocalBounds();
+
+    //--------------------------------------------------------------------
+    // Caption band: the section name, and the live count as a chip. The count
+    // is the number a soundman actually wants off this panel at a distance --
+    // "how many is it holding" -- so it gets the accent and its own outline.
+    auto caption = area.removeFromTop (kCaptionHeight);
+    drawCaption (g, "Active notches", caption.withTrimmedLeft ((int) kLeftPad), dim);
+
+    if (! rows_.empty())
+    {
+        const auto chip = caption.removeFromRight (46).withSizeKeepingCentre (34, 17);
+
+        g.setColour (accent.withAlpha (0.35f));
+        g.drawRoundedRectangle (chip.toFloat().reduced (0.5f), cornerRadius, 1.0f);
+
+        g.setColour (accent);
+        g.setFont (monoFont (baseFontSize - 2.0f));
+        g.drawText (juce::String ((int) rows_.size()), chip,
+                    juce::Justification::centred, false);
+    }
+
+    drawEngravedDivider (g, caption.withTrimmedBottom (spacing));
+
+    //--------------------------------------------------------------------
+    // Column origins. FREQ carries the age dot, so its text starts inset.
+    const auto frame = area.toFloat();
     const float x0 = frame.getX() + kLeftPad;
     const float x1 = x0 + kColIdW;
     const float x2 = x1 + kColFreqW;
     const float x3 = x2 + kColDepthW;
     const float x4 = x3 + kColQW;
+    const float statusW = juce::jmax (0.0f, frame.getRight() - x4 - kLeftPad);
 
-    g.setFont (tableFont_);
+    auto header = area.removeFromTop (kHeaderHeight);
+    g.setColour (faded);
+    g.setFont (legendFont (legendFontSize - 2.0f));
+    g.drawText ("#",     (int) x0, header.getY(), (int) kColIdW,    header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("FREQ",  (int) x1, header.getY(), (int) kColFreqW,  header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("DEPTH", (int) x2, header.getY(), (int) kColDepthW, header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("Q",     (int) x3, header.getY(), (int) kColQW,     header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("HELD",  (int) x4, header.getY(), (int) statusW,    header.getHeight(), juce::Justification::centredLeft);
 
-    // Header -- mono, dim (binding spec).
-    g.setColour (az::theme::dim);
-    const float headerY = frame.getY();
-    g.drawText ("#",      x0, headerY, kColIdW    - 4.0f, (float) kHeaderHeight, juce::Justification::centredLeft);
-    g.drawText ("FREQ",   x1, headerY, kColFreqW  - 4.0f, (float) kHeaderHeight, juce::Justification::centredLeft);
-    g.drawText ("DEPTH",  x2, headerY, kColDepthW - 4.0f, (float) kHeaderHeight, juce::Justification::centredLeft);
-    g.drawText ("Q",      x3, headerY, kColQW     - 4.0f, (float) kHeaderHeight, juce::Justification::centredLeft);
-    g.drawText ("STATUS", x4, headerY, frame.getRight() - x4 - kLeftPad, (float) kHeaderHeight, juce::Justification::centredLeft);
+    g.setColour (border);
+    g.fillRect (area.getX(), header.getBottom(), area.getWidth(), 1);
 
-    const float headerBottom = headerY + (float) kHeaderHeight;
-    g.drawLine (frame.getX(), headerBottom, frame.getRight(), headerBottom);
-
+    //--------------------------------------------------------------------
+    // Empty state: an invitation, not a void.
     if (rows_.empty())
     {
-        g.drawText (noNotchesLabel_,
-                    frame.reduced (kLeftPad, 0.0f).withTop (headerBottom),
-                    juce::Justification::centred);
+        g.setColour (faded);
+        g.setFont (baseFont());
+        g.drawText (noNotchesLabel_, area, juce::Justification::centred, false);
         return;
     }
 
-    // Rows separated by border hairlines; cells in the primary text colour.
-    float rowTop = headerBottom;
+    //--------------------------------------------------------------------
+    // Rows. Every row carries its own age colour on the dot before FREQ, and
+    // the HELD column is dim -- the frequency is what gets read, the age only
+    // qualifies it.
+    float rowTop = (float) area.getY();
+
     for (const auto& row : rows_)
     {
-        g.setColour (az::theme::border);
-        g.drawLine (frame.getX(), rowTop, frame.getRight(), rowTop);
+        if (rowTop + (float) kRowHeight > frame.getBottom())
+            break;   // a short column clips rather than painting past its edge
 
-        g.setColour (az::theme::text);
-        g.drawText (row.id,     x0, rowTop, kColIdW    - 4.0f, (float) kRowHeight, juce::Justification::centredLeft);
-        g.drawText (row.freq,   x1, rowTop, kColFreqW  - 4.0f, (float) kRowHeight, juce::Justification::centredLeft);
-        g.drawText (row.depth,  x2, rowTop, kColDepthW - 4.0f, (float) kRowHeight, juce::Justification::centredLeft);
-        g.drawText (row.q,      x3, rowTop, kColQW     - 4.0f, (float) kRowHeight, juce::Justification::centredLeft);
-        g.drawText (row.status, x4, rowTop, frame.getRight() - x4 - kLeftPad, (float) kRowHeight, juce::Justification::centredLeft);
+        const auto ageColour = notchColour (row.ageMs);
+
+        g.setFont (tableFont_);
+
+        g.setColour (faded);
+        g.drawText (row.id, x0, rowTop, kColIdW - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+
+        // THE RAMP, on a 7 px dot: sodium the instant it fires, ice once it
+        // has held. A fresh one also gets a soft ring, so a notch landing
+        // during a show catches the eye without anything animating.
+        const float heat = notchHeat (row.ageMs);
+        const auto  dot  = juce::Rectangle<float> (kDotSize, kDotSize)
+                               .withCentre ({ x1 + kDotSize * 0.5f,
+                                              rowTop + (float) kRowHeight * 0.5f });
+        if (heat > 0.0f)
+        {
+            g.setColour (ageColour.withAlpha (0.30f * heat));
+            g.fillEllipse (dot.expanded (3.0f * heat));
+        }
+        g.setColour (ageColour);
+        g.fillEllipse (dot);
+
+        g.setColour (text);
+        g.drawText (row.freq, x1 + kDotGap + kDotSize, rowTop,
+                    kColFreqW - kDotGap - kDotSize - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+        g.drawText (row.depth, x2, rowTop, kColDepthW - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+
+        g.setColour (dim);
+        g.drawText (row.q, x3, rowTop, kColQW - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+        g.drawText (row.status, x4, rowTop, statusW, (float) kRowHeight,
+                    juce::Justification::centredLeft);
 
         rowTop += (float) kRowHeight;
+
+        g.setColour (shade);
+        g.fillRect (frame.getX(), rowTop, frame.getWidth(), 1.0f);
     }
 }
 

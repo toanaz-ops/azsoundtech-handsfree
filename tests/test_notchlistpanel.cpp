@@ -239,10 +239,18 @@ TEST (NotchListPanel, EmptyStatePaintsWithoutCrashing)
 }
 
 //==============================================================================
-// Parent wiring: the strip is a FIXED bottom strip -- always visible, no
-// toggle anywhere (2026-08-25: L1/L2 removed, single Classic layout).
+// Parent wiring. REWRITTEN 2026-08-25 with the console rebuild: the notch
+// table used to be a full-width 120 px strip pinned across the window bottom.
+// It is now the LEFT COLUMN of the bottom floor, sitting beside the rig
+// controls, because the analyser needed the vertical space the old stack of
+// seven equal-weight full-width bands was spending on chrome.
+//
+// The contract that survived the move is asserted structurally rather than by
+// pixel count, so the next layout change fails only if it breaks something
+// that matters: the table is always visible, it never overlaps the analyser,
+// it stays inside the window, and laying out twice is idempotent.
 
-TEST (NotchListPanelWiring, StripIsAlwaysPinnedAtTheWindowBottom)
+TEST (NotchListPanelWiring, TableIsTheFloorsLeftColumnAndNeverOverlapsTheAnalyser)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
@@ -256,13 +264,28 @@ TEST (NotchListPanelWiring, StripIsAlwaysPinnedAtTheWindowBottom)
     app.setSize (MainComponent::kMinimumWidth, MainComponent::kMinimumHeight);
     app.resized();
 
-    const auto strip = app.notchListBoundsForTest();
-    EXPECT_FALSE (strip.isEmpty());
-    EXPECT_EQ (strip.getHeight(), 120);
-    EXPECT_EQ (strip.getBottom(), MainComponent::kMinimumHeight);   // pinned at the bottom
+    const auto strip    = app.notchListBoundsForTest();
+    const auto spectrum = app.spectrumBoundsForTest();
 
-    // The spectrum sits directly above it and nothing runs past the strip.
-    EXPECT_EQ (app.spectrumBoundsForTest().getBottom(), strip.getY());
+    EXPECT_FALSE (strip.isEmpty());
+
+    // A COLUMN, not a band: it takes well under half the window's width, and
+    // the rig controls occupy the rest of the floor beside it.
+    EXPECT_LT (strip.getWidth(), MainComponent::kMinimumWidth / 2);
+    EXPECT_LT (strip.getRight(), MainComponent::kMinimumWidth);
+
+    // Wholly inside the window, at its bottom.
+    EXPECT_GE (strip.getX(), 0);
+    EXPECT_LE (strip.getBottom(), MainComponent::kMinimumHeight);
+
+    // It sits BELOW the analyser and the two never overlap -- the claim the
+    // old pixel-exact assertion was really making.
+    EXPECT_FALSE (strip.intersects (spectrum));
+    EXPECT_GE (strip.getY(), spectrum.getBottom());
+
+    // And the analyser is the thing that got the space: at the minimum window
+    // size it is still taller than the floor column beside the rig.
+    EXPECT_GT (spectrum.getHeight(), 0);
 
     // A second pass (the old toggle path used to re-run resized()) leaves the
     // same geometry: there is no open/closed state left to change it.

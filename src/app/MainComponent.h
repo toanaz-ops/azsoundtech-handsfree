@@ -40,10 +40,19 @@ class MainComponent : public juce::Component,
 {
 public:
     // Minimum window size, enforced by the owning DocumentWindow (see
-    // main.cpp): must fit the 96 px rail above a usable spectrum with no
-    // overlap (spec section 3).
-    static constexpr int kMinimumWidth  = 720;
-    static constexpr int kMinimumHeight = 560;
+    // main.cpp). Raised from 720x560 with the 2026-08-25 rebuild: the floor is
+    // now a TWO-COLUMN split (notch table beside the rig controls) instead of
+    // a stack of full-width bands, and below ~940 the two columns start
+    // truncating each other's values rather than merely tightening.
+    static constexpr int kMinimumWidth  = 940;
+    static constexpr int kMinimumHeight = 700;
+
+    // The size the window OPENS at. Without this the window opened at exactly
+    // the minimum -- which is the one size where the fixed rig column crowds
+    // the analyser hardest, so the app's very first impression was its worst
+    // possible layout.
+    static constexpr int kDefaultWidth  = 1280;
+    static constexpr int kDefaultHeight = 880;
 
     MainComponent();
     ~MainComponent() override;
@@ -105,6 +114,13 @@ public:
     // row count exactly as the "+ Add slot" button does.
     [[nodiscard]] gui::SlotPanel& getSlotPanelForTest() { return slotPanel_; }
 
+    // The two panels that read a published snapshot. Exposed for the same
+    // reason the accessors above are: a headless caller has no timer running,
+    // so it has to drive refreshFromSnapshot() itself. tools/snapshot.cpp uses
+    // these to render the console with real detector output in it.
+    [[nodiscard]] gui::SpectrumView&   getSpectrumViewForTest()   { return spectrumView_; }
+    [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
+
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
     // slot; never null for [0, kMaxSlots).
@@ -114,6 +130,15 @@ public:
     void resized() override;
 
 private:
+    // How tall the bottom floor band should be given the vertical space left
+    // under the transport. paint() and resized() BOTH need this figure and it
+    // must agree between them, so neither computes it inline.
+    [[nodiscard]] int floorHeightFor (int available) const;
+
+    // The floor's rect in this component's coordinates, for paint(). resized()
+    // carves the same rect out of its own running area rectangle.
+    [[nodiscard]] juce::Rectangle<int> floorBoundsForPaint() const;
+
     // Polls the engine for display. The engine publishes its state through
     // atomics precisely so a reader like this never blocks the audio thread.
     void timerCallback() override;
@@ -165,7 +190,7 @@ private:
     // devicePanel_ -- both are declared above, so they outlive these.
     gui::SpectrumView spectrumView_;
     gui::ModeRail     modeRail_;
-    gui::StatusBadge  statusBadge_;      // hosted inside deviceDrawer_'s header
+    gui::StatusBadge  statusBadge_;      // masthead furniture (see the ctor)
     gui::DeviceDrawer deviceDrawer_;
 
     // The 8-slot routing table (Task 7). Reads the engine in refresh();
@@ -186,6 +211,33 @@ private:
     // A message the GUI itself produced -- a setting the hardware refused.
     // Device errors come from the engine and take precedence over it.
     juce::String panelMessage_;
+
+    // The masthead's right-hand readout, rebuilt by refreshStatus() and drawn
+    // by paint(). Held as a string rather than a child Label because it is one
+    // line of mono text with no interaction -- a Label would be a component
+    // and a layout pass for nothing.
+    juce::String rigLine_;
+
+    // The masthead readout turns amber when the engine is NOT running: a
+    // stopped device mid-show is a fault, not a neutral state.
+    bool rigIsHealthy_ = false;
+
+    // Same figure paint() and resized() both need: the cell the status badge
+    // occupies at the masthead's right end.
+    static constexpr int kBadgeWidth     = 132;
+    static constexpr int kBadgeHeight    = 26;
+    // The brand block at the masthead's left end: the sodium bar, the product
+    // name, then the company. kMarkWidth is what the rig readout starts after,
+    // so it must cover the whole block including the gaps between its parts.
+    static constexpr int kNameWidth      = 132;
+    static constexpr int kCompanyWidth   = 104;
+    static constexpr int kMarkWidth      = 3 + 10 + kNameWidth + 12 + kCompanyWidth;
+    // Window-edge padding. Wider than the 8 px grid gap on purpose: the app
+    // frame needs a margin the inner grid does not.
+    static constexpr int kEdgePad        = 12;
+    // Share of the floor's width the notch table takes; the rig column gets
+    // the rest. The table needs less than the four device combos beside it.
+    static constexpr float kNotchColumnFraction = 0.38f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

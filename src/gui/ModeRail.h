@@ -45,6 +45,22 @@ public:
     std::function<void()> onBypass;
     std::function<void()> onClearAllConfirmed;
 
+    // Which switch is lit. Named here rather than taken as an AudioEngine::Mode
+    // so the rail keeps knowing nothing about the engine -- the same separation
+    // every other panel in this GUI holds to.
+    enum class Mode { Soundcheck, Auto, Bypass };
+
+    // Lights the switch for `mode` and clears the other two, WITHOUT invoking
+    // onSoundcheck/onAuto/onBypass.
+    //
+    // This exists because the engine's mode can change from somewhere other
+    // than these buttons -- it starts in Bypass, a preset can set it, and the
+    // detector ends Soundcheck on its own. Before this the rail only ever
+    // reflected the user's own clicks, so a freshly-launched window showed
+    // BYPASSED on the status badge with no switch lit at all: the lamp, which
+    // is the primary state signal in this design, was simply wrong.
+    void setDisplayedMode (Mode mode);
+
     // Polls getSoundcheckRemainingMs now ("SOUNDCHECK 7s" while > 0). The rail
     // also runs a low-rate timer calling this; owners may call it directly too.
     void updateCountdown();

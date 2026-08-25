@@ -38,6 +38,7 @@
 // JuceHeader.h only exists for juce_add_* targets, so including it here would
 // break compilation into the plain add_executable test target.
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <melatonin_blur/melatonin_blur.h>
 
 #include "app/NotchController.h"
 #include "dsp/Detector.h"
@@ -45,6 +46,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 namespace gui
@@ -92,6 +94,19 @@ private:
     // Rebuilds the normalised polyline from snapshot_. Message thread only.
     void rebuildGeometry();
 
+    // NOTCH AGE, GUI-side (controller ruling R-2: SnapshotBuffer is not
+    // extended). Same ledger shape NotchListPanel keeps, and deliberately the
+    // same identity key: a stem in the plot and a row in the table must agree
+    // about how old the notch they both describe is, because both colour
+    // themselves from it through az::theme::notchColour.
+    static std::uint64_t notchKey (std::uint8_t channel, std::uint8_t index, float hz);
+    void updateNotchAges();
+
+    // How long ONE notch of the current snapshot has been held, from the
+    // ledger above. 0 for a notch this frame is the first to carry.
+    [[nodiscard]] double ageMsOf (const NotchController::SnapshotNotch& notch,
+                                  double nowMs) const;
+
     // Re-derives bandCenterHz_ / edges for the current bandMode_ (message
     // thread: constructor and ComboBox onChange only, never paint).
     void applyBandMode();
@@ -107,7 +122,14 @@ private:
 
     // Normalised [0..1] x/y of the spectrum polyline, pre-sized in the ctor.
     std::vector<juce::Point<float>> spectrumPoints_;
-    juce::Path markerPath_;               // reused every paint, never grows
+
+    // All four reused every paint and cleared rather than rebuilt: Path::clear
+    // resets the element count without releasing storage, so re-adding writes
+    // into memory this object already owns. That is the no-allocation
+    // guarantee the paint path is held to.
+    juce::Path markerPath_;
+    juce::Path tracePath_;
+    juce::Path fillPath_;
 
     // Tuning-toolbar state (display-only: changing these never restarts the
     // audio engine, detector or notch chain).
@@ -139,7 +161,11 @@ private:
 
     // Toolbar controls. The view paints its plot around them; they live in a
     // thin strip across the top (kToolbarHeight px, reserved in resized()).
-    static constexpr int kToolbarHeight = 30;
+    static constexpr int kToolbarHeight = 32;
+
+    // Reserved at the toolbar's left for the ANALYSER legend, by BOTH paint()
+    // (which draws it) and resized() (which must not lay a control over it).
+    static constexpr int kCaptionWidth  = 78;
     juce::Label      bandwidthLabel_;
     juce::ComboBox   bandwidthBox_;
     juce::Label      averageLabel_;
@@ -148,12 +174,24 @@ private:
 
     juce::Font tickFont_;                 // mono: axis numbers
     juce::Font bodyFont_;                 // "no signal" text
-    juce::String xTickLabels_[3];         // 100 Hz / 1k / 10k
+    juce::String xTickLabels_[7];         // 50 Hz .. 10 kHz
     juce::String yTickLabels_[4];         // 0 / -30 / -60 / -90 dB
     juce::String noSignalLabel_;
 
     std::uint64_t seenSequence_     = 0;  // last copied frame
     std::uint64_t drawnSequence_    = 0;  // last frame geometry was built from
+
+    // identity -> first-seen ms (see updateNotchAges). Bounded by the notch
+    // capacity of the snapshot; stale identities are dropped each refresh.
+    std::map<std::uint64_t, double> firstSeenMs_;
+
+    // THE fresh-notch halo. A real gaussian rather than a radial gradient: a
+    // gradient halo bands visibly around a small bright shape on a near-black
+    // ground, which is exactly the case here. melatonin caches the blur, and
+    // the path is only rebuilt while a notch is still hot -- typically zero
+    // or one of them, for a couple of seconds after it fires.
+    melatonin::DropShadow notchGlow_ { juce::Colours::transparentBlack, 26 };
+    juce::Path glowPath_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrumView)
 };

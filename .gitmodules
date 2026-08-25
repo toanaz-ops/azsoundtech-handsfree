@@ -1,3 +1,7 @@
 [submodule "external/JUCE"]
 	path = external/JUCE
 	url = https://github.com/juce-framework/JUCE.git
+[submodule "external/melatonin_blur"]
+	path = external/melatonin_blur
+	url = https://github.com/sudara/melatonin_blur.git
+	branch = main

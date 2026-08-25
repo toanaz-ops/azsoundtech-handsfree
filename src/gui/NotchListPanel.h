@@ -75,13 +75,20 @@ public:
     static constexpr double kTrackingTimeoutMs = 60000.0;
 
     // Geometry shared with tests / parent sizing decisions.
-    static constexpr int kHeaderHeight = 22;
-    static constexpr int kRowHeight    = 26;
+    static constexpr int kCaptionHeight = 26;   // section legend + live count
+    static constexpr int kHeaderHeight  = 22;   // column captions
+    static constexpr int kRowHeight     = 26;
 
     // TEST ACCESSORS -- the model behind the painted table.
     struct RowText
     {
         juce::String id, freq, depth, q, status;
+
+        // How long this notch has been held, in milliseconds. Carried on the
+        // row (not recomputed in paint) because the age drives the row's
+        // COLOUR through az::theme::notchColour as well as its status text --
+        // and the two must never disagree about how old a notch is.
+        double ageMs = 0.0;
     };
 
     [[nodiscard]] int rowCountForTest() const { return (int) rows_.size(); }
@@ -111,7 +118,10 @@ private:
 
     // Pre-built row strings, rebuilt every refresh (message thread).
     std::vector<RowText> rows_;
-    juce::String noNotchesLabel_ { "no active notches" };
+
+    // An empty table is not an error and not a void: with the detector armed
+    // it means the room is behaving. Say that, rather than reporting absence.
+    juce::String noNotchesLabel_ { "Nothing ringing" };
     juce::Font   tableFont_;              // mono: every cell holds numbers
 
     // First-seen ledger keyed by identity (ruling R-2).

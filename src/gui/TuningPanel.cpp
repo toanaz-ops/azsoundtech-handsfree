@@ -16,6 +16,9 @@ constexpr int kDepthChoices[]   = { -6, -12, -18, -24 };
 constexpr int kQChoices[]       = { 10, 20, 30, 40, 50 };
 constexpr float kThrChoices[]   = { 6.0f, 8.0f, 10.0f, 12.0f, 15.0f };
 
+// Any non-zero id makes the three RESPONSE segments mutually exclusive.
+constexpr int kResponseRadioGroupId = 7;
+
 template <typename T, std::size_t N>
 int idForValue (const T (&choices)[N], const T& value)
 {
@@ -33,7 +36,7 @@ T valueForId (const T (&choices)[N], int id)
     return choices[0];   // no selection -> first item
 }
 
-// ONE KNOB preset table (brief 2026-08-24): item id == array position + 1.
+// RESPONSE preset table (brief 2026-08-24): item id == array position + 1.
 constexpr TuningPanel::Params kPresets[] = {
     { 500, 4, -12, 40, 12.0f },   // 1 SAFE
     { 250, 3, -18, 30, 10.0f },   // 2 BALANCED (matches the param defaults)
@@ -63,25 +66,38 @@ int   TuningPanel::idForQ           (int q)  { return idForValue (kQChoices, q);
 int   TuningPanel::idForThreshold   (float t){ return idForValue (kThrChoices, t); }
 
 //==============================================================================
-// TuningPanel.
 
 TuningPanel::TuningPanel()
 {
     using namespace az::theme;
 
-    addAndMakeVisible (caption_);
-    caption_.setFont (monoFont());
+    // RESPONSE: three segments in one radio group. Ghost style -- these choose
+    // what the DETECTOR does, but they are still a display of a curated
+    // choice, and a lit lamp on them would compete with the transport, which
+    // is the only place in this app a lamp means "this is the live state".
+    const std::pair<juce::TextButton*, int> segments[] = {
+        { &safeButton,       kPresetSafeId },
+        { &balancedButton,   kPresetBalancedId },
+        { &aggressiveButton, kPresetAggressiveId },
+    };
 
-    addAndMakeVisible (oneKnobLabel_);
-    oneKnobLabel_.setFont (monoFont());
-    oneKnob_.addItem ("SAFE", 1);
-    oneKnob_.addItem ("BALANCED", 2);
-    oneKnob_.addItem ("AGGRESSIVE", 3);
-    oneKnob_.addItem ("CUSTOM", kPresetCustomId);
+    for (const auto& [button, id] : segments)
+    {
+        button->setClickingTogglesState (true);
+        button->setRadioGroupId (kResponseRadioGroupId);
+        button->getProperties().set ("azStyle", "ghost");
 
-    for (auto* label : { &riseLabel_, &persistLabel_, &depthLabel_,
-                         &qLabel_, &thrLabel_ })
-        addAndMakeVisible (*label);
+        // Guarded exactly like ModeRail's mode handlers: the radio group turns
+        // the PREVIOUS segment off with a notification, which would otherwise
+        // re-fire that segment's handler.
+        button->onClick = [this, button, id]
+        {
+            if (button->getToggleState())
+                setSelectedPresetId (id, juce::sendNotificationSync);
+        };
+
+        addAndMakeVisible (*button);
+    }
 
     for (int i = 0; i < (int) std::size (kRiseChoices); ++i)
         rise_.addItem (juce::String (kRiseChoices[i]) + " ms", i + 1);
@@ -94,12 +110,11 @@ TuningPanel::TuningPanel()
     for (int i = 0; i < (int) std::size (kThrChoices); ++i)
         thr_.addItem (juce::String (kThrChoices[i], 1), i + 1);
 
-    oneKnob_.onChange = [this] { handleOneKnobChanged(); };
-
     const auto onParamChange = [this]
     {
-        // Any manual param edit leaves the curated preset space.
-        oneKnob_.setSelectedId (kPresetCustomId, juce::dontSendNotification);
+        // Any manual edit leaves the curated preset space.
+        presetId_ = kPresetCustomId;
+        reflectPresetButtons();
         handleChanged();
     };
     rise_.onChange    = onParamChange;
@@ -108,12 +123,88 @@ TuningPanel::TuningPanel()
     q_.onChange       = onParamChange;
     thr_.onChange     = onParamChange;
 
-    for (auto* box : { &oneKnob_, &rise_, &persist_, &depth_, &q_, &thr_ })
+    for (auto* box : { &rise_, &persist_, &depth_, &q_, &thr_ })
         addAndMakeVisible (*box);
+
+    for (auto* label : { &responseLabel_, &notchLabel_, &triggerLabel_,
+                         &riseLabel_, &persistLabel_, &depthLabel_,
+                         &qLabel_, &thrLabel_ })
+        addAndMakeVisible (*label);
+
+    // Every legend here is silkscreen: tracked uppercase, quiet, and never
+    // louder than the value beside it. The gutter legends sit one step
+    // brighter than the inline ones -- they name the ROW, not one field.
+    for (auto* label : { &responseLabel_, &notchLabel_, &triggerLabel_ })
+    {
+        label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
+        label->setFont (legendFont (legendFontSize - 1.0f));
+        label->setColour (juce::Label::textColourId, dim);
+        label->setJustificationType (juce::Justification::centredLeft);
+    }
+
+    for (auto* label : { &riseLabel_, &persistLabel_, &depthLabel_,
+                         &qLabel_, &thrLabel_ })
+    {
+        label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
+        label->setFont (legendFont (legendFontSize - 2.0f));
+        label->setColour (juce::Label::textColourId, faded);
+        label->setJustificationType (juce::Justification::centredLeft);
+    }
 
     // Select the defaults without firing the callback: nothing has changed.
     refresh();
 }
+
+//==============================================================================
+// RESPONSE.
+
+void TuningPanel::reflectPresetButtons()
+{
+    // Set explicitly rather than leaning on the radio group: the group's own
+    // clearing runs through the notification path these calls exist to avoid.
+    safeButton      .setToggleState (presetId_ == kPresetSafeId,       juce::dontSendNotification);
+    balancedButton  .setToggleState (presetId_ == kPresetBalancedId,   juce::dontSendNotification);
+    aggressiveButton.setToggleState (presetId_ == kPresetAggressiveId, juce::dontSendNotification);
+}
+
+void TuningPanel::setSelectedPresetId (const int presetId,
+                                       const juce::NotificationType notification)
+{
+    presetId_ = presetId;
+    reflectPresetButtons();
+
+    const bool curated = presetId >= kPresetSafeId && presetId <= kPresetAggressiveId;
+
+    if (curated && notification != juce::dontSendNotification)
+        applyPreset (presetId);
+    else
+        repaint();
+}
+
+void TuningPanel::applyPreset (const int presetId)
+{
+    const Params p = kPresets[(std::size_t) (presetId - 1)];
+
+    // Applied silently: the segment click is the user gesture, the five combos
+    // just follow it -- otherwise each would loop back through the manual-edit
+    // handler and knock the panel straight back to CUSTOM.
+    rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
+    persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
+    depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
+    q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
+    thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
+                            juce::dontSendNotification);
+
+    // One callback per parameter, each carrying the complete snapshot -- the
+    // same contract a manual combo edit has.
+    if (onTuningChanged != nullptr)
+        for (int i = 0; i < 5; ++i)
+            onTuningChanged (p);
+
+    repaint();
+}
+
+//==============================================================================
 
 void TuningPanel::refresh()
 {
@@ -126,48 +217,21 @@ void TuningPanel::refresh()
     thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
                             juce::dontSendNotification);
 
-    updateOneKnobFor (p);
+    updatePresetFor (p);
 }
 
-void TuningPanel::updateOneKnobFor (const Params& p)
+void TuningPanel::updatePresetFor (const Params& p)
 {
     for (int i = 0; i < (int) std::size (kPresets); ++i)
         if (paramsEqual (p, kPresets[i]))
         {
-            oneKnob_.setSelectedId (i + 1, juce::dontSendNotification);
+            presetId_ = i + 1;
+            reflectPresetButtons();
             return;
         }
-    oneKnob_.setSelectedId (kPresetCustomId, juce::dontSendNotification);
-}
 
-void TuningPanel::handleOneKnobChanged()
-{
-    const int id = oneKnob_.getSelectedId();
-    if (id >= 1 && id < kPresetCustomId)
-        applyPreset (id);
-}
-
-void TuningPanel::applyPreset (int presetId)
-{
-    const Params p = kPresets[(std::size_t) (presetId - 1)];
-
-    // Apply silently: the knob change is the user gesture, the five combos
-    // just follow it -- otherwise refresh() would loop back through
-    // handleChanged() five more times.
-    rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
-    persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
-    depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
-    q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
-    thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
-                            juce::dontSendNotification);
-
-    // One callback per parameter, each carrying the complete snapshot --
-    // same contract as a manual combo edit.
-    if (onTuningChanged != nullptr)
-        for (int i = 0; i < 5; ++i)
-            onTuningChanged (p);
-
-    repaint();
+    presetId_ = kPresetCustomId;
+    reflectPresetButtons();
 }
 
 TuningPanel::Params TuningPanel::currentParams() const
@@ -187,34 +251,84 @@ void TuningPanel::handleChanged()
         onTuningChanged (currentParams());
 }
 
+//==============================================================================
+
+void TuningPanel::paint (juce::Graphics& g)
+{
+    using namespace az::theme;
+
+    const auto caption = getLocalBounds().removeFromTop (kFieldRowHeight);
+
+    drawCaption (g, "Detection", caption, dim);
+
+    // CUSTOM has no segment of its own: with none of the three lit, the row
+    // would read as "nothing chosen" rather than "your own settings". A chip
+    // at the row's right end says which it is, in the accent, because leaving
+    // the curated presets is a state worth noticing.
+    if (presetId_ == kPresetCustomId)
+    {
+        const auto chip = caption.withTrimmedTop (spacing)
+                                 .removeFromRight (74)
+                                 .withHeight (fieldHeight - 6);
+
+        g.setColour (accent.withAlpha (0.35f));
+        g.drawRoundedRectangle (chip.toFloat().reduced (0.5f), cornerRadius, 1.0f);
+
+        g.setColour (accent);
+        g.setFont (legendFont (legendFontSize - 2.0f));
+        g.drawText ("CUSTOM", chip, juce::Justification::centred, false);
+    }
+}
+
 void TuningPanel::resized()
 {
+    using namespace az::theme;
+
     auto area = getLocalBounds();
+    area.removeFromTop (kFieldRowHeight);   // the caption, painted above
 
-    const int labelWidth = 44;
-
-    // ONE KNOB sits at the far left, then the DETECTION caption.
-    auto knobCell = area.removeFromLeft (96).reduced (2);
-    oneKnobLabel_.setBounds (knobCell.removeFromLeft (labelWidth));
-    oneKnob_.setBounds (knobCell);
-
-    caption_.setBounds (area.removeFromLeft (72).reduced (2));
-
-    // Five label+combo pairs share what is left evenly.
-    const int pairWidth = area.getWidth() / 5;
-
-    const std::pair<juce::Label*, juce::ComboBox*> pairs[] = {
-        { &riseLabel_, &rise_ },   { &persistLabel_, &persist_ },
-        { &depthLabel_, &depth_ }, { &qLabel_, &q_ },
-        { &thrLabel_, &thr_ },
+    // One legend+field cell, taking `width` off the row it is handed.
+    auto cell = [] (juce::Rectangle<int>& row, int width,
+                    juce::Label& legend, juce::ComboBox& field)
+    {
+        auto slot = row.removeFromLeft (width);
+        slot.removeFromRight (gap);
+        legend.setBounds (slot.removeFromLeft (inlineLegendWidth - 18));
+        field .setBounds (slot.withSizeKeepingCentre (slot.getWidth(), fieldHeight));
     };
 
-    for (const auto& pair : pairs)
-    {
-        auto cell = area.removeFromLeft (pairWidth).reduced (2);
-        pair.first->setBounds (cell.removeFromLeft (labelWidth));
-        pair.second->setBounds (cell);
-    }
+    //--------------------------------------------------------------------
+    // RESPONSE: three equal segments filling the row after the gutter.
+    auto responseRow = area.removeFromTop (kFieldRowHeight);
+    responseLabel_.setBounds (responseRow.removeFromLeft (gutterWidth));
+
+    auto segments = responseRow.withSizeKeepingCentre (responseRow.getWidth(), fieldHeight);
+    const int segmentWidth = segments.getWidth() / 3;
+
+    safeButton      .setBounds (segments.removeFromLeft (segmentWidth).withTrimmedRight (spacing));
+    balancedButton  .setBounds (segments.removeFromLeft (segmentWidth).withTrimmedRight (spacing));
+    aggressiveButton.setBounds (segments);
+
+    // Both field rows use the SAME three-column grid, even though NOTCH only
+    // fills two of them: DEPTH lines up with RISE and Q lines up with HOLD.
+    // Splitting NOTCH into halves instead would put its two fields at x values
+    // that match nothing else in the column.
+    const int cellWidth = juce::jmax (1, (area.getWidth() - gutterWidth) / 3);
+
+    //--------------------------------------------------------------------
+    // NOTCH: what the filter IS. The third cell stays empty.
+    auto notchRow = area.removeFromTop (kFieldRowHeight);
+    notchLabel_.setBounds (notchRow.removeFromLeft (gutterWidth));
+    cell (notchRow, cellWidth, depthLabel_, depth_);
+    cell (notchRow, cellWidth, qLabel_, q_);
+
+    //--------------------------------------------------------------------
+    // TRIGGER: what makes one FIRE.
+    auto triggerRow = area.removeFromTop (kFieldRowHeight);
+    triggerLabel_.setBounds (triggerRow.removeFromLeft (gutterWidth));
+    cell (triggerRow, cellWidth, riseLabel_, rise_);
+    cell (triggerRow, cellWidth, persistLabel_, persist_);
+    cell (triggerRow, triggerRow.getWidth(), thrLabel_, thr_);
 }
 
 } // namespace gui

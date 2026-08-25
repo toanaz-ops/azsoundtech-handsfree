@@ -16,12 +16,23 @@ constexpr int kCustomItemId = 2;
 
 // Column metrics, shared by the caption row and the 8 data rows so the two
 // can never drift apart.
-constexpr int kNumberColumn = 24;
-constexpr int kEnableColumn = 40;
-constexpr int kWidthColumn  = 84;
-constexpr int kLaneColumn   = 96;
-constexpr int kLedColumn    = 28;
-constexpr int kTuneColumn   = 44;
+// Narrowed with the 2026-08-25 rebuild. This table used to be a full-width
+// band; it now lives in the rig column beside the notch table, and the old
+// 604 px of fixed columns overflowed that column at the minimum window size.
+// Every value here is the narrowest that still shows a full channel name.
+// The slot number and its enable toggle together fill the rig column's shared
+// legend gutter, so the table's first CONTROL column starts at the same x as
+// every field above it (DEVICE, RATE, RESPONSE, NOTCH, TRIGGER).
+constexpr int kNumberColumn = 26;
+constexpr int kEnableColumn = az::theme::gutterWidth - kNumberColumn;
+constexpr int kWidthColumn  = 76;
+constexpr int kLaneColumn   = 76;
+constexpr int kLedColumn    = 30;
+constexpr int kTuneColumn   = 54;   // a combo needs its caret AND its value
+
+// The section legend, drawn in paint() over the caption row's left gutter --
+// the columns there label nothing, so the section name costs no width.
+constexpr int kSectionCaptionWidth = az::theme::gutterWidth;
 
 constexpr int kDetailLabelWidth = 46;
 
@@ -45,13 +56,25 @@ void SlotPanel::Row::Led::paint (juce::Graphics& g)
 {
     using namespace az::theme;
 
-    auto area = getLocalBounds().toFloat().reduced (6.0f);
+    // A lit LED and a dark one, not a green dot and a grey dot: the OFF state
+    // is an empty ring, so "this slot is doing nothing" reads as absence
+    // rather than as another coloured thing to interpret.
+    const auto area = getLocalBounds().toFloat().withSizeKeepingCentre (9.0f, 9.0f);
 
-    g.setColour (on ? ok : dim);
-    g.fillEllipse (area);
-
-    g.setColour (border);
-    g.drawEllipse (area, 1.0f);
+    if (on)
+    {
+        g.setColour (ok.withAlpha (0.22f));
+        g.fillEllipse (area.expanded (3.5f));
+        g.setColour (ok);
+        g.fillEllipse (area);
+    }
+    else
+    {
+        g.setColour (well);
+        g.fillEllipse (area);
+        g.setColour (border);
+        g.drawEllipse (area.reduced (0.5f), 1.0f);
+    }
 }
 
 //==============================================================================
@@ -65,7 +88,13 @@ SlotPanel::SlotPanel (AudioEngine& engine)
     for (auto* label : { &widthCaption_, &inACaption_, &inBCaption_,
                          &outACaption_, &outBCaption_, &ledCaption_,
                          &tuneCaption_ })
+    {
+        // Column captions are silkscreen: tracked uppercase, quiet.
+        label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
+        label->setFont (legendFont (legendFontSize - 2.0f));
+        label->setColour (juce::Label::textColourId, faded);
         addAndMakeVisible (*label);
+    }
 
     // The five custom-tuning combos share TuningPanel's choice lists and id
     // mappings, so a custom value and its global-strip twin are the same
@@ -76,8 +105,12 @@ SlotPanel::SlotPanel (AudioEngine& engine)
         auto& row = rows_[(std::size_t) i];
         auto& detail = details_[(std::size_t) i];
 
-        row.number.setText (juce::String (i + 1), juce::dontSendNotification);
-        row.number.setFont (monoFont());
+        // Zero-padded so a one-digit and a two-digit slot number occupy the
+        // same width -- the column must not shuffle when the 10th row appears.
+        row.number.setText (juce::String (i + 1).paddedLeft ('0', 2),
+                            juce::dontSendNotification);
+        row.number.setFont (monoFont (baseFontSize - 2.0f));
+        row.number.setColour (juce::Label::textColourId, faded);
         addAndMakeVisible (row.number);
 
         // ClickingTogglesState like every other boolean button in this GUI.
@@ -106,7 +139,12 @@ SlotPanel::SlotPanel (AudioEngine& engine)
 
         for (auto* label : { &detail.riseLabel, &detail.persistLabel,
                              &detail.depthLabel, &detail.qLabel, &detail.thrLabel })
+        {
+            label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
+            label->setFont (legendFont (legendFontSize - 2.0f));
+            label->setColour (juce::Label::textColourId, dim);
             addAndMakeVisible (*label);
+        }
         for (auto* box : { &detail.rise, &detail.persist, &detail.depth,
                            &detail.q, &detail.thr })
             addAndMakeVisible (*box);
@@ -149,6 +187,10 @@ SlotPanel::SlotPanel (AudioEngine& engine)
     {
         setVisibleRowCount (juce::jmin (visibleRows_ + 1, kMaxSlots));
     };
+    addButton_.setButtonText ("+ Add slot");
+    // Ghost, not a switch: revealing a row is a table affordance, and a lit
+    // lamp on it would claim a state this button does not have.
+    addButton_.getProperties().set ("azStyle", "ghost");
     addAndMakeVisible (addButton_);
 
     refresh();
@@ -434,6 +476,38 @@ int SlotPanel::getPreferredHeight() const
     return 2 * spacing + kCaptionHeight + spacing + rows * kRowHeight;
 }
 
+void SlotPanel::paint (juce::Graphics& g)
+{
+    using namespace az::theme;
+
+    // This panel is a Viewport's content, so it paints its own ground -- the
+    // parent's band stops at the Viewport's edge.
+    g.fillAll (panel);
+
+    // The section legend rides in the caption row's left gutter: those columns
+    // label nothing, so naming the section costs no width.
+    const auto captionRow = getLocalBounds().reduced (gap, spacing)
+                                            .removeFromTop (kCaptionHeight);
+    drawCaption (g, "Routing",
+                 captionRow.withWidth (kSectionCaptionWidth), dim);
+
+    g.setColour (border);
+    g.fillRect (captionRow.getX(), captionRow.getBottom(), captionRow.getWidth(), 1);
+
+    // One hairline per row boundary, taken from the row's OWN laid-out number
+    // cell rather than recomputed here -- so the separators can never drift
+    // out of step with resized().
+    for (int i = 1; i < visibleRows_; ++i)
+    {
+        const auto cell = rows_[(std::size_t) i].number.getBounds();
+        if (cell.isEmpty())
+            continue;
+
+        g.setColour (shade);
+        g.fillRect (captionRow.getX(), cell.getY() - 1, captionRow.getWidth(), 1);
+    }
+}
+
 void SlotPanel::resized()
 {
     using namespace az::theme;
@@ -449,9 +523,10 @@ void SlotPanel::resized()
     for (const auto& row : rows_)
         anyStereo = anyStereo || row.inLanes[1].isVisible();
 
-    auto captions = area.removeFromTop (18);
+    auto captions = area.removeFromTop (kCaptionHeight);
 
-    captions.removeFromLeft (kNumberColumn + kEnableColumn);
+    // The gutter the section legend is painted into (see paint()).
+    captions.removeFromLeft (kSectionCaptionWidth);
     widthCaption_.setBounds (captions.removeFromLeft (kWidthColumn));
 
     const auto inARect  = captions.removeFromLeft (kLaneColumn);

@@ -140,8 +140,11 @@ public:
     void   setVisibleRowCount (int n);
     [[nodiscard]] int getVisibleRowCount() const { return visibleRows_; }
 
-    static constexpr int kRowHeight = 26;
-    static constexpr int kCaptionHeight = 18;
+    // 30 px rows, up from 26: this table is operated in the dark with one hand
+    // and the extra 4 px is the difference between hitting a row's combo and
+    // hitting the one above it.
+    static constexpr int kRowHeight = 30;
+    static constexpr int kCaptionHeight = 20;
 
     // Height the hosting Viewport should give the panel for its CURRENT
     // visible row count: theme margins + caption + rows (+ the Add row while
@@ -149,6 +152,7 @@ public:
     // -- the parent must hand the panel this height or it renders empty.
     [[nodiscard]] int getPreferredHeight() const;
 
+    void paint (juce::Graphics& g) override;
     void resized() override;
 
 private:
@@ -178,14 +182,20 @@ private:
 
     // Sits in the row slot after the last visible one while any row is
     // hidden; reveals one more row per click.
-    juce::TextButton addButton_ { {}, "+ Add slot" };
+    // NOTE the empty first argument: TextButton's two-argument constructor is
+    // (buttonName, TOOLTIP) -- not (name, text) the way Label's is. Written
+    // this way the button had no label at all, which the old flat styling hid
+    // and the rebuilt outline made obvious. The text is set in the ctor.
+    juce::TextButton addButton_;
 
     juce::Label widthCaption_ { {}, "Width" };
     juce::Label inACaption_   { {}, "In A" };
     juce::Label inBCaption_   { {}, "In B" };
     juce::Label outACaption_  { {}, "Out A" };
     juce::Label outBCaption_  { {}, "Out B" };
-    juce::Label ledCaption_   { {}, "Active" };
+    // "On", not "Active": the LED column is 30 px wide, and a caption that
+    // ellipsises to "A..." labels nothing at all.
+    juce::Label ledCaption_   { {}, "On" };
     juce::Label tuneCaption_  { {}, "Tune" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SlotPanel)

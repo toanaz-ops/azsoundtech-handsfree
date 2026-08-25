@@ -53,16 +53,25 @@ void expectArgb (const juce::Colour& actual, unsigned int expectedArgb, const ch
 
 TEST (AzTheme, PaletteTokensMatchTheSpecifiedValues)
 {
-    expectArgb (az::theme::background, 0xff0b0f14u, "background");
-    expectArgb (az::theme::panel,      0xff161e27u, "panel");
-    expectArgb (az::theme::border,     0xff232c36u, "border");
-    expectArgb (az::theme::text,       0xffc8d6e5u, "text");
-    expectArgb (az::theme::dim,        0xff546e7au, "dim");
-    expectArgb (az::theme::accent,     0xff4fc3f7u, "accent");
-    expectArgb (az::theme::warn,       0xffff9800u, "warn");
-    expectArgb (az::theme::ok,         0xff81c784u, "ok");
-    expectArgb (az::theme::danger,     0xffff8a65u, "danger");
-    expectArgb (az::theme::marker,     0xffffb74du, "marker");
+    // SODIUM RACK, owner-approved 2026-08-25. The neutrals are warm graphite
+    // rather than the previous blue-black, and the accent moved from Material
+    // cyan to sodium amber -- see the rationale at the top of AzTheme.h.
+    expectArgb (az::theme::background, 0xff0a0b0du, "background");
+    expectArgb (az::theme::panel,      0xff131519u, "panel");
+    expectArgb (az::theme::raise,      0xff1b1e24u, "raise");
+    expectArgb (az::theme::well,       0xff0c0e11u, "well");
+    expectArgb (az::theme::border,     0xff2b2f37u, "border");
+    expectArgb (az::theme::shade,      0xff060709u, "shade");
+    expectArgb (az::theme::text,       0xffe8eaedu, "text");
+    expectArgb (az::theme::dim,        0xff868d98u, "dim");
+    expectArgb (az::theme::faded,      0xff5c636eu, "faded");
+    expectArgb (az::theme::accent,     0xffff9f1cu, "accent");
+    expectArgb (az::theme::warn,       0xffffc24du, "warn");
+    expectArgb (az::theme::ok,         0xff6ee7a0u, "ok");
+    expectArgb (az::theme::danger,     0xffff5a4eu, "danger");
+    expectArgb (az::theme::marker,     0xffff9f1cu, "marker");
+    expectArgb (az::theme::cooling,    0xffc9d1d9u, "cooling");
+    expectArgb (az::theme::settled,    0xff5fc9ffu, "settled");
 }
 
 TEST (AzTheme, MetricTokensMatchTheSpecifiedValues)
@@ -71,20 +80,114 @@ TEST (AzTheme, MetricTokensMatchTheSpecifiedValues)
     EXPECT_EQ (az::theme::gap,              8);
     EXPECT_EQ (az::theme::touchTarget,      44);
     EXPECT_EQ (az::theme::railWidth,        96);
-    EXPECT_EQ (az::theme::buttonCellWidth,  96);
-    EXPECT_EQ (az::theme::buttonCellHeight, 64);
-    EXPECT_FLOAT_EQ (az::theme::cornerRadius, 4.0f);
-    EXPECT_FLOAT_EQ (az::theme::baseFontSize, 13.0f);
+
+    // The transport switches. Grown from 96x64 with the rebuild: they are hit
+    // in the dark, by someone doing something else with their other hand.
+    EXPECT_EQ (az::theme::buttonCellWidth,  168);
+    EXPECT_EQ (az::theme::buttonCellHeight, 62);
+    EXPECT_EQ (az::theme::clearCellWidth,   148);
+
+    EXPECT_EQ (az::theme::mastheadHeight,   38);
+    EXPECT_EQ (az::theme::transportHeight,  86);
+    EXPECT_EQ (az::theme::lampHeight,        3);
+    EXPECT_EQ (az::theme::fieldHeight,      26);
+    EXPECT_EQ (az::theme::captionHeight,    30);
+    EXPECT_EQ (az::theme::gutterWidth,      74);
+    EXPECT_EQ (az::theme::inlineLegendWidth, 58);
+    EXPECT_FLOAT_EQ (az::theme::fieldSplit, 0.42f);
+
+    EXPECT_FLOAT_EQ (az::theme::cornerRadius,   3.0f);
+    EXPECT_FLOAT_EQ (az::theme::baseFontSize,  14.0f);
+    EXPECT_FLOAT_EQ (az::theme::legendFontSize, 12.0f);
 }
 
-TEST (AzTheme, MonoFontIsConsolasAtTheBaseSizeByDefault)
+TEST (AzTheme, EveryTransportSwitchClearsTheTouchTarget)
+{
+    // The reason the cells are sized at all: a switch smaller than the touch
+    // target is one a soundman misses in the dark. Asserted as a RELATION so
+    // a future resize cannot quietly drop under it.
+    EXPECT_GE (az::theme::buttonCellWidth,  az::theme::touchTarget);
+    EXPECT_GE (az::theme::buttonCellHeight, az::theme::touchTarget);
+    EXPECT_GE (az::theme::clearCellWidth,   az::theme::touchTarget);
+}
+
+TEST (AzTheme, MonoFontIsCascadiaAtTheBaseSizeByDefault)
 {
     // Numbers must not shift width while counting down -- hence a monospaced
-    // face, Consolas first with fallbacks for machines that lack it.
+    // face. Cascadia Mono first for its modern figures, with Consolas behind
+    // it for the Windows 10 machines that do not ship Cascadia.
     const auto font = az::theme::monoFont();
 
-    EXPECT_EQ (font.getTypefaceName(), juce::String ("Consolas"));
+    EXPECT_EQ (font.getTypefaceName(), juce::String ("Cascadia Mono"));
     EXPECT_FLOAT_EQ (font.getHeight(), az::theme::baseFontSize);
+}
+
+//==============================================================================
+// THE RAMP -- the one idea the rebuild is built around, and the only piece of
+// the theme with behaviour rather than values. A notch is sodium the instant
+// it fires and ice once it has held; the analyser's stems and the notch
+// table's dots BOTH read it, so if this drifts the two stop agreeing about
+// the same notch.
+
+TEST (AzTheme, AFreshNotchIsSodiumAndFullyHot)
+{
+    EXPECT_FLOAT_EQ (az::theme::notchHeat (0.0), 1.0f);
+    EXPECT_EQ (az::theme::notchColour (0.0).getARGB(), az::theme::marker.getARGB());
+}
+
+TEST (AzTheme, ASettledNotchIsIceAndFullyCool)
+{
+    EXPECT_FLOAT_EQ (az::theme::notchHeat (az::theme::kNotchCoolMs), 0.0f);
+    EXPECT_EQ (az::theme::notchColour (az::theme::kNotchCoolMs).getARGB(),
+               az::theme::settled.getARGB());
+
+    // Past the cool point it STAYS ice rather than wrapping or overshooting.
+    EXPECT_FLOAT_EQ (az::theme::notchHeat (10.0 * az::theme::kNotchCoolMs), 0.0f);
+    EXPECT_EQ (az::theme::notchColour (10.0 * az::theme::kNotchCoolMs).getARGB(),
+               az::theme::settled.getARGB());
+}
+
+TEST (AzTheme, TheRampMidpointIsPaleSteelRatherThanOlive)
+{
+    // The reason the ramp has three stops. A straight RGB lerp from sodium to
+    // ice lands on an olive khaki halfway across; routing it through a pale
+    // steel keeps the midpoint desaturated, so it reads as "cooling" instead
+    // of as a rendering fault.
+    const double halfway = az::theme::kNotchCoolMs * 0.5;
+    EXPECT_FLOAT_EQ (az::theme::notchHeat (halfway), 0.5f);
+    EXPECT_EQ (az::theme::notchColour (halfway).getARGB(), az::theme::cooling.getARGB());
+
+    // Saturation dips in the middle and rises again at both ends -- that is
+    // what "desaturates on the way across" means, stated as a measurement.
+    const float midSaturation = az::theme::notchColour (halfway).getSaturation();
+    EXPECT_LT (midSaturation, az::theme::marker.getSaturation());
+    EXPECT_LT (midSaturation, az::theme::settled.getSaturation());
+}
+
+TEST (AzTheme, NotchHeatFallsMonotonicallyWithAge)
+{
+    // Monotonic, not merely "different at the ends": a notch that visibly
+    // warmed back up as it aged would read as a NEW notch that never fired.
+    float previous = az::theme::notchHeat (0.0);
+
+    for (int step = 1; step <= 40; ++step)
+    {
+        const double age = az::theme::kNotchCoolMs * (double) step / 40.0;
+        const float  heat = az::theme::notchHeat (age);
+
+        EXPECT_LE (heat, previous) << "age " << age << " ms";
+        EXPECT_GE (heat, 0.0f);
+        EXPECT_LE (heat, 1.0f);
+        previous = heat;
+    }
+}
+
+TEST (AzTheme, NegativeAgesAreClampedRatherThanExtrapolated)
+{
+    // A clock that steps backwards (or a notch first seen in the same
+    // millisecond it is drawn) must not produce a colour outside the ramp.
+    EXPECT_FLOAT_EQ (az::theme::notchHeat (-5000.0), 1.0f);
+    EXPECT_EQ (az::theme::notchColour (-5000.0).getARGB(), az::theme::marker.getARGB());
 }
 
 TEST (AzTheme, MonoFontAcceptsAnExplicitSize)

@@ -1,11 +1,13 @@
-// DeviceDrawer -- GUI console redesign Task 3 (spec section 2).
+// DeviceDrawer -- the INTERFACE section of the rig column.
 //
-// Wraps the EXISTING DevicePanel (re-used, never rewritten) and hosts the
-// Settings row header (presets placeholder + status badge).
+// Wraps the EXISTING DevicePanel (re-used, never rewritten) under a section
+// caption. It is ALWAYS OPEN and has no collapse gear (2026-08-25 owner
+// decision): an invisible device row reads as "the app lost my interface".
 //
-// The drawer is ALWAYS OPEN and has no collapse gear (2026-08-25 owner
-// decision: the L1/L2 layouts are gone -- one Classic arrangement, and an
-// invisible device row reads as "the app lost my interface").
+// The 2026-08-25 rebuild took two things OUT of this header row. The status
+// badge moved to the masthead, where the question it answers belongs; and the
+// "(presets)" placeholder went altogether, because a control that names a
+// feature and then does nothing is worse than no control.
 //
 // OWNERSHIP (memory/bridge-lifecycle-devicepanel lesson): the wrapped
 // DevicePanel is NOT owned here. It is re-parented under this drawer once in
@@ -28,11 +30,7 @@ public:
     // Re-parents wrappedPanel under this drawer. The panel must outlive it.
     explicit DeviceDrawer (DevicePanel& wrappedPanel);
 
-    // Hosts the StatusBadge in the header row (ownership stays with the caller;
-    // resized() tolerates null).
-    void setStatusBadge (juce::Component* badgeOrNull);
-
-    // Height the parent should give this drawer: header plus content, always.
+    // Height the parent should give this drawer: caption plus content, always.
     // Queried by MainComponent::resized().
     [[nodiscard]] int getPreferredHeight() const;
 
@@ -40,15 +38,16 @@ public:
     // actually got a usable rect.
     [[nodiscard]] juce::Rectangle<int> wrappedBoundsForTest() const { return wrapped_.getBounds(); }
 
+    void paint (juce::Graphics& g) override;
     void resized() override;
 
-    static constexpr int kHeaderHeight  = 48;   // >= the 44 px touch target
-    static constexpr int kContentHeight = 64;   // matches DevicePanel's two combo rows
+    // A caption band, not a header row: it holds one tracked word and the
+    // groove under it. 48 px was sized for a badge that no longer lives here.
+    static constexpr int kHeaderHeight  = 26;
+    static constexpr int kContentHeight = 64;   // DevicePanel's two combo rows
 
 private:
     DevicePanel& wrapped_;                 // NOT owned
-    juce::Component* badge_ = nullptr;     // NOT owned
-    juce::Label presetsPlaceholder_ { {}, "(presets)" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceDrawer)
 };

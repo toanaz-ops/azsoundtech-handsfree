@@ -16,9 +16,13 @@ constexpr int kStatusRefreshMs = 200;
 // Smallest spectrum worth looking at; resized() clamps the drawer against it.
 constexpr int kMinSpectrumHeight = 120;
 
-// Height of the notch list strip (Task 4): header row plus ~3 visible notch
-// rows. The same figure the R-1 slot reservation assumed.
+// Height of the notch list column: caption, column headers and ~3 visible
+// notch rows.
 constexpr int kNotchListHeight = 120;
+
+// The largest share of the space under the transport the bottom floor may
+// take, however much its contents want. See floorHeightFor().
+constexpr float kMaxFloorShare = 0.55f;
 } // namespace
 
 MainComponent::MainComponent()
@@ -39,9 +43,13 @@ MainComponent::MainComponent()
     , notchListPanel_ (*notchControllers_[0])
     , deviceDrawer_ (devicePanel_)
 {
-    // The Console-industrial theme, applied once here and inherited by every
-    // child through the Component::getLookAndFeel() chain.
+    // The Sodium Rack theme, applied once here and inherited by every child
+    // through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
+
+    // The window sizes itself from this (DocumentWindow::setContentOwned), so
+    // an unsized content component opens at the resize LIMIT instead.
+    setSize (kDefaultWidth, kDefaultHeight);
 
     // Per-slot tuning (brief 2026-08-24): every slot starts on Global.
     slotUsesGlobalTuning_.fill (true);
@@ -78,7 +86,10 @@ MainComponent::MainComponent()
         return remaining;
     };
 
-    deviceDrawer_.setStatusBadge (&statusBadge_);
+    // The protection badge is MASTHEAD furniture, not drawer furniture. It
+    // answers the question the whole window exists to answer, so it belongs in
+    // the one band that is always visible and never scrolls.
+    addAndMakeVisible (statusBadge_);
 
     // Bridge design §6.5: a device change in the panel is always an engine
     // RESTART, and the rings are cleared on the way -- so the detector thread
@@ -431,6 +442,19 @@ void MainComponent::refreshStatus()
         message = panelMessage_;
 
     statusBar_.setStatus (status, message);
+
+    // The masthead readout. A device error replaces the rig line entirely --
+    // when the interface is gone, its sample rate is not the news.
+    rigIsHealthy_ = status.running && message.isEmpty();
+
+    const auto next = message.isNotEmpty() ? message
+                                           : gui::formatStatusLine (status);
+
+    if (next != rigLine_)
+    {
+        rigLine_ = next;
+        repaint (getLocalBounds().removeFromTop (az::theme::mastheadHeight));
+    }
 }
 
 void MainComponent::timerCallback()
@@ -452,18 +476,155 @@ void MainComponent::timerCallback()
     // becomes real. setDisplayedMode() reflects without requesting, so this
     // cannot fight the user.
     modeBar_.setDisplayedMode (engine_.getMode());
+
+    // The RAIL is the one the user actually looks at, and its lit lamp is the
+    // primary "what mode am I in" signal in this design -- so it has to track
+    // the engine too, not just the last click it received.
+    switch (engine_.getMode())
+    {
+        case AudioEngine::Mode::Soundcheck:
+            modeRail_.setDisplayedMode (gui::ModeRail::Mode::Soundcheck);
+            break;
+        case AudioEngine::Mode::Auto:
+            modeRail_.setDisplayedMode (gui::ModeRail::Mode::Auto);
+            break;
+        case AudioEngine::Mode::Bypass:
+            modeRail_.setDisplayedMode (gui::ModeRail::Mode::Bypass);
+            break;
+    }
 }
+
+//==============================================================================
+// The window's own painting: the masthead, the raised transport and floor
+// bands, and the engraved grooves that separate them. Every child paints its
+// own inside.
 
 void MainComponent::paint (juce::Graphics& g)
 {
-    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+    using namespace az::theme;
 
-    g.setColour (az::theme::text);
-    g.setFont (20.0f);
-    g.drawText ("AZ Soundtech Hands-free",
-                getLocalBounds().removeFromTop (36),
-                juce::Justification::centred,
-                true);
+    g.fillAll (background);
+
+    auto area = getLocalBounds();
+
+    //--------------------------------------------------------------------
+    // Masthead: mark, rig readout, protection badge (a child, positioned in
+    // resized()).
+    auto masthead = area.removeFromTop (mastheadHeight);
+    g.setColour (panel);
+    g.fillRect (masthead);
+    drawEngravedDivider (g, masthead);
+
+    auto mark = masthead.reduced (kEdgePad, 0);
+
+    // The sodium bar IS the brand mark. It is also the only place on screen
+    // the accent appears without meaning "a notch just fired".
+    g.setColour (accent);
+    g.fillRect (mark.removeFromLeft (3).withSizeKeepingCentre (3, 18));
+    mark.removeFromLeft (10);
+
+    g.setColour (text);
+    g.setFont (legendFont (15.0f));
+    g.drawText ("HANDS-FREE", mark.removeFromLeft (kNameWidth),
+                juce::Justification::centredLeft, false);
+    mark.removeFromLeft (gap + spacing);
+
+    g.setColour (faded);
+    g.setFont (legendFont (11.0f, false));
+    g.drawText ("AZ SOUNDTECH", mark.removeFromLeft (kCompanyWidth),
+                juce::Justification::centredLeft, false);
+
+    // The rig readout fills whatever sits between the mark and the badge.
+    auto rigArea = masthead.reduced (kEdgePad, 0)
+                           .withTrimmedLeft (kMarkWidth)
+                           .withTrimmedRight (kBadgeWidth + gap);
+    if (rigArea.getWidth() > 0)
+    {
+        g.setColour (rigIsHealthy_ ? dim : warn);
+        g.setFont (monoFont (baseFontSize - 1.0f));
+        g.drawText (rigLine_, rigArea, juce::Justification::centredRight, true);
+    }
+
+    //--------------------------------------------------------------------
+    // Transport: a raised band, so the switches sit ON something instead of
+    // floating on the canvas.
+    auto transport = area.removeFromTop (transportHeight);
+    g.setColour (panel);
+    g.fillRect (transport);
+    drawEngravedDivider (g, transport);
+
+    //--------------------------------------------------------------------
+    // Floor: the same raised band at the window's bottom, with a vertical
+    // groove milled between its two columns.
+    const auto floor = floorBoundsForPaint();
+    if (floor.getHeight() > 2 * gap)
+    {
+        g.setColour (panel);
+        g.fillRect (floor);
+
+        // The groove ABOVE the floor: drawEngravedDivider draws on a band's
+        // bottom edge, so it is handed a zero-height band sitting one pixel up.
+        drawEngravedDivider (g, floor.withHeight (0).translated (0, -1));
+
+        const int grooveX = floor.getX() + kEdgePad
+                          + juce::roundToInt ((float) (floor.getWidth() - 2 * kEdgePad)
+                                              * kNotchColumnFraction)
+                          + gap;
+
+        g.setColour (shade);
+        g.fillRect (grooveX, floor.getY() + gap, 1, floor.getHeight() - 2 * gap);
+        g.setColour (sheen);
+        g.fillRect (grooveX + 1, floor.getY() + gap, 1, floor.getHeight() - 2 * gap);
+    }
+}
+
+//==============================================================================
+// Layout.
+//
+// The shape, and why: masthead / transport / ANALYSER / floor. The analyser is
+// the only thing on screen that changes thirty times a second, so it takes
+// every pixel the fixed bands do not need. The pre-rebuild layout gave it a
+// middling slice between seven equal-weight full-width strips, which is most
+// of why nothing on screen read as more important than anything else.
+
+int MainComponent::floorHeightFor (const int available) const
+{
+    using namespace az::theme;
+
+    // What the rig column WANTS: device drawer, detection strip, routing table.
+    const int rigColumn = deviceDrawer_.getPreferredHeight()
+                        + gap + gui::TuningPanel::kPanelHeight
+                        + gap + slotPanel_.getPreferredHeight();
+
+    const int wanted = juce::jmax (kNotchListHeight, rigColumn) + 2 * gap;
+
+    // TWO ceilings, and the floor gets the lower of them.
+    //
+    // The first is the analyser's hard minimum, reserved before the floor gets
+    // anything: a short window shrinks the floor -- whose routing table
+    // scrolls -- rather than the analyser, which has nowhere to go.
+    //
+    // The second is a SHARE cap, and it is the one that matters in practice.
+    // The rig column's natural height is fixed (device + detection + two slot
+    // rows), so without a cap a modest window hands the floor more pixels than
+    // the analyser -- which inverts the whole point of the layout. The
+    // analyser is the only thing on screen that moves, and it keeps the
+    // majority of the space at every window size.
+    const int analyserFloor = juce::jmax (0, available - kMinSpectrumHeight - gap);
+    const int shareCeiling  = juce::roundToInt ((float) available * kMaxFloorShare);
+
+    return juce::jlimit (0, juce::jmin (analyserFloor, shareCeiling), wanted);
+}
+
+juce::Rectangle<int> MainComponent::floorBoundsForPaint() const
+{
+    using namespace az::theme;
+
+    auto area = getLocalBounds();
+    area.removeFromTop (mastheadHeight);
+    area.removeFromTop (transportHeight);
+
+    return area.removeFromBottom (floorHeightFor (area.getHeight()));
 }
 
 void MainComponent::resized()
@@ -471,69 +632,67 @@ void MainComponent::resized()
     using namespace az::theme;
 
     auto area = getLocalBounds();
-    area.removeFromTop (36);  // title, drawn in paint()
 
-    // Reserve room for the rail plus a minimum usable spectrum, then clamp the
-    // drawer so a too-small window shrinks the drawer instead of overlapping
-    // siblings (spec section 3). setResizeLimits should make the clamp a
-    // no-op in practice.
-    const int reserveBelowDrawer = kMinSpectrumHeight + gap + buttonCellHeight;
-    const int maxDrawerHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
-    const int drawerHeight    = juce::jlimit (0, maxDrawerHeight,
-                                              deviceDrawer_.getPreferredHeight());
+    //--------------------------------------------------------------------
+    // 1. Masthead -- painted; the badge is its only child.
+    auto masthead = area.removeFromTop (mastheadHeight).reduced (kEdgePad, 0);
+    statusBadge_.setBounds (masthead.removeFromRight (kBadgeWidth)
+                                    .withSizeKeepingCentre (kBadgeWidth, kBadgeHeight));
 
-    // Same footprint the drawer's FlexItem used to occupy: its height plus
-    // the trailing gap margin.
-    deviceDrawer_.setBounds (area.removeFromTop (drawerHeight));
-    area.removeFromTop (gap);
+    //--------------------------------------------------------------------
+    // 2. Transport. The rail owns its internal grid; all this owes it is a
+    //    band of the right height with the window margin applied.
+    auto transport = area.removeFromTop (transportHeight);
+    modeRail_.setBounds (transport.reduced (kEdgePad, gap + spacing));
 
-    // Task 4: the notch list strip -- a FIXED bottom strip, always visible.
+    //--------------------------------------------------------------------
+    // 3. The floor, carved off the bottom BEFORE the analyser is measured.
     notchListPanel_.setVisible (true);
 
-    // The DETECTION strip sits directly above the routing table (brief
-    // 2026-08-24): a fixed ~34 px band carved before the slot block below.
-    tuningPanel_.setBounds (area.removeFromTop (gui::TuningPanel::kPanelHeight));
-    area.removeFromTop (gap);
+    auto floor = area.removeFromBottom (floorHeightFor (area.getHeight()));
 
-    // The routing table sits under the drawer, scrollable, and yields first:
-    // its height is whatever remains once the spectrum's own minimum (and the
-    // rail) are reserved. area has ALREADY had the drawer + gap removed, so
-    // the only remaining reservation is the one below -- subtracting the
-    // drawer again (the pre-2026-08-24 form) starves the table and shears its
-    // last visible row.
-    const int slotPreferred = slotPanel_.getPreferredHeight();
-    const int maxSlotHeight = juce::jmax (0, area.getHeight() - reserveBelowDrawer);
-    const int slotHeight = juce::jlimit (0, maxSlotHeight, slotPreferred);
+    //--------------------------------------------------------------------
+    // 4. The analyser takes everything that is left.
+    spectrumView_.setBounds (area.reduced (kEdgePad, 0).withTrimmedBottom (gap));
 
-    // Visibility tracks the layout decision: a shrinking window that drops
-    // the FlexItem must not leave the scroller sitting at stale bounds.
-    slotScroller_.setVisible (slotHeight > 0);
+    //--------------------------------------------------------------------
+    // 5. Floor columns: the notch table reads left -- it is the answer -- and
+    //    the rig sits right, because it is the setup you touch once.
+    auto inner = floor.reduced (kEdgePad, gap);
 
-    // Bounds are carved from the remaining area up front (a full-width strip
-    // under the drawer).
-    if (slotHeight > 0)
+    const int notchWidth = juce::roundToInt ((float) inner.getWidth() * kNotchColumnFraction);
+    notchListPanel_.setBounds (inner.removeFromLeft (notchWidth));
+    inner.removeFromLeft (2 * gap + 2);   // the painted groove lives in here
+
+    const int drawerHeight = juce::jmin (deviceDrawer_.getPreferredHeight(),
+                                         inner.getHeight());
+    deviceDrawer_.setBounds (inner.removeFromTop (drawerHeight));
+    inner.removeFromTop (gap);
+
+    if (inner.getHeight() > gui::TuningPanel::kPanelHeight)
     {
-        slotScroller_.setBounds (area.removeFromTop (slotHeight));
-        area.removeFromTop (gap);
-
-        // A Viewport never sizes its content by itself: without this the
-        // table renders as an empty black rect (the bug the 2026-08-24
-        // screenshots showed). Full preferred height for the CURRENT visible
-        // row count; the viewport adds a scrollbar only when the window is
-        // shorter than the table.
-        slotPanel_.setSize (juce::jmax (1, slotScroller_.getMaximumVisibleWidth()),
-                            slotPreferred);
+        tuningPanel_.setVisible (true);
+        tuningPanel_.setBounds (inner.removeFromTop (gui::TuningPanel::kPanelHeight));
+        inner.removeFromTop (gap);
+    }
+    else
+    {
+        tuningPanel_.setVisible (false);
     }
 
-    // Single Classic arrangement: horizontal rail strip, spectrum below,
-    // fixed notch list pinned to the window bottom.
-    notchListPanel_.setBounds (area.removeFromBottom (kNotchListHeight));
+    // Visibility tracks the layout decision: a shrinking window that drops the
+    // table must not leave the scroller sitting at stale bounds.
+    slotScroller_.setVisible (inner.getHeight() > 0);
 
-    juce::FlexBox main;
-    main.flexDirection = juce::FlexBox::Direction::column;
-    main.items.add (juce::FlexItem (modeRail_)
-                        .withHeight ((float) buttonCellHeight)
-                        .withMargin ({ 0.0f, 0.0f, (float) gap, 0.0f }));
-    main.items.add (juce::FlexItem (spectrumView_).withFlex (1.0f));
-    main.performLayout (area);
+    if (inner.getHeight() > 0)
+    {
+        slotScroller_.setBounds (inner);
+
+        // A Viewport never sizes its content by itself: without this the table
+        // renders as an empty black rect (the 2026-08-24 bug). Full preferred
+        // height for the CURRENT visible row count; the viewport adds a
+        // scrollbar only when the column is shorter than the table.
+        slotPanel_.setSize (juce::jmax (1, slotScroller_.getMaximumVisibleWidth()),
+                            slotPanel_.getPreferredHeight());
+    }
 }

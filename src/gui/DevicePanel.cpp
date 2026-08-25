@@ -1,6 +1,7 @@
 #include "gui/DevicePanel.h"
 
 #include "gui/DeviceViewModel.h"
+#include "gui/theme/AzTheme.h"
 
 namespace gui
 {
@@ -9,7 +10,16 @@ DevicePanel::DevicePanel (AudioEngine& engine)
     : engine_ (engine)
 {
     for (auto* label : { &deviceTypeLabel_, &deviceLabel_, &sampleRateLabel_, &bufferSizeLabel_ })
+    {
+        // Legends are silkscreen: tracked uppercase, and quieter than the
+        // value they name. The value is what gets read; the legend only has to
+        // be findable.
+        label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
+        label->setFont (az::theme::legendFont (az::theme::legendFontSize - 1.0f));
+        label->setColour (juce::Label::textColourId, az::theme::dim);
+        label->setJustificationType (juce::Justification::centredLeft);
         addAndMakeVisible (*label);
+    }
 
     for (auto* box : { &deviceTypeBox, &deviceBox, &sampleRateBox, &bufferSizeBox })
         addAndMakeVisible (*box);
@@ -167,21 +177,42 @@ void DevicePanel::report (const juce::String& message)
 
 void DevicePanel::resized()
 {
-    auto area = getLocalBounds().reduced (4, 2);
+    using namespace az::theme;
 
-    auto row = area.removeFromTop (26);
-    deviceTypeLabel_.setBounds (row.removeFromLeft (100));
-    deviceTypeBox   .setBounds (row.removeFromLeft (160).reduced (2, 1));
-    deviceLabel_    .setBounds (row.removeFromLeft (60));
-    deviceBox       .setBounds (row.reduced (2, 1));
+    // Two rows on the shared legend gutter, both splitting at the SAME
+    // fraction so all four columns line up vertically. The pre-rebuild version
+    // split row one at 44% and row two at 50%, which is what made this panel
+    // read as ragged even though every individual control was fine.
+    //
+    // Each row is [gutter legend][field] [inline legend][field]. Fixed pixel
+    // runs are gone: this panel now lives in the rig column, whose width
+    // tracks the window, and a fixed run there either overflows a narrow
+    // column or leaves a dead gutter in a wide one.
+    auto area = getLocalBounds();
 
-    area.removeFromTop (4);
+    auto layoutRow = [this] (juce::Rectangle<int> row,
+                             juce::Label& gutterLegend, juce::ComboBox& firstField,
+                             juce::Label& inlineLegend, juce::ComboBox& secondField)
+    {
+        using namespace az::theme;
 
-    row = area.removeFromTop (26);
-    sampleRateLabel_.setBounds (row.removeFromLeft (100));
-    sampleRateBox   .setBounds (row.removeFromLeft (110).reduced (2, 1));
-    bufferSizeLabel_.setBounds (row.removeFromLeft (60));
-    bufferSizeBox   .setBounds (row.removeFromLeft (140).reduced (2, 1));
+        auto left = row.removeFromLeft (juce::roundToInt ((float) row.getWidth() * fieldSplit));
+        gutterLegend.setBounds (left.removeFromLeft (gutterWidth));
+        firstField  .setBounds (left.withSizeKeepingCentre (juce::jmax (1, left.getWidth() - gap),
+                                                            fieldHeight)
+                                    .withX (left.getX()));
+
+        inlineLegend.setBounds (row.removeFromLeft (inlineLegendWidth));
+        secondField .setBounds (row.withSizeKeepingCentre (row.getWidth(), fieldHeight));
+    };
+
+    layoutRow (area.removeFromTop (fieldHeight + spacing),
+               deviceTypeLabel_, deviceTypeBox, deviceLabel_, deviceBox);
+
+    area.removeFromTop (spacing);
+
+    layoutRow (area.removeFromTop (fieldHeight + spacing),
+               sampleRateLabel_, sampleRateBox, bufferSizeLabel_, bufferSizeBox);
 }
 
 } // namespace gui

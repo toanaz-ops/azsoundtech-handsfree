@@ -11,6 +11,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [Multi-slot routing lessons](multi-slot-routing-lessons-2026-08-24.md) — by-value member array segfault; "legacy preserved" phải kèm điều kiện device; drain budget là per-callback không per-ring; width semantics đồng bộ một điểm.
 - [ASIO SDK silent disable](asio-sdk-silent-disable-2026-08-24.md) — thiếu `external/asiosdk` KHÔNG fail configure, chỉ warn rồi tắt ASIO im lặng; check `JUCE_ASIO:BOOL=ON` trong CMakeCache trước khi nghi driver.
 - [GUI console lessons](gui-console-lessons-2026-08-24.md) — `git commit -- <path>` commit nguyên working-tree file (hunk lane khác lọt vào); JUCE headless `setSize()` không peer → `resized()` không chạy, layout test pass rỗng; confirm dialog async phải injectable + SafePointer.
+- [UI rebuild — Sodium Rack](ui-rebuild-sodium-rack-2026-08-25.md) — chụp GUI bằng `createComponentSnapshot()` chứ không chụp màn hình; ảnh render bắt được 4 lỗi test xanh không bắt; nội suy RGB giữa amber và cyan ra màu bùn; melatonin_blur cache theo object.
 - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
 
 ## Conventions (tóm tắt)
