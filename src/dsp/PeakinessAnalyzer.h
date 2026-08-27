@@ -14,9 +14,10 @@
 //
 // Why the annulus, and why the spec's +-2 was wrong
 // =================================================
-// Detector applies a Hann window before its 1024-point FFT, and a Hann main
-// lobe is FOUR bins wide. Measured shape of an on-bin tone, normalised to its
-// peak (JUCE symmetric Hann, N = 1024):
+// Detector applies a Hann window before its 2048-point FFT, and a Hann main
+// lobe is FOUR bins wide regardless of N. Measured shape of an on-bin tone,
+// normalised to its peak (JUCE symmetric Hann, N = 1024 at the time -- see
+// the 2026-08-24 NOTE below):
 //
 //   offset:   -2       -1        0       +1       +2
 //   value:  0.0003   0.5007   1.0000   0.5007   0.0003

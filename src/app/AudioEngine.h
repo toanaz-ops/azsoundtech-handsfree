@@ -24,8 +24,8 @@
 // The per-slot post-DSP lane-0 taps (multi-slot routing, spec §3) are written
 // into one SPSC lock-free ring buffer PER SLOT -- once per callback, in every
 // mode including Bypass. The audio thread is the sole producer of each ring;
-// the detector side is the sole consumer and reads 1024-sample blocks with a
-// 512-sample hop.
+// the detector side is the sole consumer and reads 2048-sample blocks with a
+// 512-sample hop (Detector::kFftSize / kHopSize).
 
 #pragma once
 

@@ -48,7 +48,7 @@ public:
     // scored 0 outright -- the scorer never resurrects a rejected bin.
     static constexpr float  kConfirmScore           = 0.7f;
 
-    static constexpr int kBins = Detector::kNumBins;              // 513
+    static constexpr int kBins = Detector::kNumBins;              // 1025
     static constexpr int kMaxHistoryFrames = 128;
 
     struct LockedFrequencyView

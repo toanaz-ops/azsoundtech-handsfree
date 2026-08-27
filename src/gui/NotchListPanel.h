@@ -7,9 +7,10 @@
 // the audio thread.
 //
 // Layout discipline (ruling R-1 / spec section 3): this component knows
-// NOTHING about L1 or L2. The parent sets its visibility and bounds only;
-// in L2 Performance it is shown as a slide-out strip while toggled open,
-// in L1 Classic as a fixed bottom strip.
+// NOTHING about the window layout. The parent sets its visibility and bounds
+// only; in the single Classic layout (the L1/L2 dual-layout was removed in
+// commit 3a04200) MainComponent places it as the fixed left column of the
+// bottom floor strip.
 //
 // Notch AGE (controller ruling R-2): computed GUI-side. The panel tracks a
 // steady-clock FIRST-SEEN time per notch identity (channel, index, frequency)

@@ -25,9 +25,11 @@ public:
     explicit ModeRail (Orientation orientation = Orientation::Vertical);
     ~ModeRail() override;
 
-    // L1/L2 switching re-parents the SAME rail into a differently oriented
-    // slot (spec section 3: components stay layout-agnostic), so the
-    // orientation is mutable after construction.
+    // The rail stays layout-agnostic: the owner picks the orientation, the
+    // rail just renders it. Since the L1/L2 dual-layout was removed (commit
+    // 3a04200) the single Classic layout always uses Horizontal; Vertical and
+    // this setter remain for tests and any future host that lays out
+    // differently.
     void setOrientation (Orientation newOrientation) { orientation_ = newOrientation; }
     [[nodiscard]] Orientation getOrientation() const { return orientation_; }
 

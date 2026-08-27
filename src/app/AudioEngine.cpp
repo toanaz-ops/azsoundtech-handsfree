@@ -1,8 +1,18 @@
 #include "app/AudioEngine.h"
 
+#include <cmath>
+
 namespace
 {
 constexpr int kNumChannels = 2;  // stereo in/out
+
+// Hard ceiling on every sample handed to the driver. Values beyond full scale
+// would be clipped by the DAC conversion anyway; the clamp only makes that
+// bound explicit and bounds what multi-slot summing can stack onto one output
+// channel. Non-finite values must never reach the driver at all -- their
+// conversion is undefined -- so the final pass maps them to 0 rather than
+// "clamping" them (any comparison with NaN picks an arbitrary bound).
+constexpr float kMaxOutputLevel = 1.0f;
 }
 
 AudioEngine::AudioEngine()
@@ -571,8 +581,53 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             float*        out   = lanes[i].out;
 
             for (int n = 0; n < numSamples; ++n)
-                out[n] += static_cast<float> (
-                    chain.processSample (static_cast<double> (in[n])));
+            {
+                // A non-finite INPUT sample (driver glitch, hot-plug spike) is
+                // treated as 0 rather than fed onward: the biquads keep
+                // persistent Direct Form I state, and ONE NaN/Inf through them
+                // poisons that state until reset() -- which otherwise happens
+                // only on device restart.
+                const double x = std::isfinite (in[n])
+                                     ? static_cast<double> (in[n]) : 0.0;
+
+                double v = chain.processSample (x);
+
+                // A non-finite chain OUTPUT means the filter state itself is
+                // already poisoned. Reset the chain -- allocation-free, the
+                // same call the device-restart path makes -- and emit silence
+                // for this sample: the filter self-heals within one sample
+                // instead of screaming NaN until someone restarts the device.
+                if (! std::isfinite (v))
+                {
+                    chain.reset();
+                    v = 0.0;
+                }
+
+                out[n] += static_cast<float> (v);
+            }
+        }
+    }
+
+    // Final output guard: every sample actually handed to the driver is forced
+    // finite and clamped to +-kMaxOutputLevel (rationale at the constant).
+    // This is the one pass that also covers Bypass copies and multi-slot sums,
+    // and it runs BEFORE the tap writes below so the detector sees exactly
+    // what left the app.
+    if (outputChannelData != nullptr)
+    {
+        for (int ch = 0; ch < numOutputChannels; ++ch)
+        {
+            float* out = outputChannelData[ch];
+            if (out == nullptr)
+                continue;
+
+            for (int n = 0; n < numSamples; ++n)
+            {
+                const float v = out[n];
+                out[n] = std::isfinite (v)
+                             ? juce::jlimit (-kMaxOutputLevel, kMaxOutputLevel, v)
+                             : 0.0f;
+            }
         }
     }
 

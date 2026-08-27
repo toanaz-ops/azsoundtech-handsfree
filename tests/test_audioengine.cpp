@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace
@@ -1073,4 +1074,166 @@ TEST (AudioEngine, ChannelNameQueriesAreSafeWithNoDeviceOpen)
     AudioEngine engine;
     EXPECT_TRUE (engine.getInputChannelNames().isEmpty());
     EXPECT_TRUE (engine.getOutputChannelNames().isEmpty());
+}
+
+//==============================================================================
+// Output safety guard: nothing non-finite and nothing beyond full scale may
+// ever reach the driver.
+//
+// This callback feeds a PA system. A NaN or Inf handed to the DAC conversion
+// is undefined, and the Direct Form I biquads keep persistent z1_/z2_ state --
+// ONE non-finite input poisons a chain until reset(), which otherwise happens
+// only on device restart. These tests pin three promises: poisoned input
+// produces finite output, the chain SELF-HEALS instead of staying poisoned,
+// and every sample handed to the driver is inside [-1, +1].
+
+namespace
+{
+// Shared body for the NaN / +Inf poison tests: identical stimulus and
+// recovery oracle, only the poison value differs.
+void expectPoisonedInputIsAbsorbedAndTheChainRecovers (const float poison)
+{
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    // An ACTIVE notch, so the input actually flows through a biquad whose
+    // persistent state a single bad sample would poison. Idle slots are
+    // straight passthrough and would hide the state-poisoning defect.
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 0, 1000.0f, 30.0f, -18.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    constexpr int kBlock = 512;
+    long long n = 0;
+
+    // Settle the Q=30 notch on the clean phase-continuous stimulus first
+    // (same settling budget as NotchAttenuatesSignalThroughTheCallback).
+    for (int block = 0; block < 16; ++block, n += kBlock)
+    {
+        SineDriver drive (kBlock, 48000.0, n);
+        drive (engine);
+    }
+
+    // The poisoned block: one bad sample mid-block on L. EVERY output sample
+    // on BOTH channels must still be finite -- this buffer goes to the DAC.
+    {
+        SineDriver drive (kBlock, 48000.0, n);
+        drive.inL[100] = poison;
+        drive (engine);
+        n += kBlock;
+
+        for (int i = 0; i < kBlock; ++i)
+        {
+            ASSERT_TRUE (std::isfinite (drive.outL[(std::size_t) i])) << "L sample " << i;
+            ASSERT_TRUE (std::isfinite (drive.outR[(std::size_t) i])) << "R sample " << i;
+        }
+    }
+
+    // Recovery: after clean input the notch must be back at its settled
+    // ~-18 dB depth on L (window borrowed from the attenuation test). A
+    // biquad left poisoned emits NaN forever, and NaN fails EXPECT_NEAR by
+    // definition -- so this asserts recovery, not merely survival.
+    double dbL = 0.0;
+    for (int block = 0; block < 16; ++block, n += kBlock)
+    {
+        SineDriver drive (kBlock, 48000.0, n);
+        drive (engine);
+
+        dbL = 20.0 * std::log10 (rmsOf (drive.outL) / rmsOf (drive.inL));
+    }
+
+    EXPECT_NEAR (dbL, -18.0, 6.0) << "measured " << dbL << " dB";
+}
+} // namespace
+
+TEST (AudioEngine, NaNInputProducesFiniteOutputAndTheChainRecovers)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    expectPoisonedInputIsAbsorbedAndTheChainRecovers (
+        std::numeric_limits<float>::quiet_NaN());
+}
+
+TEST (AudioEngine, InfInputProducesFiniteOutputAndTheChainRecovers)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    expectPoisonedInputIsAbsorbedAndTheChainRecovers (
+        std::numeric_limits<float>::infinity());
+}
+
+TEST (AudioEngine, GuardLeavesCleanAudioBelowFullScaleUntouched)
+{
+    // Deliberately duplicates the transparency oracle under the guard
+    // section's name: if the output guard ever alters in-range audio (an
+    // off-by-one in the clamp bound, a wrong branch on the finite check),
+    // THIS is the failure that names the guard as the culprit rather than
+    // pointing at the passthrough contract.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+
+    SineDriver drive (512);   // 0.5 amplitude -- comfortably below full scale
+    drive (engine);
+
+    EXPECT_LT (worstRelativeError (drive.inL, drive.outL), kToleranceRatio);
+    EXPECT_LT (worstRelativeError (drive.inR, drive.outR), kToleranceRatio);
+}
+
+TEST (AudioEngine, OutputIsClampedToFullScaleAndNonFiniteBecomesSilence)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // Phase 1 -- Bypass with a hot input: the raw copy would hand +-1.5f
+    // straight to the driver. The guard must clamp to exactly full scale,
+    // and a non-finite sample must become 0, not "clamped NaN" (any
+    // comparison with NaN clamps to an arbitrary bound).
+    {
+        AudioEngine engine;   // Bypass by default
+
+        constexpr int frames = 256;
+        std::vector<float> inL (frames, 1.5f);
+        std::vector<float> inR (frames, -1.5f);
+        std::vector<float> outL (frames, 0.0f), outR (frames, 0.0f);
+        inL[10] = std::numeric_limits<float>::quiet_NaN();
+
+        const float* ins[2] { inL.data(), inR.data() };
+        float* outs[2] { outL.data(), outR.data() };
+
+        const juce::AudioIODeviceCallbackContext context {};
+        engine.audioDeviceIOCallbackWithContext (ins, 2, outs, 2, frames, context);
+
+        for (int i = 0; i < frames; ++i)
+        {
+            const float expectedL = (i == 10) ? 0.0f : 1.0f;
+            ASSERT_FLOAT_EQ (outL[(std::size_t) i], expectedL) << "L sample " << i;
+            ASSERT_FLOAT_EQ (outR[(std::size_t) i], -1.0f)    << "R sample " << i;
+        }
+    }
+
+    // Phase 2 -- multi-slot summing: two mono slots aimed at one output, each
+    // carrying 0.8. The raw sum is 1.6; the guard bounds what summing can
+    // stack up, so the driver sees exactly 1.0.
+    {
+        AudioEngine engine;
+        engine.setMode (AudioEngine::Mode::Auto);
+
+        SlotConfig off {};
+        engine.setSlotConfig (0, off);
+
+        SlotConfig s0; s0.enabled = true; s0.width = 1;
+        s0.inputChannels[0] = 0; s0.outputChannels[0] = 0;
+        engine.setSlotConfig (0, s0);
+
+        SlotConfig s1; s1.enabled = true; s1.width = 1;
+        s1.inputChannels[0] = 1; s1.outputChannels[0] = 0;
+        engine.setSlotConfig (1, s1);
+
+        RoutingDriver d (128, 2, 2);
+        for (auto& channel : d.in)
+            std::fill (channel.begin(), channel.end(), 0.8f);
+        d (engine);
+
+        for (int i = 0; i < d.frames; ++i)
+            ASSERT_FLOAT_EQ (d.out[0][(std::size_t) i], 1.0f) << "sample " << i;
+    }
 }
