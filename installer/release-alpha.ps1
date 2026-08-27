@@ -37,8 +37,10 @@
     list of superseded builds. 0 keeps everything.
 
 .PARAMETER SkipTests
-    Package without running the suite. There is no good reason to use this for
-    a build anyone else will install.
+    Package without running the suite -- and therefore WITHOUT publishing. The
+    version is not bumped; the CURRENT version is built and packaged into
+    installer\dist-local\ for local inspection only. The drop folder is never
+    touched. There is no good reason to hand such a build to anyone.
 
 .EXAMPLE
     pwsh -File installer\release-alpha.ps1
@@ -79,7 +81,8 @@ if (-not (Test-Path $makensis)) {
 }
 
 # ── 1. bump ─────────────────────────────────────────────────────────────
-Step "Bumping the $Part version"
+if ($SkipTests) { Step "Reading the version (no bump: -SkipTests)" }
+else            { Step "Bumping the $Part version" }
 
 # ReadAllText/WriteAllText with an explicit no-BOM UTF-8 encoding, NOT
 # Get-Content/Set-Content: repo rule 6. CMakeLists.txt has no BOM today and
@@ -97,25 +100,38 @@ $minor = [int]$match.Groups[2].Value
 $patch = [int]$match.Groups[3].Value
 $from  = "$major.$minor.$patch"
 
-switch ($Part) {
-    'major' { $major++; $minor = 0; $patch = 0 }
-    'minor' { $minor++; $patch = 0 }
-    'patch' { $patch++ }
+if ($SkipTests) {
+    # An untested build must not consume a version number. It is packaged
+    # with the CURRENT version and never leaves this machine.
+    $version = $from
+    Write-Host "    staying at $from (untested local build)"
+}
+else {
+    switch ($Part) {
+        'major' { $major++; $minor = 0; $patch = 0 }
+        'minor' { $minor++; $patch = 0 }
+        'patch' { $patch++ }
+    }
+
+    $version = "$major.$minor.$patch"
+    $bumped  = $original -replace 'project\(HandsFree VERSION \d+\.\d+\.\d+\)', "project(HandsFree VERSION $version)"
+    [System.IO.File]::WriteAllText($cmakeList, $bumped, $utf8NoBom)
+
+    Write-Host "    $from  ->  $version"
 }
 
-$version = "$major.$minor.$patch"
-$bumped  = $original -replace 'project\(HandsFree VERSION \d+\.\d+\.\d+\)', "project(HandsFree VERSION $version)"
-[System.IO.File]::WriteAllText($cmakeList, $bumped, $utf8NoBom)
-
-Write-Host "    $from  ->  $version"
-
-# Any failure from here on puts the version back. A red build must not eat a
-# version number -- the next run would then skip one and the testers would
-# wonder what happened to it.
+# Any failure BEFORE the build is published puts the version back. A red
+# build must not eat a version number -- the next run would then skip one and
+# the testers would wonder what happened to it. But once the installer is in
+# the drop folder the number is in the testers' hands, and rolling it back
+# would create an orphan version -- the exact bug this script exists to
+# prevent. $published marks that point of no return.
 function Restore-Version {
     [System.IO.File]::WriteAllText($cmakeList, $original, $utf8NoBom)
     Write-Host "    version rolled back to $from" -ForegroundColor Yellow
 }
+
+$published = $false
 
 try {
     # ── 2. reconfigure ──────────────────────────────────────────────────
@@ -151,7 +167,8 @@ try {
 
     $stamped = (Get-Item $exe).VersionInfo.ProductVersion
     Write-Host "    binary reports $stamped"
-    if ($stamped -notlike "$version*") {
+    # Anchored, not a prefix match: "1.0.1*" would happily accept 1.0.10.
+    if ($stamped -notmatch "^$([regex]::Escape($version))(\.|$)") {
         throw "the binary reports $stamped but this release is $version -- the version resource did not regenerate"
     }
 
@@ -179,20 +196,55 @@ try {
     if (-not (Test-Path $setup)) { throw "expected $setup, which makensis did not produce" }
 
     # ── 6. drop ─────────────────────────────────────────────────────────
-    Step "Publishing to the testers"
-    if (-not (Test-Path $DropFolder)) {
-        throw "drop folder not reachable: $DropFolder (is the drive mounted?)"
+    if ($SkipTests) {
+        # Untested: the drop folder is never touched. The installer goes to a
+        # local staging directory so it can still be inspected by hand.
+        Step "Staging locally (untested -- the drop folder is not touched)"
+        $localDir = Join-Path $repo 'installer\dist-local'
+        if (-not (Test-Path $localDir)) {
+            New-Item -ItemType Directory -Path $localDir | Out-Null
+        }
+
+        Copy-Item $setup -Destination $localDir -Force
+        $dropped = Join-Path $localDir "AZSoundtech-Handsfree-Setup-$version.exe"
     }
+    else {
+        Step "Publishing to the testers"
+        if (-not (Test-Path $DropFolder)) {
+            throw "drop folder not reachable: $DropFolder (is the drive mounted?)"
+        }
 
-    Copy-Item $setup -Destination $DropFolder -Force
-    $dropped = Join-Path $DropFolder "AZSoundtech-Handsfree-Setup-$version.exe"
+        Copy-Item $setup -Destination $DropFolder -Force
+        $published = $true
+        $dropped   = Join-Path $DropFolder "AZSoundtech-Handsfree-Setup-$version.exe"
+    }
+}
+catch {
+    if ($published) {
+        # The build is already in the testers' hands: the version number is
+        # spent and MUST stay. Rolling it back here would mint an orphan.
+        Write-Host "WARN  $version is already published -- the version stays: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    else {
+        if (-not $SkipTests) { Restore-Version }
+        Fail $_.Exception.Message
+    }
+}
 
-    # ── 7. prune ────────────────────────────────────────────────────────
-    # Only AFTER the new build is safely in place: a folder that briefly holds
-    # nothing is worse than one holding one build too many. Newest kept.
-    if ($Keep -gt 0) {
+# ── 7. prune ────────────────────────────────────────────────────────────
+# Only AFTER the new build is safely in place: a folder that briefly holds
+# nothing is worse than one holding one build too many. Deliberately outside
+# the gate's try: a prune failure is a housekeeping warning, never a reason
+# to roll back a version that is already published. Sorted by the version in
+# the FILENAME, not LastWriteTime -- a build restored from backup carries a
+# wrong timestamp and would push the wrong file out. Names that do not parse
+# sort last, oldest first.
+if ($published -and $Keep -gt 0) {
+    try {
         $stale = Get-ChildItem -LiteralPath $DropFolder -Filter 'AZSoundtech-Handsfree-Setup-*.exe' |
-                 Sort-Object LastWriteTime -Descending |
+                 Sort-Object -Descending -Property `
+                     @{ Expression = { $_.Name -match '-(\d+\.\d+\.\d+)\.exe$' } },
+                     @{ Expression = { if ($_.Name -match '-(\d+\.\d+\.\d+)\.exe$') { [version]$Matches[1] } else { $_.LastWriteTime } } } |
                  Select-Object -Skip $Keep
 
         foreach ($old in $stale) {
@@ -200,14 +252,22 @@ try {
             Write-Host "    pruned $($old.Name)"
         }
     }
+    catch {
+        Write-Host "WARN  prune failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "      The published build and its version stay -- tidy $DropFolder by hand." -ForegroundColor Yellow
+    }
+}
 
+if ($SkipTests) {
+    Write-Host ""
+    Write-Host "!!    UNTESTED build -- the suite never ran and nothing was published." -ForegroundColor Yellow
+    Write-Host "!!    Local only: $dropped" -ForegroundColor Yellow
+    Write-Host "!!    Do not hand this to anyone. Run without -SkipTests to release it." -ForegroundColor Yellow
+}
+else {
     Write-Host ""
     Write-Host "OK    $version published" -ForegroundColor Green
     Write-Host "      $dropped"
     Write-Host ""
     Write-Host "      Commit the version bump -- CMakeLists.txt is modified." -ForegroundColor Yellow
-}
-catch {
-    Restore-Version
-    Fail $_.Exception.Message
 }
