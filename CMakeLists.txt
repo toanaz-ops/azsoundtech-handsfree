@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(HandsFree VERSION 1.0.3)
+project(HandsFree VERSION 1.0.4)
 
 # C++17 minimum standard
 set(CMAKE_CXX_STANDARD 17)

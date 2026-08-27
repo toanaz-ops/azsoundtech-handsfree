@@ -42,4 +42,6 @@ roadmap sẽ đi làm lại việc đã xong từ một tuần trước.
   installer không chép `presets/`.
 - Ngưỡng peakiness 10.0 đo trên FFT 1024, chưa sweep lại với 2048.
 - `skills-lock.json` khóa 3 skill không tồn tại trong repo.
-- Clamp output cần một lần human listen ở volume thấp trước release kế tiếp.
+- ~~Clamp output cần một lần human listen ở volume thấp trước release kế
+  tiếp.~~ Chủ dự án bỏ gate listen-trước-release (27/08/2026) — nghe trong
+  alpha; clamp đã ship cùng 1.0.4.

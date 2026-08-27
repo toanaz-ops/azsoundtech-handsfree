@@ -44,7 +44,7 @@ GitHub runner’s cmake defaults to the newest Visual Studio — see
 | docs, `memory/`, `*.md` | none |
 | one `.cpp` body, no header touched | incremental, Release |
 | any header, or `CMakeLists.txt` | full reconfigure + build |
-| DSP path, ASIO callback, buffer size | full build **and** `ctest`, then a human listens |
+| DSP path, ASIO callback, buffer size | full build **and** `ctest`; the listen happens in alpha (see below) |
 
 **Use `build/`.** Do not create `build-*` variants; do not commit any build
 directory.
@@ -127,8 +127,10 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 ## Definition of done
 
 1. Build command and `ctest` output pasted.
-2. Anything audio-path related is marked "needs a human listen" until a human
-   confirms it.
+2. Audio-path changes ship to the alpha testers once the suite is green —
+   owner decision 2026-08-27 dropped the listen-before-release gate; the
+   listen happens in alpha. Still: state the expected level change up front,
+   and call the change out in whatever note reaches the testers.
 3. `memory/` note if the work taught something non-obvious, indexed in
    `memory/MEMORY.md`.
 4. Commit with explicit paths. Merge only if the user said "merge".
