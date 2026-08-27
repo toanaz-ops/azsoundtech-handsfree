@@ -113,6 +113,9 @@ Modify CMake; Test `tests/test_moderail.cpp`.
   (assert bounds giao nhau = 0 giữa rail và spectrum ở size tối thiểu).
 - [x] Commit `feat(gui): switchable L1/L2 layouts with persisted preference`.
 
+> ⚠ 3a04200 (2026-08-25) đã gỡ toàn bộ L1/L2 — single Classic layout (−688
+> dòng). Các mục [x] trên là lịch sử, không còn trong code.
+
 ### Task 4: NotchListPanel
 
 **Files:** Create `src/gui/NotchListPanel.h/.cpp`; Modify CMake; Test
@@ -129,11 +132,13 @@ Modify CMake; Test `tests/test_moderail.cpp`.
 
 - [x] Full reconfigure + Release + `ctest -C Release` — **284/284 PASS**
   (0380c74, controller chạy tay 2026-08-24); sau fix wave final review:
-  **283/283 PASS** (3d91b89).
+  **283/283 PASS** (3d91b89). *(Hiện tại 27/08/2026: 362/362 PASS.)*
 - [x] Grep kiểm chứng: `rg "#[0-9A-Fa-f]{6}" src/gui --glob "!theme/*"` → rỗng
   (controller chạy lại bằng grep tool).
 - [ ] Chạy app thật, chụp màn hình cả L1 + L2 gửi chủ dự án → **human look
-  gate** — CHỜ OWNER.
+  gate** — CHỜ OWNER. *(27/08/2026: gate này hết áp dụng — L2 đã bị gỡ bởi
+  3a04200; thay bằng quy tắc screenshot-mỗi-thay-đổi-GUI 122afd0 + skill
+  `juce-component-snapshot`.)*
 - [ ] progress.md + memory note (nếu có bài học) + handoff session kế.
 
 **Ngoài scope v1 (spec §7):** popover chi tiết notch, Link L/R UI, preset UI,

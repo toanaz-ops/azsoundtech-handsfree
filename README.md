@@ -2,10 +2,19 @@
 
 Windows standalone audio application for ASIO feedback elimination in live sound environments.
 
+## What it does
+
+Automatic feedback elimination: FFT-2048 detection places ultra-narrow notch
+filters (16 per lane) on ringing frequencies before they howl. Three modes —
+Soundcheck, Auto, Bypass. Audio flows through 8 routing slots, each mono or
+stereo with free channel mapping (cross-routing). Current version: 1.0.3.
+Full product description: `docs/GIOI-THIEU.md`; the anti-feedback technique:
+`docs/KY-THUAT-CHONG-HU.md`.
+
 ## System Requirements
 
 - Windows 10/11 64-bit
-- Visual Studio 2019 or later
+- Visual Studio 2026 Build Tools (or the full IDE) — the CMake generator below is "Visual Studio 18 2026"
 - CMake 3.22 or later
 - ASIO-compatible audio interface
 
@@ -75,6 +84,18 @@ window drifts in front of it, the desktop's DPI scaling rescales the result,
 and the running binary holds a lock on its own `.exe` so the next build cannot
 link. See `.claude/skills/juce-component-snapshot/SKILL.md`.
 
+## Releasing an alpha build
+
+```bash
+pwsh -File installer\release-alpha.ps1
+```
+
+Bumps PATCH, rebuilds, verifies the stamped binary version, runs `ctest` as a
+gate, packages with NSIS, copies the installer to the testers' drop folder,
+and prunes it to the newest 3 builds. Full rules: `CLAUDE.md`.
+
 ## License
 
-Proprietary software. Requires activation. Copyright (c) 2026 AZ Soundtech. All rights reserved.
+Freeware for the alpha release (owner decision D-07, 2026-08-23). License
+enforcement code exists in the source (fully tested) but is deliberately not
+wired in. Copyright (c) 2026 AZ Soundtech. All rights reserved.

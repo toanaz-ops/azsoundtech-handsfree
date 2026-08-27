@@ -1,8 +1,8 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
-> Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp 1:1 với code
-> đang chạy (`src/`). Số liệu lấy trực tiếp từ header/khối `constexpr` trong
-> source, ngày 23/08/2026. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
+> Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
+> đang chạy (`src/`) tại thời điểm 27/08/2026. Số liệu lấy trực tiếp từ
+> header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
 
 ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
 
@@ -19,25 +19,25 @@ flowchart LR
 
     subgraph AUDIOTHREAD["Luồng audio (real-time, KHÔNG alloc / KHÔNG lock)"]
         CB["AudioEngine::audioDeviceIOCallbackWithContext"]
-        NC["NotchChain ×2<br/>16 notch biquad / kênh"]
-        TAP["Tap ring buffer SPSC<br/>(8192 mẫu ≈ 170 ms @ 48 kHz)"]
-        CQ["Command queue SPSC<br/>LockFreeRingBuffer&lt;NotchCommand&gt;"]
-        DRAIN["drainCommandQueue()<br/>≤ N lệnh / callback"]
+        NC["NotchChain ×2 làn × 8 slot<br/>16 notch biquad / làn"]
+        TAP["8 tap ring buffer SPSC<br/>(làn 0 của mỗi slot)"]
+        CQ["8 command queue SPSC<br/>LockFreeRingBuffer&lt;NotchCommand&gt;"]
+        DRAIN["drainCommandQueue()<br/>≤ 256 lệnh / callback,<br/>ngân sách chung 8 queue"]
     end
 
-    subgraph DETTHREAD["Luồng detector (nền)"]
-        DET["Detector<br/>FFT 1024 · hop 512 · Hann"]
+    subgraph DETTHREAD["Luồng detector (nền, ×8 — một bộ mỗi slot)"]
+        DET["Detector<br/>FFT 2048 · hop 512 · Hann"]
         PA["PeakinessAnalyzer<br/>chấm điểm annulus ±3..±5"]
         CS["CandidateScorer<br/>peakiness × rise × novelty<br/>+ trừ điểm harmonic"]
         CTRL["NotchController<br/>mô hình notch · outbox retry<br/>auto-release 30 s"]
         SNAP["Snapshot phổ + notch<br/>(mutex, caller-owned copy)"]
     end
 
-    GUI["GUI (message thread)<br/>SpectrumView · NotchList · ModeBar"]
+    GUI["GUI (message thread)<br/>ModeRail · StatusBadge · SlotTabs<br/>SlotPanel · TuningPanel · DeviceDrawer<br/>SpectrumView · NotchListPanel<br/>(ModeBar cũ còn sống nhưng HIDDEN)"]
 
-    HW -->|input stereo| CB
+    HW -->|"input theo routing slot"| CB
     CB --> NC
-    CB -->|"copy post-notch kênh L"| TAP
+    CB -->|"copy post-notch làn 0 mỗi slot"| TAP
     TAP -->|"read ≤512 mẫu/lần"| DET
     DET --> PA --> CS --> CTRL
     CTRL -->|"Set/Clear(freq,Q,depth)"| CQ
@@ -45,15 +45,15 @@ flowchart LR
     DET -.-> SNAP
     CTRL -.-> SNAP
     SNAP -.-> GUI
-    NC -->|output stereo| CB --> HW
+    NC -->|"output theo routing slot"| CB --> HW
 ```
 
 Hai chiều bất đối xứng có chủ đích:
 
 | Chiều | Kênh | Vì sao dạng này |
 |---|---|---|
-| Audio → Detector | Tap ring buffer (SPSC) | Luồng audio chỉ `write()` và **không bao giờ chờ**; ring đầy thì drop và đếm (`getTapDropCount()`) |
-| Detector → Audio | Command queue (SPSC) | Luồng audio rút tối đa `kMaxCommandsPerCallback` lệnh mỗi callback; không rút hết cũng chẳng sao — lệnh còn lại chờ kỳ sau |
+| Audio → Detector | 8 tap ring buffer (SPSC, một cái mỗi slot) | Luồng audio chỉ `write()` và **không bao giờ chờ**; ring đầy thì drop và đếm (`getTapDropCount()`) |
+| Detector → Audio | 8 command queue (SPSC, một cái mỗi slot) | Luồng audio rút tối đa `kMaxCommandsPerCallback = 256` lệnh mỗi callback — **một ngân sách dùng chung** cho cả 8 queue, không phải 256 mỗi queue; không rút hết cũng chẳng sao — lệnh còn lại chờ kỳ sau |
 
 Mọi dữ liệu GUI cần (phổ, trạng thái notch) đi qua **snapshot có mutex**: luồng
 detector không real-time nên chờ được; caller nhận bản copy của riêng mình nên
@@ -61,12 +61,15 @@ không có race.
 
 ## 2. Đường tín hiệu audio (chu kỳ vài ms)
 
-1. Driver đưa một block stereo vào callback.
+1. Driver đưa một block vào callback; mỗi slot bật lấy đúng kênh vào/ra nó
+   được route.
 2. **Bypass mode**: copy thẳng in → out. **Auto/Soundcheck**: mỗi mẫu đi qua
-   chuỗi 16 biquad notch của kênh nó.
-3. Sau khi xử lý, **kênh L sau notch** được copy một lần vào tap ring — detector
-   nghe đúng thứ người nghe được, kể cả khi notch đã cắt.
-4. Rút command queue (tối đa ~64 lệnh) áp dụng `Set`/`Clear` vào NotchChain.
+   chuỗi 16 biquad notch của làn nó trong slot.
+3. Sau khi xử lý, **làn 0 sau notch của MỖI slot** được copy một lần vào tap
+   ring riêng của slot đó — ở mọi mode, kể cả Bypass — detector nghe đúng thứ
+   người nghe được, kể cả khi notch đã cắt.
+4. Rút command queue (tối đa 256 lệnh, ngân sách dùng chung cho cả 8 queue)
+   áp dụng `Set`/`Clear` vào NotchChain.
 5. Trả output cho driver. Toàn bộ bước trên: **zero allocation, zero lock**.
    `ScopedNoDenormals` bật ở đầu callback — sau ~4 giây im lặng tuyệt đối,
    chuỗi biquad không có nó sẽ rơi vào limit-cycle denormal và CPU vọt từ
@@ -100,8 +103,8 @@ sequenceDiagram
 
     loop Mỗi ~10.7 ms @48 kHz (hop 512)
         T->>D: read ≤ 512 mẫu mới
-        D->>D: trượt cửa sổ 1024 mẫu (50% overlap)
-        D->>D: Hann window → FFT forward → 513 magnitudes
+        D->>D: trượt cửa sổ 2048 mẫu (75% overlap)
+        D->>D: Hann window → FFT forward → 1025 magnitudes
         D->>P: phổ hiện tại
         P-->>S: peakiness mỗi bin
         S-->>C: candidates đã chấm điểm
@@ -112,8 +115,12 @@ sequenceDiagram
 
 ### 3.1 Cửa sổ FFT
 
-- **1024 điểm, hop 512 → overlap 50%**: một tần số không thể "lọt khe" giữa hai
-  lần phân tích; sự kiện hú xuất hiện trong nửa chu kỳ phân tích.
+- **2048 điểm, hop 512 → overlap 75%**: một tần số không thể "lọt khe" giữa hai
+  lần phân tích. FFT được nới 1024 → 2048 (brief 2026-08-24) để **bin hẹp một
+  nửa** — kéo điểm mù tần số thấp từ ~234 Hz xuống ~117 Hz @ 48 kHz. Giá phải
+  trả: thêm ~21 ms độ trễ phân tích và ~2× CPU, nhưng **chỉ trên luồng
+  detector** — hop không đổi nên nhịp phân tích vẫn ~10.7 ms/spectrum, và luồng
+  audio không tốn thêm gì.
 - **Cửa sổ Hann**: giảm leakage để một gai hú thật sự là một gai. (Hamming/
   Blackman đều fail test phân biệt — đã kiểm chứng bằng test.)
 - **Đồng hồ hai lớp (D-06)**: đồng hồ wall-clock đo thời lượng; cờ
@@ -147,9 +154,13 @@ tín hiệu, ngưỡng 10 không bao giờ bắn. Đổi sang annulus ±3..±5: 
 **131.7**, tệ nhất nhiễu qua 60 seed = **7.35**, zero báo nhầm. Ngưỡng **10.0**
 không đổi — cái sai là bán kính, không phải hằng số.
 
-Hệ quả đã ghi nhận: bin thấp nhất chấm điểm được là bin 5 ≈ **234 Hz @ 48 kHz**
-(cần 5 bin headroom mỗi bên). Dưới ngưỡng đó detector mù — chấp nhận cho v1,
-ghi rõ trong `PeakinessAnalyzer.h`.
+Hệ quả: bin thấp nhất chấm điểm được là bin 5 (cần 5 bin headroom mỗi bên) —
+công thức 5 × sample rate / 2048, tức ~**117 Hz @ 48 kHz** (~107 Hz @ 44.1 kHz,
+~234 Hz @ 96 kHz) kể từ khi FFT nới lên 2048 điểm (`PeakinessAnalyzer.h` đánh
+dấu đây là "FORMER v1 LIMITATION, FIXED 2026-08-24"). Dưới ngưỡng đó detector
+mù. **Caveat**: sweep đo trên đây làm với hình học 1024 điểm — ngưỡng 10.0
+**chưa được đo lại** với FFT 2048; nó runtime-tunable trong [5, 20], và cần một
+lượt calibration thực địa trước khi tin default này.
 
 ### 3.3 CandidateScorer — không phải mọi gai đều đáng khóa
 
@@ -157,6 +168,14 @@ Peakiness chỉ là một nhân tử. Điểm cuối = **peakiness × rise × no
 **phạt harmonic**: nếu tần số F nằm trong dải bội 1.4×–4.1× của một notch đã
 khóa thì điểm nhân thêm 0.5. Không có chỗ cho việc cắt bội số của nốt nhạc —
 harmonic của keyboard không phải hú.
+
+Hai tham số thời gian của scorer đều runtime-tunable (brief 2026-08-24):
+**rise reference** mặc định 250 ms (chỉnh được 100–1000 ms) — mag hiện tại so
+với mag ~250 ms trước; và **persistence** mặc định 3 block liên tiếp (chỉnh
+được 1–10) trước khi phát lệnh `Set`. GUI gom chúng vào ONE-KNOB RESPONSE:
+SAFE (500 ms/4/−12 dB/Q40/thr 12.0), BALANCED (250/3/−18/30/10.0), AGGRESSIVE
+(100/1/−24/20/8.0), tự chuyển CUSTOM khi chỉnh tay; mỗi slot chọn theo tuning
+Global chung hoặc Custom riêng.
 
 ### 3.4 NotchController — detector là tác giả duy nhất (D-05)
 
@@ -172,23 +191,26 @@ cũng không kéo dài callback.
 
 **Auto-release 30 s** (spec §5.2): quá 30 giây không thấy peakiness ở tần số
 đã khóa → phát `Clear`. Filter nhả, quỹ notch quay lại phục vụ ca hú tiếp theo.
+**Ngoại lệ KD-7**: notch đặt trong Soundcheck (Origin::Soundcheck) **miễn
+auto-release** — chỉ nhả qua `clearNotch`/`clearAll` tường minh, vì tần số
+phòng "tự khai" lúc soundcheck là tần số nguy hiểm cả buổi.
 
 ### 3.5 Chế độ hoạt động
 
 ```mermaid
 stateDiagram-v2
     [*] --> Bypass
-    Bypass --> Soundcheck : nút Run Soundcheck (15 s)
-    Soundcheck --> Auto : hết 15 s
-    Bypass --> Auto : nút Auto
-    Auto --> Bypass : nút Bypass
-    Soundcheck --> Bypass : nút Bypass
+    Bypass --> Soundcheck : nút SOUNDCHECK (15 s)
+    Soundcheck --> Auto : người vận hành bấm AUTO
+    Bypass --> Auto : nút AUTO
+    Auto --> Bypass : nút BYPASS
+    Soundcheck --> Bypass : nút BYPASS
 
     state Bypass {
         note right of Bypass : Copy thẳng in→out.<br/>Tap VẪN chạy — detector vẫn thấy phòng
     }
     state Soundcheck {
-        note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả
+        note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả (KD-7).<br/>Hết 15 s detector tự NGỪNG DÒ<br/>nhưng mode KHÔNG tự chuyển —<br/>chờ người vận hành bấm AUTO
     }
     state Auto {
         note right of Auto : Khóa khi vượt ngưỡng,<br/>tự nhả sau 30 s im
@@ -204,13 +226,22 @@ File JSON `%APPDATA%/AZSoundtech/HandsFree/presets/*.json`: version, device
 (chỉ metadata, không bao giờ chặn nạp), sampleRate **số** (không phải chuỗi
 "48000 Hz"), bufferSize, danh sách notch đã khóa, và khối tùy chọn
 `notchDefaults {Q, depth}` — chỗ duy nhất để Speech (Q=40/−18 dB) và Music
-(Q=25/−10 dB) tồn tại, vì preset đóng gói trong installer chưa khóa notch nào
+(Q=25/−10 dB) tồn tại, vì preset đóng gói trong repo chưa khóa notch nào
 (nốt nào cũng vậy — một default mang notch tần số đoán mò sẽ cắt dB thật trên
-mọi PA nó chạm). Hai file mặc định ship kèm, seed vào máy user lúc first-run,
-**không bao giờ ghi đè** file đã có.
+mọi PA nó chạm).
+
+**Format v2** (theo routing 8 slot): thêm section `"slots"` và mỗi notch mang
+key `"slot"` (mặc định 0 khi vắng — file v1 cũ vẫn nạp được). Notch có `slot`
+ngoài phạm vi [0, 7] bị **bỏ qua và đếm** vào `skippedNotchCount` — cả file
+**không** bị từ chối vì một notch lạc slot.
+
+**Trạng thái nối dây (27/08/2026)**: hàm seed first-run đã viết và test đầy đủ
+nhưng app **chưa gọi** nó, installer cũng **chưa chép** thư mục presets — user
+hiện chưa tự có Speech/Music trên máy. GUI cũng chưa có nút nạp/lưu preset
+(`MainComponent::loadPreset` không có caller). Cả hai chờ nối ở bản sau.
 
 Loader: lỗi version → từ chối ngay kèm trích version lạ; >16 notch hoặc trùng
-index → từ chối (slot đánh địa chỉ theo index, "người sau thắng" nghĩa là
+index → từ chối (slot notch đánh địa chỉ theo index, "người sau thắng" nghĩa là
 preset tai nghe ≠ preset trong file); notch trên Nyquist của **file** → từ chối
 (file tự mâu thuẫn), notch trên Nyquist của **device hiện tại** → nạp bình
 thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
@@ -227,6 +258,9 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 | Timeline discontinuity sau đổi rate | `Detector::reset()` xóa cửa sổ phân tích |
 | Notch oan harmonic nhạc | Trừ điểm 1.4×–4.1× của notch đã khóa |
 | Race GUI ↔ detector | Snapshot mutex, caller-owned copy |
+| Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
+| Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
+| Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — mỗi controller ~550 kB từ khi FFT 2048 (history 128×1025 float của scorer chiếm phần lớn); 8 cái by-value là ~4.4 MB, đo được segfault |
 
 ## 6. Những gì hệ thống cố tình KHÔNG làm (v1)
 
@@ -235,13 +269,17 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 - **Không macOS/Linux/plugin** — standalone Windows only.
 - **Không cloud sync preset** — local only.
 - **Không licensing** (D-07) — freeware; mã license nằm chờ trong repo.
-- **Không phủ dưới ~234 Hz** — giới hạn hình học của phép chấm điểm annulus.
+- **Không phủ dưới ~117 Hz @ 48 kHz** (5 × sample rate / 2048) — giới hạn
+  hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
 
-## 7. Trạng thái & kiểm chứng (23/08/2026)
+## 7. Trạng thái & kiểm chứng (27/08/2026, v1.0.3)
 
-- Suite: **244/244 test pass** (ctest Release, MSVC, CI GitHub Actions xanh).
+- Suite: **366/366 test pass** (ctest Release, MSVC, CI GitHub Actions xanh).
 - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
-- DSP spine (Tasks 12–15), bridge, GUI device/status/mode, presets, installer:
-  đã hạ cánh. Còn lại: GUI visualization (19–22, 24), code signing (Task 31,
-  chờ EV cert), integration testing với phần cứng thật (Task 32).
+- DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
+  GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
+  SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel):
+  đã hạ cánh. Còn mở: code signing (Task 31, chờ EV cert), integration testing
+  với phần cứng thật (Task 32), nối data cho chip RING RISK (hiện luôn "N/A"),
+  nối GUI nạp/lưu preset + seed first-run.

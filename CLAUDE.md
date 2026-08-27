@@ -46,9 +46,8 @@ GitHub runner’s cmake defaults to the newest Visual Studio — see
 | any header, or `CMakeLists.txt` | full reconfigure + build |
 | DSP path, ASIO callback, buffer size | full build **and** `ctest`, then a human listens |
 
-**Use `build/`.** `build-review/`, `build-task8/`, `build-task8-msvc/` and
-`build-verify/` are leftovers from earlier sessions. Do not create a new
-`build-*` directory; do not commit any of them.
+**Use `build/`.** Do not create `build-*` variants; do not commit any build
+directory.
 
 ## Dependencies that are NOT in the repo
 
@@ -71,7 +70,9 @@ pwsh -File installer\release-alpha.ps1
 It bumps the PATCH in `CMakeLists.txt`, reconfigures, builds Release, runs
 `ctest` **as a gate**, packages with NSIS, and copies the installer to
 `Z:\My Drive\RELEASE\ALPHA TEST`. Use `-Part minor` or `-Part major` when the
-change warrants it.
+change warrants it. `-SkipTests` exists but must never be used for a build
+that leaves the machine — it builds local-only into `installer\dist-local\`
+and never touches the drop folder.
 
 Three things about it that are deliberate:
 
@@ -100,7 +101,7 @@ screenshot handed to the owner -- not a description of the change, and not a
 green build. Owner's standing instruction, 2026-08-25.
 
 ```bash
-build/tools/Release/HandsFreeSnapshot.exe shots 1440 920
+build/tools/Release/HandsFreeSnapshot.exe shots 1440 920 --fast
 ```
 
 `HandsFreeSnapshot` renders `MainComponent` offscreen through
@@ -120,7 +121,8 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 
 1. `memory/MEMORY.md` — index of lessons. Search before re-deriving.
 2. `docs/` — design notes.
-3. `openspec/specs` — change through `opsx-*` commands, not by hand.
+3. `docs/superpowers/specs/` — design docs. (`openspec/` holds only
+   `config.yaml`; OpenSpec is not in use.)
 
 ## Definition of done
 
@@ -130,3 +132,5 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 3. `memory/` note if the work taught something non-obvious, indexed in
    `memory/MEMORY.md`.
 4. Commit with explicit paths. Merge only if the user said "merge".
+5. A change to DSP constants, topology, or user-visible behavior also updates
+   `docs/GIOI-THIEU.md` and `docs/KY-THUAT-CHONG-HU.md` in the same change.

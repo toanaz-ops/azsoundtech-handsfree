@@ -1,5 +1,7 @@
 # Audio–Detector Bridge Implementation Plan
 
+> **STATUS 2026-08-27: ĐÃ SHIP TOÀN BỘ — đối chiếu code thật (SnapshotBuffer/copySnapshot trong NotchController, NotchListPanel/SpectrumView tiêu thụ snapshot, ClockSource + tests). Các checkbox bên dưới để nguyên làm hồ sơ lịch sử, không phản ánh trạng thái hiện tại.**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,5 +1,7 @@
 # Multi-Slot Routing Implementation Plan
 
+> **STATUS 2026-08-27: ĐÃ SHIP (Tasks 1–8) — đối chiếu git a3371b2..bfd2fdc. Còn mở: Task 9 (human listen, merge).**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Nâng app chống hú từ 1 luồng stereo cứng thành tối đa 8 slot xử lý độc lập với route chéo tự do in/out trên thiết bị ASIO/CoreAudio đa kênh, chạy Windows + macOS.
@@ -51,7 +53,7 @@ Expected: 257/257 pass (baseline).
 - `bool slotConfigIsValid(const SlotConfig&, int numInputChannels, int numOutputChannels);`
 - `SlotConfig slotClampedTo(const SlotConfig&, int numInputChannels, int numOutputChannels);`
 
-- [ ] **Step 1: Test thất bại** — `tests/test_slotconfig.cpp`:
+- [x] **Step 1: Test thất bại** — `tests/test_slotconfig.cpp`:
 
 ```cpp
 #include <gtest/gtest.h>
@@ -87,8 +89,8 @@ TEST(SlotConfig, ClampPullsIndicesIntoRange)
 }
 ```
 
-- [ ] **Step 2:** Build test → FAIL (header chưa tồn tại).
-- [ ] **Step 3: Implement** — `src/app/SlotConfig.h`:
+- [x] **Step 2:** Build test → FAIL (header chưa tồn tại).
+- [x] **Step 3: Implement** — `src/app/SlotConfig.h`:
 
 ```cpp
 // SlotConfig: một luồng xử lý độc lập trong mô hình multi-slot (spec
@@ -142,7 +144,7 @@ inline SlotConfig slotClampedTo (const SlotConfig& c,
 ```
 (Thêm `#include <algorithm>` và `#include <array>` khi cần.)
 
-- [ ] **Step 4:** Build + chạy test → PASS. Commit: `feat: SlotConfig model with pure validation helpers`.
+- [x] **Step 4:** Build + chạy test → PASS. Commit: `feat: SlotConfig model with pure validation helpers`.
 
 ### Task 2: NotchCommand thêm trường slot
 
@@ -152,8 +154,8 @@ inline SlotConfig slotClampedTo (const SlotConfig& c,
 
 **Interfaces:** `struct NotchCommand { ... int slot = 0; ... }` — default 0 để mọi caller cũ biên dịch lại không đổi hành vi.
 
-- [ ] Test roundtrip: ghi 1 command `slot=5` vào ring, đọc ra `EXPECT_EQ(cmd.slot, 5)` — FAIL trước, PASS sau khi thêm trường.
-- [ ] Commit: `feat: NotchCommand carries slot id`.
+- [x] Test roundtrip: ghi 1 command `slot=5` vào ring, đọc ra `EXPECT_EQ(cmd.slot, 5)` — FAIL trước, PASS sau khi thêm trường.
+- [x] Commit: `feat: NotchCommand carries slot id`.
 
 ### Task 3: AudioEngine — lưu trữ slot + rewrite callback
 
@@ -265,15 +267,15 @@ khởi tạo slot 0 enabled=true stereo {0,1}→{0,1}, slot còn lại width=0/d
 >2 kênh, các kênh output không được map bởi slot nào bị tĩnh âm CỐ Ý theo
 spec §4 (owner đã duyệt).
 
-- [ ] Step 1: viết test THẤT BẠI trong `test_audioengine.cpp` (pattern hiện có gọi thẳng `audioDeviceIOCallbackWithContext` với buffer giả):
+- [x] Step 1: viết test THẤT BẠI trong `test_audioengine.cpp` (pattern hiện có gọi thẳng `audioDeviceIOCallbackWithContext` với buffer giả):
   1. Route chéo mono: slot 1 enabled width1 in{1}→out{3}; feed sóng hình sin vào in1, các in khác im lặng → out3 nhận tín hiệu lọc, out0/1/2 im lặng.
   2. Cộng dồn: slot 0 (in0→out0) + slot 1 (in1→out0) cùng bật → out0 = f(x0)+g(x1).
   3. Bypass theo mapping: mode=Bypass → out3 == copy(in1).
   4. Kênh ngoài phạm vi (device 4in nhưng slot chỉ định in7): bỏ làn, không crash, out được clear.
   5. Tap per-slot: sau callback, `getTapBuffer(1).read(...)` trả đúng khối post-notch của slot 1; `getTapDropCount(slot)` tách biệt.
   6. Command routing: viết `NotchCommand{slot=1,...}` vào `getCommandQueue(1)` → `getNotchChainForTest(1,0)` có notch active, chain slot khác không.
-- [ ] Step 2: chạy FAIL. Step 3: implement như trên. Step 4: PASS toàn bộ suite cũ + mới (suite cũ phải xanh không sửa gì — đó là bằng chứng tương thích ngược hành vi).
-- [ ] Step 5: Commit: `feat: AudioEngine 8-slot routing with per-slot taps and command queues`.
+- [x] Step 2: chạy FAIL. Step 3: implement như trên. Step 4: PASS toàn bộ suite cũ + mới (suite cũ phải xanh không sửa gì — đó là bằng chứng tương thích ngược hành vi).
+- [x] Step 5: Commit: `feat: AudioEngine 8-slot routing with per-slot taps and command queues`.
 
 ### Task 4: NotchController theo width slot
 
@@ -283,9 +285,9 @@ spec §4 (owner đã duyệt).
 
 **Consumes:** Task 2 (cmd.slot do CHÍNH controller này gán khi gửi command — constructor thêm tham số `int slotId`; mọi command gửi đi mang `slot = slotId_`, `channel` = làn trong slot).
 
-- [ ] Thêm `setWidth (int lanes)` (1 hoặc 2; default 2). Sửa `adoptPreset` và đường detect (đoạn hardcode `left/right` ở NotchController.cpp:118-119 và :341-343) thành vòng `for (lane = 0; lane < width_; ++lane)` — mỗi làn một lệnh `setNotch(slotId_, lane, ...)`.
-- [ ] Test: controller width1 + slotId=3: adoptPreset 2 notch → chain slot3/lane0 có notch, KHÔNG sinh lệnh nào cho lane1; command trong ring mang `slot==3`.
-- [ ] Commit: `feat: NotchController slot-aware width and command tagging`.
+- [x] Thêm `setWidth (int lanes)` (1 hoặc 2; default 2). Sửa `adoptPreset` và đường detect (đoạn hardcode `left/right` ở NotchController.cpp:118-119 và :341-343) thành vòng `for (lane = 0; lane < width_; ++lane)` — mỗi làn một lệnh `setNotch(slotId_, lane, ...)`.
+- [x] Test: controller width1 + slotId=3: adoptPreset 2 notch → chain slot3/lane0 có notch, KHÔNG sinh lệnh nào cho lane1; command trong ring mang `slot==3`.
+- [x] Commit: `feat: NotchController slot-aware width and command tagging`.
 
 ### Task 5: Preset v2 — slotId + slots section
 
@@ -299,8 +301,8 @@ spec §4 (owner đã duyệt).
 - Load rules (spec §6): notch slot chưa enabled/tồn tại → tự kích hoạt, config giữ nguyên nếu đã có, nếu chưa dùng mặc định stereo rồi `slotClampedTo` theo kênh device (số kênh truyền vào hàm load mới `loadPreset(data, int numIn, int numOut)` — overload mới, bản cũ giữ hành vi = clamp về {0,1}); `slot ≥ 8` → bỏ notch, cộng `skippedCount` trả về caller để cảnh báo.
 - Writer: emit `"slots"` khi có slot nào ≠ mặc định; **vẫn đọc được file v1** (không có key nào trong số đó → hành vi cũ).
 
-- [ ] Test: (a) parse v1 thuần → mọi notch slot=0; (b) parse v2 với slot=3 → PresetNotch.slot==3; (c) load v2 lên engine giả 4in/4out → slot3 được kích hoạt đúng; (d) slot=9 → skippedCount==1; (e) round-trip write/read giữ slot.
-- [ ] Commit: `feat: preset format v2 with slot ids and slot configs`.
+- [x] Test: (a) parse v1 thuần → mọi notch slot=0; (b) parse v2 với slot=3 → PresetNotch.slot==3; (c) load v2 lên engine giả 4in/4out → slot3 được kích hoạt đúng; (d) slot=9 → skippedCount==1; (e) round-trip write/read giữ slot.
+- [x] Commit: `feat: preset format v2 with slot ids and slot configs`.
 
 ### Task 6: MainComponent — 8 pipeline + wiring
 
@@ -330,7 +332,7 @@ std::array<NotchController, kMaxSlots> notchControllers_;   // khởi tạo vớ
 
 **Produces:** component bảng cuộn 8 dòng `[On/Off toggle] [Mono/Stereo ▼] [In ▼] [(In ▼)] [Out ▼] [(Out ▼)] [LED + notch count]`, dùng AzTheme tokens. Combo kênh đổ từ `engine_.getInputChannelNames()/getOutputChannelNames()`. Mọi thay đổi đi qua `onBeforeRestart/onAfterRestart` rồi `engine_.setSlotConfig()` + restart.
 
-- [ ] Commit: `feat: SlotPanel UI for 8-slot cross routing`.
+- [x] Commit: `feat: SlotPanel UI for 8-slot cross routing`.
 
 ### Task 8: Platform default device type + CI macOS
 
@@ -357,7 +359,7 @@ strategy:
 runs-on: ${{ matrix.os }}
 ```
 với bước configure chọn generator theo OS (Windows giữ `-G "Visual Studio ..." -A x64`; macOS dùng mặc định Xcode, KHÔNG truyền asiosdk — JUCE_ASIO chỉ compile trên Windows).
-- [ ] Commit: `feat: platform-aware default device type; CI builds macos`.
+- [x] Commit: `feat: platform-aware default device type; CI builds macos`.
 
 ### Task 9: Close-out Phase 1
 

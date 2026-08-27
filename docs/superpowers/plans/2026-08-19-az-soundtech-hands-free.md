@@ -10,14 +10,14 @@
 > | 5 (command queue thật) | ✅ xong qua bridge (`AudioEngine` sở hữu queue, drain ≤64/callback) |
 > | 12–15 (harmonic detection, controller, auto-release, soundcheck) | ✅ xong qua bridge/DSP spine |
 > | 16–18, 23 (GUI device/rate/buffer/status/mode) | ✅ xong |
-> | 19–22, 24 (spectrum, overlay, notch list, clear) | ⬜ **VIỆC TIẾP THEO** — đã mở khóa bởi bridge snapshot |
-> | 25 (format half), 26 (presets mặc định) | ✅ xong; nửa wiring (nạp vào detector) cần nối startup |
+> | 19–22, 24 (spectrum, overlay, notch list, clear) | ✅ xong — đã ship và rebuild 2 lần (fd70d97, b3d589b, 88959b5, 98a4b08, 0351bca) |
+> | 25 (format half), 26 (presets mặc định) | ✅ xong; wiring có (MainComponent.cpp:401, :458 per-slot adoptPreset) — nhưng nút load/save trên GUI + first-run seeding vẫn CHƯA nối (không có caller) |
 > | 27–29 (licensing) | ⏸️ **HOÃN theo D-07** — build + test xong, cố tình chưa wire (freeware v1) |
 > | 30 (NSIS installer) | ✅ xong, verify 20/20 install→launch→uninstall |
 > | 31 (code signing) | 🚫 chờ EV certificate (~$300–500/năm) — vẫn cần dù freeware (SmartScreen) |
 > | 32 (integration testing) | ⬜ chờ phần cứng thật (iD14/Wing/phòng rehearsal) |
 >
-> Suite hiện tại: **244/244 pass** · CI xanh. Tài liệu sản phẩm:
+> Suite hiện tại: **366/366 pass (27/08/2026)** · CI xanh. Tài liệu sản phẩm:
 > [`docs/GIOI-THIEU.md`](../../docs/GIOI-THIEU.md) ·
 > [`docs/KY-THUAT-CHONG-HU.md`](../../docs/KY-THUAT-CHONG-HU.md).
 
@@ -35,8 +35,8 @@
 - JUCE 7.0+ (CMake support)
 - C++17 minimum
 - Sample rates: 44.1, 48, 88.2, 96 kHz
-- Stereo only (2 in / 2 out)
-- Max 16 notches per channel
+- ~~Stereo only (2 in / 2 out)~~ — superseded 24–26/08/2026 bởi 8-slot cross-routing (`kMaxSlots = 8`, mỗi slot mono/stereo, map kênh tự do)
+- Max 16 notches per lane × 2 lanes × 8 slots (trước đây: per channel)
 - Target latency: <3ms added by app
 - License: Perpetual, online activation required
 - No VST/AU/AAX (standalone only for v1)

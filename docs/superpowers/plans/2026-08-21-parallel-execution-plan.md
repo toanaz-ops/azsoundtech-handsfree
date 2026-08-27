@@ -88,7 +88,7 @@ boundary is four separate holes:
 
 | Hole | Blocks | Evidence |
 |---|---|---|
-| No command queue instantiated | 13 | `NotchCommand` appears only in its own header and the CMake source list. Task 5 is not done. |
+| No command queue instantiated | 13 | `NotchCommand` appears only in its own header and the CMake source list. Task 5 is not done. **[Correction 2026-08-27: đã ship — AudioEngine sở hữu 8 command queue, drain dưới shared budget 256 (AudioEngine.cpp:465-470).]** |
 | No thread-safe read of locked-notch state | 12 | Notch state is private in `AudioEngine`; `NotchChain.h` says all methods are audio-thread-only. |
 | No detector thread and no wall clock | 14 | `Detector` has no `start/stop/run`. `Spectrum::readCount` is a *buffer-position* hop; an input dropout advances it by nothing while real time passes. Spec §5.2 steps 6–7 need real elapsed time (~30 ms, 30 s). |
 | Magnitudes handed out as a borrowed pointer | 19 | Invalidated on the next `processLatestBlock()`. A 60 fps GUI thread cannot read it without a race. |
@@ -154,6 +154,8 @@ Running concurrently in a worktree, because it touches only
   40 M-item two-thread torture test (power-of-two *and* non-power-of-two
   capacity) and found the memory ordering correct — this is about bringing that
   evidence *into the repo*, not about discovering something new.
+  **[Correction 2026-08-27: đã có trong repo — 3 test concurrent tại
+  test_ringbuffer.cpp:342, :350, :368.]**
 
 ### Wave 2 — four genuine lanes
 
