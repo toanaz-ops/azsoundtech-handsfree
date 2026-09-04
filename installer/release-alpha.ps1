@@ -249,6 +249,7 @@ if ($published -and $Keep -gt 0) {
 
         foreach ($old in $stale) {
             Remove-Item -LiteralPath $old.FullName -Force
+            $pruned = $true
             Start-Sleep -Milliseconds 500
             if (Test-Path -LiteralPath $old.FullName) {
                 Write-Host "WARN  $($old.Name) still present after delete (Drive sync lag?) -- retrying once"
@@ -256,9 +257,12 @@ if ($published -and $Keep -gt 0) {
                 Start-Sleep -Milliseconds 1500
                 if (Test-Path -LiteralPath $old.FullName) {
                     Write-Host "WARN  $($old.Name) would not delete -- tidy the drop folder by hand"
+                    $pruned = $false
                 }
             }
-            Write-Host "    pruned $($old.Name)"
+            if ($pruned) {
+                Write-Host "    pruned $($old.Name)"
+            }
         }
     }
     catch {
