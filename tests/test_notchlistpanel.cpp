@@ -127,6 +127,40 @@ TEST (NotchListPanelFormatting, AgeUnderAMinuteCountsSecondsOverAMinutesMinutesA
 //==============================================================================
 // Model behaviour against a REAL published snapshot.
 
+// Spec test 19. Red if the LANE column stops reading L for channel 0 and R
+// for channel 1.
+TEST (NotchListPanel, LaneColumnReadsLOrRPerChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tapL { 8192 }, tapR { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tapL, &tapR, commands, clock };
+    ASSERT_TRUE (controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (controller.setNotch (1, 3, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    std::vector<float> hop (Detector::kHopSize, 0.01f);
+    tapL.write (hop.data(), hop.size()); tapR.write (hop.data(), hop.size());
+    for (int i = 0; i < 5; ++i) { tapL.write (hop.data(), hop.size()); tapR.write (hop.data(), hop.size()); controller.runOnce(); }
+
+    gui::NotchListPanel panel (controller, [] { return 0.0; });
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 2);
+
+    bool sawL = false, sawR = false;
+    for (int i = 0; i < panel.rowCountForTest(); ++i)
+    {
+        const auto row = panel.rowForTest (i);
+        if (row.freq == "1000 Hz" || row.freq == "1.0 kHz")
+            EXPECT_EQ (row.lane.toStdString(), "L");
+        if (row.freq == "2.0 kHz")
+            EXPECT_EQ (row.lane.toStdString(), "R");
+        if (row.lane.toStdString() == "L") sawL = true;
+        if (row.lane.toStdString() == "R") sawR = true;
+    }
+    EXPECT_TRUE (sawL);
+    EXPECT_TRUE (sawR);
+}
+
 TEST (NotchListPanel, TwoPublishedNotchesProduceExactlyTwoRows)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

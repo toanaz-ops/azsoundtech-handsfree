@@ -1,7 +1,7 @@
 // NotchListPanel -- Task 4 of the GUI Console redesign (spec section 2).
 //
-// A read-only table of the notches currently in the model: # / FREQ / DEPTH /
-// Q / STATUS(age). It reads the model EXACTLY through
+// A read-only table of the notches currently in the model: # / LANE / FREQ /
+// DEPTH / Q / STATUS(age). It reads the model EXACTLY through
 // NotchController::copySnapshot() (design section 4), exactly like
 // SpectrumView -- display only, it NEVER issues commands and never touches
 // the audio thread.
@@ -99,7 +99,7 @@ public:
     // TEST ACCESSORS -- the model behind the painted table.
     struct RowText
     {
-        juce::String id, freq, depth, q, status;
+        juce::String id, lane, freq, depth, q, status;
 
         // How long this notch has been held, in milliseconds. Carried on the
         // row (not recomputed in paint) because the age drives the row's

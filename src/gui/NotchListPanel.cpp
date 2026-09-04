@@ -15,6 +15,7 @@ namespace
 // truncation at the theme's 13 px mono face.
 constexpr float kLeftPad    = 10.0f;
 constexpr float kColIdW     = 26.0f;
+constexpr float kColLaneW   = 30.0f;
 constexpr float kColFreqW   = 96.0f;   // includes the age dot ahead of the value
 constexpr float kColDepthW  = 88.0f;
 constexpr float kColQW      = 40.0f;
@@ -98,6 +99,7 @@ void NotchListPanel::refreshFromSnapshot()
             ageMs = now - it->second.firstSeenMs;
 
         rows_.push_back ({ juce::String (i + 1).paddedLeft ('0', 2),
+                           notch.channel == 1 ? "R" : "L",
                            formatFrequency (notch.frequency),
                            formatDepthDb (notch.depthDB),
                            formatQ (notch.Q),
@@ -267,7 +269,7 @@ void NotchListPanel::paint (juce::Graphics& g)
     // Column origins. FREQ carries the age dot, so its text starts inset.
     const auto frame = area.toFloat();
     const float x0 = frame.getX() + kLeftPad;
-    const float x1 = x0 + kColIdW;
+    const float x1 = x0 + kColIdW + kColLaneW;
     const float x2 = x1 + kColFreqW;
     const float x3 = x2 + kColDepthW;
     const float x4 = x3 + kColQW;
@@ -277,6 +279,7 @@ void NotchListPanel::paint (juce::Graphics& g)
     g.setColour (dim);
     g.setFont (legendFont (columnFontSize, true, trackingColumn));
     g.drawText ("#",     (int) x0, header.getY(), (int) kColIdW,    header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("LANE",  (int) (x0 + kColIdW), header.getY(), (int) kColLaneW, header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("FREQ",  (int) x1, header.getY(), (int) kColFreqW,  header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("DEPTH", (int) x2, header.getY(), (int) kColDepthW, header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("Q",     (int) x3, header.getY(), (int) kColQW,     header.getHeight(), juce::Justification::centredLeft);
@@ -317,6 +320,8 @@ void NotchListPanel::paint (juce::Graphics& g)
 
         g.setColour (faded);
         g.drawText (row.id, x0, rowTop, kColIdW - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+        g.drawText (row.lane, x0 + kColIdW, rowTop, kColLaneW - 4.0f, (float) kRowHeight,
                     juce::Justification::centredLeft);
 
         // THE RAMP, on a 7 px dot: sodium the instant it fires, ice once it
