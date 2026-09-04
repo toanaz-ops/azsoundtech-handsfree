@@ -45,7 +45,7 @@ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng ch
 | **3 chế độ** | **Bypass** (thông tuyến thuần), **Auto** (chạy liên tục), **Soundcheck** (nghe 15 giây đầu show, khóa mọi đỉnh tìm thấy, không tự nhả; hết 15 giây detector tự ngừng dò — bấm **Auto** để chạy tiếp) |
 | **Chỉnh độ nhạy một nút** | ONE-KNOB RESPONSE: **SAFE** / **BALANCED** / **AGGRESSIVE** (tự chuyển **CUSTOM** khi chỉnh tay); mỗi slot chọn theo tuning **Global** chung hoặc **Custom** riêng |
 | **Chọn device trực quan** | Chọn driver/device/sample rate/buffer ngay trong app; hiện latency và trạng thái theo thời gian thực |
-| **Preset có sẵn** | `Speech` (Q=40, −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. *Lưu ý v1: GUI chưa có nút nạp/lưu preset, và app chưa tự chép hai preset này vào máy lúc first-run — sẽ nối ở bản sau* |
+| **Preset có sẵn** | `Speech` (Q=40, −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). |
 | **An toàn theo thiết kế** | Không cấp phát bộ nhớ hay khóa mutex trên đường audio real-time; từ chối độ sâu dương (điều gì sẽ xảy ra nếu một lỗi đánh dấu biến notch thành máy khuếch đại hú?); tự vô hiệu notch khi đổi sample rate khiến notch vượt Nyquist |
 
 ## Thông số nhanh
