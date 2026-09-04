@@ -87,6 +87,27 @@ public:
     // refused file. Returns false (with nothing applied) when the load fails.
     bool loadPreset (const juce::File& file);
 
+    // Gathers the CURRENT published notch state (what the user sees) across all
+    // routing slots and writes it as a preset file. Returns the saveToFile
+    // result: PresetManager validates FIRST and writes nothing if invalid, so a
+    // false here means the file was NOT created -- an app that saves a preset it
+    // cannot reopen is worse than one that refuses.
+    //
+    // The sample rate written is the one the notches were PUBLISHED at
+    // (SnapshotBuffer::sampleRate), never 0: saveToFile checks each notch's freq
+    // against that rate's Nyquist, and a notch detected at rate R is valid at R
+    // by construction. Notches mirrored across both lanes are deduped to one per
+    // (slot, index).
+    bool savePreset (const juce::File& file);
+
+    // Injectable for tests: the default opens a native async FileChooser and
+    // invokes onPicked with the file the user picked (a cancel is a no-op). A
+    // headless test replaces these with a fake that hands onPicked a known temp
+    // file. Mirrors ModeRail::confirmHook -- the only way to exercise the
+    // button->chooser->load/save route with JUCE_MODAL_LOOPS_PERMITTED off.
+    std::function<void (std::function<void (const juce::File&)> onPicked)> presetLoadChooser;
+    std::function<void (std::function<void (const juce::File&)> onPicked)> presetSaveChooser;
+
     // THE one route a routing-table change takes (the SlotPanel lambda calls
     // this): the same detector stop/apply/start cycle as a device change,
     // then the CURRENT mode's detection gating re-applied to the changed slot,
