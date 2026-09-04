@@ -226,6 +226,15 @@ void NotchController::runOnce()
             ++latest_.sequence;
         }
 
+        // One tick per lockstep drain iteration, BEFORE the per-lane dispatch
+        // below, so every lane processed in this pass reads the same number.
+        // Skipping 0 on wrap keeps the never-placed sentinel in
+        // linkedPlacedAt_ unambiguous (the wrap is ~1.4 years of continuous
+        // 10.7 ms drains away, but a stale stamp matching costs a missed
+        // notch, so it is not left to luck).
+        if (++drainIteration_ == 0)
+            ++drainIteration_;
+
         // The cross-lane comparison (§4.4) compares magnitudes that are, per
         // the invariant above, never more than one hop apart: `other` is
         // handed over only when the opposite lane produced a block in THIS
@@ -465,23 +474,52 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
         if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
             ++applied;
 
-    // Review finding (round 1): under LINKED, lane 0 and lane 1 keep
-    // independent persistence counters per bin (§4.3 -- persistence is still
-    // counted per (lane, bin)). runOnce() drains lane 0 then lane 1 within
-    // the SAME iteration, so if a howl sits on BOTH lanes their counters can
-    // both cross the confirm threshold before either placement lands: lane
-    // 0's call sets index i on both lanes, then lane 1's call -- unaware the
-    // pair is already placed -- sets index i+1 on both lanes too. That is
-    // two notches for one frequency, double the cut 1.0.4 never produced
-    // (it only ever analysed one lane). Once a lane's confirm has placed the
-    // pair, the other lanes' streak for this bin is stale and must not also
-    // fire this same iteration, so it is reset here. lanes_[].persistence is
+    // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
+    // lane 1 keep independent persistence counters per bin (§4.3 --
+    // persistence is still counted per (lane, bin)). runOnce() drains lane 0
+    // then lane 1 within the SAME iteration, so if a howl sits on BOTH lanes
+    // their counters can both cross the confirm threshold before either
+    // placement lands: lane 0's call sets index i on both lanes, then lane
+    // 1's call -- unaware the pair is already placed -- sets index i+1 on
+    // both lanes too. That is two notches for one frequency, double the cut
+    // 1.0.4 never produced (it only ever analysed one lane), and a chain that
+    // fills twice as fast.
+    //
+    // TWO mechanisms below, and they are complementary rather than redundant:
+    //
+    //   * the STAMP stops a lane processed AFTER this one in this same
+    //     iteration. Zeroing that lane's counter cannot do that job: with
+    //     persistenceBlocks == 1 -- operator-selectable from the DETECTION
+    //     panel and what the AGGRESSIVE preset ships -- its very next ++ takes
+    //     the counter 0 -> 1 >= 1 and it confirms anyway, in this same drain.
+    //     processSpectrumForDetection() reads the stamp and skips the bin.
+    //   * the RESET stops a lane processed BEFORE this one, whose streak for
+    //     this bin is now stale. The stamp expires with the iteration, so it
+    //     is never consulted on that lane's behalf; only zeroing its counter
+    //     costs it the requiredBlocks it must now re-earn.
+    //
+    // Both cover bin-1..bin+1 (bounds-checked). A howl straddling two bins can
+    // confirm on bin b on one lane and bin b+1 on the other, and one placed
+    // pair should answer that whole neighbourhood: at 48 kHz / 2048 a bin is
+    // 23.4 Hz, narrower than the notch just placed (Q 30 at 1 kHz is ~33 Hz
+    // wide), so no second howl the analyser could actually tell apart is being
+    // suppressed.
+    //
+    // lanes_[].persistence, linkedPlacedAt_ and drainIteration_ are all
     // detector-thread-only state (runOnce is never called concurrently from
-    // two threads), so no lock is needed for this reset.
+    // two threads), so none of this needs a lock.
     if (linkedNow && applied > 0)
-        for (int l = 0; l < width_; ++l)
-            if (l != lane)
-                lanes_[(std::size_t) l].persistence[(std::size_t) cand.bin] = 0;
+    {
+        const int firstBin = std::max (0, cand.bin - 1);
+        const int lastBin  = std::min (Detector::kNumBins - 1, cand.bin + 1);
+        for (int b = firstBin; b <= lastBin; ++b)
+        {
+            linkedPlacedAt_[(std::size_t) b] = drainIteration_;
+            for (int l = 0; l < width_; ++l)
+                if (l != lane)
+                    lanes_[(std::size_t) l].persistence[(std::size_t) b] = 0;
+        }
+    }
 
     // Partial-failure analysis, unchanged from 1.0.4: setNotch validates only
     // index bounds + params + sample rate, identical across lanes, so a
@@ -581,6 +619,22 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
     for (std::size_t i = 0; i < result.count && i < (std::size_t) Detector::kNumBins; ++i)
     {
         const auto& cand = result.candidates[i];
+        const int  bin  = cand.bin;
+
+        // A LINKED pair placed THIS drain iteration -- by the other lane, or
+        // by an earlier candidate of this same block -- already covers this
+        // bin and its two neighbours on every driven lane. Confirming again
+        // would stack a second pair at the next free index for one howl (see
+        // placeConfirmed's note). The streak dies with it: the bin has been
+        // answered, so what it accumulated is spent. Consulted only under
+        // LINK -- INDEP never places on a lane it did not confirm on, so it
+        // has no pair to double up on and its behaviour is untouched.
+        if (linkedNow && linkedPlacedAt_[(std::size_t) bin] == drainIteration_)
+        {
+            la.persistence[(std::size_t) bin] = 0;
+            continue;
+        }
+
         float score = la.scorer.scoreCandidate (
             cand, block.magnitudes,
             { locked.data(), locked.size() });
@@ -588,7 +642,6 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
         score *= asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
                                       laneAsymmetryBonus_.load (std::memory_order_relaxed));
 
-        const int bin = cand.bin;
         if (score > CandidateScorer::kConfirmScore)
         {
             const std::uint32_t requiredBlocks =

@@ -1039,7 +1039,9 @@ void SpectrumView::paint (juce::Graphics& g)
     // in frequency order. `order` carries each notch's ORIGINAL position,
     // which is the number the flag prints and the row the ACTIVE NOTCHES table
     // lists it under -- sorting the draw order must not renumber them. Fixed
-    // size, sorted in place: no allocation in paint().
+    // size and sorted in place, so paint() allocates nothing: the array holds
+    // kTotalSlots = 32 entries (2 lanes x 16 slots), which is every notch a
+    // snapshot can carry -- not 16, which would be one lane's worth.
     std::array<std::uint32_t, NotchController::kTotalSlots> order {};
     for (std::uint32_t i = 0; i < notchCount; ++i)
         order[i] = i;

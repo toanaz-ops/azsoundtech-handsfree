@@ -1000,16 +1000,36 @@ TEST (NotchControllerStereo, IndepHowlOnRightOnlyCutsRightOnly)
     EXPECT_NEAR (cmds.front().frequency, 1000.0, 0.5 * kTestSr / Detector::kFftSize);
 }
 
-// Spec test 5. Red if both-lane howl yields fewer than one Set per lane.
+// Spec test 5. Red if a both-lane howl yields fewer than one Set per lane, AND
+// red if a lane's confirm fans out to the other lane. "A Set on each channel"
+// alone proves nothing about independence -- 1.0.4 fanned every confirm to both
+// channels and would have passed that. So the two lanes howl at DIFFERENT
+// frequencies (1 kHz left, 3 kHz right) and every Set must carry the frequency
+// of the lane it landed on; a fan-out would put 1 kHz on channel 1.
 TEST (NotchControllerStereo, IndepHowlOnBothLanesCutsBoth)
 {
     StereoHarness h;
     h.controller.setDetectionActive (true);
-    SineSource toneL, toneR;
+    SineSource toneL;  toneL.freq = 1000.0;   // bin 43 -> 1007.8125 Hz
+    SineSource toneR;  toneR.freq = 3000.0;   // bin 128 -> 3000.0 Hz exactly
     const auto cmds = warmThenDrive (h, toneL, toneR);
 
+    constexpr double halfBinHz = 0.5 * kTestSr / Detector::kFftSize;
     bool sawL = false, sawR = false;
-    for (const auto& c : cmds) { sawL |= (c.channel == 0); sawR |= (c.channel == 1); }
+    for (const auto& c : cmds)
+    {
+        ASSERT_EQ (c.type, NotchCommandType::Set);
+        if (c.channel == 0)
+        {
+            sawL = true;
+            EXPECT_NEAR (c.frequency, 1000.0, halfBinHz) << "lane 0 notched lane 1's howl";
+        }
+        else
+        {
+            sawR = true;
+            EXPECT_NEAR (c.frequency, 3000.0, halfBinHz) << "lane 1 notched lane 0's howl";
+        }
+    }
     EXPECT_TRUE (sawL);
     EXPECT_TRUE (sawR);
 }
@@ -1173,6 +1193,41 @@ TEST (NotchControllerStereo, LinkedHowlOnBothLanesPlacesExactlyOnePairFirst)
     // Identical tone on both lanes: their persistence counters climb in
     // lockstep, so both cross the confirm threshold in the SAME drain
     // iteration -- exactly the race Finding 1 describes.
+    SineSource toneL, toneR;
+    for (int i = 0; i < 40; ++i)
+    {
+        pumpStereo (h, toneL.hop(), toneR.hop());
+        if (h.commands.getAvailableRead() > 0)
+            break;
+    }
+    const auto cmds = drain (h.commands);
+
+    ASSERT_EQ (cmds.size(), 2u) << "one howl on both lanes must cost exactly one index pair";
+    EXPECT_EQ (cmds[0].type, NotchCommandType::Set);
+    EXPECT_EQ (cmds[1].type, NotchCommandType::Set);
+    EXPECT_EQ (cmds[0].channel, 0);
+    EXPECT_EQ (cmds[1].channel, 1);
+    EXPECT_EQ (cmds[0].index, cmds[1].index);
+    EXPECT_FLOAT_EQ (cmds[0].frequency, cmds[1].frequency);
+}
+
+// Review round 2, Finding 1. The same symmetric howl at persistenceBlocks == 1
+// -- operator-selectable from the DETECTION panel and what AGGRESSIVE ships.
+// Red before the drain-iteration stamp: resetting the other lane's counter is
+// a no-op at a required streak of 1 (its next ++ takes it 0 -> 1 >= 1 and it
+// confirms in the SAME drain iteration), so one howl bought two index pairs.
+TEST (NotchControllerStereo, LinkedHowlOnBothLanesPlacesExactlyOnePairFirstAtPersistOne)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setPersistenceBlocks (1);
+    h.controller.setDetectionActive (true);
+
+    NoiseSource quietL, quietR;
+    quietR.rng.seed (999u);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+
     SineSource toneL, toneR;
     for (int i = 0; i < 40; ++i)
     {

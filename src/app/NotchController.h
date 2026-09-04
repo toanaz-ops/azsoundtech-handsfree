@@ -294,6 +294,18 @@ private:
     std::array<LockFreeRingBuffer<float>*, kChannels> taps_ {};   // [0] never null
     std::array<LaneAnalysis, kChannels> lanes_;
 
+    // Detector-thread-only state -- runOnce() is never entered concurrently,
+    // so neither of these needs a lock or an atomic.
+    //
+    // drainIteration_ ticks once per lockstep drain iteration in runOnce().
+    // linkedPlacedAt_[bin] carries the iteration in which a LINKED pair was
+    // last placed over that bin, so the candidate loop can tell "the other
+    // lane already placed this pair, THIS iteration" from "a fresh streak".
+    // 0 is the never-placed sentinel: the counter starts at 1 and skips 0 on
+    // wrap, so a stale zero can never match (see placeConfirmed's note).
+    std::uint32_t drainIteration_ = 0;
+    std::array<std::uint32_t, Detector::kNumBins> linkedPlacedAt_ {};
+
     // Lanes actually analysed this run: 2 only when stereo AND a lane-1 tap exists.
     int analysedLanes() const { return (width_ == 2 && taps_[1] != nullptr) ? 2 : 1; }
 
