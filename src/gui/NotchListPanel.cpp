@@ -10,21 +10,6 @@ namespace gui
 
 namespace
 {
-// Column widths, left to right. STATUS takes whatever remains. Chosen so the
-// narrowest sensible panel (~360 px) still fits every formatted cell without
-// truncation at the theme's 13 px mono face.
-constexpr float kLeftPad    = 10.0f;
-constexpr float kColIdW     = 26.0f;
-constexpr float kColLaneW   = 30.0f;
-constexpr float kColFreqW   = 96.0f;   // includes the age dot ahead of the value
-constexpr float kColDepthW  = 88.0f;
-constexpr float kColQW      = 40.0f;
-
-// The age dot: the same hot-to-ice ramp the analyser's notch stems use, so a
-// row and its stem always read as the same object.
-constexpr float kDotSize    = 7.0f;
-constexpr float kDotGap     = 9.0f;
-
 // The typographic minus of the depth format. Built from a code point rather
 // than a string literal so the compiler's execution charset can never mangle
 // it (repo rule: UTF-8 survives every read-modify-write).
@@ -215,6 +200,17 @@ NotchListPanel::RowText NotchListPanel::rowForTest (const int index) const
     return rows_[(std::size_t) index];
 }
 
+float NotchListPanel::statusWidthFor (const float frameWidth)
+{
+    // Mirrors the x4 derivation in paint() exactly (see the geometry
+    // comment on the column constants in the header): the fixed columns
+    // plus BOTH margins come off the frame, and STATUS/HELD gets whatever
+    // remains. Position-independent -- callers pass the panel's WIDTH, not
+    // its bounds, so paint() and the test share one formula.
+    const float fixedColumnsWidth = kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW;
+    return juce::jmax (0.0f, frameWidth - (2.0f * kLeftPad) - fixedColumnsWidth);
+}
+
 void NotchListPanel::timerCallback()
 {
     // Ages change even when the sequence does not, so unlike SpectrumView
@@ -273,7 +269,7 @@ void NotchListPanel::paint (juce::Graphics& g)
     const float x2 = x1 + kColFreqW;
     const float x3 = x2 + kColDepthW;
     const float x4 = x3 + kColQW;
-    const float statusW = juce::jmax (0.0f, frame.getRight() - x4 - kLeftPad);
+    const float statusW = statusWidthFor (frame.getWidth());
 
     auto header = area.removeFromTop (kHeaderHeight);
     g.setColour (dim);
@@ -349,7 +345,7 @@ void NotchListPanel::paint (juce::Graphics& g)
         g.setColour (dim);
         g.drawText (row.q, x3, rowTop, kColQW - 4.0f, (float) kRowHeight,
                     juce::Justification::centredLeft);
-        g.drawText (row.status, x4, rowTop, statusW, (float) kRowHeight,
+        g.drawText (row.status, x4, rowTop, statusW - 4.0f, (float) kRowHeight,
                     juce::Justification::centredLeft);
 
         rowTop += (float) kRowHeight;

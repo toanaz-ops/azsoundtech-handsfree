@@ -23,6 +23,7 @@
 #include "dsp/Detector.h"
 #include "dsp/LockFreeRingBuffer.h"
 #include "gui/NotchListPanel.h"
+#include "gui/theme/AzTheme.h"
 #include "test_gui_helpers.h"
 
 using gui_test::paintHeadless;
@@ -336,4 +337,56 @@ TEST (NotchListPanelWiring, TableIsTheFloorsLeftColumnAndNeverOverlapsTheAnalyse
     // same geometry: there is no open/closed state left to change it.
     app.resized();
     EXPECT_EQ (app.notchListBoundsForTest(), strip);
+}
+
+//==============================================================================
+// Column budget (review finding on Task 8): the header's guarantee that
+// every column fits its widest realistic cell at the narrowest sensible
+// panel (~360 px), measured against the REAL faces the panel paints with --
+// not guessed, and not the 13 px the header comment used to (wrongly) claim.
+//
+// Red if any column constant is narrowed below its widest cell, or if a
+// formatter starts producing a wider string, at the panel's real font.
+TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // Same call NotchListPanel's tableFont_ is built with -- one definition
+    // of "the real face", shared rather than re-derived here.
+    const auto tableFont = az::theme::monoFont();
+
+    auto widthOf = [&] (const juce::String& s)
+    {
+        return juce::GlyphArrangement::getStringWidth (tableFont, s);
+    };
+
+    constexpr float kInset = 4.0f;   // the right-margin every column paints with
+    const juce::String minus = juce::String::charToString ((juce::juce_wchar) 0x2212);
+
+    // # / LANE: a 2-digit index, a single lane glyph.
+    EXPECT_LE (widthOf ("32") + kInset, gui::NotchListPanel::kColIdW);
+    EXPECT_LE (widthOf ("L") + kInset, gui::NotchListPanel::kColLaneW);
+    EXPECT_LE (widthOf ("R") + kInset, gui::NotchListPanel::kColLaneW);
+
+    // FREQ: the age dot + its gap + the format's canonical widest cell
+    // ("2.4 kHz" -- design plan 2026-08-23-gui-console-redesign.md:128, and
+    // what TwoNotchController above deliberately exercises).
+    const float freqPrefix = gui::NotchListPanel::kDotGap + gui::NotchListPanel::kDotSize;
+    EXPECT_LE (freqPrefix + widthOf ("2.4 kHz") + kInset, gui::NotchListPanel::kColFreqW);
+
+    // DEPTH: the deepest notch the UI offers (TuningPanel::kDepthChoices
+    // tops out at -24 dB), typographic minus.
+    EXPECT_LE (widthOf (minus + "24.0 dB") + kInset, gui::NotchListPanel::kColDepthW);
+
+    // Q: TuningPanel::kQChoices tops out at 50.
+    EXPECT_LE (widthOf ("50.0") + kInset, gui::NotchListPanel::kColQW);
+
+    // STATUS/HELD: formatAgeMs() is uncapped -- age keeps counting across
+    // re-sightings, so "127m ago" (8 chars) is reachable in a long show.
+    // Assert against the ACTUAL formatter output, not a literal, so a format
+    // change that widens the string fails this test too.
+    const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
+    ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
+    const float statusW360 = gui::NotchListPanel::statusWidthFor (360.0f);
+    EXPECT_LE (widthOf (widestAge) + kInset, statusW360);
 }

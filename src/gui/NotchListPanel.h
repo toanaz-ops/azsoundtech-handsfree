@@ -96,6 +96,46 @@ public:
     static constexpr int kHeaderHeight  = 22;   // column captions
     static constexpr int kRowHeight     = 26;
 
+    // Column geometry, left to right. STATUS/HELD takes whatever remains
+    // (see statusWidthFor()). Every fixed column is sized against its OWN
+    // widest REALISTIC cell, measured with juce::GlyphArrangement against
+    // the faces this panel actually paints with -- az::theme::monoFont()
+    // (height == az::theme::baseFontSize, 14 px, NOT the 13 px a stale
+    // comment used to claim) for every data row, and
+    // az::theme::legendFont(az::theme::columnFontSize, ...) (13 px) for the
+    // header captions only. At the narrowest sensible panel (~360 px) every
+    // column still fits its widest cell without truncation -- pinned by
+    // NotchListPanel.EveryColumnFitsItsWidestCellAtTheNarrowestPanel:
+    //   #     : "01".."32" (kTotalSlots tops out at two digits) + 4 px inset.
+    //   LANE  : one glyph, "L" or "R" -- same 4 px inset as "#".
+    //   FREQ  : the age dot (kDotSize) + its gap (kDotGap) + "2.4 kHz" (the
+    //           format's canonical widest cell -- design plan
+    //           2026-08-23-gui-console-redesign.md:128, and what
+    //           TwoNotchController below deliberately exercises) + 4 px inset.
+    //   DEPTH : "-24.0 dB" (U+2212 minus) -- the deepest notch the UI offers;
+    //           TuningPanel::kDepthChoices tops out at -24 -- + 4 px inset.
+    //           Monospace, so any 2-digit-magnitude depth is the same width.
+    //   Q     : "50.0" -- TuningPanel::kQChoices tops out at 50 -- + 4 px inset.
+    //   STATUS: formatAgeMs() is UNCAPPED -- age keeps growing across
+    //           re-sightings, so "127m ago" (8 chars) is reachable in a long
+    //           show. statusWidthFor() must clear that width + 4 px inset at
+    //           every frame width this table is asked to draw.
+    static constexpr float kLeftPad    = 10.0f;
+    static constexpr float kColIdW     = 26.0f;
+    static constexpr float kColLaneW   = 22.0f;
+    static constexpr float kColFreqW   = 66.0f;   // dot + gap + "2.4 kHz" + inset
+    static constexpr float kColDepthW  = 56.0f;   // "-24.0 dB" + inset
+    static constexpr float kColQW      = 40.0f;
+
+    // The age dot: the same hot-to-ice ramp the analyser's notch stems use, so
+    // a row and its stem always read as the same object.
+    static constexpr float kDotSize    = 7.0f;
+    static constexpr float kDotGap     = 9.0f;
+
+    // STATUS/HELD width for a panel this wide. The one definition paint()
+    // and the column-budget test share, so they can never drift apart.
+    static float statusWidthFor (float frameWidth);
+
     // TEST ACCESSORS -- the model behind the painted table.
     struct RowText
     {
