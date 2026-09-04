@@ -253,7 +253,7 @@ if ($published -and $Keep -gt 0) {
             Start-Sleep -Milliseconds 500
             if (Test-Path -LiteralPath $old.FullName) {
                 Write-Host "WARN  $($old.Name) still present after delete (Drive sync lag?) -- retrying once"
-                Remove-Item -LiteralPath $old.FullName -Force
+                Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Milliseconds 1500
                 if (Test-Path -LiteralPath $old.FullName) {
                     Write-Host "WARN  $($old.Name) would not delete -- tidy the drop folder by hand"
