@@ -217,9 +217,10 @@ void NotchController::runOnce()
             ++latest_.sequence;
         }
 
-        // The cross-lane comparison (§4.4) only ever compares the SAME hop:
-        // `other` is handed over only when the opposite lane produced a block
-        // in THIS drain iteration, and is nullptr otherwise.
+        // The cross-lane comparison (§4.4) compares magnitudes that are, per
+        // the invariant above, never more than one hop apart: `other` is
+        // handed over only when the opposite lane produced a block in THIS
+        // drain iteration, and is nullptr otherwise.
         for (int l = 0; l < lanesToRead; ++l)
             if (spec[(std::size_t) l].magnitudes != nullptr)
             {
@@ -454,6 +455,25 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     for (int l = firstLane; l <= lastLane; ++l)
         if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
             ++applied;
+
+    // Review finding (round 1): under LINKED, lane 0 and lane 1 keep
+    // independent persistence counters per bin (§4.3 -- persistence is still
+    // counted per (lane, bin)). runOnce() drains lane 0 then lane 1 within
+    // the SAME iteration, so if a howl sits on BOTH lanes their counters can
+    // both cross the confirm threshold before either placement lands: lane
+    // 0's call sets index i on both lanes, then lane 1's call -- unaware the
+    // pair is already placed -- sets index i+1 on both lanes too. That is
+    // two notches for one frequency, double the cut 1.0.4 never produced
+    // (it only ever analysed one lane). Once a lane's confirm has placed the
+    // pair, the other lanes' streak for this bin is stale and must not also
+    // fire this same iteration, so it is reset here. lanes_[].persistence is
+    // detector-thread-only state (runOnce is never called concurrently from
+    // two threads), so no lock is needed for this reset.
+    if (linkedNow && applied > 0)
+        for (int l = 0; l < width_; ++l)
+            if (l != lane)
+                lanes_[(std::size_t) l].persistence[(std::size_t) cand.bin] = 0;
+
     // Partial-failure analysis, unchanged from 1.0.4: setNotch validates only
     // index bounds + params + sample rate, identical across lanes, so a
     // partial application has no realistic trigger. If it ever happens,

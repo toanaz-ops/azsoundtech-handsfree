@@ -1132,3 +1132,38 @@ TEST (NotchControllerStereo, IndepHarmonicPenaltyIsPerLane)
     for (const auto& c : cmds) setOnL |= (c.type == NotchCommandType::Set && c.channel == 0);
     EXPECT_TRUE (setOnL) << "the lane-1 notch must not halve lane 0's score";
 }
+
+// Review round 1, Finding 1. Red if placeConfirmed stops resetting the other
+// lane's persistence under LINKED: both lanes then confirm in the same drain
+// iteration and one howl costs two index pairs (double the cut).
+TEST (NotchControllerStereo, LinkedHowlOnBothLanesPlacesExactlyOnePairFirst)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setDetectionActive (true);
+
+    NoiseSource quietL, quietR;
+    quietR.rng.seed (999u);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+
+    // Identical tone on both lanes: their persistence counters climb in
+    // lockstep, so both cross the confirm threshold in the SAME drain
+    // iteration -- exactly the race Finding 1 describes.
+    SineSource toneL, toneR;
+    for (int i = 0; i < 40; ++i)
+    {
+        pumpStereo (h, toneL.hop(), toneR.hop());
+        if (h.commands.getAvailableRead() > 0)
+            break;
+    }
+    const auto cmds = drain (h.commands);
+
+    ASSERT_EQ (cmds.size(), 2u) << "one howl on both lanes must cost exactly one index pair";
+    EXPECT_EQ (cmds[0].type, NotchCommandType::Set);
+    EXPECT_EQ (cmds[1].type, NotchCommandType::Set);
+    EXPECT_EQ (cmds[0].channel, 0);
+    EXPECT_EQ (cmds[1].channel, 1);
+    EXPECT_EQ (cmds[0].index, cmds[1].index);
+    EXPECT_FLOAT_EQ (cmds[0].frequency, cmds[1].frequency);
+}

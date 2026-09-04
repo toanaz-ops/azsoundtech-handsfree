@@ -248,8 +248,9 @@ private:
     void flushOutbox();
     void pushClearLocked (int channel, int index);
 
-    // `otherLaneMagnitudes` is the SAME hop's spectrum on the opposite lane,
-    // or nullptr when only one lane produced a block this iteration.
+    // `otherLaneMagnitudes` is the opposite lane's spectrum, at most one hop
+    // apart from `block` (runOnce()'s per-lane drain invariant), or nullptr
+    // when only one lane produced a block this iteration.
     void processSpectrumForDetection (int lane, const Detector::Spectrum& block,
                                       const float* otherLaneMagnitudes, double blockNowMs);
 
