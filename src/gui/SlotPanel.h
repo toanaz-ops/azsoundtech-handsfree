@@ -21,6 +21,7 @@
 
 #include "app/AudioEngine.h"
 #include "app/SlotConfig.h"
+#include "gui/SegmentedControl.h"
 
 #include <functional>
 
@@ -66,6 +67,14 @@ public:
     // slot's NotchController); this panel never touches a controller.
     std::function<void (int slotIndex, const SlotTuning&)> onSlotTuningChanged;
 
+    // Per-slot LINK/INDEP ring-risk policy (Task 7): fired by a click on the
+    // row's LINK/INDEP segmented control, stereo rows only. LINK -- either
+    // channel ringing cuts both; INDEP -- only the ringing side is cut.
+    std::function<void (int slotIndex, bool linked)> onSlotLinkChanged;
+    // Seeds a row's LINK/INDEP control. Null -> false (INDEP), same as a
+    // freshly-added slot that has never been told otherwise.
+    std::function<bool (int slotIndex)>               slotLinkedProvider;
+
     // Overridable sources. Tests inject light fakes here; when null each falls
     // back to the engine member below.
     std::function<juce::StringArray()> inputChannelNamesProvider;
@@ -96,6 +105,11 @@ public:
             void paint (juce::Graphics& g) override;
         };
         Led led;
+
+        // Ring-risk policy for a stereo row (Task 7): LINK cuts both channels
+        // when either rings, INDEP cuts only the ringing side. Hidden on mono
+        // rows -- a policy about "the other channel" means nothing there.
+        SegmentedControl link { { "LINK", "INDEP" } };
     };
 
     // The custom-tuning editor shown BELOW a slot's row while its Tune combo
@@ -201,6 +215,7 @@ private:
     // "On", not "Active": the LED column is 30 px wide, and a caption that
     // ellipsises to "A..." labels nothing at all.
     juce::Label ledCaption_   { {}, "On" };
+    juce::Label linkCaption_  { {}, "LINK" };
     juce::Label tuneCaption_  { {}, "Tune" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SlotPanel)

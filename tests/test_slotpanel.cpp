@@ -116,6 +116,46 @@ TEST (SlotPanel, StereoShowsBothLaneCombosMonoHidesTheSecond)
 }
 
 //==============================================================================
+// LINK / INDEP control (Task 7 / spec section 7 continuation): a per-row
+// segmented control, shown only on stereo rows, that reports which ring-risk
+// policy applies to that slot -- LINK cuts both channels when either rings,
+// INDEP cuts only the ringing side.
+
+TEST (SlotPanel, LinkControlFollowsWidthAndReportsClicks)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.inputChannelNamesProvider  = [] { return juce::StringArray { "In 1", "In 2" }; };
+    panel.outputChannelNamesProvider = [] { return juce::StringArray { "Out 1", "Out 2" }; };
+    panel.slotConfigProvider = [] (int slot)
+    {
+        SlotConfig c; c.enabled = true; c.width = (slot == 0) ? 1 : 2; return c;
+    };
+    panel.slotLinkedProvider = [] (int slot) { return slot == 1; };
+    panel.refresh();
+    panel.setSize (700, 400);
+
+    EXPECT_FALSE (panel.getRowForTest (0).link.isVisible());
+    EXPECT_TRUE  (panel.getRowForTest (1).link.isVisible());
+    EXPECT_EQ (panel.getRowForTest (1).link.getSelectedIndex(), 0);   // LINK
+    EXPECT_EQ (panel.getRowForTest (2).link.getSelectedIndex(), 1);   // INDEP
+
+    int reportedSlot = -1; bool reportedLinked = true;
+    panel.onSlotLinkChanged = [&] (int s, bool l) { reportedSlot = s; reportedLinked = l; };
+
+    // triggerClick() posts an async command message this headless suite never
+    // pumps (juce_Button.cpp, Button::triggerClick -> postCommandMessage; see
+    // test_moderail.cpp's header note). setToggleState(..., sendNotificationSync)
+    // is the file's established inline-dispatch click, same as every other
+    // click in this suite.
+    panel.getRowForTest (2).link.getSegmentForTest (0)
+        .setToggleState (true, juce::sendNotificationSync);
+    EXPECT_EQ (reportedSlot, 2);
+    EXPECT_TRUE (reportedLinked);
+}
+
+//==============================================================================
 // Per-slot tuning (brief 2026-08-24): each row ends in a Tune combo -- G follows
 // the global DETECTION strip, C gives the slot its own parameter set edited in
 // a detail row below the slot's row.

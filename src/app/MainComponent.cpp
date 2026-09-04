@@ -179,6 +179,17 @@ MainComponent::MainComponent()
         slotPanel_.refresh();
     };
 
+    // Per-slot LINK/INDEP (Task 7): the panel only ever asks for/reports the
+    // policy; setSlotLinked/isSlotLinked own what it means at runtime.
+    slotPanel_.onSlotLinkChanged = [this] (int slotIndex, bool linked)
+    {
+        setSlotLinked (slotIndex, linked);
+    };
+    slotPanel_.slotLinkedProvider = [this] (int slotIndex)
+    {
+        return isSlotLinked (slotIndex);
+    };
+
     // Per-slot tuning (brief 2026-08-24): the panel reports a COMPLETE
     // SlotTuning; here is where it means something. Global just flips the
     // flag -- the strip keeps driving the controller. Custom applies the five

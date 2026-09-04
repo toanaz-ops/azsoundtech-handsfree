@@ -14,6 +14,10 @@ constexpr int kStereoItemId = 2;
 constexpr int kGlobalItemId = 1;
 constexpr int kCustomItemId = 2;
 
+const char* const kLinkTooltip =
+    "LINK: one side rings, both get cut. INDEP: only the ringing side is cut. "
+    "Switching does not copy existing notches.";
+
 // Column metrics, shared by the caption row and the 8 data rows so the two
 // can never drift apart.
 // Narrowed with the 2026-08-25 rebuild. This table used to be a full-width
@@ -34,6 +38,9 @@ constexpr int kWidthColumn  = 84;   // fits "Stereo" whole -- see elideMiddle
 // READ rather than merely fit on one line with an ellipsis.
 constexpr int kLaneColumn   = 98;
 constexpr int kLedColumn    = 26;
+// Between LED and Tune: wide enough for the two-segment LINK/INDEP control at
+// its own preferred width without eliding either label.
+constexpr int kLinkColumn   = 92;
 constexpr int kTuneColumn   = 46;   // a combo needs its caret AND its value
 
 // The section legend, drawn in paint() over the caption row's left gutter --
@@ -93,7 +100,7 @@ SlotPanel::SlotPanel (AudioEngine& engine)
 
     for (auto* label : { &widthCaption_, &inACaption_, &inBCaption_,
                          &outACaption_, &outBCaption_, &ledCaption_,
-                         &tuneCaption_ })
+                         &linkCaption_, &tuneCaption_ })
     {
         // Column captions are silkscreen: tracked uppercase, quiet.
         label->setText (label->getText().toUpperCase(), juce::dontSendNotification);
@@ -162,6 +169,16 @@ SlotPanel::SlotPanel (AudioEngine& engine)
         }
 
         addAndMakeVisible (row.led);
+
+        addAndMakeVisible (row.link);
+        row.link.setWantsKeyboardFocus (false);
+        row.link.getSegmentForTest (0).setTooltip (kLinkTooltip);
+        row.link.getSegmentForTest (1).setTooltip (kLinkTooltip);
+        row.link.onSelected = [this, i] (int idx)
+        {
+            if (onSlotLinkChanged != nullptr)
+                onSlotLinkChanged (i, idx == 0);
+        };
 
         // One handler per row: any control change reports the whole config,
         // exactly as DevicePanel funnels every combo through one restart path.
@@ -269,6 +286,12 @@ void SlotPanel::refresh()
         const bool stereo = (config.width == 2);
         row.inLanes[1] .setVisible (stereo);
         row.outLanes[1].setVisible (stereo);
+
+        // LINK/INDEP means nothing on a mono row -- there is no "other
+        // channel" to link. dontSendNotification: refresh() reflects reality,
+        // it never invents a click.
+        row.link.setVisible (stereo);
+        row.link.setSelectedIndex ((slotLinkedProvider && slotLinkedProvider (i)) ? 0 : 1);
 
         row.led.on = config.enabled;
         row.led.repaint();
@@ -522,7 +545,7 @@ int SlotPanel::getPreferredWidth() const
     // the same whether any slot is stereo or not -- the table must not change
     // width when a slot's width combo moves.
     return 2 * gap + kNumberColumn + kEnableColumn + kWidthColumn
-         + 4 * kLaneColumn + kLedColumn + kTuneColumn;
+         + 4 * kLaneColumn + kLedColumn + kLinkColumn + kTuneColumn;
 }
 
 void SlotPanel::resized()
@@ -561,6 +584,9 @@ void SlotPanel::resized()
     ledCaption_.setBounds (captions.removeFromLeft (kLedColumn));
     ledCaption_.setJustificationType (juce::Justification::centredLeft);
 
+    linkCaption_.setBounds (captions.removeFromLeft (kLinkColumn));
+    linkCaption_.setJustificationType (juce::Justification::centredLeft);
+
     tuneCaption_.setBounds (captions.removeFromLeft (kTuneColumn));
     tuneCaption_.setJustificationType (juce::Justification::centredLeft);
 
@@ -581,6 +607,7 @@ void SlotPanel::resized()
             row.inLanes[0].setBounds ({});  row.inLanes[1] .setBounds ({});
             row.outLanes[0].setBounds ({}); row.outLanes[1].setBounds ({});
             row.led.setBounds ({});
+            row.link.setBounds ({});
 
             auto& hiddenDetail = details_[(std::size_t) i];
             for (auto* c : { &hiddenDetail.rise, &hiddenDetail.persist,
@@ -613,6 +640,13 @@ void SlotPanel::resized()
                                        : juce::Rectangle<int>());
 
         row.led.setBounds (rowArea.removeFromLeft (kLedColumn));
+
+        // Fixed column even on a mono row -- so the Tune combo never shifts
+        // between a mono row and the stereo one above or below it.
+        const auto linkRect = rowArea.removeFromLeft (kLinkColumn);
+        row.link.setBounds (row.link.isVisible()
+                                ? linkRect.reduced (2, 3)
+                                : juce::Rectangle<int>());
 
         row.tune.setBounds (rowArea.removeFromLeft (kTuneColumn).reduced (2, 1));
 
