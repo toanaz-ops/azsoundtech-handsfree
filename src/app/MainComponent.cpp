@@ -149,19 +149,38 @@ MainComponent::MainComponent()
     };
 
     // The button requests route through the injectable choosers to load/save.
-    // A SafePointer guard is unnecessary here: these lambdas outlive nothing --
-    // they are invoked synchronously by the drawer's onClick and captured by
-    // `this`, which owns the drawer. The async safety lives in the chooser
-    // lambdas above, which capture only the chooser and the plain callback.
+    // The outer lambda is invoked synchronously by the drawer's onClick, so a
+    // plain `this` capture there is fine. But the INNER callback (onPicked) is
+    // stored inside the chooser and fires later, after launchAsync returns --
+    // possibly after MainComponent has been destroyed if the user closes the
+    // window while the native picker is open. That inner callback crosses the
+    // async boundary back into MainComponent, so it captures a
+    // Component::SafePointer and no-ops if the component is already gone. The
+    // shared_ptr<FileChooser> above keeps the chooser itself alive for the
+    // duration of the async call; the SafePointer guards the completion.
     deviceDrawer_.onLoadRequested = [this]
     {
         if (presetLoadChooser)
-            presetLoadChooser ([this] (const juce::File& f) { loadPreset (f); });
+        {
+            const juce::Component::SafePointer<MainComponent> safe (this);
+            presetLoadChooser ([safe] (const juce::File& f)
+            {
+                if (safe != nullptr)
+                    safe->loadPreset (f);
+            });
+        }
     };
     deviceDrawer_.onSaveRequested = [this]
     {
         if (presetSaveChooser)
-            presetSaveChooser ([this] (const juce::File& f) { savePreset (f); });
+        {
+            const juce::Component::SafePointer<MainComponent> safe (this);
+            presetSaveChooser ([safe] (const juce::File& f)
+            {
+                if (safe != nullptr)
+                    safe->savePreset (f);
+            });
+        }
     };
 
     // The protection badge is MASTHEAD furniture, not drawer furniture. It
