@@ -16,6 +16,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
 - [Docs drift audit](docs-drift-audit-2026-08-27.md) — plan checkbox không tự tick, số test chép tay stale ngay trong cùng wave, và lỗ hổng an toàn có-từ-đầu (thiếu output clamp/NaN guard) không hiện trong diff nào; danh sách việc còn treo chờ người quyết.
 - [Anti-feedback next-gen research](anti-feedback-research-2026-09-04.md) — app hiện "dò mono, đè stereo"; LLM không ở tầng realtime; lật cực chỉ dời hú; AFC là lane cuối; roadmap xếp theo phụ thuộc dữ liệu.
+- [Stereo lane lessons](stereo-lane-lessons-2026-09-05.md) — reset persistence chéo làn suy biến ở ngưỡng 1; test tắt detection cũng tắt reinforcement; ảnh render bắt 2 lỗi 396 test bỏ qua; đo cột bằng font thật với ô rộng nhất formatter in được; preallocateSpace đếm float.
 
 ## Conventions (tóm tắt)
 
