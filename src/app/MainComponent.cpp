@@ -37,7 +37,8 @@ MainComponent::MainComponent()
           decltype (notchControllers_) controllers;
           for (int i = 0; i < kMaxSlots; ++i)
               controllers[(std::size_t) i] =
-                  std::make_unique<NotchController> (engine_.getTapBuffer (i),
+                  std::make_unique<NotchController> (engine_.getTapBuffer (i, 0),
+                                                     &engine_.getTapBuffer (i, 1),
                                                      engine_.getCommandQueue (i),
                                                      systemClock_, i);
           return controllers;
@@ -287,6 +288,20 @@ NotchController* MainComponent::getNotchControllerForTest (int slot)
     return notchControllers_[(std::size_t) slot].get();
 }
 
+void MainComponent::setSlotLinked (int slotIndex, bool linked)
+{
+    if (slotIndex < 0 || slotIndex >= kMaxSlots)
+        return;
+
+    slotLinked_[(std::size_t) slotIndex] = linked;
+    notchControllers_[(std::size_t) slotIndex]->setLinked (linked);
+}
+
+bool MainComponent::isSlotLinked (int slotIndex) const
+{
+    return slotIndex >= 0 && slotIndex < kMaxSlots && slotLinked_[(std::size_t) slotIndex];
+}
+
 void MainComponent::startAudio()
 {
     // Task 16: prefer ASIO, but do NOT require it. The plan said "filter to
@@ -441,6 +456,8 @@ bool MainComponent::loadPreset (const juce::File& file)
     {
         if (entry.index < 0 || entry.index >= kMaxSlots)
             continue;
+
+        setSlotLinked (entry.index, entry.linked);
 
         notchControllers_[(std::size_t) entry.index]->setWidth (
             engine_.getSlotConfig (entry.index).width);

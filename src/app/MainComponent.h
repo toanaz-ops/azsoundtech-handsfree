@@ -146,6 +146,15 @@ public:
     // slot; never null for [0, kMaxSlots).
     NotchController* getNotchControllerForTest (int slot);
 
+    // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
+    // (Task 7) calls setSlotLinked; the runtime source of truth is
+    // slotLinked_, not the controller's own atomic, so a query never has to
+    // reach into notchControllers_ just to read a flag the UI already knows.
+    void setSlotLinked (int slotIndex, bool linked);
+    [[nodiscard]] bool isSlotLinked (int slotIndex) const;
+    [[nodiscard]] const NotchController& getControllerForTest (int slotIndex) const
+        { return *notchControllers_[(std::size_t) slotIndex]; }
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -214,6 +223,9 @@ private:
     // follows the global DETECTION strip; false = Custom, its controller is
     // driven only by the slot panel's per-slot values. All Global at start.
     std::array<bool, kMaxSlots> slotUsesGlobalTuning_ {};
+
+    // lane S: runtime source of truth; lane P reads it when SAVE exists
+    std::array<bool, kMaxSlots> slotLinked_ {};
 
     gui::DevicePanel devicePanel_ { engine_ };
 

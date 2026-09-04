@@ -23,6 +23,7 @@
 
 #include "app/MainComponent.h"
 #include "app/NotchController.h"
+#include "app/PresetManager.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/theme/AzTheme.h"
 #include "gui/DevicePanel.h"
@@ -148,6 +149,43 @@ TEST (MainComponent, RequestingAModeReachesTheEngine)
     app.requestMode (AudioEngine::Mode::Auto);
 
     EXPECT_EQ (app.getAudioEngine().getMode(), AudioEngine::Mode::Auto);
+}
+
+//==============================================================================
+// Task 6 -- MainComponent builds stereo controllers and carries `linked`.
+
+// Lane S. Red if the app wires controllers with one tap (legacy ctor ⇒ LINKED
+// forever) or if setSlotLinked stops reaching the controller.
+TEST (MainComponent, ControllersGetBothTapsAndFollowTheLinkFlag)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (mc.getControllerForTest (s).hasLaneOneTapForTest()) << "slot " << s;
+
+    EXPECT_FALSE (mc.isSlotLinked (2));
+    mc.setSlotLinked (2, true);
+    EXPECT_TRUE (mc.isSlotLinked (2));
+    EXPECT_TRUE (mc.getControllerForTest (2).isLinked());
+    EXPECT_FALSE (mc.getControllerForTest (1).isLinked());
+}
+
+// Red if loadPreset stops applying a slot's "linked" before adopting notches.
+TEST (MainComponent, LoadPresetAppliesTheSlotsLinkedFlag)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    Preset p;
+    p.version = PresetManager::CURRENT_VERSION; p.device = "test"; p.sampleRate = 48000.0; p.bufferSize = 512;
+    PresetSlot s; s.index = 3; s.config.enabled = true; s.config.width = 2; s.linked = true;
+    p.slots.push_back (s);
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("lane-s-linked.json");
+    ASSERT_TRUE (file.replaceWithText (PresetManager::toJSON (p)));
+    ASSERT_TRUE (mc.loadPreset (file));
+    EXPECT_TRUE (mc.isSlotLinked (3));
+    EXPECT_TRUE (mc.getControllerForTest (3).isLinked());
+    file.deleteFile();
 }
 
 //==============================================================================
