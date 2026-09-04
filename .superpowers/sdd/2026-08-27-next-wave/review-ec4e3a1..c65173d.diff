@@ -1,0 +1,44 @@
+# Review package: ec4e3a1b87100d48256d1df6d3e56412ac7f87d7..c65173d9152f1e36010dfbb7c78dda5fdabce6b8
+
+## Commits
+c65173d build(installer): retry prune delete once for Drive sync lag
+
+## Files changed
+ installer/release-alpha.ps1 | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+## Diff
+diff --git a/installer/release-alpha.ps1 b/installer/release-alpha.ps1
+index 2f335b8..569106b 100644
+--- a/installer/release-alpha.ps1
++++ b/installer/release-alpha.ps1
+@@ -242,20 +242,29 @@ catch {
+ if ($published -and $Keep -gt 0) {
+     try {
+         $stale = Get-ChildItem -LiteralPath $DropFolder -Filter 'AZSoundtech-Handsfree-Setup-*.exe' |
+                  Sort-Object -Descending -Property `
+                      @{ Expression = { $_.Name -match '-(\d+\.\d+\.\d+)\.exe$' } },
+                      @{ Expression = { if ($_.Name -match '-(\d+\.\d+\.\d+)\.exe$') { [version]$Matches[1] } else { $_.LastWriteTime } } } |
+                  Select-Object -Skip $Keep
+ 
+         foreach ($old in $stale) {
+             Remove-Item -LiteralPath $old.FullName -Force
++            Start-Sleep -Milliseconds 500
++            if (Test-Path -LiteralPath $old.FullName) {
++                Write-Host "WARN  $($old.Name) still present after delete (Drive sync lag?) -- retrying once"
++                Remove-Item -LiteralPath $old.FullName -Force
++                Start-Sleep -Milliseconds 1500
++                if (Test-Path -LiteralPath $old.FullName) {
++                    Write-Host "WARN  $($old.Name) would not delete -- tidy the drop folder by hand"
++                }
++            }
+             Write-Host "    pruned $($old.Name)"
+         }
+     }
+     catch {
+         Write-Host "WARN  prune failed: $($_.Exception.Message)" -ForegroundColor Yellow
+         Write-Host "      The published build and its version stay -- tidy $DropFolder by hand." -ForegroundColor Yellow
+     }
+ }
+ 
+ if ($SkipTests) {

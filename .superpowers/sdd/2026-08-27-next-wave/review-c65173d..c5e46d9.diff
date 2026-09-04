@@ -1,0 +1,173 @@
+# Review package: c65173d9152f1e36010dfbb7c78dda5fdabce6b8..c5e46d9
+
+## Commits
+c5e46d9 fix(installer): don't log 'pruned' for a file the retry still couldn't delete
+8eb285d chore: gitignore root-level Testing/ and *.lnk (untracked cruft)
+7c91ee6 chore: remove orphaned skills-lock.json; correct stale openspec claim
+
+## Files changed
+ .gitignore                            |  5 +++++
+ CLAUDE.md                             |  4 +++-
+ installer/release-alpha.ps1           |  6 +++++-
+ memory/docs-drift-audit-2026-08-27.md | 21 ++++++++++++++++++++-
+ skills-lock.json                      | 23 -----------------------
+ 5 files changed, 33 insertions(+), 26 deletions(-)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index 1cd7769..6a6433d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -64,10 +64,15 @@ Thumbs.db
+ 
+ # Codegraph index (local, regenerable)
+ .codegraph/
+ 
+ # Claude-desktop harness scratch state (worktree drift tracking)
+ .feat-drift-history.json
+ .superpowers/brainstorm/
+ 
+ # HandsFreeSnapshot output (see README, "Reviewing a GUI change").
+ shots/
++
++# CTest scratch dir when ctest runs from repo root, and a stray desktop
++# shortcut a tester dropped there — both untracked at root, 2026-09-04.
++/Testing/
++/*.lnk
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0211b9f..6c00d8a 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -115,21 +115,23 @@ a button with no text, a truncated CLEAR ALL, markers burying the trace, a
+ mojibake middle dot -- passed the whole test suite. A green build says nothing
+ about whether the thing is legible.
+ 
+ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
+ 
+ ## Source of truth
+ 
+ 1. `memory/MEMORY.md` — index of lessons. Search before re-deriving.
+ 2. `docs/` — design notes.
+ 3. `docs/superpowers/specs/` — design docs. (`openspec/` holds only
+-   `config.yaml`; OpenSpec is not in use.)
++   `config.yaml`; unused from Claude Code's side, but `.opencode/skills/openspec-*`
++   wires OpenCode's `/opsx-*` commands to it — do not delete it. Verified
++   2026-09-04, see `memory/docs-drift-audit-2026-08-27.md`.)
+ 
+ ## Definition of done
+ 
+ 1. Build command and `ctest` output pasted.
+ 2. Audio-path changes ship to the alpha testers once the suite is green —
+    owner decision 2026-08-27 dropped the listen-before-release gate; the
+    listen happens in alpha. Still: state the expected level change up front,
+    and call the change out in whatever note reaches the testers.
+ 3. `memory/` note if the work taught something non-obvious, indexed in
+    `memory/MEMORY.md`.
+diff --git a/installer/release-alpha.ps1 b/installer/release-alpha.ps1
+index 569106b..caa018b 100644
+--- a/installer/release-alpha.ps1
++++ b/installer/release-alpha.ps1
+@@ -242,30 +242,34 @@ catch {
+ if ($published -and $Keep -gt 0) {
+     try {
+         $stale = Get-ChildItem -LiteralPath $DropFolder -Filter 'AZSoundtech-Handsfree-Setup-*.exe' |
+                  Sort-Object -Descending -Property `
+                      @{ Expression = { $_.Name -match '-(\d+\.\d+\.\d+)\.exe$' } },
+                      @{ Expression = { if ($_.Name -match '-(\d+\.\d+\.\d+)\.exe$') { [version]$Matches[1] } else { $_.LastWriteTime } } } |
+                  Select-Object -Skip $Keep
+ 
+         foreach ($old in $stale) {
+             Remove-Item -LiteralPath $old.FullName -Force
++            $pruned = $true
+             Start-Sleep -Milliseconds 500
+             if (Test-Path -LiteralPath $old.FullName) {
+                 Write-Host "WARN  $($old.Name) still present after delete (Drive sync lag?) -- retrying once"
+                 Remove-Item -LiteralPath $old.FullName -Force
+                 Start-Sleep -Milliseconds 1500
+                 if (Test-Path -LiteralPath $old.FullName) {
+                     Write-Host "WARN  $($old.Name) would not delete -- tidy the drop folder by hand"
++                    $pruned = $false
+                 }
+             }
+-            Write-Host "    pruned $($old.Name)"
++            if ($pruned) {
++                Write-Host "    pruned $($old.Name)"
++            }
+         }
+     }
+     catch {
+         Write-Host "WARN  prune failed: $($_.Exception.Message)" -ForegroundColor Yellow
+         Write-Host "      The published build and its version stay -- tidy $DropFolder by hand." -ForegroundColor Yellow
+     }
+ }
+ 
+ if ($SkipTests) {
+     Write-Host ""
+diff --git a/memory/docs-drift-audit-2026-08-27.md b/memory/docs-drift-audit-2026-08-27.md
+index b72eded..966bc5b 100644
+--- a/memory/docs-drift-audit-2026-08-27.md
++++ b/memory/docs-drift-audit-2026-08-27.md
+@@ -34,14 +34,33 @@ roadmap sẽ đi làm lại việc đã xong từ một tuần trước.
+    DSP/topology/hành vi user-visible phải cập nhật `docs/GIOI-THIEU.md` +
+    `docs/KY-THUAT-CHONG-HU.md` trong cùng change. Xem [[gui-console-lessons]]
+    và [[build-verification]] cho các bài học kiểm chứng liên quan.
+ 
+ ## Còn treo (quyết định của người)
+ 
+ - Ring-risk chip vẫn "N/A" — provider chưa nối (`docs/spec-ring-risk.md`).
+ - Preset: GUI nạp/lưu chưa có, seed first-run viết+test nhưng app không gọi,
+   installer không chép `presets/`.
+ - Ngưỡng peakiness 10.0 đo trên FFT 1024, chưa sweep lại với 2048.
+-- `skills-lock.json` khóa 3 skill không tồn tại trong repo.
++- ~~`skills-lock.json` khóa 3 skill không tồn tại trong repo.~~ Chủ dự án gật
++  2026-09-04 — đã `git rm`. Điều tra trước khi xóa: 3 skill nó khóa
++  (design-taste-frontend, juce-best-practices, redesign-existing-projects)
++  không nằm ở `.claude/skills/` (chỉ có `juce-component-snapshot`) lẫn
++  `.opencode/skills/` (chỉ có các skill `openspec-*`) — không tool nào trong
++  hai tool (Claude Code / OpenCode) của dự án đang dùng nó.
+ - ~~Clamp output cần một lần human listen ở volume thấp trước release kế
+   tiếp.~~ Chủ dự án bỏ gate listen-trước-release (27/08/2026) — nghe trong
+   alpha; clamp đã ship cùng 1.0.4.
++
++## Phát hiện thêm 2026-09-04 — `openspec/` KHÔNG mồ côi (dự án dùng 2 tool)
++
++CLAUDE.md từng ghi "OpenSpec is not in use" — đúng cho phía Claude Code,
++SAI cho phía OpenCode: `.opencode/skills/openspec-{apply-change,
++archive-change, explore, propose, sync-specs, update-change}/SKILL.md` nối
++6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec, và
++các skill đó đọc `openspec/config.yaml` (`schema: spec-driven`). Xém xóa
++nhầm ở Task C2 (docs/superpowers/plans/2026-08-27-next-wave.md) — chủ dự
++án chặn lại, yêu cầu kiểm tra trước. Đã sửa CLAUDE.md để không lặp lại
++nhầm lẫn này. **Bài học chung: một file "mồ côi" theo góc nhìn Claude Code
++có thể đang sống ở phía OpenCode (hoặc ngược lại) — dự án này chạy qua lại
++giữa hai tool — luôn `grep` cả `.opencode/` trước khi đề xuất xóa bất cứ
++gì ở gốc repo.**
+diff --git a/skills-lock.json b/skills-lock.json
+deleted file mode 100644
+index b28e81d..0000000
+--- a/skills-lock.json
++++ /dev/null
+@@ -1,23 +0,0 @@
+-{
+-  "version": 1,
+-  "skills": {
+-    "design-taste-frontend": {
+-      "source": "Leonxlnx/taste-skill",
+-      "sourceType": "github",
+-      "skillPath": "skills/taste-skill/SKILL.md",
+-      "computedHash": "899b84384f74f540ea5284d9b2e9234e050998b42eacc805410b518d4226c0b3"
+-    },
+-    "juce-best-practices": {
+-      "source": "yebot/rad-cc-plugins",
+-      "sourceType": "github",
+-      "skillPath": "plugins/juce-dev-team/skills/juce-best-practices/SKILL.md",
+-      "computedHash": "f3de99f0f4047f01a5088aae910e24ec11ca965aa1a8bf49e7769d9bf7935f1d"
+-    },
+-    "redesign-existing-projects": {
+-      "source": "Leonxlnx/taste-skill",
+-      "sourceType": "github",
+-      "skillPath": "skills/redesign-skill/SKILL.md",
+-      "computedHash": "47eced3e960a2c961d3cbee11fa1216264f589344b586a5cbd03967cd6b9c54b"
+-    }
+-  }
+-}
