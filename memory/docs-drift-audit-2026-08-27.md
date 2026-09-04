@@ -56,8 +56,12 @@ roadmap sẽ đi làm lại việc đã xong từ một tuần trước.
 CLAUDE.md từng ghi "OpenSpec is not in use" — đúng cho phía Claude Code,
 SAI cho phía OpenCode: `.opencode/skills/openspec-{apply-change,
 archive-change, explore, propose, sync-specs, update-change}/SKILL.md` nối
-6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec, và
-các skill đó đọc `openspec/config.yaml` (`schema: spec-driven`). Xém xóa
+6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec.
+Trong 6 file đó, chỉ `openspec-explore/SKILL.md` thực sự đọc
+`openspec/config.yaml` (có điều kiện — dòng 97: "skip this if neither
+file exists"); 5 skill còn lại không grep tới `config.yaml`, nhưng cả 6 vẫn
+gắn với workflow OpenSpec qua schema `spec-driven` mà file đó khai báo, nên
+kết luận GIỮ `openspec/` vẫn đúng. Xém xóa
 nhầm ở Task C2 (docs/superpowers/plans/2026-08-27-next-wave.md) — chủ dự
 án chặn lại, yêu cầu kiểm tra trước. Đã sửa CLAUDE.md để không lặp lại
 nhầm lẫn này. **Bài học chung: một file "mồ côi" theo góc nhìn Claude Code
