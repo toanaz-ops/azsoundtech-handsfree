@@ -1030,8 +1030,28 @@ void SpectrumView::paint (juce::Graphics& g)
     // Pass 2: stems and wedges.
     float lastFlagRight = -1.0e6f;
 
+    // The flag-overlap skip further down compares each flag against the
+    // PREVIOUS one only, which is correct only if the markers are visited left
+    // to right. The snapshot orders its notches by (lane, index), and since
+    // lane S that is no longer ascending in frequency -- an INDEP slot can
+    // hold 1.2 kHz on R after 1.9 kHz on L, and the low flag was then dropped
+    // as "overlapping" a flag it sits nowhere near. So the markers are visited
+    // in frequency order. `order` carries each notch's ORIGINAL position,
+    // which is the number the flag prints and the row the ACTIVE NOTCHES table
+    // lists it under -- sorting the draw order must not renumber them. Fixed
+    // size, sorted in place: no allocation in paint().
+    std::array<std::uint32_t, NotchController::kTotalSlots> order {};
     for (std::uint32_t i = 0; i < notchCount; ++i)
+        order[i] = i;
+    std::sort (order.begin(), order.begin() + (std::ptrdiff_t) notchCount,
+               [this] (std::uint32_t a, std::uint32_t b)
+               {
+                   return snapshot_.notches[a].frequency < snapshot_.notches[b].frequency;
+               });
+
+    for (std::uint32_t k = 0; k < notchCount; ++k)
     {
+        const std::uint32_t i = order[k];
         const auto& notch = snapshot_.notches[i];
         const float hz = notch.frequency;
         if (hz < lowHz_ || hz > highHz_)

@@ -124,7 +124,11 @@ public:
     //           every frame width this table is asked to draw.
     static constexpr float kLeftPad    = 10.0f;
     static constexpr float kColIdW     = 26.0f;
-    static constexpr float kColLaneW   = 22.0f;
+    // Sized by the HEADER, not the cell: the cells are one glyph ("L"/"R")
+    // and fit in 22 px, but the column is captioned "LANE" in the tracked
+    // legend face, and at 22 px that caption rendered as "LA...". A column
+    // whose own name is ellipsised is not a labelled column.
+    static constexpr float kColLaneW   = 38.0f;
     static constexpr float kColFreqW   = 74.0f;   // dot + gap + "23.9 kHz" + inset
     static constexpr float kColDepthW  = 66.0f;   // "-150.0 dB" + inset
     static constexpr float kColQW      = 40.0f;

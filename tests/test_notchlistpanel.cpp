@@ -368,6 +368,25 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     EXPECT_LE (widthOf ("L") + kInset, gui::NotchListPanel::kColLaneW);
     EXPECT_LE (widthOf ("R") + kInset, gui::NotchListPanel::kColLaneW);
 
+    // ...and the HEADERS, in the legend face they are actually painted with.
+    // Cells alone are not enough: LANE shipped at 22 px -- wide enough for
+    // "L"/"R" and too narrow for the word "LANE", which drew as "LA..." in the
+    // first stereo screenshot. A column whose own caption is ellipsised reads
+    // as a broken table, and no cell assertion catches it.
+    const auto headerFont = az::theme::legendFont (az::theme::columnFontSize, true,
+                                                   az::theme::trackingColumn);
+    auto headerWidthOf = [&] (const juce::String& s)
+    {
+        return juce::GlyphArrangement::getStringWidth (headerFont, s);
+    };
+
+    EXPECT_LE (headerWidthOf ("#"),     gui::NotchListPanel::kColIdW);
+    EXPECT_LE (headerWidthOf ("LANE"),  gui::NotchListPanel::kColLaneW);
+    EXPECT_LE (headerWidthOf ("FREQ"),  gui::NotchListPanel::kColFreqW);
+    EXPECT_LE (headerWidthOf ("DEPTH"), gui::NotchListPanel::kColDepthW);
+    EXPECT_LE (headerWidthOf ("Q"),     gui::NotchListPanel::kColQW);
+    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (360.0f));
+
     // FREQ: detection runs to Nyquist (24 kHz at 48 kHz sample rate, 48 kHz
     // at 96 kHz), so a two-digit-kHz reading is reachable, not just the
     // "2.4 kHz" design-plan example this test used to pin. Assert against
