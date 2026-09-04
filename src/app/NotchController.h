@@ -111,7 +111,9 @@ public:
     // Default 2 (the legacy stereo behaviour). Message thread ONLY, and only
     // while the detector thread is STOPPED -- same precondition as the policy
     // entry points below; width_ is read unlocked by runOnce(), so writing it
-    // while the thread runs is a data race.
+    // while the thread runs is a data race. Narrowing (2 -> 1) queues a Clear
+    // for every active notch on the lanes leaving the slot, so they don't
+    // linger in the model or keep running on the audio thread's chain.
     void setWidth (int lanes);
 
     // LINK mode (design §4.3). INDEP is the default: a confirm on lane l

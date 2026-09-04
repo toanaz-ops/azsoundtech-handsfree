@@ -960,6 +960,29 @@ std::vector<NotchCommand> warmThenDrive (StereoHarness& h, L& left, R& right)
 }
 } // namespace
 
+// Spec test 10. Red if narrowing to mono orphans lane-1 notches in the model.
+TEST (NotchControllerSlotAware, NarrowingToMonoClearsLaneOneNotches)
+{
+    StereoHarness h;
+    ASSERT_TRUE (h.controller.setNotch (1, 2, 800.0, 30.0, -12.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (h.controller.setNotch (0, 2, 800.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.runOnce();
+    (void) drain (h.commands);
+
+    h.controller.setWidth (1);       // thread is not running in tests: precondition holds
+    h.controller.runOnce();          // flushes the outbox
+    const auto cmds = drain (h.commands);
+    ASSERT_EQ (cmds.size(), 1u);
+    EXPECT_EQ (cmds[0].type, NotchCommandType::Clear);
+    EXPECT_EQ (cmds[0].channel, 1);
+    EXPECT_EQ (cmds[0].index, 2);
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+        EXPECT_EQ (snap.notches[i].channel, 0);
+}
+
 // Spec test 4. Red if INDEP placement fans out to the silent lane.
 TEST (NotchControllerStereo, IndepHowlOnRightOnlyCutsRightOnly)
 {

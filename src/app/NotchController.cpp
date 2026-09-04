@@ -45,7 +45,18 @@ void NotchController::setWidth (int lanes)
 {
     // Precondition: the detector thread is STOPPED (see header comment).
     // No lock: width_ has no concurrent reader while run() is not running.
-    width_ = std::clamp (lanes, 1, 2);
+    const int newWidth = std::clamp (lanes, 1, 2);
+    if (newWidth < width_)
+    {
+        // Lanes leaving the slot take their notches with them: an active model
+        // entry on a lane nobody analyses would never auto-release and would
+        // keep a real filter running on a chain the operator thinks is idle.
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        for (int c = newWidth; c < kChannels; ++c)
+            for (int i = 0; i < kSlots; ++i)
+                pushClearLocked (c, i);
+    }
+    width_ = newWidth;
 }
 
 void NotchController::run()
