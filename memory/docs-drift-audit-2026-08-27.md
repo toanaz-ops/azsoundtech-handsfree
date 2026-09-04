@@ -41,7 +41,26 @@ roadmap sẽ đi làm lại việc đã xong từ một tuần trước.
 - Preset: GUI nạp/lưu chưa có, seed first-run viết+test nhưng app không gọi,
   installer không chép `presets/`.
 - Ngưỡng peakiness 10.0 đo trên FFT 1024, chưa sweep lại với 2048.
-- `skills-lock.json` khóa 3 skill không tồn tại trong repo.
+- ~~`skills-lock.json` khóa 3 skill không tồn tại trong repo.~~ Chủ dự án gật
+  2026-09-04 — đã `git rm`. Điều tra trước khi xóa: 3 skill nó khóa
+  (design-taste-frontend, juce-best-practices, redesign-existing-projects)
+  không nằm ở `.claude/skills/` (chỉ có `juce-component-snapshot`) lẫn
+  `.opencode/skills/` (chỉ có các skill `openspec-*`) — không tool nào trong
+  hai tool (Claude Code / OpenCode) của dự án đang dùng nó.
 - ~~Clamp output cần một lần human listen ở volume thấp trước release kế
   tiếp.~~ Chủ dự án bỏ gate listen-trước-release (27/08/2026) — nghe trong
   alpha; clamp đã ship cùng 1.0.4.
+
+## Phát hiện thêm 2026-09-04 — `openspec/` KHÔNG mồ côi (dự án dùng 2 tool)
+
+CLAUDE.md từng ghi "OpenSpec is not in use" — đúng cho phía Claude Code,
+SAI cho phía OpenCode: `.opencode/skills/openspec-{apply-change,
+archive-change, explore, propose, sync-specs, update-change}/SKILL.md` nối
+6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec, và
+các skill đó đọc `openspec/config.yaml` (`schema: spec-driven`). Xém xóa
+nhầm ở Task C2 (docs/superpowers/plans/2026-08-27-next-wave.md) — chủ dự
+án chặn lại, yêu cầu kiểm tra trước. Đã sửa CLAUDE.md để không lặp lại
+nhầm lẫn này. **Bài học chung: một file "mồ côi" theo góc nhìn Claude Code
+có thể đang sống ở phía OpenCode (hoặc ngược lại) — dự án này chạy qua lại
+giữa hai tool — luôn `grep` cả `.opencode/` trước khi đề xuất xóa bất cứ
+gì ở gốc repo.**
