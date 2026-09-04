@@ -63,6 +63,7 @@ SetCompressor /SOLID lzma
 !define APP_EXE      "${PRODUCT_NAME}.exe"
 !define APP_EXE_SRC  "${BUILD_DIR}\HandsFree_artefacts\Release\${APP_EXE}"
 !define VCREDIST_SRC "vendor\vc_redist.x64.exe"
+!define PRESETS_SRC  "..\presets"
 
 ; Fail at compile time, with a readable message, rather than emitting an
 ; installer that is quietly missing its payload.
@@ -73,6 +74,14 @@ SetCompressor /SOLID lzma
 !if /FileExists "${VCREDIST_SRC}"
 !else
   !error "Missing ${VCREDIST_SRC} -- run installer\fetch-deps.ps1 once to download it (~25 MB)."
+!endif
+!if /FileExists "${PRESETS_SRC}\Speech.json"
+!else
+  !error "Missing ${PRESETS_SRC}\Speech.json -- shipped default presets must exist at repo-root presets\."
+!endif
+!if /FileExists "${PRESETS_SRC}\Music.json"
+!else
+  !error "Missing ${PRESETS_SRC}\Music.json -- shipped default presets must exist at repo-root presets\."
 !endif
 
 Name    "${PRODUCT_NAME} ${PRODUCT_VERSION}"
@@ -148,6 +157,13 @@ Section "Application" SEC_APP
 
   SetOutPath "$INSTDIR"
   File "${APP_EXE_SRC}"
+
+  ; Shipped default presets. The app seeds these into %APPDATA% on first
+  ; run (PresetFirstRun) and NEVER overwrites a file the user already has.
+  SetOutPath "$INSTDIR\presets"
+  File "${PRESETS_SRC}\Speech.json"
+  File "${PRESETS_SRC}\Music.json"
+  SetOutPath "$INSTDIR"
 
   ; --- Visual C++ runtime -------------------------------------------------
   ;
@@ -264,6 +280,13 @@ Section "Uninstall"
   app_deleted:
 
   Delete "$INSTDIR\Uninstall.exe"
+
+  ; Shipped default presets copied in by the Application section. NOT the
+  ; user's own presets/licence -- those live under %APPDATA% and are handled
+  ; separately below, with a prompt.
+  Delete "$INSTDIR\presets\*.json"
+  RMDir "$INSTDIR\presets"
+
   RMDir /REBOOTOK "$INSTDIR"
   RMDir /REBOOTOK "$PROGRAMFILES64\AZSoundtech"
 
