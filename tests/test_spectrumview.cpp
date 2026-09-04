@@ -494,21 +494,21 @@ TEST (SpectrumView, LaneOneStemsPaintDashedWithoutGrowingTheDashedPath)
     // paints" assertions below would pass vacuously against an empty path.
     const auto elementsBefore = view.dashedStemPathElementCountForTest();
     ASSERT_GT (elementsBefore, (std::size_t) 0);
-    // NOTE on the ctor's dashedStemPath_.preallocateSpace(256): that call
-    // reserves COORDS (3 per lineTo/startNewSubPath -- juce_Path.h's own
-    // doc comment), not elements, and createDashedStroke's destination is
-    // the STROKED OUTLINE of the dash pattern (it finishes by calling
-    // createStrokedPath internally), not bare line segments -- so a single
-    // full-height dashed stem at this window size (elementsBefore, measured
-    // above) needs well over 256 coords. That is a real under-reservation
-    // in production, but not a per-frame allocation: Path::clear() calls
-    // Array::clearQuick(), which keeps whatever capacity the first paint
-    // grew into, so only the FIRST relevant paint pays for it and every
-    // paint after -- proven below -- allocates nothing further. Asserting
-    // elementsBefore against 256 directly (as originally sketched) would
-    // therefore be asserting something false about the current code, not a
-    // regression; the growth-across-100-paints check below is the part of
-    // the no-alloc guarantee this test can actually stand behind.
+
+    // REAL reservation assertion (round 1 of this task shipped
+    // preallocateSpace(256), which round 2 found undersized by >10x --
+    // measured 288 elements at this exact window size). The ctor now
+    // reserves kDashedStemReserveFloats coords, sized from measured
+    // elements-per-pixel-of-stem-height projected to a 2000px-tall plot
+    // plus a 25% margin -- see the derivation comment on the constant in
+    // SpectrumView.h. Dividing by 3 converts JUCE's coords back to the
+    // element count this accessor reports (juce_Path.h's own doc comment:
+    // preallocateSpace reserves ~3 floats per lineTo/startNewSubPath
+    // element). RED if the reservation is cut below what a full-height stem
+    // needs: this assertion fails the moment kDashedStemReserveFloats drops
+    // back toward 256, exactly the bug this round fixes.
+    EXPECT_LE (elementsBefore,
+               (std::size_t) gui::SpectrumView::kDashedStemReserveFloats / 3);
 
     const auto boundsBefore   = view.dashedStemPathBoundsForTest();
     const auto sizeBefore     = view.spectrumPointSizeForTest();
@@ -525,4 +525,22 @@ TEST (SpectrumView, LaneOneStemsPaintDashedWithoutGrowingTheDashedPath)
     EXPECT_EQ (view.dashedStemPathBoundsForTest(), boundsBefore);
     EXPECT_EQ (view.spectrumPointSizeForTest(), sizeBefore);
     EXPECT_EQ (view.spectrumPointCapacityForTest(), capacityBefore);
+
+    // Same reservation check again at the worst-case size the derivation
+    // targets: a 2000px-tall (4K-monitor) plot. A resize forces
+    // rebuildGeometry() and the dashed stem is redrawn full-height inside
+    // this taller window on the very next paint -- if the reservation were
+    // undersized for THIS height (not just 400px), this is where it would
+    // show up as a real first-paint growth on the taller plot.
+    view.setSize (800, 2000);
+    view.refreshFromSnapshot();
+    juce::Image tallImage (juce::Image::ARGB, 800, 2000, true);
+    juce::Graphics tallG (tallImage);
+    view.paint (tallG);
+
+    const auto elementsAtFourK = view.dashedStemPathElementCountForTest();
+    ASSERT_GT (elementsAtFourK, (std::size_t) 0);
+    EXPECT_GT (elementsAtFourK, elementsBefore);   // taller plot, longer stem, more dashes
+    EXPECT_LE (elementsAtFourK,
+               (std::size_t) gui::SpectrumView::kDashedStemReserveFloats / 3);
 }

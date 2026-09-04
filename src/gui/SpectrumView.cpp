@@ -109,10 +109,12 @@ SpectrumView::SpectrumView (const NotchController& controller)
     bandEdgeLowHz_.reserve   ((std::size_t) 31);
     bandEdgeHighHz_.reserve  ((std::size_t) 31);
 
-    // Sized generously for a dashed vertical stem over the tallest plot this
-    // view is ever asked to draw -- one preallocateSpace here keeps the paint
-    // path's first-frame growth off the steady-state no-allocation guarantee.
-    dashedStemPath_.preallocateSpace (256);
+    // Sized for a dashed vertical stem over the tallest plot this view is
+    // ever asked to draw (a 2000px-tall 4K plot, plus a 25% margin) -- see
+    // kDashedStemReserveFloats's derivation comment in the header. One
+    // preallocateSpace here keeps the paint path's first-frame growth off
+    // the steady-state no-allocation guarantee.
+    dashedStemPath_.preallocateSpace (kDashedStemReserveFloats);
 
     // Toolbar, in the study's order: the display groups sit LEFT next to the
     // section caption, ring risk sits far right. Nothing here reaches the

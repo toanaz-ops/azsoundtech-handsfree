@@ -155,6 +155,35 @@ public:
         return dashedStemPath_.getBounds();
     }
 
+    // dashedStemPath_'s ctor reservation, sized from measured geometry rather
+    // than a guess (round 1 of this task shipped preallocateSpace(256), which
+    // undersized the very first lane-1 paint by more than 10x). Derivation:
+    //
+    //   1. createDashedStroke()'s destination holds the STROKED OUTLINE of
+    //      the dash pattern, not bare line segments (verified by reading
+    //      juce_PathStrokeType.cpp) -- so the element count scales with the
+    //      stem's pixel height, not its length in "dashes".
+    //   2. Measured directly (not modelled): painting a channel-1 notch's
+    //      full-height stem at two window sizes --
+    //        800x400  -> stem 333 px tall -> dashedStemPath_ holds 288 elements
+    //        800x2000 -> stem 1933 px tall -> dashedStemPath_ holds 1662 elements
+    //      both give ~0.86-0.87 elements per pixel of stem height, confirming
+    //      the relationship is linear (as the dash period is fixed).
+    //   3. Worst case this view can be asked to paint: a plot height of at
+    //      least 2000 px (a 4K-tall monitor). 0.865 elements/px * 2000 px =
+    //      1730 elements, the same order as the 2000px measurement above.
+    //   4. 25% margin for anything the two sample points didn't cover (a
+    //      longer/shorter dash pattern, a different stroke cap): 1730 * 1.25
+    //      = 2163 elements.
+    //   5. Path::preallocateSpace() reserves COORDS, not elements -- its own
+    //      doc comment in juce_Path.h says ~3 floats per lineTo/startNewSubPath
+    //      element. 2163 elements * 3 = 6489 coords, rounded up for a clean
+    //      constant.
+    //
+    // Exposed (not private) so a test can assert against the exact number the
+    // ctor reserves with, rather than a second guess that could drift from it.
+    static constexpr int kDashedStemReserveFloats = 6500;
+
     // TEST ACCESSOR ONLY -- lets a test confirm a channel-1 notch actually
     // reached the cached snapshot, so a test exercising the dashed-stem /
     // widened-flag branch in paint() can prove that branch really ran rather
