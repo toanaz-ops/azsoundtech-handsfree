@@ -15,6 +15,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [UI rebuild — Sodium Rack](ui-rebuild-sodium-rack-2026-08-25.md) — chụp GUI bằng `createComponentSnapshot()` chứ không chụp màn hình; ảnh render bắt được 4 lỗi test xanh không bắt; nội suy RGB giữa amber và cyan ra màu bùn; melatonin_blur cache theo object.
 - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
 - [Docs drift audit](docs-drift-audit-2026-08-27.md) — plan checkbox không tự tick, số test chép tay stale ngay trong cùng wave, và lỗ hổng an toàn có-từ-đầu (thiếu output clamp/NaN guard) không hiện trong diff nào; danh sách việc còn treo chờ người quyết.
+- [SDD workspace gitignore trap](sdd-workspace-gitignore-trap-2026-09-04.md) — skill `subagent-driven-development`'s `sdd-workspace` script tự ghi `.superpowers/sdd/.gitignore` (`*`) mỗi lần chạy, âm thầm đè chính sách "`.superpowers/` phải TRACKED" của repo này — xóa file đó ngay trước commit cuối, mọi session SDD.
 
 ## Conventions (tóm tắt)
 
