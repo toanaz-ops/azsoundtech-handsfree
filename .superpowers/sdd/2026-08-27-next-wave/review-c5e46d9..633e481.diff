@@ -1,0 +1,151 @@
+# Review package: c5e46d9..633e481
+
+## Commits
+633e481 docs: sync Lane C plan/memory with what actually happened 2026-09-04
+c2231fc fix(installer): retry Remove-Item shouldn't abort the whole prune loop
+
+## Files changed
+ docs/superpowers/plans/2026-08-27-next-wave.md | 21 ++++++++++++---------
+ installer/release-alpha.ps1                    |  2 +-
+ memory/docs-drift-audit-2026-08-27.md          |  8 ++++++--
+ memory/juce9-api-traps-2026-08-25.md           |  3 ++-
+ 4 files changed, 21 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-08-27-next-wave.md b/docs/superpowers/plans/2026-08-27-next-wave.md
+index f0f2509..59e69b0 100644
+--- a/docs/superpowers/plans/2026-08-27-next-wave.md
++++ b/docs/superpowers/plans/2026-08-27-next-wave.md
+@@ -294,46 +294,49 @@ noise/nhạc/hú có thể dịch. Đây là lane DUY NHẤT cần phần cứng
+ 
+ # LANE C — Hạ tầng nhỏ (session C)
+ 
+ ### Task C1: Prune verify-after-delete (Google Drive xóa async)
+ 
+ **Files:** Modify `installer/release-alpha.ps1` (khối prune, ~dòng 234-259)
+ 
+ Sự cố 27/08: `Remove-Item` trên `Z:\` (Google Drive) báo thành công nhưng
+ `...-1.0.0.exe` vẫn nằm lại, phải xóa tay.
+ 
+-- [ ] **Step 1:** sau mỗi Remove-Item trong prune, thêm:
++- [x] **Step 1:** sau mỗi Remove-Item trong prune, thêm:
+ 
+ ```powershell
+         Start-Sleep -Milliseconds 500
+         if (Test-Path $stale.FullName) {
+             Write-Host "WARN  $($stale.Name) still present after delete (Drive sync lag?) -- retrying once"
+             Remove-Item $stale.FullName -Force
+             Start-Sleep -Milliseconds 1500
+             if (Test-Path $stale.FullName) {
+                 Write-Host "WARN  $($stale.Name) would not delete -- tidy the drop folder by hand"
+             }
+         }
+ ```
+ 
+-- [ ] **Step 2:** verify parse (`ParseFile` như lần trước) + mô phỏng bằng
++- [x] **Step 2:** verify parse (`ParseFile` như lần trước) + mô phỏng bằng
+   thư mục tạm local. KHÔNG chạy script thật.
+-- [ ] **Step 3:** commit.
++- [x] **Step 3:** commit.
+ 
+ ### Task C2: Quyết định 2 món mồ côi (CẦN CHỦ DỰ ÁN GẬT TRƯỚC KHI XÓA)
+ 
+-- [ ] Hỏi chủ dự án: (a) xóa `skills-lock.json` (khóa 3 skill không tồn tại
+-  trong repo, không có lệnh restore)? (b) xóa thư mục `openspec/` (chỉ còn
+-  config.yaml, workflow không dùng — CLAUDE.md đã ghi "not in use")?
+-- [ ] Nếu gật: `git rm skills-lock.json openspec/config.yaml` + commit
+-  `chore: remove orphaned skills-lock and unused openspec scaffold`.
+-  Nếu không: đóng task, ghi 1 dòng lý do vào memory note docs-drift.
++- [x] Hỏi chủ dự án: (a) xóa `skills-lock.json`? (b) xóa thư mục
++  `openspec/`? — Resolved 2026-09-04 (commit 7c91ee6): chủ dự án gật xóa
++  (a), NHƯNG khi điều tra (b) phát hiện `.opencode/skills/openspec-*`
++  (OpenCode's `/opsx-*` commands) đang đọc `openspec/config.yaml` — CLAUDE.md
++  từng ghi "not in use" là SAI (đúng cho Claude Code, sai cho OpenCode). Chủ
++  dự án chốt: GIỮ `openspec/`. Xem `memory/docs-drift-audit-2026-08-27.md`.
++- [x] `git rm skills-lock.json` + commit (giữ nguyên `openspec/config.yaml`
++  — KHÔNG xóa, khác với đề xuất ban đầu của plan này). CLAUDE.md đã sửa
++  lại claim "not in use" trong cùng commit.
+ 
+ ### Task C3 (chờ người, không phải việc agent): mua chứng chỉ code signing
+ 
+ - [ ] Task 31 của roadmap — SmartScreen sẽ còn chặn tới khi có cert. Chỉ
+   chủ dự án làm được (mua EV/OV cert). Khi có cert: thêm bước `signtool`
+   vào release-alpha.ps1 (task mới lúc đó).
+ 
+ ---
+ 
+ # MA TRẬN SONG SONG
+diff --git a/installer/release-alpha.ps1 b/installer/release-alpha.ps1
+index caa018b..57de8f0 100644
+--- a/installer/release-alpha.ps1
++++ b/installer/release-alpha.ps1
+@@ -246,21 +246,21 @@ if ($published -and $Keep -gt 0) {
+                      @{ Expression = { $_.Name -match '-(\d+\.\d+\.\d+)\.exe$' } },
+                      @{ Expression = { if ($_.Name -match '-(\d+\.\d+\.\d+)\.exe$') { [version]$Matches[1] } else { $_.LastWriteTime } } } |
+                  Select-Object -Skip $Keep
+ 
+         foreach ($old in $stale) {
+             Remove-Item -LiteralPath $old.FullName -Force
+             $pruned = $true
+             Start-Sleep -Milliseconds 500
+             if (Test-Path -LiteralPath $old.FullName) {
+                 Write-Host "WARN  $($old.Name) still present after delete (Drive sync lag?) -- retrying once"
+-                Remove-Item -LiteralPath $old.FullName -Force
++                Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+                 Start-Sleep -Milliseconds 1500
+                 if (Test-Path -LiteralPath $old.FullName) {
+                     Write-Host "WARN  $($old.Name) would not delete -- tidy the drop folder by hand"
+                     $pruned = $false
+                 }
+             }
+             if ($pruned) {
+                 Write-Host "    pruned $($old.Name)"
+             }
+         }
+diff --git a/memory/docs-drift-audit-2026-08-27.md b/memory/docs-drift-audit-2026-08-27.md
+index 966bc5b..0ca225d 100644
+--- a/memory/docs-drift-audit-2026-08-27.md
++++ b/memory/docs-drift-audit-2026-08-27.md
+@@ -49,18 +49,22 @@ roadmap sẽ đi làm lại việc đã xong từ một tuần trước.
+   hai tool (Claude Code / OpenCode) của dự án đang dùng nó.
+ - ~~Clamp output cần một lần human listen ở volume thấp trước release kế
+   tiếp.~~ Chủ dự án bỏ gate listen-trước-release (27/08/2026) — nghe trong
+   alpha; clamp đã ship cùng 1.0.4.
+ 
+ ## Phát hiện thêm 2026-09-04 — `openspec/` KHÔNG mồ côi (dự án dùng 2 tool)
+ 
+ CLAUDE.md từng ghi "OpenSpec is not in use" — đúng cho phía Claude Code,
+ SAI cho phía OpenCode: `.opencode/skills/openspec-{apply-change,
+ archive-change, explore, propose, sync-specs, update-change}/SKILL.md` nối
+-6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec, và
+-các skill đó đọc `openspec/config.yaml` (`schema: spec-driven`). Xém xóa
++6 lệnh `/opsx-*` (`.opencode/commands/opsx-*.md`) vào workflow OpenSpec.
++Trong 6 file đó, chỉ `openspec-explore/SKILL.md` thực sự đọc
++`openspec/config.yaml` (có điều kiện — dòng 97: "skip this if neither
++file exists"); 5 skill còn lại không grep tới `config.yaml`, nhưng cả 6 vẫn
++gắn với workflow OpenSpec qua schema `spec-driven` mà file đó khai báo, nên
++kết luận GIỮ `openspec/` vẫn đúng. Xém xóa
+ nhầm ở Task C2 (docs/superpowers/plans/2026-08-27-next-wave.md) — chủ dự
+ án chặn lại, yêu cầu kiểm tra trước. Đã sửa CLAUDE.md để không lặp lại
+ nhầm lẫn này. **Bài học chung: một file "mồ côi" theo góc nhìn Claude Code
+ có thể đang sống ở phía OpenCode (hoặc ngược lại) — dự án này chạy qua lại
+ giữa hai tool — luôn `grep` cả `.opencode/` trước khi đề xuất xóa bất cứ
+ gì ở gốc repo.**
+diff --git a/memory/juce9-api-traps-2026-08-25.md b/memory/juce9-api-traps-2026-08-25.md
+index bbf3916..afed46d 100644
+--- a/memory/juce9-api-traps-2026-08-25.md
++++ b/memory/juce9-api-traps-2026-08-25.md
+@@ -34,11 +34,12 @@ khác nhau thì phải nối chuỗi:
+ ```cpp
+ bounds.withTrimmedLeft (l).withTrimmedRight (r)
+       .withTrimmedTop (t).withTrimmedBottom (b)
+ ```
+ 
+ ## Nguồn
+ 
+ Ghi lại bởi một phiên agent song song cùng ngày, phiên đó redesign UI theo một
+ hướng khác và cuối cùng bị thay bằng "Sodium Rack". Hai bài học trên là thứ duy
+ nhất trong nhánh đó không tái tạo được từ nơi khác — phần còn lại là skill cài
+-từ GitHub (xem `skills-lock.json`) hoặc code đã bị thay thế.
++từ GitHub (xem `skills-lock.json`, đã xóa 2026-09-04, xem
++memory/docs-drift-audit-2026-08-27.md) hoặc code đã bị thay thế.

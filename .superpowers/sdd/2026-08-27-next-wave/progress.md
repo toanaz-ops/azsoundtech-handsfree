@@ -34,3 +34,33 @@ many openspec-* skills read config.yaml.
 Fix wave dispatched (all 5 findings, one dispatch per skill's "no
 per-finding fixers" rule) — no amend (policy), report corrected to match
 actual git history instead.
+Fix wave done: c2231fc (Minor #3, -ErrorAction SilentlyContinue on retry
+Remove-Item only) + 633e481 (Important #1 plan rewrite + tick C1/C2, Minor
+#4, Minor #5). Important #2 (report commit-message correction) applied to
+disk but NOT in either commit — caught separately: a rogue, never-tracked
+.superpowers/sdd/.gitignore (bare `*`) had been silently blanket-ignoring
+this ENTIRE session's SDD workspace since ~23:2x, contradicting this
+repo's OWN root .gitignore comment (line 60: ".superpowers/ is
+deliberately TRACKED ... do not re-add it here"). Removed the rogue file,
+committed the whole workspace in 6cba3b1 (unrelated to the fix-wave
+findings; separate self-caught infra issue).
+Scoped re-review of fix wave (c5e46d9..633e481, findings 1/3/4/5 from diff,
+finding 2 from live task-C1-report.md) dispatched.
+Scoped re-review verdict: all 5 findings ADDRESSED, no new breakage.
+
+FINAL REVIEW CLEAN. Branch commits (ec4e3a1..6cba3b1):
+c65173d (C1 impl) c5e46d9 (C1 fix rd1) 7c91ee6 (C2) 8eb285d (gitignore
+chore) c2231fc (final-review fix: retry SilentlyContinue) 633e481
+(final-review fix: plan/memory docs) 6cba3b1 (recovered SDD audit trail,
+removed rogue nested .gitignore).
+
+NOTE deviating from generic skill default: did NOT `rm -rf` this plan's
+workspace at finish — this project's root .gitignore explicitly records
+`.superpowers/` as permanently TRACKED audit trail (owner decision
+2026-08-22), and this workspace is now committed (6cba3b1). Deleting the
+working copy of tracked, committed files is not what that skill step
+means for a project with this override; git history already had that role
+in the generic case, but here the intent is the files stay in the tree too.
+Leaving `.superpowers/sdd/2026-08-27-next-wave/` in place.
+
+Next: superpowers:finishing-a-development-branch.
