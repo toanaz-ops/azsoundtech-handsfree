@@ -653,8 +653,7 @@ TEST (NotchControllerStereo, SnapshotPublishesBothLanesSpectraAndLaneCount)
 {
     StereoHarness h;
     SineSource toneL;                 // 1 kHz on the left only
-    NoiseSource quietR;
-    quietR.amp = 0.001f;
+    NoiseSource quietR;                // default amp: brief's own harness
     for (int i = 0; i < 8; ++i)
         pumpStereo (h, toneL.hop(), quietR.hop());
 
@@ -665,6 +664,11 @@ TEST (NotchControllerStereo, SnapshotPublishesBothLanesSpectraAndLaneCount)
     ASSERT_EQ (snap.magnitudeCount, (std::uint32_t) Detector::kNumBins);
 
     const int toneBin = 43;   // 1007.8 Hz @ 48 kHz / 2048
+    // Pins the lane-1 copy itself (not just the ratio): if the lane-1 branch
+    // of runOnce()'s copy loop were deleted, magnitudes[1] would stay all-
+    // zero and this would fail even though the ratio check below still
+    // trivially "passes" (anything > 0).
+    EXPECT_GT (snap.magnitudes[1][toneBin], 0.0f);
     EXPECT_GT (snap.magnitudes[0][toneBin], 10.0f * snap.magnitudes[1][toneBin]);
 }
 
@@ -686,6 +690,63 @@ TEST (NotchControllerStereo, TuningSettersReachBothLanes)
     EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold (0), 15.0f);
     EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold (1), 15.0f);
     EXPECT_DOUBLE_EQ (h.controller.getRiseReferenceMs (1), 500.0);
+}
+
+// Red if runOnce()'s drain loop (NotchController.cpp, the `for (;;)` /
+// `if (! any) break;` loop around the per-lane processLatestBlock() calls)
+// were collapsed to a single pass instead of draining every block a large
+// audio callback delivered at once -- e.g. replacing the `for (;;)` with a
+// plain `if`. Detector::processLatestBlock() reads at most one hop
+// (kHopSize samples) per call, so writing 3 hops into BOTH rings before a
+// single runOnce() must still publish 3 snapshots, advancing `sequence` by
+// exactly 3.
+TEST (NotchControllerStereo, RunOnceDrainsMultipleBlocksPerCall)
+{
+    StereoHarness h;
+    SineSource toneL;
+    NoiseSource quietR;
+    std::vector<float> left, right;
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto l = toneL.hop();
+        const auto r = quietR.hop();
+        left.insert  (left.end(),  l.begin(), l.end());
+        right.insert (right.end(), r.begin(), r.end());
+    }
+    ASSERT_EQ (h.tapL.write (left.data(),  left.size()),  left.size());
+    ASSERT_EQ (h.tapR.write (right.data(), right.size()), right.size());
+    h.clock.advance (kBlockMs);
+
+    NotchController::SnapshotBuffer before;
+    h.controller.copySnapshot (before);
+    h.controller.runOnce();
+    NotchController::SnapshotBuffer after;
+    h.controller.copySnapshot (after);
+
+    EXPECT_EQ (after.sequence - before.sequence, 3u);
+}
+
+// Same drain-loop assertion, legacy mono-ring shape (Harness, one tap).
+TEST (NotchControllerStereo, RunOnceDrainsMultipleBlocksPerCallLegacy)
+{
+    Harness h;
+    SineSource tone;
+    std::vector<float> samples;
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto hop = tone.hop();
+        samples.insert (samples.end(), hop.begin(), hop.end());
+    }
+    ASSERT_EQ (h.tap.write (samples.data(), samples.size()), samples.size());
+    h.clock.advance (kBlockMs);
+
+    NotchController::SnapshotBuffer before;
+    h.controller.copySnapshot (before);
+    h.controller.runOnce();
+    NotchController::SnapshotBuffer after;
+    h.controller.copySnapshot (after);
+
+    EXPECT_EQ (after.sequence - before.sequence, 3u);
 }
 
 // ===========================================================================

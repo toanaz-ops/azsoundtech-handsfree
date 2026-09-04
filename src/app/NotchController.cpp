@@ -189,6 +189,17 @@ void NotchController::runOnce()
         }
         {
             const std::lock_guard<std::mutex> lock (snapshotMutex_);
+            // magnitudeCount/laneCount below are set unconditionally even
+            // though a lane with spec[l].magnitudes == nullptr skips its
+            // copy and so keeps its PREVIOUS bins in latest_.magnitudes[l].
+            // That is accepted by design, not an oversight: both rings of a
+            // slot are written by the same audio callback with the same
+            // sample count (bridge design), so both lanes' Detectors yield a
+            // fresh block in the same drain iteration. A lane can only lag
+            // the other if its ring dropped samples the other one did not --
+            // equal ring capacities and one writer preclude that. So
+            // magnitudes[l] is never more than one hop stale here, and there
+            // is no need for a per-lane freshness flag in the snapshot.
             for (int l = 0; l < lanesToRead; ++l)
                 if (spec[(std::size_t) l].magnitudes != nullptr)
                     std::copy (spec[(std::size_t) l].magnitudes,

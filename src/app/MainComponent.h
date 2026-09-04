@@ -202,11 +202,12 @@ private:
     // One detector controller per routing slot; element i is wired to
     // engine_'s slot-i tap and command queue (see the constructor).
     //
-    // Heap-held (unique_ptr) deliberately: a NotchController is ~550 kB
-    // since the FFT went 2048-wide (the scorer's 128x1025-float history
-    // dominates), so eight BY VALUE would put ~4.4 MB on this object's
-    // owner's stack -- over the default 1 MB Windows thread stack, measured
-    // as a segfault in every MainComponent-constructing test.
+    // Heap-held (unique_ptr) deliberately: a NotchController is ~1.1 MB
+    // since stereo-aware detection doubled it (two Detectors, two
+    // CandidateScorers -- each with a 128x1025-float history -- and two
+    // persistence arrays), so eight BY VALUE would put ~8.8 MB on this
+    // object's owner's stack -- over the default 1 MB Windows thread stack,
+    // measured as a segfault in every MainComponent-constructing test.
     std::array<std::unique_ptr<NotchController>, kMaxSlots> notchControllers_;
 
     // Per-slot tuning mode (brief 2026-08-24): true = the slot's detector
