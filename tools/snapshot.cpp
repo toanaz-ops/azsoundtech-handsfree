@@ -19,12 +19,17 @@
 //   console-idle.png   the state the app opens in -- no signal, no notches
 //   console-live.png   a real published spectrum with three notches placed at
 //                      staggered ages, so the sodium-to-ice ramp that the whole
-//                      design is built around is actually visible
+//                      design is built around is actually visible -- two of
+//                      them on lane 0 (L) and one on lane 1 (R), so the LANE
+//                      column, the dashed R stem and the L/R picker all render
+//                      with something real behind them
 //
-// The live shot uses the REAL path: audio is written into slot 0's tap ring
-// and the controller's runOnce() publishes genuine snapshots, exactly as
-// tests/test_spectrumview.cpp does. Nothing here hand-writes a lookalike
-// struct, so a snapshot that looks right is evidence the real pipeline is.
+// The live shot uses the REAL path: audio is written into BOTH of slot 0's tap
+// rings and the controller's runOnce() publishes genuine two-lane snapshots,
+// exactly as tests/test_spectrumview.cpp does. Nothing here hand-writes a
+// lookalike struct, so a snapshot that looks right is evidence the real
+// pipeline is. Slot 1 is put in LINK so the routing table shows both states of
+// the per-slot ring-risk control side by side.
 //
 // Usage:
 //   HandsFreeSnapshot <out-dir> [width] [height] [--fast]
@@ -50,7 +55,7 @@ constexpr double kSampleRate = 48000.0;
 // A plausible programme rather than a test tone: a pink-ish floor with a few
 // musical partials on it. A single sine produces one spike and a flat line,
 // which tells a reviewer nothing about how the trace actually reads.
-std::vector<float> makeHop (int hopIndex)
+std::vector<float> makeHop (int hopIndex, int lane)
 {
     std::vector<float> hop ((std::size_t) Detector::kHopSize);
 
@@ -59,7 +64,7 @@ std::vector<float> makeHop (int hopIndex)
     static const double gains[]    = { 0.28, 0.22, 0.30, 0.18, 0.12,
                                        0.16, 0.20, 0.08, 0.04 };
 
-    juce::Random random ((juce::int64) (hopIndex + 1) * 7919);
+    juce::Random random ((juce::int64) (hopIndex + 1) * 7919 + (juce::int64) lane * 104729);
 
     for (std::size_t i = 0; i < hop.size(); ++i)
     {
@@ -67,8 +72,15 @@ std::vector<float> makeHop (int hopIndex)
 
         double sample = 0.0;
         for (int p = 0; p < (int) std::size (partials); ++p)
-            sample += gains[p] * std::sin (2.0 * juce::MathConstants<double>::pi
-                                           * partials[p] * t);
+        {
+            // Lane 1 carries the same programme with a darker tilt -- more low
+            // end, less top. Without it the L and R traces are identical and
+            // the analyser's new L/R picker would redraw the same curve, which
+            // proves nothing about which lane is being plotted.
+            const double gain = gains[p] * (lane == 1 ? (p < 5 ? 1.25 : 0.55) : 1.0);
+            sample += gain * std::sin (2.0 * juce::MathConstants<double>::pi
+                                       * partials[p] * t);
+        }
 
         sample += 0.05 * (random.nextDouble() * 2.0 - 1.0);   // broadband floor
 
@@ -85,13 +97,19 @@ std::vector<float> makeHop (int hopIndex)
     return hop;
 }
 
-void pump (LockFreeRingBuffer<float>& tap, NotchController& controller,
-           int blocks, int& hopCounter)
+// Both lanes of the slot, written by the same loop: the controller drains one
+// block from EACH tap per runOnce(), so feeding only lane 0 would publish a
+// two-lane snapshot whose R half is silence.
+void pump (LockFreeRingBuffer<float>& tapLane0, LockFreeRingBuffer<float>& tapLane1,
+           NotchController& controller, int blocks, int& hopCounter)
 {
     for (int block = 0; block < blocks; ++block)
     {
-        const auto hop = makeHop (hopCounter++);
-        tap.write (hop.data(), hop.size());
+        const auto hopL = makeHop (hopCounter, 0);
+        const auto hopR = makeHop (hopCounter, 1);
+        ++hopCounter;
+        tapLane0.write (hopL.data(), hopL.size());
+        tapLane1.write (hopR.data(), hopR.size());
         controller.runOnce();
     }
 }
@@ -196,27 +214,53 @@ int main (int argc, char** argv)
         return 1;
     }
 
-    auto& tap = app.getAudioEngine().getTapBuffer (0);
+    auto& tapL = app.getAudioEngine().getTapBuffer (0, 0);
+    auto& tapR = app.getAudioEngine().getTapBuffer (0, 1);
     controller->setSampleRate (kSampleRate);
 
+    // Slot 0 stays INDEP (the default), slot 1 is made STEREO and switched to
+    // LINK, so the routing table renders both states of the per-slot control
+    // rather than a column of one repeated word. Slot 1 opens MONO, and the
+    // LINK/INDEP control is deliberately hidden on a mono row -- a policy
+    // about "the other channel" means nothing there.
+    //
+    // The config goes straight to the engine rather than through
+    // changeSlotConfig(): that path runs the device restart cycle, which stops
+    // and starts every controller's detector thread, and this tool drives
+    // runOnce() by hand from the main thread. Engine slot config is plain
+    // relaxed atomics and needs no restart (AudioEngine::setSlotConfig).
+    {
+        SlotConfig stereoSlot;
+        stereoSlot.enabled = true;
+        stereoSlot.width   = 2;
+        app.getAudioEngine().setSlotConfig (1, stereoSlot);
+    }
+    app.setSlotLinked (1, true);
+    slots.refresh();
+    app.resized();
+
     int hop = 0;
-    pump (tap, *controller, 8, hop);
+    pump (tapL, tapR, *controller, 8, hop);
 
     // Three notches, placed at staggered wall-clock times so the ramp is
     // visible in ONE frame: the first has cooled to ice, the second is
     // mid-way, the third has just fired and is still sodium.
-    struct Placement { int index; double hz; double q; double depthDb; int waitMs; };
+    // Lane 1 takes the middle placement: with INDEP the two lanes hold
+    // DIFFERENT frequencies, which is the whole point of the mode and the only
+    // way the LANE column, the dashed stem and the R flag tag can be checked.
+    struct Placement { int lane; int index; double hz; double q; double depthDb; int waitMs; };
     const Placement placements[] = {
-        { 0,  247.0, 30.0, -18.0, fast ? 0 : 12000 },
-        { 1, 1240.0, 30.0, -12.0, fast ? 0 :  9000 },
-        { 2, 1920.0, 30.0, -21.0, fast ? 0 :  1500 },
+        { 0, 0,  247.0, 30.0, -18.0, fast ? 0 : 12000 },
+        { 1, 1, 1240.0, 30.0, -12.0, fast ? 0 :  9000 },
+        { 0, 2, 1920.0, 30.0, -21.0, fast ? 0 :  1500 },
     };
 
     for (const auto& placement : placements)
     {
-        controller->setNotch (0, placement.index, placement.hz, placement.q,
-                              placement.depthDb, NotchController::Origin::Manual);
-        pump (tap, *controller, 2, hop);
+        controller->setNotch (placement.lane, placement.index, placement.hz,
+                              placement.q, placement.depthDb,
+                              NotchController::Origin::Manual);
+        pump (tapL, tapR, *controller, 2, hop);
 
         // The ledgers record a notch's first sighting on the refresh that
         // first SEES it, so each placement has to be observed before the wait
@@ -232,7 +276,7 @@ int main (int argc, char** argv)
         }
     }
 
-    pump (tap, *controller, 4, hop);
+    pump (tapL, tapR, *controller, 4, hop);
     app.getSpectrumViewForTest().refreshFromSnapshot();
     app.getNotchListPanelForTest().refreshFromSnapshot();
 
