@@ -207,16 +207,26 @@ void NotchController::runOnce()
                                latest_.magnitudes[(std::size_t) l].begin());
             latest_.magnitudeCount = (std::uint32_t) Detector::kNumBins;
             latest_.laneCount      = (std::uint32_t) lanesToRead;
-            latest_.linked         = false;   // Task 3 adds linked_
+            // The operator's own switch, not effectiveLinked(): the panel
+            // must show what was ASKED for, so a slot that is forced linked
+            // by width or a missing tap still reads back INDEP.
+            latest_.linked         = linked_.load (std::memory_order_relaxed);
             latest_.sampleRate     = spec[0].magnitudes != nullptr ? spec[0].sampleRate : spec[1].sampleRate;
             latest_.notches        = notchList;
             latest_.notchCount     = notchCount;
             ++latest_.sequence;
         }
 
+        // The cross-lane comparison (§4.4) only ever compares the SAME hop:
+        // `other` is handed over only when the opposite lane produced a block
+        // in THIS drain iteration, and is nullptr otherwise.
         for (int l = 0; l < lanesToRead; ++l)
             if (spec[(std::size_t) l].magnitudes != nullptr)
-                processSpectrumForDetection (l, spec[(std::size_t) l], now);
+            {
+                const float* other = (lanesToRead == 2 && spec[(std::size_t) (1 - l)].magnitudes != nullptr)
+                                         ? spec[(std::size_t) (1 - l)].magnitudes : nullptr;
+                processSpectrumForDetection (l, spec[(std::size_t) l], other, now);
+            }
     }
 
     // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
@@ -371,36 +381,130 @@ double NotchController::getSoundcheckRemainingMs() const
     return remainingSoundcheckMs();
 }
 
-int NotchController::firstFreeSlotLocked() const
+void NotchController::setLaneAsymmetryBonus (float b)
+{
+    laneAsymmetryBonus_.store (std::clamp (b, kMinLaneAsymmetryBonus, kMaxLaneAsymmetryBonus),
+                               std::memory_order_relaxed);
+}
+
+float NotchController::getLaneAsymmetryBonus() const
+{
+    return laneAsymmetryBonus_.load (std::memory_order_relaxed);
+}
+
+// Design §4.4. Neutral (1.0) whenever the comparison is not meaningful: no
+// opposite-lane block this iteration, a bonus of exactly 1.0 (the default --
+// no arithmetic, no rounding), or a bin too close to either end for
+// peakinessAt to build a full annulus. The 0.5x margin says the other lane
+// must be MARKEDLY flatter, not merely lower -- stereo programme material
+// differs between lanes by a few dB all the time.
+float NotchController::asymmetryMultiplier (const float* mine, const float* other, int bin, float bonus)
+{
+    if (other == nullptr || ! (bonus > 1.0f))
+        return 1.0f;
+    if (bin < PeakinessAnalyzer::kNeighbourOuterRadius
+        || bin >= Detector::kNumBins - PeakinessAnalyzer::kNeighbourOuterRadius)
+        return 1.0f;
+    const float minePk  = PeakinessAnalyzer::peakinessAt (mine,  Detector::kNumBins, bin);
+    const float otherPk = PeakinessAnalyzer::peakinessAt (other, Detector::kNumBins, bin);
+    return (otherPk < 0.5f * minePk) ? bonus : 1.0f;
+}
+
+int NotchController::firstFreeIndexLocked (int lane) const
 {
     for (int i = 0; i < kSlots; ++i)
-        if (! model_[slotOf (0, i)].active)
+        if (! model_[slotOf (lane, i)].active)
             return i;
     return -1;
 }
 
+int NotchController::firstFreeIndexAllLanesLocked() const
+{
+    for (int i = 0; i < kSlots; ++i)
+    {
+        bool free = true;
+        for (int c = 0; c < width_; ++c)
+            free = free && ! model_[slotOf (c, i)].active;
+        if (free)
+            return i;
+    }
+    return -1;
+}
+
+// The one place a confirmed candidate becomes notches. INDEP touches `lane`
+// alone; LINKED takes one index free on every driven lane and writes them all.
+void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow)
+{
+    // soundcheckActive() takes modelMutex_ itself, so it is asked BEFORE the
+    // lock below -- never underneath it.
+    const Origin origin  = soundcheckActive() ? Origin::Soundcheck : Origin::Detector;
+    const double q       = notchQ_.load (std::memory_order_relaxed);
+    const double depthDb = notchDepthDb_.load (std::memory_order_relaxed);
+
+    int index = -1, firstLane = lane, lastLane = lane;
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        if (linkedNow) { index = firstFreeIndexAllLanesLocked(); firstLane = 0; lastLane = width_ - 1; }
+        else           { index = firstFreeIndexLocked (lane); }
+    }
+    if (index < 0)
+        return;   // chain full on the lanes concerned: same outcome as today
+
+    int applied = 0;
+    for (int l = firstLane; l <= lastLane; ++l)
+        if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
+            ++applied;
+    // Partial-failure analysis, unchanged from 1.0.4: setNotch validates only
+    // index bounds + params + sample rate, identical across lanes, so a
+    // partial application has no realistic trigger. If it ever happens,
+    // unwind rather than leave one lane unprotected while the GUI claims
+    // protection.
+    const int wanted = lastLane - firstLane + 1;
+    if (applied != wanted && applied > 0)
+        for (int l = firstLane; l <= lastLane; ++l)
+            clearNotch (l, index);
+
+    // One light line per detection event -- per PLACED notch, not per frame.
+    // Logged outside every lock: juce::Logger is not a place to hold one.
+    juce::Logger::writeToLog (
+        "[detect] slot=" + juce::String (slotId_)
+        + " lane=" + (linkedNow ? juce::String ("LR") : juce::String (lane == 0 ? "L" : "R"))
+        + " idx=" + juce::String (index)
+        + " freq=" + juce::String ((int) std::lround (cand.frequencyHz))
+        + " Q=" + juce::String (q, 1) + " depth=" + juce::String (depthDb, 1)
+        + " rise=" + juce::String ((int) std::lround (lanes_[(std::size_t) lane].scorer.getRiseReferenceMs())));
+}
+
 void NotchController::processSpectrumForDetection (int lane, const Detector::Spectrum& block,
+                                                   const float* otherLaneMagnitudes,
                                                    double blockNowMs)
 {
-    if (! detectionActive_.load (std::memory_order_relaxed))
-        return;
-
     auto& la = lanes_[(std::size_t) lane];
-
-    // Real gap since the previous DRAINED block; the first block has no
-    // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
-    const double rawDt     = blockNowMs - la.previousBlockNowMs;
-    const double elapsedMs = (la.previousBlockNowMs > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
-    la.previousBlockNowMs  = blockNowMs;
-
-    la.scorer.beginBlock (block.sampleRate);
+    // Read ONCE: a setLinked() landing mid-block must not have this frame
+    // place with one policy and feed auto-release with the other.
+    const bool linkedNow = effectiveLinked();
 
     // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
     // same frame the scorer looks at (spec 5.2 step 7).
+    //
+    // Deliberately ABOVE the detectionActive_ gate. Reinforcement is notch
+    // MAINTENANCE, not detection: with the gate off (Bypass, or a finished
+    // soundcheck) the detector can no longer re-place anything it drops, so
+    // releasing a notch the room is still ringing through would leave a live
+    // PA unprotected with no path back. The release itself is unchanged -- a
+    // notch whose bin goes quiet still clears after kAutoReleaseMs.
+    //
+    // Which lanes a frame may reinforce is the placement policy read back:
+    // INDEP feeds only the lane this spectrum came from (design §4.3 -- a
+    // lane's notch is fed by "the spectrum of that same lane"); LINKED feeds
+    // the whole pair from either lane, so a linked pair releases together.
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         const double binWidthHz = block.sampleRate / (double) Detector::kFftSize;
         for (int c = 0; c < kChannels; ++c)
+        {
+            if (! linkedNow && c != lane)
+                continue;
             for (int i = 0; i < kSlots; ++i)
             {
                 auto& n = model_[slotOf (c, i)];
@@ -419,24 +523,48 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                     n.lastDetectedMs = liveMs_;
                 }
             }
+        }
     }
 
-    // Locked fundamentals for the harmonic penalty (KD-3).
+    if (! detectionActive_.load (std::memory_order_relaxed))
+        return;
+
+    // Real gap since the previous DRAINED block; the first block has no
+    // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
+    const double rawDt     = blockNowMs - la.previousBlockNowMs;
+    const double elapsedMs = (la.previousBlockNowMs > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
+    la.previousBlockNowMs  = blockNowMs;
+
+    la.scorer.beginBlock (block.sampleRate);
+
+    // Locked fundamentals for the harmonic penalty (KD-3). Same lane rule as
+    // the reinforcement loop above: under INDEP the lanes hold different
+    // notches, and lane 1's fundamental has no business halving a lane-0
+    // candidate's score (design §4.3). Under LINKED the two lists are
+    // identical anyway, so 1.0.4's behaviour is preserved exactly.
     std::vector<double> locked;
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
-        for (const auto& n : model_)
-            if (n.active)
-                locked.push_back (n.frequency);
+        for (int c = 0; c < kChannels; ++c)
+        {
+            if (! linkedNow && c != lane)
+                continue;
+            for (int i = 0; i < kSlots; ++i)
+                if (model_[slotOf (c, i)].active)
+                    locked.push_back (model_[slotOf (c, i)].frequency);
+        }
     }
 
     const auto result = la.analyzer.analyse (block);
     for (std::size_t i = 0; i < result.count && i < (std::size_t) Detector::kNumBins; ++i)
     {
         const auto& cand = result.candidates[i];
-        const float score = la.scorer.scoreCandidate (
+        float score = la.scorer.scoreCandidate (
             cand, block.magnitudes,
             { locked.data(), locked.size() });
+        // Design §4.4: neutral at the default bonus of 1.0.
+        score *= asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
+                                      laneAsymmetryBonus_.load (std::memory_order_relaxed));
 
         const int bin = cand.bin;
         if (score > CandidateScorer::kConfirmScore)
@@ -447,48 +575,12 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
             {
                 la.persistence[(std::size_t) bin] = 0;
 
-                // KD-5: automatic notch params were fixed; since the
-                // 2026-08-24 brief they are runtime defaults set from the
-                // DETECTION panel. KD-6: first index whose lane-0 model notch
-                // is inactive; ALL width_ lanes take that SAME index, or
-                // nothing.
-                const int slot = firstFreeSlotLocked();
-                if (slot >= 0)
-                {
-                    const Origin origin = soundcheckActive() ? Origin::Soundcheck
-                                                             : Origin::Detector;
-                    const double q      = notchQ_.load (std::memory_order_relaxed);
-                    const double depthDb= notchDepthDb_.load (std::memory_order_relaxed);
-                    int appliedLanes = 0;
-                    for (int l = 0; l < width_; ++l)
-                        if (setNotch (l, slot, cand.frequencyHz,
-                                      q, depthDb, origin))
-                            ++appliedLanes;
-                    // Partial-failure analysis: setNotch validates only index
-                    // bounds + params + sample rate, identical across all
-                    // lanes, so a partial application has no realistic
-                    // trigger today (same reasoning as adoptPreset). If it
-                    // ever happens, unwind the half-applied lanes rather than
-                    // leave one lane unprotected while the GUI claims
-                    // protection.
-                    if (appliedLanes != width_ && appliedLanes > 0)
-                        for (int l = 0; l < width_; ++l)
-                            clearNotch (l, slot);
-
-                    // Brief change 3: one light line per detection event. The
-                    // detector thread already logs elsewhere, this allocates
-                    // a handful of short strings ONCE per placed notch (not
-                    // per frame), and "rise" is the configured rise reference
-                    // the confirmation ran under.
-                    juce::Logger::writeToLog (
-                        "[detect] slot=" + juce::String (slotId_)
-                        + " lane=" + juce::String (appliedLanes)
-                        + " freq=" + juce::String ((int) std::lround (cand.frequencyHz))
-                        + " Q=" + juce::String (q, 1)
-                        + " depth=" + juce::String (depthDb, 1)
-                        + " rise=" + juce::String ((int) std::lround (
-                              la.scorer.getRiseReferenceMs())));
-                }
+                // KD-5: automatic notch params are runtime defaults set from
+                // the DETECTION panel. Which LANES and which INDEX the notch
+                // lands on is now the placement policy's business (§4.3);
+                // persistence is still counted per (lane, bin), so under LINK
+                // a confirm on either lane is enough for the pair.
+                placeConfirmed (lane, cand, linkedNow);
             }
         }
         else

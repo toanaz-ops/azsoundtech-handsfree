@@ -922,3 +922,204 @@ TEST (NotchControllerDetection, DetectionCommandsCarrySlotIdOnBothLanes)
     EXPECT_TRUE (sawLane0);
     EXPECT_TRUE (sawLane1);
 }
+
+// ===========================================================================
+// Stereo placement policy (task 3): INDEP by default, LINK on request,
+// lane-aware index search (S-7), asymmetry bonus (design §4.3, §4.4).
+// ===========================================================================
+namespace {
+// Drains every command currently queued into `out`.
+std::vector<NotchCommand> drain (LockFreeRingBuffer<NotchCommand>& ring)
+{
+    std::vector<NotchCommand> out;
+    NotchCommand cmd {};
+    while (ring.read (&cmd, 1) == 1)
+        out.push_back (cmd);
+    return out;
+}
+
+// Warm both lanes with noise, then feed `left`/`right` sources until at
+// least one Set appears or 40 blocks pass. Returns everything queued.
+template <typename L, typename R>
+std::vector<NotchCommand> warmThenDrive (StereoHarness& h, L& left, R& right)
+{
+    NoiseSource quietL, quietR;
+    quietR.rng.seed (999u);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+    for (int i = 0; i < 40; ++i)
+    {
+        pumpStereo (h, left.hop(), right.hop());
+        if (h.commands.getAvailableRead() > 0)
+            break;
+    }
+    // A few more blocks so a lagging second lane (if any) gets its chance.
+    for (int i = 0; i < 6; ++i)
+        pumpStereo (h, left.hop(), right.hop());
+    return drain (h.commands);
+}
+} // namespace
+
+// Spec test 4. Red if INDEP placement fans out to the silent lane.
+TEST (NotchControllerStereo, IndepHowlOnRightOnlyCutsRightOnly)
+{
+    StereoHarness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quietL;  SineSource toneR;
+    const auto cmds = warmThenDrive (h, quietL, toneR);
+
+    ASSERT_FALSE (cmds.empty());
+    for (const auto& c : cmds)
+    {
+        EXPECT_EQ (c.type, NotchCommandType::Set);
+        EXPECT_EQ (c.channel, 1) << "lane 0 must stay untouched";
+    }
+    EXPECT_NEAR (cmds.front().frequency, 1000.0, 0.5 * kTestSr / Detector::kFftSize);
+}
+
+// Spec test 5. Red if both-lane howl yields fewer than one Set per lane.
+TEST (NotchControllerStereo, IndepHowlOnBothLanesCutsBoth)
+{
+    StereoHarness h;
+    h.controller.setDetectionActive (true);
+    SineSource toneL, toneR;
+    const auto cmds = warmThenDrive (h, toneL, toneR);
+
+    bool sawL = false, sawR = false;
+    for (const auto& c : cmds) { sawL |= (c.channel == 0); sawR |= (c.channel == 1); }
+    EXPECT_TRUE (sawL);
+    EXPECT_TRUE (sawR);
+}
+
+// Spec test 6. Red if LINKED stops fanning a right-only howl to both lanes
+// at the same index.
+TEST (NotchControllerStereo, LinkedHowlOnRightOnlyCutsBothAtOneIndex)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setDetectionActive (true);
+    NoiseSource quietL;  SineSource toneR;
+    const auto cmds = warmThenDrive (h, quietL, toneR);
+
+    ASSERT_GE (cmds.size(), 2u);
+    EXPECT_EQ (cmds[0].channel, 0);
+    EXPECT_EQ (cmds[1].channel, 1);
+    EXPECT_EQ (cmds[0].index, cmds[1].index);
+    EXPECT_FLOAT_EQ (cmds[0].frequency, cmds[1].frequency);
+}
+
+// Spec test 7 / S-6. Red if the legacy ctor honours INDEP.
+TEST (NotchControllerStereo, LegacyCtorIsLinkedRegardlessOfFlag)
+{
+    Harness h;
+    h.controller.setLinked (false);
+    EXPECT_TRUE (h.controller.effectiveLinked());
+    StereoHarness s;
+    EXPECT_FALSE (s.controller.effectiveLinked());
+    s.controller.setLinked (true);
+    EXPECT_TRUE (s.controller.effectiveLinked());
+}
+
+// Spec test 17b / S-7. Red if LINKED reuses an index lane 1 already holds.
+TEST (NotchControllerStereo, LinkedPlacementSkipsAnIndexBusyOnEitherLane)
+{
+    StereoHarness h;
+    // Pre-occupy lane 1 index 0 (as INDEP would have) via the policy API.
+    ASSERT_TRUE (h.controller.setNotch (1, 0, 3000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.runOnce();
+    (void) drain (h.commands);
+
+    h.controller.setLinked (true);
+    h.controller.setDetectionActive (true);
+    SineSource toneL; NoiseSource quietR;
+    const auto cmds = warmThenDrive (h, toneL, quietR);
+
+    ASSERT_GE (cmds.size(), 2u);
+    for (const auto& c : cmds)
+    {
+        EXPECT_EQ (c.type, NotchCommandType::Set);
+        EXPECT_NE (c.index, 0) << "index 0 is busy on lane 1";
+    }
+}
+
+// Spec test 8. Red if INDEP auto-release on lane 0 waits for lane 1 to go quiet.
+TEST (NotchControllerStereo, IndepAutoReleaseIsPerLane)
+{
+    StereoHarness h;
+    h.controller.setDetectionActive (true);
+    SineSource toneL, toneR;
+    (void) warmThenDrive (h, toneL, toneR);
+    h.controller.setDetectionActive (false);   // freeze placement, keep feeding
+
+    // Left goes quiet, right keeps ringing, for > 30 s of live time.
+    NoiseSource quietL;
+    const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
+    for (int i = 0; i < blocks; ++i)
+        pumpStereo (h, quietL.hop(), toneR.hop());
+
+    const auto cmds = drain (h.commands);
+    bool clearedL = false, clearedR = false;
+    for (const auto& c : cmds)
+        if (c.type == NotchCommandType::Clear) { clearedL |= (c.channel == 0); clearedR |= (c.channel == 1); }
+    EXPECT_TRUE (clearedL);
+    EXPECT_FALSE (clearedR);
+}
+
+// Spec test 9. Red if a LINKED pair releases while one lane still rings.
+TEST (NotchControllerStereo, LinkedAutoReleaseWaitsForBothLanes)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setDetectionActive (true);
+    SineSource toneL; NoiseSource quietR;
+    (void) warmThenDrive (h, toneL, quietR);
+    h.controller.setDetectionActive (false);
+
+    // Left goes quiet, RIGHT now rings the same frequency: the pair stays.
+    NoiseSource quietL; SineSource toneR;
+    const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
+    for (int i = 0; i < blocks; ++i)
+        pumpStereo (h, quietL.hop(), toneR.hop());
+
+    for (const auto& c : drain (h.commands))
+        EXPECT_NE (c.type, NotchCommandType::Clear);
+}
+
+// Spec test 12. Red if the bonus multiplies when the other lane is NOT quiet,
+// or fails to multiply when it is. Uses the public score hook below.
+TEST (NotchControllerStereo, AsymmetryBonusAppliesOnlyWhenOtherLaneIsQuiet)
+{
+    StereoHarness h;
+    EXPECT_FLOAT_EQ (h.controller.getLaneAsymmetryBonus(), 1.0f);
+    h.controller.setLaneAsymmetryBonus (2.0f);
+    EXPECT_FLOAT_EQ (h.controller.getLaneAsymmetryBonus(), 2.0f);
+    h.controller.setLaneAsymmetryBonus (9.0f);
+    EXPECT_FLOAT_EQ (h.controller.getLaneAsymmetryBonus(), 2.0f);   // clamped
+
+    std::array<float, Detector::kNumBins> mine {}, other {};
+    mine.fill (1.0f); other.fill (1.0f);
+    mine[43] = 100.0f;                 // peaky here
+    other[43] = 100.0f;                // other lane equally peaky -> no bonus
+    EXPECT_FLOAT_EQ (NotchController::asymmetryMultiplierForTest (mine.data(), other.data(), 43, 2.0f), 1.0f);
+    other[43] = 1.0f;                  // other lane flat -> bonus
+    EXPECT_FLOAT_EQ (NotchController::asymmetryMultiplierForTest (mine.data(), other.data(), 43, 2.0f), 2.0f);
+    EXPECT_FLOAT_EQ (NotchController::asymmetryMultiplierForTest (mine.data(), nullptr, 43, 2.0f), 1.0f);
+    EXPECT_FLOAT_EQ (NotchController::asymmetryMultiplierForTest (mine.data(), other.data(), 43, 1.0f), 1.0f);
+}
+
+// Spec test 14. Red if INDEP's harmonic penalty sees the other lane's notches.
+TEST (NotchControllerStereo, IndepHarmonicPenaltyIsPerLane)
+{
+    StereoHarness h;
+    // Lock 500 Hz on lane 1 only; a 1 kHz howl on lane 0 must NOT be penalised
+    // (1 kHz is 2x 500 Hz, inside the 1.4x..4.1x band).
+    ASSERT_TRUE (h.controller.setNotch (1, 0, 500.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.runOnce();
+    (void) drain (h.commands);
+    h.controller.setDetectionActive (true);
+    SineSource toneL; NoiseSource quietR;
+    const auto cmds = warmThenDrive (h, toneL, quietR);
+    bool setOnL = false;
+    for (const auto& c : cmds) setOnL |= (c.type == NotchCommandType::Set && c.channel == 0);
+    EXPECT_TRUE (setOnL) << "the lane-1 notch must not halve lane 0's score";
+}

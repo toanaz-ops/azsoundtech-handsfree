@@ -114,6 +114,19 @@ public:
     // while the thread runs is a data race.
     void setWidth (int lanes);
 
+    // LINK mode (design §4.3). INDEP is the default: a confirm on lane l
+    // notches lane l ONLY, so a howl into the left mic no longer costs the
+    // right side a filter it never needed. LINK restores the 1.0.4 fan-out:
+    // any lane's confirm notches BOTH at one index. Atomic, so unlike
+    // setWidth() this may be flipped while the detector thread runs; a flip
+    // never touches notches already placed (design §4.3 -- CLEAR ALL is how
+    // an operator asks for symmetry back).
+    void setLinked (bool linked) { linked_.store (linked, std::memory_order_relaxed); }
+    bool isLinked() const        { return linked_.load (std::memory_order_relaxed); }
+    // LINKED behaviour is forced whenever independence is impossible (S-6):
+    // one lane driven, or no lane-1 tap to be independent ABOUT.
+    bool effectiveLinked() const { return isLinked() || width_ < 2 || taps_[1] == nullptr; }
+
     // Policy entry points. Message thread. setNotch validates BEFORE touching
     // anything; false means nothing changed anywhere.
     bool setNotch (int channel, int index,
@@ -159,6 +172,21 @@ public:
     void   setPeakinessThreshold (float t);       // clamped 5..20, -> analyzer
     float  getPeakinessThreshold() const;
     float  getPeakinessThreshold (int lane) const;
+
+    // Lane asymmetry bonus (design §4.4). A howl is geometrically asymmetric
+    // -- one loudspeaker into one mic -- while stereo programme material is
+    // not, so a candidate that is peaky on THIS lane and flat on the other is
+    // more likely feedback. 1.0 is deliberately the DEFAULT and the floor:
+    // the number has not been swept against real-room data yet, so out of the
+    // box this changes no placement decision at all.
+    static constexpr float kMinLaneAsymmetryBonus = 1.0f;
+    static constexpr float kMaxLaneAsymmetryBonus = 2.0f;
+    void  setLaneAsymmetryBonus (float b);        // clamped 1..2
+    float getLaneAsymmetryBonus() const;
+
+    // TEST ACCESSOR ONLY: the multiplier §4.4 applies to a candidate at `bin`.
+    static float asymmetryMultiplierForTest (const float* mine, const float* other, int bin, float bonus)
+        { return asymmetryMultiplier (mine, other, bin, bonus); }
 
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
@@ -220,8 +248,22 @@ private:
     void flushOutbox();
     void pushClearLocked (int channel, int index);
 
-    void processSpectrumForDetection (int lane, const Detector::Spectrum& block, double blockNowMs);
-    int  firstFreeSlotLocked() const;
+    // `otherLaneMagnitudes` is the SAME hop's spectrum on the opposite lane,
+    // or nullptr when only one lane produced a block this iteration.
+    void processSpectrumForDetection (int lane, const Detector::Spectrum& block,
+                                      const float* otherLaneMagnitudes, double blockNowMs);
+
+    static float asymmetryMultiplier (const float* mine, const float* other, int bin, float bonus);
+
+    // Index search, both under modelMutex_ (the suffix is a promise, not a
+    // decoration). INDEP asks only about the lane it is placing on; LINKED
+    // must find an index free on EVERY driven lane (S-7) -- the pre-1.0.5
+    // "look at lane 0 only" rule would silently overwrite a lane-1 notch that
+    // INDEP had placed, with no Clear to tell the chain about it.
+    int  firstFreeIndexLocked (int lane) const;
+    int  firstFreeIndexAllLanesLocked() const;
+    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow);
+
     double remainingSoundcheckMs() const;
 
     LockFreeRingBuffer<NotchCommand>& commands_;
@@ -253,6 +295,10 @@ private:
     int analysedLanes() const { return (width_ == 2 && taps_[1] != nullptr) ? 2 : 1; }
 
     std::atomic<bool> detectionActive_ { false };
+    // INDEP by default (design §4.3). Atomic because setLinked() is allowed
+    // while the detector thread runs, unlike width_.
+    std::atomic<bool>  linked_ { false };
+    std::atomic<float> laneAsymmetryBonus_ { kMinLaneAsymmetryBonus };
     // Runtime tuning state (brief 2026-08-24): message thread writes, the
     // detector thread loads relaxed inside processSpectrumForDetection().
     std::atomic<int>    persistenceBlocks_ { kPersistenceBlocks };
