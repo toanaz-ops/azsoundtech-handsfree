@@ -158,9 +158,9 @@ public:
     void setMode(Mode mode);
     Mode getMode() const;
 
-    // Tap: post-notch lane-0 output of a slot, written once per callback into
-    // an SPSC ring buffer -- one ring PER SLOT. Read side belongs to the
-    // detector thread (Task 10).
+    // Tap: post-notch output of every lane of a slot, written once per
+    // callback into an SPSC ring buffer -- one ring PER SLOT PER LANE. Read
+    // side belongs to the detector thread (Task 10).
     //
     // *** CALLER CONTRACT: read() only, and from exactly one thread per ring.
     // ***
@@ -174,22 +174,26 @@ public:
     // than the risk currently justifies. If a second caller ever appears, add
     // the view then.
     //
-    // The no-argument overloads are the LEGACY surface (slot 0): everything
-    // that existed before multi-slot routing keeps working unchanged.
+    // The no-argument overloads are the LEGACY surface (slot 0, lane 0):
+    // everything that existed before multi-slot routing keeps working
+    // unchanged. The (slot, lane) form reaches either ring of the 8x2 grid;
+    // both slot and lane clamp into range for bad input.
     LockFreeRingBuffer<float>& getTapBuffer();
     LockFreeRingBuffer<float>& getTapBuffer (int slot);
+    LockFreeRingBuffer<float>& getTapBuffer (int slot, int lane);
 
     // Number of tap samples dropped because a slot's ring was full, accumulated
-    // over the lifetime of the engine -- tracked PER SLOT; the no-argument
-    // overload reads slot 0. Dropping is the correct behaviour on the audio
-    // thread -- blocking or spinning is not -- but a drop splices sample N onto
-    // sample N+k, and through the detector's Hann window that step is broadband
-    // energy in every bin. Without this count nothing downstream can
-    // distinguish a drop-induced false peak from a real howl. Incremented with
-    // memory_order_relaxed: one lock-free RMW per short write, no allocation,
-    // no ordering dependency on anything else.
+    // over the lifetime of the engine -- tracked PER SLOT PER LANE; the
+    // no-argument overload reads slot 0 lane 0. Dropping is the correct
+    // behaviour on the audio thread -- blocking or spinning is not -- but a
+    // drop splices sample N onto sample N+k, and through the detector's Hann
+    // window that step is broadband energy in every bin. Without this count
+    // nothing downstream can distinguish a drop-induced false peak from a real
+    // howl. Incremented with memory_order_relaxed: one lock-free RMW per short
+    // write, no allocation, no ordering dependency on anything else.
     std::uint64_t getTapDropCount() const;
     std::uint64_t getTapDropCount (int slot) const;
+    std::uint64_t getTapDropCount (int slot, int lane) const;
 
     // Command channel FROM the detector threads INTO the audio thread (bridge
     // design §2), one queue PER SLOT: the audio callback drains the queues
@@ -265,19 +269,23 @@ private:
         {{ NotchChain (48000.0), NotchChain (48000.0) }}
     }};
 
-    // Per-slot post-DSP lane-0 taps (SPSC ring buffers, lock-free). The audio
-    // callback is the single producer of every ring; the detector side is the
-    // single consumer. Pre-allocated at construction; write() never blocks and
-    // silently drops whatever does not fit.
+    // Per-slot, PER-LANE post-DSP taps (lane S): [slot][lane]. The audio
+    // callback is the single producer of every ring; the slot's detector
+    // thread is the single consumer of BOTH of its rings.
     static constexpr size_t kTapCapacity = 8192;  // ~170 ms @ 48 kHz, power of 2
-    std::array<LockFreeRingBuffer<float>, kMaxSlots> tapBuffers_
-    {
-        { LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
-          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
-          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity),
-          LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }
-    };
-    std::array<std::atomic<std::uint64_t>, kMaxSlots> tapDropCounts_ {};
+    using TapPair = std::array<LockFreeRingBuffer<float>, kMaxSlotLanes>;
+    std::array<TapPair, kMaxSlots> tapBuffers_
+    {{
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }},
+        {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }}
+    }};
+    std::array<std::array<std::atomic<std::uint64_t>, kMaxSlotLanes>, kMaxSlots> tapDropCounts_ {};
 
     // Per-slot detector -> audio command rings (bridge design §2). Capacity
     // 1024 gives 4x headroom over the worst legitimate burst per spec §3:

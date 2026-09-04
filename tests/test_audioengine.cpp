@@ -1007,6 +1007,61 @@ TEST (AudioEngineRouting, TapsArePerSlotWithIndependentDropCounts)
     EXPECT_EQ (engine.getTapDropCount (1), 2048u)  << "ring 1 stayed full";
 }
 
+// Lane S: the detector needs to hear BOTH lanes. Turns red if the callback
+// stops writing lane 1's post-DSP output into tapBuffers_[slot][1].
+TEST (AudioEngineRouting, StereoSlotTapsBothLanesWithLaneOneCarryingLaneOneOutput)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;   // Bypass by default; slot 0 default stereo {0,1}->{0,1}
+
+    RoutingDriver d (512, 2, 2);
+    std::fill (d.in[0].begin(), d.in[0].end(), 0.25f);
+    std::fill (d.in[1].begin(), d.in[1].end(), -0.5f);
+    d (engine);
+
+    std::vector<float> tapped0 ((std::size_t) d.frames), tapped1 ((std::size_t) d.frames);
+    ASSERT_EQ (engine.getTapBuffer (0, 0).read (tapped0.data(), tapped0.size()), tapped0.size());
+    ASSERT_EQ (engine.getTapBuffer (0, 1).read (tapped1.data(), tapped1.size()), tapped1.size());
+    EXPECT_FLOAT_EQ (tapped0[100],  0.25f);
+    EXPECT_FLOAT_EQ (tapped1[100], -0.5f);   // NOT a copy of lane 0
+    EXPECT_EQ (engine.getTapDropCount (0, 1), 0u);
+}
+
+// Turns red if a mono slot starts writing lane 1's ring (there is no lane 1).
+TEST (AudioEngineRouting, MonoSlotLeavesLaneOneTapUntouched)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;   // Bypass by default
+
+    SlotConfig mono;
+    mono.enabled = true; mono.width = 1;
+    mono.inputChannels[0] = 0; mono.outputChannels[0] = 0;
+    engine.setSlotConfig (0, mono);
+
+    RoutingDriver d (512, 2, 2);
+    std::fill (d.in[0].begin(), d.in[0].end(), 0.25f);
+    std::fill (d.in[1].begin(), d.in[1].end(), -0.5f);
+    d (engine);
+
+    EXPECT_EQ (engine.getTapBuffer (0, 0).getAvailableRead(), 512u);
+    EXPECT_EQ (engine.getTapBuffer (0, 1).getAvailableRead(), 0u);
+    EXPECT_EQ (engine.getTapDropCount (0, 1), 0u);
+}
+
+// Turns red if the legacy accessors stop aliasing lane 0.
+TEST (AudioEngineRouting, LegacyTapAccessorsAliasLaneZero)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    EXPECT_EQ (&engine.getTapBuffer(),  &engine.getTapBuffer (0, 0));
+    EXPECT_EQ (&engine.getTapBuffer (3), &engine.getTapBuffer (3, 0));
+    // Out-of-range lane clamps to 0, matching the slot-clamp convention.
+    EXPECT_EQ (&engine.getTapBuffer (3, 7), &engine.getTapBuffer (3, 0));
+}
+
 TEST (AudioEngineCommands, CommandOnQueue1AppliesToSlot1Only)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

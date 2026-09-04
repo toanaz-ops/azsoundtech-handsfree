@@ -285,26 +285,42 @@ AudioEngine::Mode AudioEngine::getMode() const
     return currentMode_.load (std::memory_order_acquire);
 }
 
+namespace
+{
+// Clamped, never OOB: tests and future callers get slot 0 / lane 0 for bad
+// input, matching the getNotchChainForTest convention.
+int clampSlot (int slot) { return (slot < 0 || slot >= kMaxSlots) ? 0 : slot; }
+int clampLane (int lane) { return (lane < 0 || lane >= kMaxSlotLanes) ? 0 : lane; }
+}
+
 LockFreeRingBuffer<float>& AudioEngine::getTapBuffer()
 {
-    return getTapBuffer (0);
+    return getTapBuffer (0, 0);
 }
 
 LockFreeRingBuffer<float>& AudioEngine::getTapBuffer (int slot)
 {
-    // Clamped, never OOB: tests and future callers get slot 0 for bad input,
-    // matching the getNotchChainForTest convention.
-    return tapBuffers_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))];
+    return getTapBuffer (slot, 0);
+}
+
+LockFreeRingBuffer<float>& AudioEngine::getTapBuffer (int slot, int lane)
+{
+    return tapBuffers_[(std::size_t) clampSlot (slot)][(std::size_t) clampLane (lane)];
 }
 
 std::uint64_t AudioEngine::getTapDropCount() const
 {
-    return getTapDropCount (0);
+    return getTapDropCount (0, 0);
 }
 
 std::uint64_t AudioEngine::getTapDropCount (int slot) const
 {
-    return tapDropCounts_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))]
+    return getTapDropCount (slot, 0);
+}
+
+std::uint64_t AudioEngine::getTapDropCount (int slot, int lane) const
+{
+    return tapDropCounts_[(std::size_t) clampSlot (slot)][(std::size_t) clampLane (lane)]
         .load (std::memory_order_relaxed);
 }
 
@@ -504,10 +520,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     LaneRef lanes[kMaxSlots * kMaxSlotLanes];
     int numLanes = 0;
 
-    // Per-slot tap source: slot s taps its LANE 0 output post-DSP when that
-    // lane exists and is valid. Null means "do not tap this slot" -- disabled
-    // slot, invalid width, or no valid lane 0.
-    const float* tapSource[kMaxSlots] {};
+    // Per-slot, per-lane tap source: slot s, lane l taps its output post-DSP
+    // when that lane exists and is valid. Null means "do not tap this lane" --
+    // disabled slot, invalid width, or no valid channel pair for that lane.
+    const float* tapSource[kMaxSlots][kMaxSlotLanes] {};
 
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
@@ -542,8 +558,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             lanes[numLanes++] = { in, out,
                                   &notchChains_[(std::size_t) slot][(std::size_t) lane] };
 
-            if (lane == 0)
-                tapSource[slot] = out;
+            tapSource[slot][lane] = out;
         }
     }
 
@@ -631,38 +646,41 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
-    // Tap EVERY enabled slot's post-DSP lane-0 output -- the signal actually
-    // leaving that slot -- in every mode, including Bypass (the detector must
-    // still see the signal when bypassed). Written straight from the
-    // already-processed output buffer in ONE bulk write() per callback: no
-    // heap buffer, no per-sample writes. The detector may be slow or absent:
-    // a short write (or 0) is expected and silently tolerated -- never block,
-    // never spin, never log. A slot with no valid lane-0 input/output pair is
-    // not tapped at all.
+    // Tap EVERY enabled slot's post-DSP output on EVERY lane -- the signal
+    // actually leaving that lane -- in every mode, including Bypass (the
+    // detector must still see the signal when bypassed). Written straight
+    // from the already-processed output buffer in ONE bulk write() per ring
+    // per callback: no heap buffer, no per-sample writes. The detector may be
+    // slow or absent: a short write (or 0) is expected and silently tolerated
+    // -- never block, never spin, never log. A lane with no valid
+    // input/output pair is not tapped at all.
     for (int slot = 0; slot < kMaxSlots; ++slot)
-    {
-        if (tapSource[slot] == nullptr)
-            continue;
+        for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+        {
+            const float* src = tapSource[slot][lane];
+            if (src == nullptr)
+                continue;
 
-        const size_t requested = static_cast<size_t> (numSamples);
-        const size_t written   =
-            tapBuffers_[(std::size_t) slot].write (tapSource[slot], requested);
+            const size_t requested = static_cast<size_t> (numSamples);
+            const size_t written   =
+                tapBuffers_[(std::size_t) slot][(std::size_t) lane].write (src, requested);
 
-        // Dropping is the right BEHAVIOUR here -- blocking or spinning on the
-        // audio thread is not an option -- but discarding the FACT is not. A
-        // truncated write leaves no gap for the detector to notice; it leaves
-        // a SPLICE, sample N followed immediately by sample N+k. Through a
-        // 1024-point Hann window that step is broadband energy in every bin,
-        // which is exactly the shape the peakiness scorer is built to react
-        // to, and a notch would get placed on a frequency that never fed back.
-        //
-        // One relaxed read-modify-write: lock-free, allocation-free, and no
-        // ordering relationship with anything else, since the count is only
-        // ever read for display.
-        if (written < requested)
-            tapDropCounts_[(std::size_t) slot].fetch_add (requested - written,
-                                                          std::memory_order_relaxed);
-    }
+            // Dropping is the right BEHAVIOUR here -- blocking or spinning on
+            // the audio thread is not an option -- but discarding the FACT is
+            // not. A truncated write leaves no gap for the detector to
+            // notice; it leaves a SPLICE, sample N followed immediately by
+            // sample N+k. Through a 1024-point Hann window that step is
+            // broadband energy in every bin, which is exactly the shape the
+            // peakiness scorer is built to react to, and a notch would get
+            // placed on a frequency that never fed back.
+            //
+            // One relaxed read-modify-write: lock-free, allocation-free, and
+            // no ordering relationship with anything else, since the count is
+            // only ever read for display.
+            if (written < requested)
+                tapDropCounts_[(std::size_t) slot][(std::size_t) lane]
+                    .fetch_add (requested - written, std::memory_order_relaxed);
+        }
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -708,8 +726,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // Detector::reset() is the consumer-side counterpart. Calling it belongs
     // to Task 14, which owns the detector instance; the method exists and is
     // tested here so that wiring is a one-liner.
-    for (auto& tap : tapBuffers_)
-        tap.clear();
+    for (auto& slotTaps : tapBuffers_)
+        for (auto& tap : slotTaps)
+            tap.clear();
 
     // All 16 rings (8 taps + 8 command queues) are cleared under the same
     // precondition (no producer/consumer running); the detector side is
