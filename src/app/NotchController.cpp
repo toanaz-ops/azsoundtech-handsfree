@@ -3,19 +3,22 @@
 #include <algorithm>
 #include <cmath>
 
-NotchController::NotchController (LockFreeRingBuffer<float>& tap,
+NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
+                                  LockFreeRingBuffer<float>* tapLane1,
                                   LockFreeRingBuffer<NotchCommand>& commands,
-                                  ClockSource& clock,
-                                  int slotId)
+                                  ClockSource& clock, int slotId)
     : juce::Thread ("AZNotchDetector")
-    , tap_ (tap)
-    , commands_ (commands)
-    , clock_ (clock)
-    , slotId_ (slotId)
-    , detector_ (48000.0)
+    , commands_ (commands), clock_ (clock), slotId_ (slotId)
     , lastPollMs_ (clock.nowMs())
 {
+    taps_[0] = &tapLane0;
+    taps_[1] = tapLane1;
 }
+
+NotchController::NotchController (LockFreeRingBuffer<float>& tap,
+                                  LockFreeRingBuffer<NotchCommand>& commands,
+                                  ClockSource& clock, int slotId)
+    : NotchController (tap, nullptr, commands, clock, slotId) {}
 
 NotchController::~NotchController()
 {
@@ -63,7 +66,7 @@ bool NotchController::setNotch (int channel, int index,
         return false;
 
     // Same predicates Biquad::setNotchFilter applies (see header comment).
-    const double sampleRate = detector_.getSampleRate();
+    const double sampleRate = lanes_[0].detector.getSampleRate();
     if (! (sampleRate > 0.0))                       return false;
     if (! (Q > 0.0))                                return false;
     if (! (frequency > 0.0 && frequency < sampleRate * 0.5))
@@ -156,47 +159,53 @@ void NotchController::runOnce()
     //    while its magnitudes pointer is still valid (it dies at the next
     //    processLatestBlock call).
     const double now = clock_.nowMs();
-    for (auto block = detector_.processLatestBlock (tap_);
-         block.magnitudes != nullptr;
-         block = detector_.processLatestBlock (tap_))
+    const int lanesToRead = analysedLanes();
+    for (;;)
     {
-        // Capture model state under the model lock FIRST, release, THEN take
-        // the snapshot lock -- the two mutexes are never held together.
+        std::array<Detector::Spectrum, kChannels> spec {};
+        bool any = false;
+        for (int l = 0; l < lanesToRead; ++l)
+        {
+            spec[(std::size_t) l] = lanes_[(std::size_t) l].detector.processLatestBlock (*taps_[(std::size_t) l]);
+            any = any || spec[(std::size_t) l].magnitudes != nullptr;
+        }
+        if (! any)
+            break;
+
+        // --- snapshot publish: identical to today's block, but per lane ---
         std::array<SnapshotNotch, kTotalSlots> notchList {};
         std::uint32_t notchCount = 0;
-        double liveNow = 0.0;
         {
             const std::lock_guard<std::mutex> lock (modelMutex_);
             lastDataMs_ = now;
-            liveNow     = liveMs_;
             for (int c = 0; c < kChannels; ++c)
                 for (int i = 0; i < kSlots; ++i)
                 {
                     const auto& n = model_[slotOf (c, i)];
-                    if (! n.active)
-                        continue;
-                    notchList[notchCount] = { (float) n.frequency, (float) n.Q,
-                                              (float) n.depthDB,
-                                              (std::uint8_t) c, (std::uint8_t) i };
-                    ++notchCount;
+                    if (! n.active) continue;
+                    notchList[notchCount++] = { (float) n.frequency, (float) n.Q, (float) n.depthDB,
+                                                (std::uint8_t) c, (std::uint8_t) i };
                 }
         }
-        (void) liveNow;
-
         {
-        const std::lock_guard<std::mutex> lock (snapshotMutex_);
-        std::copy (block.magnitudes, block.magnitudes + Detector::kNumBins,
-                   latest_.magnitudes.begin());
-        latest_.magnitudeCount = (std::uint32_t) Detector::kNumBins;
-        latest_.sampleRate     = block.sampleRate;
-        latest_.notches        = notchList;
-        latest_.notchCount     = notchCount;
-        ++latest_.sequence;
+            const std::lock_guard<std::mutex> lock (snapshotMutex_);
+            for (int l = 0; l < lanesToRead; ++l)
+                if (spec[(std::size_t) l].magnitudes != nullptr)
+                    std::copy (spec[(std::size_t) l].magnitudes,
+                               spec[(std::size_t) l].magnitudes + Detector::kNumBins,
+                               latest_.magnitudes[(std::size_t) l].begin());
+            latest_.magnitudeCount = (std::uint32_t) Detector::kNumBins;
+            latest_.laneCount      = (std::uint32_t) lanesToRead;
+            latest_.linked         = false;   // Task 3 adds linked_
+            latest_.sampleRate     = spec[0].magnitudes != nullptr ? spec[0].sampleRate : spec[1].sampleRate;
+            latest_.notches        = notchList;
+            latest_.notchCount     = notchCount;
+            ++latest_.sequence;
         }
 
-        // Detection policy for THIS block, while its magnitudes are still
-        // alive (they die at the next processLatestBlock call).
-        processSpectrumForDetection (block, now);
+        for (int l = 0; l < lanesToRead; ++l)
+            if (spec[(std::size_t) l].magnitudes != nullptr)
+                processSpectrumForDetection (l, spec[(std::size_t) l], now);
     }
 
     // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
@@ -261,12 +270,18 @@ void NotchController::setDetectionActive (bool active)
 
 void NotchController::setRiseReferenceMs (double ms)
 {
-    scorer_.setRiseReferenceMs (ms);
+    for (auto& l : lanes_)
+        l.scorer.setRiseReferenceMs (ms);
 }
 
 double NotchController::getRiseReferenceMs() const
 {
-    return scorer_.getRiseReferenceMs();
+    return lanes_[0].scorer.getRiseReferenceMs();
+}
+
+double NotchController::getRiseReferenceMs (int lane) const
+{
+    return lanes_[(std::size_t) std::clamp (lane, 0, kChannels - 1)].scorer.getRiseReferenceMs();
 }
 
 void NotchController::setPersistenceBlocks (int blocks)
@@ -301,12 +316,18 @@ double NotchController::getNotchDepthDb() const
 
 void NotchController::setPeakinessThreshold (float t)
 {
-    analyzer_.setThreshold (t);   // clamped in PeakinessAnalyzer
+    for (auto& l : lanes_)
+        l.analyzer.setThreshold (t);   // clamped in PeakinessAnalyzer
 }
 
 float NotchController::getPeakinessThreshold() const
 {
-    return analyzer_.getThreshold();
+    return lanes_[0].analyzer.getThreshold();
+}
+
+float NotchController::getPeakinessThreshold (int lane) const
+{
+    return lanes_[(std::size_t) std::clamp (lane, 0, kChannels - 1)].analyzer.getThreshold();
 }
 
 void NotchController::startSoundcheck()
@@ -347,19 +368,21 @@ int NotchController::firstFreeSlotLocked() const
     return -1;
 }
 
-void NotchController::processSpectrumForDetection (const Detector::Spectrum& block,
+void NotchController::processSpectrumForDetection (int lane, const Detector::Spectrum& block,
                                                    double blockNowMs)
 {
     if (! detectionActive_.load (std::memory_order_relaxed))
         return;
 
+    auto& la = lanes_[(std::size_t) lane];
+
     // Real gap since the previous DRAINED block; the first block has no
     // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
-    const double rawDt     = blockNowMs - previousBlockNowMs_;
-    const double elapsedMs = (previousBlockNowMs_ > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
-    previousBlockNowMs_    = blockNowMs;
+    const double rawDt     = blockNowMs - la.previousBlockNowMs;
+    const double elapsedMs = (la.previousBlockNowMs > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
+    la.previousBlockNowMs  = blockNowMs;
 
-    scorer_.beginBlock (block.sampleRate);
+    la.scorer.beginBlock (block.sampleRate);
 
     // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
     // same frame the scorer looks at (spec 5.2 step 7).
@@ -380,7 +403,7 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                 // with the panel about whether it is still reinforced.
                 if (PeakinessAnalyzer::peakinessAt (block.magnitudes,
                                                     Detector::kNumBins, bin)
-                        > analyzer_.getThreshold())
+                        > la.analyzer.getThreshold())
                 {
                     n.lastDetectedMs = liveMs_;
                 }
@@ -396,14 +419,11 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                 locked.push_back (n.frequency);
     }
 
-    if (persistence_.size() != (std::size_t) Detector::kNumBins)
-        persistence_.assign ((std::size_t) Detector::kNumBins, 0);
-
-    const auto result = analyzer_.analyse (block);
+    const auto result = la.analyzer.analyse (block);
     for (std::size_t i = 0; i < result.count && i < (std::size_t) Detector::kNumBins; ++i)
     {
         const auto& cand = result.candidates[i];
-        const float score = scorer_.scoreCandidate (
+        const float score = la.scorer.scoreCandidate (
             cand, block.magnitudes,
             { locked.data(), locked.size() });
 
@@ -412,9 +432,9 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
         {
             const std::uint32_t requiredBlocks =
                 (std::uint32_t) persistenceBlocks_.load (std::memory_order_relaxed);
-            if (++persistence_[(std::size_t) bin] >= requiredBlocks)
+            if (++la.persistence[(std::size_t) bin] >= requiredBlocks)
             {
-                persistence_[(std::size_t) bin] = 0;
+                la.persistence[(std::size_t) bin] = 0;
 
                 // KD-5: automatic notch params were fixed; since the
                 // 2026-08-24 brief they are runtime defaults set from the
@@ -429,8 +449,8 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                     const double q      = notchQ_.load (std::memory_order_relaxed);
                     const double depthDb= notchDepthDb_.load (std::memory_order_relaxed);
                     int appliedLanes = 0;
-                    for (int lane = 0; lane < width_; ++lane)
-                        if (setNotch (lane, slot, cand.frequencyHz,
+                    for (int l = 0; l < width_; ++l)
+                        if (setNotch (l, slot, cand.frequencyHz,
                                       q, depthDb, origin))
                             ++appliedLanes;
                     // Partial-failure analysis: setNotch validates only index
@@ -441,8 +461,8 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                     // leave one lane unprotected while the GUI claims
                     // protection.
                     if (appliedLanes != width_ && appliedLanes > 0)
-                        for (int lane = 0; lane < width_; ++lane)
-                            clearNotch (lane, slot);
+                        for (int l = 0; l < width_; ++l)
+                            clearNotch (l, slot);
 
                     // Brief change 3: one light line per detection event. The
                     // detector thread already logs elsewhere, this allocates
@@ -456,18 +476,18 @@ void NotchController::processSpectrumForDetection (const Detector::Spectrum& blo
                         + " Q=" + juce::String (q, 1)
                         + " depth=" + juce::String (depthDb, 1)
                         + " rise=" + juce::String ((int) std::lround (
-                              scorer_.getRiseReferenceMs())));
+                              la.scorer.getRiseReferenceMs())));
                 }
             }
         }
         else
         {
             // Any non-confirming block resets that bin's streak.
-            persistence_[(std::size_t) bin] = 0;
+            la.persistence[(std::size_t) bin] = 0;
         }
     }
 
-    scorer_.commitBlock (block.magnitudes, elapsedMs);
+    la.scorer.commitBlock (block.magnitudes, elapsedMs);
 }
 
 void NotchController::copySnapshot (SnapshotBuffer& destOwnedByCaller) const
@@ -483,7 +503,8 @@ std::uint64_t NotchController::retryCount() const
 
 void NotchController::setSampleRate (double sampleRate)
 {
-    detector_.setSampleRate (sampleRate);
+    for (auto& l : lanes_)
+        l.detector.setSampleRate (sampleRate);
 }
 
 void NotchController::flushOutbox()

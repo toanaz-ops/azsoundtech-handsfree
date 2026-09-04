@@ -29,6 +29,7 @@
 #pragma once
 
 #include "app/PresetManager.h"
+#include "app/SlotConfig.h"
 #include "dsp/CandidateScorer.h"
 #include "dsp/ClockSource.h"
 #include "dsp/Detector.h"
@@ -59,6 +60,7 @@ public:
     static constexpr int kChannels   = 2;
     static constexpr int kSlots      = 16;
     static constexpr int kTotalSlots = kChannels * kSlots;
+    static_assert (kChannels == kMaxSlotLanes, "lanes and channels are the same axis");
 
     // Auto-release measures real elapsed time but ONLY while the tap is
     // delivering audio (owner decision D-06). The gate is "the tap delivered
@@ -82,10 +84,19 @@ public:
     static constexpr double kDefaultNotchQ      = 30.0;
     static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
 
+    NotchController (LockFreeRingBuffer<float>& tapLane0,
+                     LockFreeRingBuffer<float>* tapLane1,
+                     LockFreeRingBuffer<NotchCommand>& commands,
+                     ClockSource& clock,
+                     int slotId = 0);
+    // Legacy shape: one tap. Behaves LINKED whatever setLinked() says (S-6):
+    // with no lane-1 spectrum there is nothing to be independent about.
     NotchController (LockFreeRingBuffer<float>& tap,
                      LockFreeRingBuffer<NotchCommand>& commands,
                      ClockSource& clock,
                      int slotId = 0);
+
+    bool hasLaneOneTapForTest() const { return taps_[1] != nullptr; }   // TEST ACCESSOR ONLY
 
     ~NotchController() override;
 
@@ -139,6 +150,7 @@ public:
     // owning analyzer/scorer or to this controller's own notch defaults.
     void   setRiseReferenceMs (double ms);        // clamped 100..1000, -> scorer
     double getRiseReferenceMs() const;
+    double getRiseReferenceMs (int lane) const;
     void   setPersistenceBlocks (int blocks);     // clamped 1..10
     int    getPersistenceBlocks() const;
     void   setNotchDefaults (double q, double depthDb);   // Q 8..50, depth -24..-6
@@ -146,6 +158,7 @@ public:
     double getNotchDepthDb() const;
     void   setPeakinessThreshold (float t);       // clamped 5..20, -> analyzer
     float  getPeakinessThreshold() const;
+    float  getPeakinessThreshold (int lane) const;
 
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
@@ -169,8 +182,10 @@ public:
 
     struct SnapshotBuffer
     {
-        std::array<float, Detector::kNumBins> magnitudes {};
+        std::array<std::array<float, Detector::kNumBins>, kChannels> magnitudes {};
         std::uint32_t magnitudeCount = 0;
+        std::uint32_t laneCount = 1;
+        bool          linked = false;
         double sampleRate = 0.0;
         std::array<SnapshotNotch, kTotalSlots> notches {};
         std::uint32_t notchCount = 0;
@@ -205,11 +220,10 @@ private:
     void flushOutbox();
     void pushClearLocked (int channel, int index);
 
-    void processSpectrumForDetection (const Detector::Spectrum& block, double blockNowMs);
+    void processSpectrumForDetection (int lane, const Detector::Spectrum& block, double blockNowMs);
     int  firstFreeSlotLocked() const;
     double remainingSoundcheckMs() const;
 
-    LockFreeRingBuffer<float>&      tap_;
     LockFreeRingBuffer<NotchCommand>& commands_;
     ClockSource&                    clock_;
 
@@ -222,12 +236,22 @@ private:
     // thread start/restart.
     int width_ = 2;
 
-    Detector detector_;
+    // Per-lane detection state: one Detector/analyzer/scorer/persistence set
+    // per channel, so each lane's FFT and candidate history is independent.
+    struct LaneAnalysis
+    {
+        Detector          detector { 48000.0 };
+        PeakinessAnalyzer analyzer;
+        CandidateScorer   scorer;
+        std::array<std::uint32_t, Detector::kNumBins> persistence {};
+        double previousBlockNowMs = 0.0;   // <= 0: no previous block yet
+    };
+    std::array<LockFreeRingBuffer<float>*, kChannels> taps_ {};   // [0] never null
+    std::array<LaneAnalysis, kChannels> lanes_;
 
-    // Detection policy (KD-5..KD-9): analyzer + scorer live entirely on the
-    // detector thread; persistence_ is per-bin consecutive-confirm counters.
-    PeakinessAnalyzer analyzer_;
-    CandidateScorer   scorer_;
+    // Lanes actually analysed this run: 2 only when stereo AND a lane-1 tap exists.
+    int analysedLanes() const { return (width_ == 2 && taps_[1] != nullptr) ? 2 : 1; }
+
     std::atomic<bool> detectionActive_ { false };
     // Runtime tuning state (brief 2026-08-24): message thread writes, the
     // detector thread loads relaxed inside processSpectrumForDetection().
@@ -237,10 +261,6 @@ private:
     // Atomic is belt-and-braces only: ALWAYS accessed under modelMutex_
     // together with liveMs_, which is what actually serialises it.
     std::atomic<double> soundcheckEndsAtLiveMs_ { -1.0 };
-    std::vector<std::uint32_t> persistence_;   // per bin, sized kBins on first use
-    // Wall-clock reading of the last drained spectrum block, for the scorer's
-    // inter-block gap. <= 0 means "no previous block yet" -> elapsed 0.
-    double previousBlockNowMs_ = 0.0;
 
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;

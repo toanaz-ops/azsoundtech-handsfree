@@ -628,7 +628,7 @@ void SpectrumView::rebuildGeometry()
 
     const float hzPerBin = static_cast<float> (snapshot_.sampleRate / (double) Detector::kFftSize);
     const std::size_t count = std::min<std::size_t> (snapshot_.magnitudeCount,
-                                                     snapshot_.magnitudes.size());
+                                                     snapshot_.magnitudes[0].size());
 
     // 1) Raw dB for this frame. resize() never allocates here: count is
     //    bounded by kNumBins, which every buffer reserved in the ctor.
@@ -638,7 +638,7 @@ void SpectrumView::rebuildGeometry()
 
     for (std::size_t bin = 0; bin < count; ++bin)
     {
-        const float mag = std::max (snapshot_.magnitudes[bin], 1.0e-9f);
+        const float mag = std::max (snapshot_.magnitudes[0][bin], 1.0e-9f);
         newDb_[bin] = 20.0f * std::log10 (mag);
     }
 

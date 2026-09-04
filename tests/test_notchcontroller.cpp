@@ -34,6 +34,15 @@ struct SlotHarness {
     explicit SlotHarness (int s) : slotId (s) {}
 };
 
+// Two rings, one controller: the lane-S shape MainComponent builds.
+struct StereoHarness {
+    LockFreeRingBuffer<float> tapL { 8192 };
+    LockFreeRingBuffer<float> tapR { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    FakeClock clock;
+    NotchController controller { tapL, &tapR, commands, clock };
+};
+
 std::vector<PresetNotch> onePresetNotch (int index, double freq)
 {
     PresetNotch n;
@@ -338,6 +347,14 @@ void pump (Harness& h, const std::vector<float>& hop)
     h.controller.runOnce();
 }
 
+void pumpStereo (StereoHarness& h, const std::vector<float>& left, const std::vector<float>& right)
+{
+    ASSERT_EQ (h.tapL.write (left.data(),  left.size()),  left.size());
+    ASSERT_EQ (h.tapR.write (right.data(), right.size()), right.size());
+    h.clock.advance (kBlockMs);
+    h.controller.runOnce();
+}
+
 // True when SOME bin currently looks like a candidate in the published
 // snapshot -- the same peakiness test analyse() applies before its
 // local-maximum rule.
@@ -351,7 +368,7 @@ bool anyCandidateInSnapshot (Harness& h)
          bin < Detector::kNumBins - PeakinessAnalyzer::kNeighbourOuterRadius;
          ++bin)
     {
-        if (PeakinessAnalyzer::peakinessAt (snap.magnitudes.data(),
+        if (PeakinessAnalyzer::peakinessAt (snap.magnitudes[0].data(),
                                             Detector::kNumBins, bin)
                 > PeakinessAnalyzer::kDefaultThreshold)
         {
@@ -622,6 +639,53 @@ TEST (NotchControllerSlotAware, DefaultsMatchLegacyBehaviour)
     EXPECT_EQ (cmd.slot, 0);
     EXPECT_EQ (cmd.channel, 1);
     EXPECT_EQ (cmd.index, 0);
+}
+
+// ===========================================================================
+// Two-lane analysis bundles (stereo-aware detection, Task 2). Placement
+// policy is UNCHANGED here -- these only assert the snapshot and tuning
+// surface now carry both lanes.
+// ===========================================================================
+
+// Lane S task 2. Red if the snapshot stops carrying lane 1's spectrum or
+// misreports laneCount.
+TEST (NotchControllerStereo, SnapshotPublishesBothLanesSpectraAndLaneCount)
+{
+    StereoHarness h;
+    SineSource toneL;                 // 1 kHz on the left only
+    NoiseSource quietR;
+    quietR.amp = 0.001f;
+    for (int i = 0; i < 8; ++i)
+        pumpStereo (h, toneL.hop(), quietR.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_EQ (snap.laneCount, 2u);
+    EXPECT_FALSE (snap.linked);
+    ASSERT_EQ (snap.magnitudeCount, (std::uint32_t) Detector::kNumBins);
+
+    const int toneBin = 43;   // 1007.8 Hz @ 48 kHz / 2048
+    EXPECT_GT (snap.magnitudes[0][toneBin], 10.0f * snap.magnitudes[1][toneBin]);
+}
+
+// Red if the legacy ctor reports a lane-1 tap it does not have.
+TEST (NotchControllerStereo, LegacyCtorHasNoLaneOneTap)
+{
+    Harness h;
+    EXPECT_FALSE (h.controller.hasLaneOneTapForTest());
+    StereoHarness s;
+    EXPECT_TRUE (s.controller.hasLaneOneTapForTest());
+}
+
+// Red if a tuning setter reaches only lane 0's analyser.
+TEST (NotchControllerStereo, TuningSettersReachBothLanes)
+{
+    StereoHarness h;
+    h.controller.setPeakinessThreshold (15.0f);
+    h.controller.setRiseReferenceMs (500.0);
+    EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold (0), 15.0f);
+    EXPECT_FLOAT_EQ (h.controller.getPeakinessThreshold (1), 15.0f);
+    EXPECT_DOUBLE_EQ (h.controller.getRiseReferenceMs (1), 500.0);
 }
 
 // ===========================================================================
