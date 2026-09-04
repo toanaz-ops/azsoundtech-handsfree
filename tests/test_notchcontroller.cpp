@@ -1190,3 +1190,20 @@ TEST (NotchControllerStereo, LinkedHowlOnBothLanesPlacesExactlyOnePairFirst)
     EXPECT_EQ (cmds[0].index, cmds[1].index);
     EXPECT_FLOAT_EQ (cmds[0].frequency, cmds[1].frequency);
 }
+
+// Spec test 16 (adopt half) / S-8. Red if adoptPreset ignores lane, searches
+// for a free index, or lets linked_ change how a file is adopted.
+TEST (NotchControllerStereo, AdoptPresetHonoursLaneAndKeepsTheFilesIndex)
+{
+    StereoHarness h;
+    h.controller.setLinked (false);
+    PresetNotch both;  both.index = 5; both.freq = 1000.0; both.Q = 30.0; both.depthDB = -12.0;   // lane -1
+    PresetNotch right; right.index = 7; right.freq = 2000.0; right.Q = 30.0; right.depthDB = -12.0; right.lane = 1;
+    EXPECT_EQ (h.controller.adoptPreset (std::vector<PresetNotch> { both, right }), 2);
+    h.controller.runOnce();
+    const auto cmds = drain (h.commands);
+    ASSERT_EQ (cmds.size(), 3u);
+    EXPECT_EQ (cmds[0].channel, 0); EXPECT_EQ (cmds[0].index, 5);
+    EXPECT_EQ (cmds[1].channel, 1); EXPECT_EQ (cmds[1].index, 5);
+    EXPECT_EQ (cmds[2].channel, 1); EXPECT_EQ (cmds[2].index, 7);
+}

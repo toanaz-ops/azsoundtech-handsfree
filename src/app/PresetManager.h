@@ -92,6 +92,10 @@ struct PresetNotch
         warn, instead of refusing a file whose other notches are fine.
     */
     int slot = 0;
+
+    // Lane S: 0 = L, 1 = R, -1 = every lane of the slot (files written before
+    // lane S have no "lane" key and mean this). OPTIONAL key.
+    int lane = -1;
 };
 
 //==============================================================================
@@ -105,6 +109,7 @@ struct PresetSlot
 {
     int        index = 0;   ///< [0, kMaxSlots - 1].
     SlotConfig config;
+    bool linked = false;   // OPTIONAL "linked" key, lane S
 };
 
 //==============================================================================

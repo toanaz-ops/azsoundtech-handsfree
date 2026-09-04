@@ -137,27 +137,25 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
     int adopted = 0;
     for (const auto& p : notches)
     {
-        // All width_ lanes or neither: a half-applied preset notch would
-        // leave one side unprotected while the GUI claims protection.
-        // setNotch validates before touching anything, so a failure here
-        // means the parameters were rejected -- skip the whole notch.
-        int appliedLanes = 0;
-        for (int lane = 0; lane < width_; ++lane)
-            if (setNotch (lane, p.index, p.freq, p.Q, p.depthDB, Origin::Preset))
-                ++appliedLanes;
+        // S-8: the file's index, always. A named lane lands on that lane; an
+        // unnamed one lands on every lane, all-or-nothing, whatever linked_ says
+        // (linked_ only steers where the DETECTOR places new notches -- it has
+        // no say over what a preset file explicitly names).
+        const int firstLane = (p.lane < 0) ? 0 : p.lane;
+        const int lastLane  = (p.lane < 0) ? width_ - 1 : p.lane;
+        if (firstLane >= width_)
+            continue;   // lane 1 named on a mono slot: not adoptable here
 
-        if (appliedLanes == width_)
-        {
+        int applied = 0;
+        for (int lane = firstLane; lane <= lastLane; ++lane)
+            if (setNotch (lane, p.index, p.freq, p.Q, p.depthDB, Origin::Preset))
+                ++applied;
+        const int wanted = lastLane - firstLane + 1;
+        if (applied == wanted)
             ++adopted;
-        }
-        else if (appliedLanes > 0)
-        {
-            // Cannot happen today (validation depends only on index + params,
-            // which are identical across lanes), but if it ever does,
-            // unwind the half-applied lanes rather than keep them.
-            for (int lane = 0; lane < width_; ++lane)
+        else if (applied > 0)
+            for (int lane = firstLane; lane <= lastLane; ++lane)
                 clearNotch (lane, p.index);
-        }
     }
     return adopted;
 }

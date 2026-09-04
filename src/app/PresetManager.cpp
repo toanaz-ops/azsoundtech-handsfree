@@ -163,6 +163,23 @@ bool readNotch (const juce::var&   entry,
         ok = readWholeNumber (*object, "slot", where, errors, out.slot) && ok;
     }
 
+    // OPTIONAL lane-S key. Absent means every lane. Present, it must be 0 or
+    // 1 -- anything else is a self-contradicting file (S-9), refused in this
+    // SHAPE pass so both fromJSON overloads agree.
+    if (object->hasProperty ("lane"))
+    {
+        int lane = -1;
+        if (! readWholeNumber (*object, "lane", where, errors, lane))
+            ok = false;
+        else if (lane != 0 && lane != 1)
+        {
+            errors.add (where + "\"lane\" is " + juce::String (lane) + ", expected 0 or 1");
+            ok = false;
+        }
+        else
+            out.lane = lane;
+    }
+
     return ok;
 }
 
@@ -285,6 +302,11 @@ bool readSlotEntry (const juce::var&   entry,
     ok = readChannelArray (*object, "outputChannels", where, errors,
                            out.config.outputChannels)                         && ok;
 
+    // OPTIONAL lane-S key. Absent means false, same as every preset written
+    // before lane S implied by never mentioning linking.
+    if (object->hasProperty ("linked"))
+        ok = readBool (*object, "linked", where, errors, out.linked) && ok;
+
     return ok;
 }
 
@@ -392,6 +414,13 @@ juce::String PresetManager::toJSON (const Preset& preset)
             entry->setProperty ("slot", notch.slot);
         }
 
+        // Same v1-stays-v1 rule as "slot": only present when it says something
+        // an absent key would not already mean (-1, every lane).
+        if (notch.lane != -1)
+        {
+            entry->setProperty ("lane", notch.lane);
+        }
+
         notches.add (juce::var (entry));
     }
 
@@ -406,6 +435,7 @@ juce::String PresetManager::toJSON (const Preset& preset)
     {
         if (s.config.enabled != defaultConfig.enabled) return true;
         if (s.config.width   != defaultConfig.width)   return true;
+        if (s.linked)                                  return true;
 
         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
         {
@@ -445,6 +475,13 @@ juce::String PresetManager::toJSON (const Preset& preset)
 
             entry->setProperty ("inputChannels",  inputs);
             entry->setProperty ("outputChannels", outputs);
+
+            // Same v1-stays-v1 rule as "slot" on a notch: omitted when false,
+            // which is what an absent key already means.
+            if (slot.linked)
+            {
+                entry->setProperty ("linked", juce::var (true));
+            }
 
             slots.add (juce::var (entry));
         }

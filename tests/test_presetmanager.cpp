@@ -777,6 +777,67 @@ TEST (PresetManager, TheWriterEmitsSlotAndSlotsWhenTheyCarrySomething)
 }
 
 //==============================================================================
+// Lane S: PresetNotch::lane, PresetSlot::linked
+//==============================================================================
+
+// Lane S / spec test 15. Red if "lane" or "linked" are dropped by the writer
+// or ignored by either reader.
+TEST (PresetManager, LaneAndLinkedSurviveARoundTripOnBothOverloads)
+{
+    Preset p = makeValidPreset();
+    p.notches.clear();
+    PresetNotch n; n.index = 3; n.freq = 1000.0; n.Q = 30.0; n.depthDB = -12.0; n.slot = 1; n.lane = 1;
+    p.notches.push_back (n);
+    PresetSlot s; s.index = 1; s.config.enabled = true; s.config.width = 2; s.linked = true;
+    p.slots.push_back (s);
+
+    const auto text = PresetManager::toJSON (p);
+    EXPECT_TRUE (text.contains ("\"lane\""));
+    EXPECT_TRUE (text.contains ("\"linked\""));
+
+    const auto plain = PresetManager::fromJSON (text);
+    ASSERT_TRUE (plain.ok) << plain.errors.joinIntoString ("\n");
+    ASSERT_EQ (plain.preset.notches.size(), 1u);
+    EXPECT_EQ (plain.preset.notches[0].lane, 1);
+    ASSERT_EQ (plain.preset.slots.size(), 1u);
+    EXPECT_TRUE (plain.preset.slots[0].linked);
+
+    const auto aware = PresetManager::fromJSON (text, 2, 2);
+    ASSERT_TRUE (aware.ok);
+    EXPECT_EQ (aware.preset.notches[0].lane, 1);
+    EXPECT_TRUE (aware.preset.slots[0].linked);
+}
+
+// Spec test 16 (parse half). Red if an absent "lane" stops meaning -1.
+TEST (PresetManager, AMissingLaneKeyMeansEveryLane)
+{
+    Preset p = makeValidPreset();
+    const auto r = PresetManager::fromJSON (PresetManager::toJSON (p));
+    ASSERT_TRUE (r.ok);
+    for (const auto& n : r.preset.notches)
+        EXPECT_EQ (n.lane, -1);
+}
+
+// Spec test 17 / S-9. Red if a bad lane is skipped instead of refusing the file,
+// or if the two overloads disagree.
+TEST (PresetManager, AnInvalidLaneRefusesTheWholeFileOnBothOverloads)
+{
+    Preset p = makeValidPreset();
+    juce::String text = PresetManager::toJSON (p);
+    // Inject a bad lane into the first notch object.
+    text = text.replaceFirstOccurrenceOf ("\"freq\"", "\"lane\": 2, \"freq\"");
+    const auto plain = PresetManager::fromJSON (text);
+    const auto aware = PresetManager::fromJSON (text, 2, 2);
+    EXPECT_FALSE (plain.ok);
+    EXPECT_FALSE (aware.ok);
+    EXPECT_TRUE (plain.errors.joinIntoString ("\n").contains ("lane"));
+
+    juce::String textStr = PresetManager::toJSON (p)
+        .replaceFirstOccurrenceOf ("\"freq\"", "\"lane\": \"L\", \"freq\"");
+    EXPECT_FALSE (PresetManager::fromJSON (textStr).ok);
+}
+
+//==============================================================================
 // planFor -- owner decision D-00, and the hand-off to the wiring half
 //==============================================================================
 
