@@ -40,6 +40,7 @@ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng ch
 | **Phát hiện tự động** | FFT 2048 điểm, chấm điểm "độ nhọn" của đỉnh phổ — phân biệt tiếng hú (một gai duy nhất nhô lên) với nhạc (nhiều đỉnh tự nhiên). Thời gian khóa mục tiêu trong ~1 giây kể từ khi hú đạt ngưỡng |
 | **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30), độ sâu −6 đến −24 dB (mặc định −18 dB). Chỉ mất đúng vài Hz quanh tần số hú |
 | **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra bất kỳ của interface — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật |
+| **Stereo độc lập** | Mic hú qua loa trái thì chỉ cắt cánh trái; nút LINK mỗi slot để cắt cả hai bên như trước |
 | **Tự nhả sau 30 giây** | Hết hú là filter tự nhả — không tích tụ vết cắt vô nghĩa suốt buổi show |
 | **Chống báo nhầm harmonic** | Nếu đã khóa tần số F thì bậc harmonics 1.4F–4.1F bị trừ điểm, tránh cắt oan bội số của nốt nhạc |
 | **3 chế độ** | **Bypass** (thông tuyến thuần), **Auto** (chạy liên tục), **Soundcheck** (nghe 15 giây đầu show, khóa mọi đỉnh tìm thấy, không tự nhả; hết 15 giây detector tự ngừng dò — bấm **Auto** để chạy tiếp) |
@@ -70,8 +71,11 @@ trước show để "soi" sẵn phòng, sau đó chuyển **Auto** và quên nó
 
 Masthead hiện **CPU %** và trạng thái **DEVICE** (OK/ERROR) theo thời gian
 thực. Màn hình phổ (RTA) có averaging Off/0.1/0.3/0.5/1/3/5/10 s, peak hold và
-độ phân giải 1/1–1/3 octave; tab per-slot theo dõi từng slot riêng. Chip
-**RING RISK** hiện luôn hiển thị "N/A" — nguồn dữ liệu sẽ được nối ở bản sau.
+độ phân giải 1/1–1/3 octave; tab per-slot theo dõi từng slot riêng. Với slot
+stereo, bộ chọn **L/R** trên thanh analyser đổi làn đang vẽ, notch của làn phải
+vẽ bằng nét đứt kèm nhãn "R", và bảng **ACTIVE NOTCHES** có cột **LANE** cho
+biết mỗi notch nằm ở làn nào. Chip **RING RISK** hiện luôn hiển thị "N/A" —
+nguồn dữ liệu sẽ được nối ở bản sau.
 
 ## Freeware
 
