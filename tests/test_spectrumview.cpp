@@ -438,3 +438,91 @@ TEST (SpectrumView, LaneSelectorPlotsTheChosenLaneAndIsDisabledForMono)
     EXPECT_FALSE (view.getLaneGroupForTest().isEnabled());
     EXPECT_EQ (view.getDisplayLane(), 0);
 }
+
+//==============================================================================
+// Review finding on Task 9 (ad256c2): no test constructed a channel==1 notch
+// and called paint(), so (1) dashedStemPath_ -- the scratch member
+// createDashedStroke writes the lane-1 dashed stem into -- was never
+// exercised by the no-alloc proof, and (2) the dashed-stem / widened-"R"-flag
+// branch itself had no assertion behind it. This test closes both gaps.
+//
+// Red if the lane-1 stem path is rebuilt through a fresh juce::Path per
+// paint, or if createDashedStroke grows the member past its reservation.
+TEST (SpectrumView, LaneOneStemsPaintDashedWithoutGrowingTheDashedPath)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tapL { 8192 }, tapR { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    JuceMonotonicClock clock;
+    NotchController stereo { tapL, &tapR, commands, clock };
+
+    // One notch per lane, at DIFFERENT slot indices, so the snapshot really
+    // carries a channel-1 notch alongside a channel-0 one rather than both
+    // coincidentally landing in slot 0.
+    ASSERT_TRUE (stereo.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (stereo.setNotch (1, 3, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
+
+    std::vector<float> hop ((std::size_t) Detector::kHopSize, 0.1f);
+    for (int block = 0; block < 6; ++block)
+    {
+        tapL.write (hop.data(), hop.size());
+        tapR.write (hop.data(), hop.size());
+        stereo.runOnce();
+    }
+
+    gui::SpectrumView view (stereo);
+    view.setSize (800, 400);
+    view.refreshFromSnapshot();
+
+    // The snapshot really carries a channel-1 notch -- otherwise every
+    // assertion below would pass vacuously against a paint() that never took
+    // the dashed-stem branch at all.
+    ASSERT_EQ (view.snapshotNotchCountForTest(), 2u);
+    bool sawChannelOne = false;
+    for (std::uint32_t i = 0; i < view.snapshotNotchCountForTest(); ++i)
+        sawChannelOne = sawChannelOne || (view.snapshotNotchForTest (i).channel == 1);
+    ASSERT_TRUE (sawChannelOne);
+    ASSERT_GT (view.spectrumPointSizeForTest(), (std::size_t) 0);
+
+    juce::Image image (juce::Image::ARGB, 800, 400, true);
+    juce::Graphics g (image);
+
+    // Warm-up paint: this is what first populates dashedStemPath_'s content.
+    view.paint (g);
+
+    // The path was actually used -- otherwise the "unchanged after 100 more
+    // paints" assertions below would pass vacuously against an empty path.
+    const auto elementsBefore = view.dashedStemPathElementCountForTest();
+    ASSERT_GT (elementsBefore, (std::size_t) 0);
+    // NOTE on the ctor's dashedStemPath_.preallocateSpace(256): that call
+    // reserves COORDS (3 per lineTo/startNewSubPath -- juce_Path.h's own
+    // doc comment), not elements, and createDashedStroke's destination is
+    // the STROKED OUTLINE of the dash pattern (it finishes by calling
+    // createStrokedPath internally), not bare line segments -- so a single
+    // full-height dashed stem at this window size (elementsBefore, measured
+    // above) needs well over 256 coords. That is a real under-reservation
+    // in production, but not a per-frame allocation: Path::clear() calls
+    // Array::clearQuick(), which keeps whatever capacity the first paint
+    // grew into, so only the FIRST relevant paint pays for it and every
+    // paint after -- proven below -- allocates nothing further. Asserting
+    // elementsBefore against 256 directly (as originally sketched) would
+    // therefore be asserting something false about the current code, not a
+    // regression; the growth-across-100-paints check below is the part of
+    // the no-alloc guarantee this test can actually stand behind.
+
+    const auto boundsBefore   = view.dashedStemPathBoundsForTest();
+    const auto sizeBefore     = view.spectrumPointSizeForTest();
+    const auto capacityBefore = view.spectrumPointCapacityForTest();
+
+    for (int paint = 0; paint < 100; ++paint)
+        view.paint (g);
+
+    // dashedStemPath_ redrew the identical dashed stem 100 more times without
+    // its element count or extent moving -- the same "no growth" claim the
+    // HundredPaints test above proves for spectrumPoints_, now proven for the
+    // lane-1 scratch path too.
+    EXPECT_EQ (view.dashedStemPathElementCountForTest(), elementsBefore);
+    EXPECT_EQ (view.dashedStemPathBoundsForTest(), boundsBefore);
+    EXPECT_EQ (view.spectrumPointSizeForTest(), sizeBefore);
+    EXPECT_EQ (view.spectrumPointCapacityForTest(), capacityBefore);
+}

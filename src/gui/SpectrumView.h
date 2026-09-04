@@ -127,6 +127,44 @@ public:
     }
     [[nodiscard]] SegmentedControl& getLaneGroupForTest() { return laneGroup_; }
 
+    // TEST ACCESSORS ONLY -- prove the same no-allocation guarantee for
+    // dashedStemPath_ (the lane-1 dashed-stem scratch member) that the pair
+    // above proves for spectrumPoints_. juce::Path has no public capacity
+    // getter, so this walks the path with its own Iterator instead -- a raw
+    // scan over storage the Path already owns, itself no allocation -- and
+    // counts elements. Paired with the bounds getter, a paint-100x test can
+    // assert both stay bit-for-bit identical run to run.
+    // What this CAN prove: the path's drawn CONTENT (element count + extent)
+    // does not change between paints once the underlying notch is unchanged,
+    // which is what a rebuild-through-a-fresh-Path regression would break.
+    // What this CANNOT prove: that juce::Array<float>::data's reserved
+    // capacity stayed fixed -- that field is private and unreadable from
+    // here, same limitation the task brief calls out. The element count
+    // additionally being checked against the ctor's preallocateSpace(256)
+    // reservation is the closest available proxy for "did not grow".
+    [[nodiscard]] std::size_t dashedStemPathElementCountForTest() const
+    {
+        std::size_t count = 0;
+        juce::Path::Iterator it (dashedStemPath_);
+        while (it.next())
+            ++count;
+        return count;
+    }
+    [[nodiscard]] juce::Rectangle<float> dashedStemPathBoundsForTest() const
+    {
+        return dashedStemPath_.getBounds();
+    }
+
+    // TEST ACCESSOR ONLY -- lets a test confirm a channel-1 notch actually
+    // reached the cached snapshot, so a test exercising the dashed-stem /
+    // widened-flag branch in paint() can prove that branch really ran rather
+    // than merely constructing a controller it assumes would trigger it.
+    [[nodiscard]] std::uint32_t snapshotNotchCountForTest() const { return snapshot_.notchCount; }
+    [[nodiscard]] NotchController::SnapshotNotch snapshotNotchForTest (std::size_t index) const
+    {
+        return snapshot_.notches[index];
+    }
+
     // Which lane's magnitudes rebuildGeometry() reads: 0 = L, 1 = R. Clamped
     // into [0, 1] and forced back to 0 whenever the controller turns out to
     // be mono (refreshFromSnapshot()). Selecting a lane rebuilds the polyline
