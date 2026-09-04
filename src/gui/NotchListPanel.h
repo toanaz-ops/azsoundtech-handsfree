@@ -108,13 +108,15 @@ public:
     // NotchListPanel.EveryColumnFitsItsWidestCellAtTheNarrowestPanel:
     //   #     : "01".."32" (kTotalSlots tops out at two digits) + 4 px inset.
     //   LANE  : one glyph, "L" or "R" -- same 4 px inset as "#".
-    //   FREQ  : the age dot (kDotSize) + its gap (kDotGap) + "2.4 kHz" (the
-    //           format's canonical widest cell -- design plan
-    //           2026-08-23-gui-console-redesign.md:128, and what
-    //           TwoNotchController below deliberately exercises) + 4 px inset.
-    //   DEPTH : "-24.0 dB" (U+2212 minus) -- the deepest notch the UI offers;
-    //           TuningPanel::kDepthChoices tops out at -24 -- + 4 px inset.
-    //           Monospace, so any 2-digit-magnitude depth is the same width.
+    //   FREQ  : the age dot (kDotSize) + its gap (kDotGap) + "23.9 kHz" (the
+    //           widest cell formatFrequency() can print -- detection runs to
+    //           Nyquist, 24 kHz at 48 kHz sample rate / 48 kHz at 96 kHz, so a
+    //           two-digit-kHz reading is reachable, not just the "2.4 kHz"
+    //           design-plan example this used to be sized against) + 4 px inset.
+    //   DEPTH : "-150.0 dB" (U+2212 minus) -- PresetManager only enforces
+    //           depthDB <= 0, no floor, so a hand-edited preset can carry a
+    //           three-digit magnitude -- + 4 px inset. Monospace, so any
+    //           3-digit-magnitude depth is the same width.
     //   Q     : "50.0" -- TuningPanel::kQChoices tops out at 50 -- + 4 px inset.
     //   STATUS: formatAgeMs() is UNCAPPED -- age keeps growing across
     //           re-sightings, so "127m ago" (8 chars) is reachable in a long
@@ -123,8 +125,8 @@ public:
     static constexpr float kLeftPad    = 10.0f;
     static constexpr float kColIdW     = 26.0f;
     static constexpr float kColLaneW   = 22.0f;
-    static constexpr float kColFreqW   = 66.0f;   // dot + gap + "2.4 kHz" + inset
-    static constexpr float kColDepthW  = 56.0f;   // "-24.0 dB" + inset
+    static constexpr float kColFreqW   = 74.0f;   // dot + gap + "23.9 kHz" + inset
+    static constexpr float kColDepthW  = 66.0f;   // "-150.0 dB" + inset
     static constexpr float kColQW      = 40.0f;
 
     // The age dot: the same hot-to-ice ramp the analyser's notch stems use, so

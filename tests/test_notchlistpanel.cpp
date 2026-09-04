@@ -368,18 +368,28 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     EXPECT_LE (widthOf ("L") + kInset, gui::NotchListPanel::kColLaneW);
     EXPECT_LE (widthOf ("R") + kInset, gui::NotchListPanel::kColLaneW);
 
-    // FREQ: the age dot + its gap + the format's canonical widest cell
-    // ("2.4 kHz" -- design plan 2026-08-23-gui-console-redesign.md:128, and
-    // what TwoNotchController above deliberately exercises).
+    // FREQ: detection runs to Nyquist (24 kHz at 48 kHz sample rate, 48 kHz
+    // at 96 kHz), so a two-digit-kHz reading is reachable, not just the
+    // "2.4 kHz" design-plan example this test used to pin. Assert against
+    // the ACTUAL formatter output, not a literal, so a format change that
+    // widens the string fails this test too.
+    const auto widestFreq = gui::NotchListPanel::formatFrequency (23900.0f);
+    ASSERT_EQ (widestFreq.toStdString(), "23.9 kHz");   // sanity: this IS the 8-char case
     const float freqPrefix = gui::NotchListPanel::kDotGap + gui::NotchListPanel::kDotSize;
-    EXPECT_LE (freqPrefix + widthOf ("2.4 kHz") + kInset, gui::NotchListPanel::kColFreqW);
+    EXPECT_LE (freqPrefix + widthOf (widestFreq) + kInset, gui::NotchListPanel::kColFreqW);
 
-    // DEPTH: the deepest notch the UI offers (TuningPanel::kDepthChoices
-    // tops out at -24 dB), typographic minus.
-    EXPECT_LE (widthOf (minus + "24.0 dB") + kInset, gui::NotchListPanel::kColDepthW);
+    // DEPTH: PresetManager only enforces depthDB <= 0 -- no floor -- so a
+    // hand-edited preset can carry a three-digit magnitude. Assert against
+    // the ACTUAL formatter output for the same reason as FREQ above.
+    const auto widestDepth = gui::NotchListPanel::formatDepthDb (-150.0f);
+    ASSERT_EQ (widestDepth.toStdString(), (minus + "150.0 dB").toStdString());
+    EXPECT_LE (widthOf (widestDepth) + kInset, gui::NotchListPanel::kColDepthW);
 
-    // Q: TuningPanel::kQChoices tops out at 50.
-    EXPECT_LE (widthOf ("50.0") + kInset, gui::NotchListPanel::kColQW);
+    // Q: TuningPanel::kQChoices tops out at 50, but sourced from the
+    // formatter (99.9, same 4-char width as the old "50.0" literal under
+    // this monospace face) so a format change is caught here too.
+    const auto widestQ = gui::NotchListPanel::formatQ (99.9f);
+    EXPECT_LE (widthOf (widestQ) + kInset, gui::NotchListPanel::kColQW);
 
     // STATUS/HELD: formatAgeMs() is uncapped -- age keeps counting across
     // re-sightings, so "127m ago" (8 chars) is reachable in a long show.
