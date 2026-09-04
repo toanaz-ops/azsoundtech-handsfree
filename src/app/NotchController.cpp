@@ -479,20 +479,24 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                                                    const float* otherLaneMagnitudes,
                                                    double blockNowMs)
 {
+    if (! detectionActive_.load (std::memory_order_relaxed))
+        return;
+
     auto& la = lanes_[(std::size_t) lane];
     // Read ONCE: a setLinked() landing mid-block must not have this frame
     // place with one policy and feed auto-release with the other.
     const bool linkedNow = effectiveLinked();
 
+    // Real gap since the previous DRAINED block; the first block has no
+    // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
+    const double rawDt     = blockNowMs - la.previousBlockNowMs;
+    const double elapsedMs = (la.previousBlockNowMs > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
+    la.previousBlockNowMs  = blockNowMs;
+
+    la.scorer.beginBlock (block.sampleRate);
+
     // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
     // same frame the scorer looks at (spec 5.2 step 7).
-    //
-    // Deliberately ABOVE the detectionActive_ gate. Reinforcement is notch
-    // MAINTENANCE, not detection: with the gate off (Bypass, or a finished
-    // soundcheck) the detector can no longer re-place anything it drops, so
-    // releasing a notch the room is still ringing through would leave a live
-    // PA unprotected with no path back. The release itself is unchanged -- a
-    // notch whose bin goes quiet still clears after kAutoReleaseMs.
     //
     // Which lanes a frame may reinforce is the placement policy read back:
     // INDEP feeds only the lane this spectrum came from (design §4.3 -- a
@@ -525,17 +529,6 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
             }
         }
     }
-
-    if (! detectionActive_.load (std::memory_order_relaxed))
-        return;
-
-    // Real gap since the previous DRAINED block; the first block has no
-    // predecessor and passes 0 (the EMA deliberately skips zero-dt updates).
-    const double rawDt     = blockNowMs - la.previousBlockNowMs;
-    const double elapsedMs = (la.previousBlockNowMs > 0.0 && rawDt > 0.0) ? rawDt : 0.0;
-    la.previousBlockNowMs  = blockNowMs;
-
-    la.scorer.beginBlock (block.sampleRate);
 
     // Locked fundamentals for the harmonic penalty (KD-3). Same lane rule as
     // the reinforcement loop above: under INDEP the lanes hold different

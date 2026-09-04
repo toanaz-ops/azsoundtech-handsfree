@@ -1049,8 +1049,14 @@ TEST (NotchControllerStereo, IndepAutoReleaseIsPerLane)
     h.controller.setDetectionActive (true);
     SineSource toneL, toneR;
     (void) warmThenDrive (h, toneL, toneR);
-    h.controller.setDetectionActive (false);   // freeze placement, keep feeding
 
+    // Detection stays ARMED for the whole test. Reinforcement of a still-
+    // ringing notch sits behind the detectionActive_ gate, so disarming to
+    // "freeze placement" would freeze reinforcement too and release both
+    // lanes whatever the policy -- which would measure the gate, not the
+    // per-lane rule. The armed detector may keep emitting Sets on the lane
+    // that still rings; only Clear commands are asserted on below.
+    //
     // Left goes quiet, right keeps ringing, for > 30 s of live time.
     NoiseSource quietL;
     const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
@@ -1073,8 +1079,11 @@ TEST (NotchControllerStereo, LinkedAutoReleaseWaitsForBothLanes)
     h.controller.setDetectionActive (true);
     SineSource toneL; NoiseSource quietR;
     (void) warmThenDrive (h, toneL, quietR);
-    h.controller.setDetectionActive (false);
 
+    // Detection stays ARMED for the same reason as IndepAutoReleaseIsPerLane:
+    // reinforcement lives behind the gate. Sets the armed detector keeps
+    // emitting are ignored; the claim under test is that NO Clear appears.
+    //
     // Left goes quiet, RIGHT now rings the same frequency: the pair stays.
     NoiseSource quietL; SineSource toneR;
     const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
