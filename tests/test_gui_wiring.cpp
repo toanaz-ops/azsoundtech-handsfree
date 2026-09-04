@@ -23,6 +23,7 @@
 
 #include "app/MainComponent.h"
 #include "app/NotchController.h"
+#include "app/PresetManager.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/theme/AzTheme.h"
 #include "gui/DevicePanel.h"
@@ -164,8 +165,12 @@ TEST (MainComponent, DrawerIsAlwaysOpenWithFullHeight)
     app.resized();
 
     auto& drawer = app.getDeviceDrawer();
+    // Full height now includes the PRESET row (caption + LOAD.../SAVE...)
+    // added below the wrapped DevicePanel -- see getPreferredHeight().
     EXPECT_EQ (drawer.getBounds().getHeight(),
-               gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight);
+               gui::DeviceDrawer::kHeaderHeight + gui::DeviceDrawer::kContentHeight
+                 + gui::DeviceDrawer::kPresetCaptionHeight
+                 + gui::DeviceDrawer::kPresetRowHeight);
 
     // The wrapped DevicePanel always has a real rect -- never squeezed out.
     const auto wrapped = drawer.wrappedBoundsForTest();
@@ -734,4 +739,102 @@ TEST (MainComponent, RingRiskReadsUnavailableUntilSomethingProvidesIt)
 
     EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
                gui::SpectrumView::RingRisk::Unavailable);
+}
+
+//==============================================================================
+// Task P3 -- the PRESET row (LOAD... / SAVE...) under the INTERFACE drawer.
+//
+// The two file choosers are INJECTABLE (mirroring ModeRail::confirmHook): a
+// test swaps in a fake that hands the inner callback a known temp file, so no
+// native dialog is ever opened under a headless suite. The buttons are driven
+// through onClick() directly -- triggerClick() posts a command message no
+// headless loop dispatches (test_moderail.cpp:76). A notch is proven present
+// exactly as test_notchcontroller.cpp does it: feed a synthetic block into the
+// slot's tap, runOnce() to publish, then copySnapshot() and read it back.
+
+TEST (GuiWiring, LoadPresetButtonRoutesThroughInjectableChooserToLoadPreset)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    // A valid one-notch preset routed to slot 0, at a real sample rate.
+    const juce::String json =
+        R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})";
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-p3-load.json");
+    ASSERT_TRUE (presetFile.replaceWithText (json));
+
+    // Fake chooser: hands loadPreset the temp file with no dialog. A real pick.
+    app.presetLoadChooser = [presetFile] (std::function<void (const juce::File&)> onPicked)
+    {
+        onPicked (presetFile);
+    };
+
+    // The button's own handler -- the whole routing lives in there.
+    app.getDeviceDrawer().loadButton.onClick();
+    presetFile.deleteFile();
+
+    // The notch reached slot 0's controller: publish a frame and read it back.
+    // loadPreset adopts even with no device running.
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();
+
+    NotchController::SnapshotBuffer snap {};
+    controller0->copySnapshot (snap);
+    ASSERT_GT (snap.notchCount, 0u);
+
+    bool found = false;
+    for (std::uint32_t n = 0; n < snap.notchCount; ++n)
+        if (std::abs (snap.notches[n].frequency - 482.0f) < 1.0f)
+            found = true;
+    EXPECT_TRUE (found);
+}
+
+TEST (GuiWiring, SavePresetWritesAFileThatLoadPresetReopensIdentically)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+
+    // A known notch adopted into slot 0, published at a known rate. The rate
+    // matters: saveToFile validates freq < Nyquist of Preset.sampleRate, and
+    // savePreset records the rate the notch was published at.
+    controller0->setSampleRate (48000.0);
+    PresetNotch n;
+    n.index = 2; n.freq = 1234.0; n.Q = 28.0; n.depthDB = -9.0; n.slot = 0;
+    ASSERT_EQ (controller0->adoptPreset ({ n }), 1);
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();
+
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-p3-roundtrip.json");
+    outFile.deleteFile();
+
+    ASSERT_TRUE (app.savePreset (outFile));
+
+    const auto result = PresetManager::loadFromFile (outFile);
+    outFile.deleteFile();
+
+    ASSERT_TRUE (result.ok);
+    // adoptPreset mirrors the notch onto both lanes; savePreset dedups across
+    // lanes, so exactly one notch comes back.
+    ASSERT_EQ (result.preset.notches.size(), 1u);
+
+    const auto& saved = result.preset.notches[0];
+    EXPECT_EQ (saved.index, 2);
+    EXPECT_EQ (saved.slot, 0);
+    EXPECT_NEAR (saved.freq, 1234.0, 0.5);
+    EXPECT_NEAR (saved.Q, 28.0, 0.5);
+    EXPECT_NEAR (saved.depthDB, -9.0, 0.5);
+    EXPECT_DOUBLE_EQ (result.preset.sampleRate, 48000.0);
 }
