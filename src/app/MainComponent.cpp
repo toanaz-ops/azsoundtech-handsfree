@@ -1,5 +1,6 @@
 #include "app/MainComponent.h"
 
+#include "app/PresetFirstRun.h"
 #include "app/PresetManager.h"
 #include "gui/DeviceViewModel.h"
 
@@ -50,6 +51,21 @@ MainComponent::MainComponent()
     // The Sodium Rack theme, applied once here and inherited by every child
     // through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
+
+    // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
+    // Source: <exe dir>/presets (the installer puts them there, P1). Running
+    // from the repo, or from a test/snapshot exe with no presets/ beside it,
+    // the source dir is simply absent -- seedDefaultPresets reports that in
+    // SeedResult::errors and the app carries on. Message thread, runs once,
+    // touches no audio state.
+    {
+        const auto exeDir = juce::File::getSpecialLocation (
+            juce::File::currentExecutableFile).getParentDirectory();
+        const auto seeded = presetfirstrun::seedDefaultPresets (
+            exeDir.getChildFile ("presets"),
+            PresetManager::getPresetDirectory());
+        juce::ignoreUnused (seeded);  // or log via juce::Logger if the app has a log pattern
+    }
 
     // The window sizes itself from this (DocumentWindow::setContentOwned), so
     // an unsized content component opens at the resize LIMIT instead.
