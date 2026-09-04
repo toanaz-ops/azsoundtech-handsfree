@@ -273,7 +273,7 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 | Notch mồ côi làn 1 khi thu về mono | `setWidth` push Clear cho làn rời slot |
 | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
 | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
-| Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — mỗi controller ~550 kB từ khi FFT 2048 (history 128×1025 float của scorer chiếm phần lớn); 8 cái by-value là ~4.4 MB, đo được segfault |
+| Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
 
 ## 6. Những gì hệ thống cố tình KHÔNG làm (v1)
 
