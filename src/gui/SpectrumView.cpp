@@ -109,6 +109,11 @@ SpectrumView::SpectrumView (const NotchController& controller)
     bandEdgeLowHz_.reserve   ((std::size_t) 31);
     bandEdgeHighHz_.reserve  ((std::size_t) 31);
 
+    // Sized generously for a dashed vertical stem over the tallest plot this
+    // view is ever asked to draw -- one preallocateSpace here keeps the paint
+    // path's first-frame growth off the steady-state no-allocation guarantee.
+    dashedStemPath_.preallocateSpace (256);
+
     // Toolbar, in the study's order: the display groups sit LEFT next to the
     // section caption, ring risk sits far right. Nothing here reaches the
     // audio engine, the detector or the notch chain.
@@ -118,6 +123,10 @@ SpectrumView::SpectrumView (const NotchController& controller)
         applyBandMode();
         repaint();   // stale data keeps showing until the next frame lands
     };
+
+    // L/R lane picker: which of snapshot_.magnitudes[] rebuildGeometry() reads.
+    // Disabled outright for a mono controller -- see refreshFromSnapshot().
+    laneGroup_.onSelected = [this] (int index) { setDisplayLane (index); };
 
     avgGroup_.onSelected = [this] (int index)
     {
@@ -212,8 +221,10 @@ SpectrumView::SpectrumView (const NotchController& controller)
 
     bandGroup_.setSelectedIndex ((int) bandMode_);
     avgGroup_ .setSelectedIndex ((int) avgMode_);
+    laneGroup_.setSelectedIndex (displayLane_);
+    laneGroup_.setEnabled (false);   // mono until refreshFromSnapshot() says otherwise
 
-    for (auto* group : { &bandGroup_, &avgGroup_, &peakGroup_ })
+    for (auto* group : { &bandGroup_, &avgGroup_, &peakGroup_, &laneGroup_ })
     {
         group->setWantsKeyboardFocus (false);
         addAndMakeVisible (*group);
@@ -260,6 +271,7 @@ void SpectrumView::resized()
     strip.removeFromLeft (kCaptionWidth);
 
     place (bandGroup_);
+    place (laneGroup_);
     place (avgGroup_);
 
     // The long-average combo butts against the averaging group it extends.
@@ -519,7 +531,25 @@ void SpectrumView::setController (const NotchController& controller)
     seenSequence_  = 0;
     drawnSequence_ = 0;
 
+    // The old slot's lane choice describes a controller we just left; a mono
+    // slot has no R lane at all, and a fresh stereo one deserves a fresh L.
+    displayLane_ = 0;
+    laneGroup_.setSelectedIndex (0);
+
     refreshFromSnapshot();
+    repaint();
+}
+
+void SpectrumView::setDisplayLane (const int lane)
+{
+    displayLane_ = juce::jlimit (0, 1, lane);
+    laneGroup_.setSelectedIndex (displayLane_);
+
+    // Force the next refresh (and this rebuild, right now) to actually
+    // re-read the chosen lane rather than being skipped as "unchanged" --
+    // the sequence itself has not moved, only which lane is being plotted.
+    drawnSequence_ = 0;
+    rebuildGeometry();
     repaint();
 }
 
@@ -552,6 +582,18 @@ void SpectrumView::refreshFromSnapshot()
 {
     controller_->copySnapshot (snapshot_);
     seenSequence_ = snapshot_.sequence;
+
+    // The lane picker only makes sense for a stereo controller. Dropping back
+    // to mono (a slot switch, or the room simply publishing fewer lanes)
+    // forces the view back to L rather than plotting a lane that no longer
+    // exists.
+    const bool stereo = snapshot_.laneCount >= 2;
+    laneGroup_.setEnabled (stereo);
+    if (! stereo && displayLane_ != 0)
+    {
+        displayLane_ = 0;
+        laneGroup_.setSelectedIndex (0);
+    }
 
     updateNotchAges();
 
@@ -627,8 +669,9 @@ void SpectrumView::rebuildGeometry()
         return;
 
     const float hzPerBin = static_cast<float> (snapshot_.sampleRate / (double) Detector::kFftSize);
+    const std::size_t lane = (std::size_t) displayLane_;
     const std::size_t count = std::min<std::size_t> (snapshot_.magnitudeCount,
-                                                     snapshot_.magnitudes[0].size());
+                                                     snapshot_.magnitudes[lane].size());
 
     // 1) Raw dB for this frame. resize() never allocates here: count is
     //    bounded by kNumBins, which every buffer reserved in the ctor.
@@ -638,7 +681,7 @@ void SpectrumView::rebuildGeometry()
 
     for (std::size_t bin = 0; bin < count; ++bin)
     {
-        const float mag = std::max (snapshot_.magnitudes[0][bin], 1.0e-9f);
+        const float mag = std::max (snapshot_.magnitudes[lane][bin], 1.0e-9f);
         newDb_[bin] = 20.0f * std::log10 (mag);
     }
 
@@ -1015,7 +1058,26 @@ void SpectrumView::paint (juce::Graphics& g)
 
         g.setColour (colour.withAlpha (kStemAlphaSettled
                                        + (kStemAlphaFresh - kStemAlphaSettled) * heat));
-        g.drawLine (stemX, top, stemX, plot.getBottom(), 1.0f);
+
+        // Lane 1 (R) draws its colour stem dashed instead of solid -- the only
+        // visual difference between an L and an R marker, so a stereo trace
+        // reads which channel fired without a second legend. markerPath_ is
+        // reused as scratch to describe the straight line createDashedStroke
+        // needs as its source; it is cleared and rebuilt as the wedge triangle
+        // a few lines below, so nothing here escapes this iteration.
+        if (notch.channel == 1)
+        {
+            const float dashes[] = { 4.0f, 3.0f };
+            markerPath_.clear();
+            markerPath_.startNewSubPath (stemX, top);
+            markerPath_.lineTo (stemX, plot.getBottom());
+
+            dashedStemPath_.clear();
+            juce::PathStrokeType (1.0f).createDashedStroke (dashedStemPath_, markerPath_, dashes, 2);
+            g.strokePath (dashedStemPath_, juce::PathStrokeType (1.0f));
+        }
+        else
+            g.drawLine (stemX, top, stemX, plot.getBottom(), 1.0f);
 
         markerPath_.clear();
         markerPath_.startNewSubPath (x - kMarkerHalfWidth, top);
@@ -1036,9 +1098,12 @@ void SpectrumView::paint (juce::Graphics& g)
         // Fixed width, not measured: the label is always two monospaced
         // digits, so measuring it every frame for every notch would buy an
         // identical number at the cost of a text layout per marker.
-        const juce::String label = juce::String ((int) i + 1).paddedLeft ('0', 2);
+        juce::String label = juce::String ((int) i + 1).paddedLeft ('0', 2);
+        if (notch.channel == 1)
+            label += "R";   // the same "which lane" cue the dashed stem gives
         g.setFont (monoFont (10.0f));
-        constexpr float flagW = 2.0f * kFlagDigitWidth + 2.0f * kFlagPad;
+        const float flagW = 2.0f * kFlagDigitWidth + 2.0f * kFlagPad
+                           + (notch.channel == 1 ? kFlagDigitWidth : 0.0f);
 
         if (x - flagW * 0.5f > lastFlagRight)
         {

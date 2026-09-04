@@ -125,6 +125,15 @@ public:
     {
         return spectrumPoints_[index];
     }
+    [[nodiscard]] SegmentedControl& getLaneGroupForTest() { return laneGroup_; }
+
+    // Which lane's magnitudes rebuildGeometry() reads: 0 = L, 1 = R. Clamped
+    // into [0, 1] and forced back to 0 whenever the controller turns out to
+    // be mono (refreshFromSnapshot()). Selecting a lane rebuilds the polyline
+    // immediately rather than waiting for the next timer tick, so the click
+    // reads as instant.
+    void setDisplayLane (int lane);
+    [[nodiscard]] int getDisplayLane() const { return displayLane_; }
 
     //==========================================================================
     // RING RISK -- how close the room is to ringing right now.
@@ -247,6 +256,12 @@ private:
     juce::Path markerPath_;
     juce::Path tracePath_;
     juce::Path fillPath_;
+    // Lane-1 (R) notch stems are dashed instead of solid, so a stereo trace
+    // reads which channel a marker belongs to without a second legend.
+    // createDashedStroke() writes into a DESTINATION path rather than
+    // allocating its own -- reusing this member keeps that write inside
+    // memory this object already owns, same as markerPath_ above.
+    juce::Path dashedStemPath_;
 
     // Tuning-toolbar state (display-only: changing these never restarts the
     // audio engine, detector or notch chain).
@@ -292,6 +307,12 @@ private:
     // BAND / AVG legends -- the averaging group's first option carries its own
     // label. See docs/spec-ui-mockup.md section 3.
     SegmentedControl bandGroup_ { { "Line", "1/1 oct", "1/3 oct" } };
+    // L/R display-lane picker, right after bandGroup_ in the toolbar. Enabled
+    // only for a stereo controller (snapshot_.laneCount >= 2); see
+    // refreshFromSnapshot(). displayLane_ is the source of truth -- the
+    // group's selected index always mirrors it, never the other way round.
+    SegmentedControl laneGroup_ { { "L", "R" } };
+    int displayLane_ = 0;
     // The five quick picks, in AverageMode's own order so a segment index IS
     // the mode. Chasing a ring wants 0.1-0.5 s within reach.
     SegmentedControl avgGroup_  { { "Avg off", "0.1 s", "0.3 s", "0.5 s", "1 s" } };

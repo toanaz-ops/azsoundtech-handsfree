@@ -398,3 +398,43 @@ TEST (RtaProcessing, TheFirstFiveModesAreTheToolbarsSegmentsInOrder)
     EXPECT_EQ (static_cast<int> (rta::AverageMode::S0_5), 3);
     EXPECT_EQ (static_cast<int> (rta::AverageMode::S1),   4);
 }
+
+//==============================================================================
+// Task 9: the L/R display-lane selector (spec test 20). A stereo controller
+// publishes per-lane magnitudes; the toolbar's laneGroup_ picks which lane
+// rebuildGeometry() reads, and is disabled entirely for a mono controller.
+
+TEST (SpectrumView, LaneSelectorPlotsTheChosenLaneAndIsDisabledForMono)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tapL { 8192 }, tapR { 8192 };
+    LockFreeRingBuffer<NotchCommand> commands { 128 };
+    JuceMonotonicClock clock;
+    NotchController stereo { tapL, &tapR, commands, clock };
+
+    // Loud left, quiet right, a few hops so both detectors publish.
+    std::vector<float> loud (Detector::kHopSize, 0.5f), quiet (Detector::kHopSize, 0.0005f);
+    for (int i = 0; i < 6; ++i) { tapL.write (loud.data(), loud.size()); tapR.write (quiet.data(), quiet.size()); stereo.runOnce(); }
+
+    gui::SpectrumView view (stereo);
+    view.setSize (800, 400);
+    view.refreshFromSnapshot();
+    EXPECT_TRUE (view.getLaneGroupForTest().isEnabled());
+    EXPECT_EQ (view.getDisplayLane(), 0);
+    const auto leftPoint = view.spectrumPointForTest (0);
+
+    view.setDisplayLane (1);
+    view.refreshFromSnapshot();
+    const auto rightPoint = view.spectrumPointForTest (0);
+    // rebuildGeometry() maps ny = (kMaxDb - displayDb) / (kMaxDb - kMinDb), so
+    // a QUIETER (more negative dB) lane produces a LARGER ny -- and y grows
+    // downward in this normalised space, i.e. plots LOWER on screen.
+    EXPECT_GT (rightPoint.y, leftPoint.y) << "quiet lane plots lower (y grows downward)";
+
+    LockFreeRingBuffer<float> tapMono { 8192 };
+    NotchController mono { tapMono, commands, clock };
+    view.setController (mono);
+    view.refreshFromSnapshot();
+    EXPECT_FALSE (view.getLaneGroupForTest().isEnabled());
+    EXPECT_EQ (view.getDisplayLane(), 0);
+}
