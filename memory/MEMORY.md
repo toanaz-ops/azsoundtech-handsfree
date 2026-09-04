@@ -14,6 +14,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [JUCE 9 API traps](juce9-api-traps-2026-08-25.md) — `TextButton(name, tooltip)` đổi nghĩa tham số 2 (Label thì không) nên nút ra rỗng mà build vẫn xanh; `Rectangle<float>` không có `reduced` 4 tham số.
 - [UI rebuild — Sodium Rack](ui-rebuild-sodium-rack-2026-08-25.md) — chụp GUI bằng `createComponentSnapshot()` chứ không chụp màn hình; ảnh render bắt được 4 lỗi test xanh không bắt; nội suy RGB giữa amber và cyan ra màu bùn; melatonin_blur cache theo object.
 - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
+- [Preset save round-trip](preset-save-roundtrip-2026-09-05.md) — `savePreset` phải lấy `sampleRate` từ snapshot (saveToFile validate Nyquist, để 0 là bị từ chối im lặng); snapshot chỉ refresh khi `runOnce()` có block nên test headless phải bơm block sau `adoptPreset`; dedup theo lane khi đọc snapshot ngược ra `PresetNotch`.
 - [Docs drift audit](docs-drift-audit-2026-08-27.md) — plan checkbox không tự tick, số test chép tay stale ngay trong cùng wave, và lỗ hổng an toàn có-từ-đầu (thiếu output clamp/NaN guard) không hiện trong diff nào; danh sách việc còn treo chờ người quyết.
 
 ## Conventions (tóm tắt)
