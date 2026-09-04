@@ -64,7 +64,11 @@ MainComponent::MainComponent()
         const auto seeded = presetfirstrun::seedDefaultPresets (
             exeDir.getChildFile ("presets"),
             PresetManager::getPresetDirectory());
-        juce::ignoreUnused (seeded);  // or log via juce::Logger if the app has a log pattern
+        // Result deliberately ignored: the only failure modes are a missing
+        // source dir (the normal repo/test/snapshot case) or a copy error, and
+        // neither should block startup -- the app runs fine without seeded
+        // presets, and logging the missing-source case would just be noise.
+        juce::ignoreUnused (seeded);
     }
 
     // The window sizes itself from this (DocumentWindow::setContentOwned), so
@@ -578,7 +582,9 @@ bool MainComponent::savePreset (const juce::File& file)
 
         // adoptPreset (and detection) mirror each notch onto every lane, so the
         // snapshot lists the same chain index on channel 0 and channel 1. Emit
-        // ONE PresetNotch per (slot, index), keeping the lowest channel seen.
+        // ONE PresetNotch per (slot, index): keep the FIRST channel seen -- the
+        // snapshot lists channels ascending so that is the lowest, and mirrored
+        // lanes carry identical params, so the choice is immaterial anyway.
         std::array<int, NotchController::kSlots> lowestChannel;
         lowestChannel.fill (-1);
 
