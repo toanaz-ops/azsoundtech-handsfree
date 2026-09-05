@@ -1262,3 +1262,191 @@ TEST (NotchControllerStereo, AdoptPresetHonoursLaneAndKeepsTheFilesIndex)
     EXPECT_EQ (cmds[1].channel, 1); EXPECT_EQ (cmds[1].index, 5);
     EXPECT_EQ (cmds[2].channel, 1); EXPECT_EQ (cmds[2].index, 7);
 }
+
+// ===========================================================================
+// Lane D (data loop): ClearReason on every clear path, NotchEvent sink.
+// ===========================================================================
+namespace {
+using Ev = NotchController::NotchEvent;
+
+struct Recorder
+{
+    std::vector<Ev> events;
+    NotchController::EventSink sink()
+    {
+        return [this] (const Ev& e) { events.push_back (e); };
+    }
+    std::vector<Ev> clears() const
+    {
+        std::vector<Ev> out;
+        for (const auto& e : events)
+            if (e.kind == Ev::Kind::Clear)
+                out.push_back (e);
+        return out;
+    }
+};
+} // namespace
+
+// Spec test 8, six reasons. Red if any clear path stops carrying its reason.
+TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
+{
+    // Manual (default), VerdictFalse, ClearAll -- one Harness.
+    {
+        Harness h; Recorder r; h.controller.setEventSink (r.sink());
+        ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+        ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
+        ASSERT_TRUE (h.controller.setNotch (0, 2, 3000.0, 30.0, -12.0, NotchController::Origin::Manual));
+        h.controller.clearNotch (0, 0);
+        h.controller.clearNotch (0, 1, NotchController::ClearReason::VerdictFalse);
+        h.controller.clearAll();
+        h.controller.runOnce();
+        const auto c = r.clears();
+        ASSERT_EQ (c.size(), 3u);
+        EXPECT_EQ (c[0].reason, NotchController::ClearReason::Manual);       EXPECT_EQ (c[0].index, 0);
+        EXPECT_EQ (c[1].reason, NotchController::ClearReason::VerdictFalse); EXPECT_EQ (c[1].index, 1);
+        EXPECT_EQ (c[2].reason, NotchController::ClearReason::ClearAll);     EXPECT_EQ (c[2].index, 2);
+        EXPECT_FLOAT_EQ (c[2].hz, 3000.0f);
+        // Set events preceded them, one per setNotch, no score (manual origin).
+        int sets = 0;
+        for (const auto& e : r.events) if (e.kind == Ev::Kind::Set) { ++sets; EXPECT_FALSE (e.hasScore); EXPECT_EQ (e.origin, NotchController::Origin::Manual); }
+        EXPECT_EQ (sets, 3);
+    }
+    // AutoRelease: mirror LiveTapReleasesAfter30s (this file, ~line 151).
+    {
+        Harness h; Recorder r; h.controller.setEventSink (r.sink());
+        ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+        NoiseSource quiet;
+        const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 10;
+        for (int i = 0; i < blocks; ++i)
+            pump (h, quiet.hop());
+        const auto c = r.clears();
+        ASSERT_EQ (c.size(), 1u);
+        EXPECT_EQ (c[0].reason, NotchController::ClearReason::AutoRelease);
+        EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs);
+    }
+    // WidthChange: lane-1 notch, narrow to mono.
+    {
+        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+        ASSERT_TRUE (h.controller.setNotch (1, 2, 800.0, 30.0, -12.0, NotchController::Origin::Manual));
+        h.controller.setWidth (1);
+        h.controller.runOnce();
+        const auto c = r.clears();
+        ASSERT_EQ (c.size(), 1u);
+        EXPECT_EQ (c[0].reason, NotchController::ClearReason::WidthChange);
+        EXPECT_EQ (c[0].lane, 1); EXPECT_EQ (c[0].index, 2);
+    }
+    // PartialApplyUnwind: adoptPreset with lane -1 on a stereo slot, lane 1 forced to fail.
+    {
+        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+        h.controller.failNextSetNotchOnLaneForTest (1);
+        EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (4, 1000.0)), 0);
+        h.controller.runOnce();
+        const auto c = r.clears();
+        ASSERT_EQ (c.size(), 1u);
+        EXPECT_EQ (c[0].reason, NotchController::ClearReason::PartialApplyUnwind);
+        EXPECT_EQ (c[0].lane, 0); EXPECT_EQ (c[0].index, 4);
+        NotchController::SnapshotBuffer snap; h.controller.copySnapshot (snap);
+        EXPECT_EQ (snap.notchCount, 0u);
+    }
+}
+
+// Spec test 9. Red if the sink is ever invoked with modelMutex_ held: the
+// re-entrant clearNotch below would deadlock, and the try_lock would fail.
+TEST (NotchControllerEvents, SinkRunsOutsideTheModelMutexAndMayReenter)
+{
+    Harness h;
+    bool mutexWasFree = false;
+    int  calls = 0;
+    h.controller.setEventSink ([&] (const Ev& e)
+    {
+        ++calls;
+        mutexWasFree = h.controller.modelMutexIsFreeForTest();
+        if (e.kind == Ev::Kind::Set && e.index == 0)
+            h.controller.clearNotch (0, 1);   // re-entrant policy call from inside the sink
+    });
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.runOnce();   // delivers the two Sets; the re-entrant clear lands in the outbox
+    h.controller.runOnce();   // delivers that Clear
+    EXPECT_TRUE (mutexWasFree);
+    EXPECT_EQ (calls, 3);
+}
+
+// Spec test 10. Red if events accumulate with no sink attached.
+TEST (NotchControllerEvents, NoSinkMeansNoAccumulation)
+{
+    Harness h;
+    for (int i = 0; i < 200; ++i)
+    {
+        ASSERT_TRUE (h.controller.setNotch (0, i % 16, 1000.0 + i, 30.0, -12.0, NotchController::Origin::Manual));
+        h.controller.clearNotch (0, i % 16);
+    }
+    h.controller.runOnce();
+    EXPECT_EQ (h.controller.pendingEventsForTest(), 0);
+    EXPECT_EQ (h.controller.droppedEvents(), 0u);
+}
+
+// Cap. Red if the outbox grows past kMaxPendingEvents instead of dropping
+// and counting.
+TEST (NotchControllerEvents, OutboxDropsAndCountsPastTheCap)
+{
+    Harness h; Recorder r; h.controller.setEventSink (r.sink());
+    for (int i = 0; i < 100; ++i)
+    {
+        ASSERT_TRUE (h.controller.setNotch (0, i % 16, 1000.0 + i, 30.0, -12.0, NotchController::Origin::Manual));
+        h.controller.clearNotch (0, i % 16);
+    }
+    EXPECT_EQ (h.controller.pendingEventsForTest(), NotchController::kMaxPendingEvents);
+    EXPECT_EQ (h.controller.droppedEvents(), 200u - (std::uint64_t) NotchController::kMaxPendingEvents);
+    h.controller.runOnce();
+    EXPECT_EQ (r.events.size(), (std::size_t) NotchController::kMaxPendingEvents);
+}
+
+// Spec test 11. Red if stop() stops flushing what is still queued.
+TEST (NotchControllerEvents, StopFlushesPendingEventsEvenWhenTheThreadNeverRan)
+{
+    Harness h; Recorder r; h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.stop (1000);
+    ASSERT_EQ (r.events.size(), 1u);
+    EXPECT_EQ (r.events[0].kind, Ev::Kind::Set);
+}
+
+// Lane S loose end (A-9). Red if widening 1 -> 2 leaves lane 1's analysis
+// window holding audio from before it went mono: one silent hop after the
+// widen must publish a near-silent lane-1 spectrum, not 1536 stale samples
+// of tone.
+TEST (NotchControllerSlotAware, WideningResetsLaneOneDetectorState)
+{
+    StereoHarness h;
+    SineSource tone; NoiseSource quiet;
+    for (int i = 0; i < 8; ++i)
+        pumpStereo (h, quiet.hop(), tone.hop());   // lane 1 window full of 1 kHz
+    h.controller.setWidth (1);
+    h.controller.setWidth (2);
+
+    std::vector<float> silence ((std::size_t) Detector::kHopSize, 0.0f);
+    pumpStereo (h, silence, silence);
+
+    NotchController::SnapshotBuffer snap; h.controller.copySnapshot (snap);
+    ASSERT_EQ (snap.laneCount, 2u);
+    float peak = 0.0f;
+    for (int b = 0; b < Detector::kNumBins; ++b)
+        peak = std::max (peak, snap.magnitudes[1][(std::size_t) b]);
+    // A window of pure tone gives bin 43 ~ 0.5 (amp 1, Hann); 512 zeros in a
+    // 2048 window still leaves ~0.37. A reset window gives exactly 0.
+    EXPECT_LT (peak, 1.0e-3f);
+}
+
+// Lane S loose end (A-9). Red if a lane-1 notch skipped on a mono slot is
+// not counted.
+TEST (NotchControllerPreset, AdoptPresetCountsLaneOneNotchesSkippedOnAMonoSlot)
+{
+    StereoHarness h;
+    h.controller.setWidth (1);
+    PresetNotch onLaneOne; onLaneOne.index = 0; onLaneOne.freq = 1000.0; onLaneOne.Q = 30.0; onLaneOne.depthDB = -12.0; onLaneOne.lane = 1;
+    PresetNotch onLaneZero = onLaneOne; onLaneZero.index = 1; onLaneZero.lane = 0;
+    int skipped = -1;
+    EXPECT_EQ (h.controller.adoptPreset ({ onLaneOne, onLaneZero }, &skipped), 1);
+    EXPECT_EQ (skipped, 1);
+}
