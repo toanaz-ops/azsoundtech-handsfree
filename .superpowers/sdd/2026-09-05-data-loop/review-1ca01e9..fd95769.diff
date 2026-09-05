@@ -1,0 +1,396 @@
+# Review package: 1ca01e9..HEAD
+
+## Commits
+fd95769 docs: lane D — session log, verdict buttons, tester note 1.1.2, roadmap status, memory lessons
+e3a5747 chore(snapshot): console-live shows unjudged, GOOD and FALSE verdict rows (lane D)
+
+## Files changed
+ docs/GIOI-THIEU.md                                 |  8 +++
+ docs/KY-THUAT-CHONG-HU.md                          | 61 ++++++++++++++++-----
+ docs/release-notes/1.1.2-alpha.md                  | 28 ++++++++++
+ .../specs/2026-09-04-anti-feedback-v2-roadmap.md   | 14 ++++-
+ .../specs/2026-09-05-data-loop-design.md           |  7 ++-
+ memory/MEMORY.md                                   |  1 +
+ memory/data-loop-lessons-2026-09-05.md             | 63 ++++++++++++++++++++++
+ tools/snapshot.cpp                                 | 28 ++++++++++
+ 8 files changed, 195 insertions(+), 15 deletions(-)
+
+## Diff
+diff --git a/docs/GIOI-THIEU.md b/docs/GIOI-THIEU.md
+index 8ad9d46..172e8cb 100644
+--- a/docs/GIOI-THIEU.md
++++ b/docs/GIOI-THIEU.md
+@@ -34,20 +34,21 @@ tần số đang "vươn lên" thành hú thì đặt ngay một bộ lọc notc
+ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng chất lượng nhạc.
+ 
+ ## Tính năng chính
+ 
+ | | |
+ |---|---|
+ | **Phát hiện tự động** | FFT 2048 điểm, chấm điểm "độ nhọn" của đỉnh phổ — phân biệt tiếng hú (một gai duy nhất nhô lên) với nhạc (nhiều đỉnh tự nhiên). Thời gian khóa mục tiêu trong ~1 giây kể từ khi hú đạt ngưỡng |
+ | **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30), độ sâu −6 đến −24 dB (mặc định −18 dB). Chỉ mất đúng vài Hz quanh tần số hú |
+ | **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra bất kỳ của interface — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật |
+ | **Stereo độc lập** | Mic hú qua loa trái thì chỉ cắt cánh trái; nút LINK mỗi slot để cắt cả hai bên như trước |
++| **Chấm notch để app học** | Mỗi dòng ACTIVE NOTCHES có nút **GOOD** / **FALSE**. FALSE xóa notch ngay và ghi nhãn "cắt oan"; GOOD ghi nhãn "cắt đúng". Nhãn + phổ lúc quyết định vào log session trên máy (không audio) — dữ liệu cho bộ phân loại ở bản sau |
+ | **Tự nhả sau 30 giây** | Hết hú là filter tự nhả — không tích tụ vết cắt vô nghĩa suốt buổi show |
+ | **Chống báo nhầm harmonic** | Nếu đã khóa tần số F thì bậc harmonics 1.4F–4.1F bị trừ điểm, tránh cắt oan bội số của nốt nhạc |
+ | **3 chế độ** | **Bypass** (thông tuyến thuần), **Auto** (chạy liên tục), **Soundcheck** (nghe 15 giây đầu show, khóa mọi đỉnh tìm thấy, không tự nhả; hết 15 giây detector tự ngừng dò — bấm **Auto** để chạy tiếp) |
+ | **Chỉnh độ nhạy một nút** | ONE-KNOB RESPONSE: **SAFE** / **BALANCED** / **AGGRESSIVE** (tự chuyển **CUSTOM** khi chỉnh tay); mỗi slot chọn theo tuning **Global** chung hoặc **Custom** riêng |
+ | **Chọn device trực quan** | Chọn driver/device/sample rate/buffer ngay trong app; hiện latency và trạng thái theo thời gian thực |
+ | **Preset có sẵn** | `Speech` (Q=40, −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). |
+ | **An toàn theo thiết kế** | Không cấp phát bộ nhớ hay khóa mutex trên đường audio real-time; từ chối độ sâu dương (điều gì sẽ xảy ra nếu một lỗi đánh dấu biến notch thành máy khuếch đại hú?); tự vô hiệu notch khi đổi sample rate khiến notch vượt Nyquist |
+ 
+ ## Thông số nhanh
+ 
+@@ -70,20 +71,27 @@ trước show để "soi" sẵn phòng, sau đó chuyển **Auto** và quên nó
+ ## Theo dõi khi chạy
+ 
+ Masthead hiện **CPU %** và trạng thái **DEVICE** (OK/ERROR) theo thời gian
+ thực. Màn hình phổ (RTA) có averaging Off/0.1/0.3/0.5/1/3/5/10 s, peak hold và
+ độ phân giải 1/1–1/3 octave; tab per-slot theo dõi từng slot riêng. Với slot
+ stereo, bộ chọn **L/R** trên thanh analyser đổi làn đang vẽ, notch của làn phải
+ vẽ bằng nét đứt kèm nhãn "R", và bảng **ACTIVE NOTCHES** có cột **LANE** cho
+ biết mỗi notch nằm ở làn nào. Chip **RING RISK** hiện luôn hiển thị "N/A" —
+ nguồn dữ liệu sẽ được nối ở bản sau.
+ 
++## Chấm notch để app học
++
++Thấy app cắt oan một nốt nhạc: bấm **FALSE** trên dòng đó — notch nhả ngay và app ghi
++lại "đây là cắt oan". Thấy nó cắt đúng tiếng hú: bấm **GOOD**. Không bắt buộc, nhưng mỗi
++lần bấm là một mẫu huấn luyện. Log nằm ở `%APPDATA%\AZSoundtech\HandsFree\logs\`, một
++file mỗi lần mở app, không chứa audio; gửi file khi được hỏi.
++
+ ## Freeware
+ 
+ Theo quyết định chủ sở hữu **D-07** (23/08/2026): bản phát hành đầu là
+ **freeware**, không kích hoạt license. Phần mã license vẫn nằm trong source
+ (đã test đầy đủ 45 test) nhưng cố tình chưa được nối vào app — sẽ bật lại khi
+ có thông báo. Xem `.superpowers/sdd/2026-08-19-az-soundtech-hands-free/owner-decisions.md`.
+ 
+ ## Muốn hiểu bên trong?
+ 
+ Xem [`docs/KY-THUAT-CHONG-HU.md`](KY-THUAT-CHONG-HU.md) — mô tả kỹ thuật đầy
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index 7af1de3..c703ec0 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -280,40 +280,77 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
+ | Denormal blow-up sau im lặng dài | `ScopedNoDenormals` đầu callback |
+ | Allocation/lock trên luồng audio | Zero-alloc theo thiết kế; atomics cho mọi state cross-thread; test ràng buộc |
+ | Drop tap im lặng biến thành giả broadband | `getTapDropCount()` đếm công khai |
+ | Timeline discontinuity sau đổi rate | `Detector::reset()` xóa cửa sổ phân tích |
+ | Notch oan harmonic nhạc | Trừ điểm 1.4×–4.1× của notch đã khóa |
+ | Race GUI ↔ detector | Snapshot mutex, caller-owned copy |
+ | Notch mồ côi làn 1 khi thu về mono | `setWidth` push Clear cho làn rời slot |
+ | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
+ | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
+ | Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
++| Logger chặn detector thread | Hàng đợi có cap 4096, bỏ + đếm; sink gọi ngoài modelMutex_ |
+ 
+ ## 6. Những gì hệ thống cố tình KHÔNG làm (v1)
+ 
+ - **Không adaptive AFC/NLMS** — filter thích ứng liên tục; phạm vi v1 là
+   detect-and-notch, đơn giản hơn để tin được trên sân khấu.
+ - **Không macOS/Linux/plugin** — standalone Windows only.
+ - **Không cloud sync preset** — local only.
+ - **Không licensing** (D-07) — freeware; mã license nằm chờ trong repo.
+ - **Không phủ dưới ~117 Hz @ 48 kHz** (5 × sample rate / 2048) — giới hạn
+   hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
+ 
+-## 7. Trạng thái & kiểm chứng (05/09/2026, v1.1.1 — chờ release)
++## 7. Log session và nhãn (lane D, v1.1.2)
+ 
+-- Suite: **402/402 test pass** (ctest Release, MSVC, CI GitHub
+-  Actions xanh) — +2 test cho nút LOAD/SAVE preset (routing qua chooser tiêm
+-  được; round-trip save→load), +1 test round-trip theo làn (INDEP hai làn cùng
+-  index khác tần số + `linked` sống sót), +2 test validator theo (slot, làn).
++App ghi một file mỗi lần chạy vào `%APPDATA%\AZSoundtech\HandsFree\logs\session-YYYYMMDD-HHMMSS-mmm.jsonl`,
++mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30 file mới nhất.
++
++| `ev` | Khi nào | Mang gì |
++|---|---|---|
++| `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
++| `mode` | bấm Bypass / Auto / Soundcheck | `mode` |
++| `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
++| `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
++| `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
++| `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
++
++Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
++người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
++thread; hàng đợi 4096 dòng, quá thì bỏ và đếm vào `dropped_events` ở dòng `session_end`.
++Sự kiện của `NotchController` đi qua một outbox 64 phần tử và chỉ được đẩy ra **ngoài**
++`modelMutex_` trên detector thread (spec D-6), nên nút CLEAR ALL không bao giờ chờ I/O.
++
++`FALSE` vừa ghi nhãn vừa xóa notch (đó là điều người vận hành muốn — D-2); `GOOD` chỉ ghi
++nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
++frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
++Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
++
++## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — chờ release)
++
++Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
++`tools/logstats.py`.
++
++- Suite: **430/430 test pass** (ctest Release, MSVC, CI GitHub
++  Actions xanh) — +28 test so với 1.1.1 (402): `SessionLogger` (start/stop,
++  cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
++  mục là no-op), sự kiện `notch_set`/`notch_clear`/`verdict` qua outbox ngoài
++  `modelMutex_`, nút GOOD/FALSE trên `NotchListPanel`, và `logstats_fixture`
++  chạy `tools/logstats.py` dưới ctest.
+ - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
+   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
+ - DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
+   GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
+   SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel),
+   **chuỗi preset trọn vẹn** (installer ship presets → seed first-run → nút
+-  LOAD/SAVE), và **phát hiện theo làn** (lane S): đã hạ cánh. Bản 1.1.x thêm:
+-  mỗi làn của slot stereo tự dò và tự đặt notch (INDEP mặc định), có nút LINK
+-  mỗi slot, cột LANE trong bảng ACTIVE NOTCHES và bộ chọn làn L/R trên
+-  analyser; preset lưu/nạp được cả `lane` lẫn `linked`. Còn mở: code signing
+-  (Task 31, chờ EV cert), integration testing với phần cứng thật (Task 32),
+-  nối data cho chip RING RISK (hiện luôn "N/A"), và sweep `laneAsymmetryBonus`
+-  (lane T).
++  LOAD/SAVE), **phát hiện theo làn** (lane S), và **vòng dữ liệu** (lane D:
++  nút GOOD/FALSE ghi nhãn, log session JSONL không audio, `tools/logstats.py`
++  tóm tắt) — đã hạ cánh. Bản 1.1.x thêm: mỗi làn của slot stereo tự dò và tự
++  đặt notch (INDEP mặc định), có nút LINK mỗi slot, cột LANE trong bảng ACTIVE
++  NOTCHES và bộ chọn làn L/R trên analyser; preset lưu/nạp được cả `lane` lẫn
++  `linked`. Còn mở: code signing (Task 31, chờ EV cert), integration testing
++  với phần cứng thật (Task 32), nối data cho chip RING RISK (hiện luôn
++  "N/A"), sweep `laneAsymmetryBonus` (lane T), lane C (classifier, chờ ≥ 300
++  verdict từ ≥ 3 session), và quyết định owner còn treo cho lane S: có nên
++  chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot widen 1→2 hay
++  không (amendment A-9 bị rút khỏi lane D khi review — xem
++  `.superpowers/sdd/2026-09-05-data-loop/progress.md`, "Task 3: CONTROLLER
++  RULING").
+diff --git a/docs/release-notes/1.1.2-alpha.md b/docs/release-notes/1.1.2-alpha.md
+new file mode 100644
+index 0000000..6d4b297
+--- /dev/null
++++ b/docs/release-notes/1.1.2-alpha.md
+@@ -0,0 +1,28 @@
++# Hands-free 1.1.2 alpha — vòng dữ liệu: nút GOOD / FALSE và log session
++
++**Không đụng đường audio.** Mức thay đổi level: 0 dB. Bản này chỉ quan sát và ghi.
++
++## Có gì trong 1.1.2
++
++- Bảng **ACTIVE NOTCHES** có cột **VERDICT** với hai nút mỗi dòng. **FALSE** = app cắt
++  oan (notch nhả ngay, nhãn được ghi). **GOOD** = cắt đúng hú (chỉ ghi nhãn, notch giữ).
++- Log session `%APPDATA%\AZSoundtech\HandsFree\logs\session-*.jsonl`, một file mỗi lần
++  mở app, giữ 30 file. Ghi: device, mode, tuning, mọi notch đặt/xóa kèm phổ lúc quyết
++  định, và verdict. **Không có audio trong log.**
++- `tools/logstats.py <file>` in bảng tóm tắt (cần Python 3, không cần thư viện).
++- Sửa nhỏ từ 1.1.1: LOAD… cập nhật bảng ROUTING ngay; preset có notch làn R cho slot mono
++  được đếm và ghi log thay vì lặng lẽ bỏ; slot mono → stereo không dò lại đuôi audio cũ
++  của làn R.
++
++## Việc tester cần làm
++
++Bấm **FALSE** khi app cắt oan nốt nhạc, **GOOD** khi cắt đúng hú. Cuối buổi, copy file
++mới nhất trong thư mục logs và gửi kèm mô tả show. Nếu bấm FALSE mà notch không nhả trong
++1 giây, báo lại kèm file log.
++
++## Vì sao việc này có ích
++
++Mỗi lần bấm là một mẫu có nhãn: phổ lúc detector quyết định, cộng với "đúng" hay "oan"
++từ chính người vận hành. Đủ dữ liệu thật thì bước tiếp theo — một bộ phân loại học từ
++nhãn thay vì luật cứng — mới có gì để học. Ngưỡng mở lane đó: **≥ 300 verdict từ ≥ 3
++session khác nhau**. Chưa đủ thì app vẫn chạy y như 1.1.1, chỉ là im lặng ghi thêm.
+diff --git a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+index c015a85..796b55c 100644
+--- a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
++++ b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+@@ -59,16 +59,26 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
+ 5. `docs/GIOI-THIEU.md` + `docs/KY-THUAT-CHONG-HU.md` cập nhật cùng
+    commit khi hành vi user-visible đổi.
+ 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
+    gửi tester nêu rõ lane vừa đổi gì.
+ 
+ ## Trạng thái
+ 
+ | Lane | Trạng thái | Ngày |
+ |---|---|---|
+ | S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
+-| D | spec đã duyệt phản biện, chờ S merge rồi rebase; kế tiếp | 2026-09-05 |
++| D | **đã làm xong** trên nhánh `feat/data-loop` (8 task, suite 430/430, review từng task + verifier độc lập toàn nhánh đang chờ); release 1.1.2 alpha; chờ owner PR vào main | 2026-09-05 |
+ | G | chờ S, D | |
+ | M | chờ S | |
+-| C | chờ D nhãn | |
++| C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
+ | L | chờ D | |
+ | A | chờ M, G | |
++
++**Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
++plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
++khỏi lane D khi review**. Reset chỉ Detector mà không đụng lịch sử của
++`CandidateScorer` để lại history cũ, khiến hai trục rise/novelty bị bão hòa về
++0 trong ~200 ms trên làn vừa quay lại — **dễ dãi hơn** hành vi 1.1.1 đang
++chạy, không phải chặt hơn. Việc có nên chặn `riseReferenceMs` cho làn tái nhập
++sau khi widen hay không là **quyết định owner còn treo cho lane S**. Chi tiết:
++`.superpowers/sdd/2026-09-05-data-loop/progress.md`, mục "Task 3: CONTROLLER
++RULING".
+diff --git a/docs/superpowers/specs/2026-09-05-data-loop-design.md b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+index ce49e7c..c7f4e2e 100644
+--- a/docs/superpowers/specs/2026-09-05-data-loop-design.md
++++ b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+@@ -1,14 +1,19 @@
+ # Lane D — Vòng dữ liệu: nhãn oan/đúng và log session có cấu trúc
+ 
+ **Ngày:** 2026-09-05. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md).
+-**Trạng thái:** spec, chờ owner duyệt. **Đụng audio path:** không.
++**Trạng thái:** đã thực thi trên nhánh `feat/data-loop` (2026-09-05, 8 task,
++suite 430/430); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
++lane S đã merge trước — nằm trong
++[`../plans/2026-09-05-data-loop.md`](../plans/2026-09-05-data-loop.md):
++mục "Hợp nhất hai phiên" (đầu file) và bảng "Amendments to the spec" (A-1..A-10).
++**Đụng audio path:** không.
+ **Mức thay đổi level dự kiến:** 0 dB. Lane này chỉ quan sát và ghi.
+ 
+ ## 1. Vì sao lane này đi trước mọi thứ "AI"
+ 
+ Lane C (classifier), lane L (LLM copilot) và lane T (threshold sweep)
+ đều cần hai thứ mà app chưa sinh ra:
+ 
+ - **Nhãn**: notch này là hú thật hay cắt oan nốt nhạc. Chỉ người vận
+   hành biết, và chỉ biết trong vài giây sau khi nó xảy ra.
+ - **Ngữ cảnh**: phổ tại lúc quyết định, phổ 250 ms trước đó (rise
+diff --git a/memory/MEMORY.md b/memory/MEMORY.md
+index 1f17a81..2c16a00 100644
+--- a/memory/MEMORY.md
++++ b/memory/MEMORY.md
+@@ -13,18 +13,19 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
+ - [GUI console lessons](gui-console-lessons-2026-08-24.md) — `git commit -- <path>` commit nguyên working-tree file (hunk lane khác lọt vào); JUCE headless `setSize()` không peer → `resized()` không chạy, layout test pass rỗng; confirm dialog async phải injectable + SafePointer.
+ - [JUCE 9 API traps](juce9-api-traps-2026-08-25.md) — `TextButton(name, tooltip)` đổi nghĩa tham số 2 (Label thì không) nên nút ra rỗng mà build vẫn xanh; `Rectangle<float>` không có `reduced` 4 tham số.
+ - [UI rebuild — Sodium Rack](ui-rebuild-sodium-rack-2026-08-25.md) — chụp GUI bằng `createComponentSnapshot()` chứ không chụp màn hình; ảnh render bắt được 4 lỗi test xanh không bắt; nội suy RGB giữa amber và cyan ra màu bùn; melatonin_blur cache theo object.
+ - [Peakiness sweep @ FFT-2048](peakiness-sweep-2048-2026-09-04.md) — `analyse()` che phân bố dưới ngưỡng (phải tự MAX `peakinessAt`); baseline 7.35 là 60-seed một-shot, lấy mẫu dày liên tục cross 10.0 một lần (13.99); sine tĩnh không phải proxy nhạc hợp lệ. Ngưỡng chờ T2.
+ - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
+ - [Preset save round-trip](preset-save-roundtrip-2026-09-05.md) — `savePreset` phải lấy `sampleRate` từ snapshot (saveToFile validate Nyquist, để 0 là bị từ chối im lặng); snapshot chỉ refresh khi `runOnce()` có block nên test headless phải bơm block sau `adoptPreset`; sau khi hợp nhất lane S (05/09/2026) `savePreset` KHÔNG dedup nữa — một `PresetNotch` cho mỗi (slot, làn, index) kèm `lane`, cộng section `slots` mang `linked`.
+ - [Docs drift audit](docs-drift-audit-2026-08-27.md) — plan checkbox không tự tick, số test chép tay stale ngay trong cùng wave, và lỗ hổng an toàn có-từ-đầu (thiếu output clamp/NaN guard) không hiện trong diff nào; danh sách việc còn treo chờ người quyết.
+ - [Anti-feedback next-gen research](anti-feedback-research-2026-09-04.md) — app hiện "dò mono, đè stereo"; LLM không ở tầng realtime; lật cực chỉ dời hú; AFC là lane cuối; roadmap xếp theo phụ thuộc dữ liệu.
+ - [Stereo lane lessons](stereo-lane-lessons-2026-09-05.md) — reset persistence chéo làn suy biến ở ngưỡng 1; test tắt detection cũng tắt reinforcement; ảnh render bắt 2 lỗi 396 test bỏ qua; đo cột bằng font thật với ô rộng nhất formatter in được; preallocateSpace đếm float.
+ - [SDD workspace gitignore trap](sdd-workspace-gitignore-trap-2026-09-04.md) — skill `subagent-driven-development`'s `sdd-workspace` script tự ghi `.superpowers/sdd/.gitignore` (`*`) mỗi lần chạy, âm thầm đè chính sách "`.superpowers/` phải TRACKED" của repo này — xóa file đó ngay trước commit cuối, mọi session SDD.
++- [Data loop lessons](data-loop-lessons-2026-09-05.md) — `juce::JSON` in double tới 18 chữ số nên phải làm tròn 3 chữ số có nghĩa trước khi vào `var`; `getDynamicObject()` trên `const var&` vẫn mutate được caller, phải `clone()` trước khi stamp `t`; logger không bao giờ start trong ctor của `MainComponent` (26 test + snapshot tool sẽ prune log thật); test headless gọi `onClick()` chứ không `triggerClick()` (async, suite không bơm); nửa cái reset (Detector sạch, CandidateScorer history cũ) dễ dãi hơn không reset gì — A-9 bị rút, chờ owner quyết cho lane S; hai bẫy quy trình: một prompt dán hai session cùng một lane, và prune worktree theo tên mà không check `git worktree list` + cwd session đang chạy.
+ 
+ ## Conventions (tóm tắt)
+ 
+ - Commit: `feat:` / `fix:` / `docs:` / `chore:` / `refactor:` — nhỏ, một việc một commit
+ - Branch: `feat/<tên>` / `fix/<tên>` — 1 session = 1 branch = 1 worktree (`.worktrees/`)
+ - Merge: qua Pull Request + review, không commit thẳng vào main
+ - Secret-scan hook: chạy tự động mỗi commit — không commit `.env`, `*.key`, token
+ - Stack: C++ / JUCE / CMake / MSVC / ASIO — xem `docs/superpowers/specs/`
+diff --git a/memory/data-loop-lessons-2026-09-05.md b/memory/data-loop-lessons-2026-09-05.md
+new file mode 100644
+index 0000000..a4c26be
+--- /dev/null
++++ b/memory/data-loop-lessons-2026-09-05.md
+@@ -0,0 +1,63 @@
++# Bài học từ lane D (vòng dữ liệu: log session + nhãn GOOD/FALSE) — 2026-09-05
++
++**Bối cảnh:** lane D thêm `SessionLogger` (JSONL, thread riêng), nút GOOD/FALSE
++trên `NotchListPanel`, và `tools/logstats.py`. 8 task, suite 402 → 430, không
++đụng audio path (0 dB). Spec: `docs/superpowers/specs/2026-09-05-data-loop-design.md`.
++Plan + amendments A-1..A-10: `docs/superpowers/plans/2026-09-05-data-loop.md`.
++
++## 1. `juce::JSON::toString` in double tới 18 chữ số — làm tròn TRƯỚC khi vào `var`
++
++`serialiseDouble` của JUCE không giới hạn số chữ số: một magnitude 0.00123 có
++thể in ra `0.001229999999999999`. Không sửa được ở bước serialise vì lúc đó
++giá trị đã là double thật trong `var`. Phải làm tròn về 3 chữ số có nghĩa
++(`roundSig3`) **trước khi** nhét vào `var`, không phải format lại chuỗi sau.
++
++## 2. `SessionLogger::log(const var&)` phải clone trước khi stamp `t` — sửa `var` const vẫn mutate được caller
++
++`getDynamicObject()` trên một `var` là non-const về mặt kỹ thuật của kiểu trả
++về (con trỏ tới `DynamicObject` dùng chung), nên gọi nó trên một tham số
++`const var&` rồi set thêm property `"t"` **sửa luôn object của caller** — dù
++chữ ký hàm là const-correct trên giấy. Phải `var::clone()` (deep copy) trước
++khi thêm `t`, nếu không caller giữ một `var` đã bị logger tự ý thêm field.
++
++## 3. Không bao giờ start logger trong ctor của `MainComponent`
++
++26 test hiện có cộng `HandsFreeSnapshot` đều dựng `MainComponent` để test
++layout/logic, không phải để chạy một phiên thật. Nếu logger start trong ctor,
++mỗi lần chạy test suite sẽ ghi — và **prune** — thư mục log thật ở
++`%APPDATA%`. Logger chỉ start từ `startAudio()` (production) hoặc
++`startSessionLog(dir)` test-only, không bao giờ từ constructor.
++
++## 4. Test headless phải gọi `button->onClick()`, không phải `triggerClick()`
++
++`triggerClick()` post một message async qua `MessageManager` để mô phỏng
++tương tác chuột thật; test suite headless không bơm message loop đó nên
++message không bao giờ chạy — test tưởng nút không làm gì. Gọi thẳng
++`onClick()` (lambda) là cách duy nhất thấy hiệu ứng ngay trong cùng frame,
++và cũng là lý do `tools/snapshot.cpp` dùng `goodButtonForTest(...)->onClick()`
++thay vì mô phỏng click chuột.
++
++## 5. Nửa cái reset còn tệ hơn không reset gì (widen 1→2, A-9)
++
++Amendment A-9 định reset `Detector` của làn 1 khi slot widen 1→2 để dọn cửa
++sổ phân tích cũ. Nhưng `CandidateScorer` giữ history riêng (EMA rise/novelty)
++không bị đụng tới — làn vừa quay lại có `Detector` sạch nhưng `CandidateScorer`
++bão hòa 0 trên hai trục rise/novelty trong ~200 ms, tức **dễ bắn notch hơn**
++hành vi 1.1.1 đang chạy, ngược hẳn ý định "làm sạch trạng thái cũ". Phán
++quyết điều phối viên: RÚT hành vi này khỏi lane D (owner constraint "0 dB,
++không đụng audio/detection path" đã đủ lý do); có nên gate `riseReferenceMs`
++cho làn tái nhập hay không là quyết định owner còn treo cho lane S. Bài học
++chung: reset một phần trạng thái liên kết (Detector) mà bỏ qua phần còn lại
++(CandidateScorer history) không "an toàn hơn" — nó đổi hành vi theo hướng
++không ai chủ định.
++
++## 6. Hai bẫy quy trình nhiều-agent trong ngày này
++
++- **Một prompt lane D dán vào hai session** tạo ra hai session song song cùng
++  nhận việc trên MỘT lane — `list_sessions` là cách phát hiện; handoff/ledger
++  nên ghi rõ session nào đang sở hữu lane nào để tránh hai bên cùng sửa một
++  file.
++- **Một worktree app tái dùng tên thư mục cũ** (kiểu
++  `chore-infra-prune-orphans-…`) bị một session khác coi là orphan và prune
++  mất. Trước khi prune bất kỳ worktree nào: `git worktree list` **và** kiểm
++  tra cwd của mọi session đang chạy, không chỉ suy từ tên thư mục.
+diff --git a/tools/snapshot.cpp b/tools/snapshot.cpp
+index 76b3989..5cab0f2 100644
+--- a/tools/snapshot.cpp
++++ b/tools/snapshot.cpp
+@@ -273,12 +273,40 @@ int main (int argc, char** argv)
+             std::cout << "ageing notch at " << placement.hz << " Hz for "
+                       << placement.waitMs << " ms" << std::endl;
+             juce::Thread::sleep (placement.waitMs);
+         }
+     }
+ 
+     pump (tapL, tapR, *controller, 4, hop);
+     app.getSpectrumViewForTest().refreshFromSnapshot();
+     app.getNotchListPanelForTest().refreshFromSnapshot();
+ 
++    // Lane D: one row unjudged, one GOOD, one FALSE -- the FALSE row is
++    // still in this (stale) snapshot because nothing is pumped after the
++    // click, which is exactly the frame an operator sees for the ~250 ms
++    // before the panel's next refresh drops it. Rows are found by their
++    // displayed frequency text rather than by index: placement order in the
++    // loop above is an implementation detail, not a promise about row order.
++    {
++        auto& list = app.getNotchListPanelForTest();
++        int goodRow = -1, falseRow = -1;
++        for (int i = 0; i < list.rowCountForTest(); ++i)
++        {
++            const auto freq = list.rowForTest (i).freq;
++            if (freq == "247 Hz")
++                goodRow = i;
++            else if (freq == "1.9 kHz")
++                falseRow = i;
++        }
++        if (goodRow < 0 || falseRow < 0)
++        {
++            std::cerr << "snapshot: could not find 247 Hz / 1.9 kHz rows to "
++                          "click verdicts on (goodRow=" << goodRow
++                       << " falseRow=" << falseRow << ")" << std::endl;
++            return 1;
++        }
++        list.goodButtonForTest (goodRow)->onClick();     // 247 Hz  -> GOOD
++        list.falseButtonForTest (falseRow)->onClick();   // 1.9 kHz -> FALSE, clears the notch
++    }
++
+     return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
+ }

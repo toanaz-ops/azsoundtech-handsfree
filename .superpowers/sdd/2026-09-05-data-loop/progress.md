@@ -50,3 +50,9 @@ Task 7: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE c27f724; fi
 Task 7: fix round 1/5 (3 addressed, 0 open; commits c27f724..d14e581; controller ran the tool: 1007.8 Hz x2 only, 4-flag gate exit 0)
 Task 7: minor (deferred): first-match grouping can chain across adjacent bins; verdict-after-clear on a reused (slot,lane,index) key is theoretical
 Task 7: complete (commits 04239d1..d14e581, review clean after 1 fix round)
+Task 8: dispatched (BASE 1ca01e9, implementer sonnet, brief task-8-brief.md)
+Task 8: review — 2 Important: memory note lacks the frontmatter (sibling sdd-workspace-gitignore-trap has it); release note bullet "slot mono → stereo không dò lại đuôi audio cũ của làn R" describes the REMOVED widen-reset (plan-mandated text, now false). Minor: KY-THUAT top-matter still v1.1.0.
+Task 8: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE fd95769; findings: frontmatter, drop the false bullet, top-matter version)
+Task 8: fix round 1/5 (3 addressed, 0 open; commits fd95769..600f1b2)
+Task 8: complete (commits 1ca01e9..600f1b2, review clean after 1 fix round; PNGs sent to owner)
+Task 9: dispatched — independent read-only verifier (az-harness:verifier) against spec §4 tests 1-16 + final whole-branch review (opus) with the deferred-minor list

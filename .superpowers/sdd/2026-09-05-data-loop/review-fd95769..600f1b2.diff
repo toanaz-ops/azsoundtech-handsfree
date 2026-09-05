@@ -1,0 +1,82 @@
+# Review package: fd95769..HEAD
+
+## Commits
+600f1b2 docs: lane D — memory note frontmatter, drop the removed widen-reset claim from the tester note, version top-matter (review round 1)
+
+## Files changed
+ docs/KY-THUAT-CHONG-HU.md              | 2 +-
+ docs/release-notes/1.1.2-alpha.md      | 3 +--
+ memory/data-loop-lessons-2026-09-05.md | 7 +++++++
+ 3 files changed, 9 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index c703ec0..5dbf0a0 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -1,14 +1,14 @@
+ # Kỹ thuật chống hú — AZ Soundtech Hands-free
+ 
+ > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
+-> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.0 (chờ release). Số liệu lấy trực tiếp từ
++> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.2 (chờ release). Số liệu lấy trực tiếp từ
+ > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
+ 
+ ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
+ 
+ Nguyên tắc nền tảng của real-time audio: **luồng audio không bao giờ được chờ
+ ai**. Mọi allocation, mutex hay I/O trên luồng đó là một cơn dropout tiềm ẩn.
+ Vì thế hệ thống tách làm hai luồng, trao đổi nhau qua hai kênh lock-free
+ (SPSC — single-producer single-consumer), và mọi thứ còn lại dùng mutex thoải mái:
+ 
+ ```mermaid
+diff --git a/docs/release-notes/1.1.2-alpha.md b/docs/release-notes/1.1.2-alpha.md
+index 6d4b297..ca03ecb 100644
+--- a/docs/release-notes/1.1.2-alpha.md
++++ b/docs/release-notes/1.1.2-alpha.md
+@@ -4,22 +4,21 @@
+ 
+ ## Có gì trong 1.1.2
+ 
+ - Bảng **ACTIVE NOTCHES** có cột **VERDICT** với hai nút mỗi dòng. **FALSE** = app cắt
+   oan (notch nhả ngay, nhãn được ghi). **GOOD** = cắt đúng hú (chỉ ghi nhãn, notch giữ).
+ - Log session `%APPDATA%\AZSoundtech\HandsFree\logs\session-*.jsonl`, một file mỗi lần
+   mở app, giữ 30 file. Ghi: device, mode, tuning, mọi notch đặt/xóa kèm phổ lúc quyết
+   định, và verdict. **Không có audio trong log.**
+ - `tools/logstats.py <file>` in bảng tóm tắt (cần Python 3, không cần thư viện).
+ - Sửa nhỏ từ 1.1.1: LOAD… cập nhật bảng ROUTING ngay; preset có notch làn R cho slot mono
+-  được đếm và ghi log thay vì lặng lẽ bỏ; slot mono → stereo không dò lại đuôi audio cũ
+-  của làn R.
++  được đếm và ghi log thay vì lặng lẽ bỏ.
+ 
+ ## Việc tester cần làm
+ 
+ Bấm **FALSE** khi app cắt oan nốt nhạc, **GOOD** khi cắt đúng hú. Cuối buổi, copy file
+ mới nhất trong thư mục logs và gửi kèm mô tả show. Nếu bấm FALSE mà notch không nhả trong
+ 1 giây, báo lại kèm file log.
+ 
+ ## Vì sao việc này có ích
+ 
+ Mỗi lần bấm là một mẫu có nhãn: phổ lúc detector quyết định, cộng với "đúng" hay "oan"
+diff --git a/memory/data-loop-lessons-2026-09-05.md b/memory/data-loop-lessons-2026-09-05.md
+index a4c26be..7147603 100644
+--- a/memory/data-loop-lessons-2026-09-05.md
++++ b/memory/data-loop-lessons-2026-09-05.md
+@@ -1,10 +1,17 @@
++---
++name: data-loop-lessons
++description: lane D (data loop — SessionLogger, GOOD/FALSE verdicts, tools/logstats.py) pitfalls — JUCE double serialisation rounding, var const-mutation via getDynamicObject, logger start timing vs tests, headless onClick() vs triggerClick(), the withdrawn widen-reset (A-9), multi-agent lane ownership traps
++metadata:
++  type: project
++---
++
+ # Bài học từ lane D (vòng dữ liệu: log session + nhãn GOOD/FALSE) — 2026-09-05
+ 
+ **Bối cảnh:** lane D thêm `SessionLogger` (JSONL, thread riêng), nút GOOD/FALSE
+ trên `NotchListPanel`, và `tools/logstats.py`. 8 task, suite 402 → 430, không
+ đụng audio path (0 dB). Spec: `docs/superpowers/specs/2026-09-05-data-loop-design.md`.
+ Plan + amendments A-1..A-10: `docs/superpowers/plans/2026-09-05-data-loop.md`.
+ 
+ ## 1. `juce::JSON::toString` in double tới 18 chữ số — làm tròn TRƯỚC khi vào `var`
+ 
+ `serialiseDouble` của JUCE không giới hạn số chữ số: một magnitude 0.00123 có
