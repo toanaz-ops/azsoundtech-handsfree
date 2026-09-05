@@ -389,3 +389,122 @@ touched files (the one C4996 in `MainComponent.cpp:1265` predates this lane).
 - **Concerns 1–5 of the round-0 report still stand as written** — in
   particular no screenshot is owed until R3 wires the provider and the chip
   first renders a live state.
+
+---
+
+## Fix round 2 — the one residual finding, closed
+
+**Commit:** `910b1a0` fix(gui): reset the displayed ring-risk field on a slot
+switch, not just the hold.
+**Level change:** still 0 dB — three files, all GUI/test
+(`git show --numstat 910b1a0`: `src/gui/SpectrumView.h` +7, `src/gui/SpectrumView.cpp`
++2/−1, `tests/test_spectrumview.cpp` +34/−1).
+
+### The finding
+
+Round 1 fixed `ringRiskHold_` (the hysteresis state) on `setController` but
+missed `ringRisk_` — the **separate** field `paint()` (`SpectrumView.cpp:908-925`)
+actually reads. `timerCallback()` is the only other writer of `ringRisk_`, so
+between a slot switch and the next timer tick, `setController`'s own
+unconditional `repaint()` (`:547`, now `:552`) could paint the *old* slot's
+stale `Critical` badge for up to one 30 fps frame. The round-1 test drove
+`ringRiskHoldForTest()` directly and never read `ringRisk_` / `getRingRisk()`,
+so this was unverified.
+
+### What changed
+
+**`SpectrumView::setController`** (`src/gui/SpectrumView.cpp:541-548`) now
+resets `ringRisk_ = RingRisk::Unavailable;` on the line immediately after
+`ringRiskHold_ = {};`, with the comment explaining why both are needed: the
+hold reset alone doesn't stop the stale value already sitting in `ringRisk_`
+from being painted before the next `timerCallback()` runs.
+
+**New test-only accessor**, mirroring the existing `ringRiskHoldForTest()`
+pattern exactly: `[[nodiscard]] RingRisk& ringRiskForTest() { return
+ringRisk_; }` (`src/gui/SpectrumView.h`, next to `ringRiskHoldForTest()`).
+Read/write, because a test needs to *put* the displayed field into a known
+state (mimicking what a live `timerCallback()` tick would have left there)
+before exercising `setController()`, then read it back afterward.
+
+### Covering test (`tests/test_spectrumview.cpp:804-831`)
+
+`RingRiskDisplayedFieldDoesNotSurviveASlotSwitch`: sets
+`view.ringRiskForTest() = Risk::Critical` (slot A's alarm), calls
+`view.setController(slotB.controller)`, and asserts `view.getRingRisk() ==
+Risk::Unavailable` immediately after — no timer tick, no sleep. This is
+distinct from the existing `RingRiskHoldDoesNotSurviveASlotSwitch`, which only
+proves the *hold* was cleared and never reads `ringRisk_` at all.
+
+**Deferred nit fixed too:** `RingRiskDoesNotFlickerAcrossManyHoldWindows`
+(`tests/test_spectrumview.cpp:750`) asserted `EXPECT_GT (now - 100.0, 4.0 *
+kHoldMs)`. The loop runs 90 frames of `1000.0 / 30.0` ms, so `now - 100.0`
+lands on exactly `3000.0` — the same value as `4.0 * kHoldMs` (750) —
+an exact floating-point boundary that `EXPECT_GT` could flip on rounding.
+Changed the margin to `3.9 * kHoldMs` (2925), comfortably below the ~3000 the
+loop actually reaches, while still proving the run outlasted several hold
+windows.
+
+### Mutation check — RED against the pre-fix code
+
+Reverted the one-line `ringRisk_ = RingRisk::Unavailable;` reset, rebuilt, ran
+the new test alone:
+
+```
+$ cmake --build build --config Release --target HandsFreeTests
+$ ./build/tests/Release/HandsFreeTests.exe --gtest_filter=*RingRiskDisplayedFieldDoesNotSurviveASlotSwitch*
+[ RUN      ] SpectrumView.RingRiskDisplayedFieldDoesNotSurviveASlotSwitch
+tests\test_spectrumview.cpp(831): error: Expected equality of these values:
+  view.getRingRisk()
+    Which is: 4-byte object <03-00 00-00>
+  Risk::Unavailable
+    Which is: 4-byte object <00-00 00-00>
+[  FAILED  ] SpectrumView.RingRiskDisplayedFieldDoesNotSurviveASlotSwitch (40 ms)
+```
+
+`<03-00 00-00>` is `RingRisk::Critical` — slot A's alarm, still on screen
+after switching to slot B. Confirms the test catches exactly the reviewer's
+predicted failure. Restored the fix.
+
+### GREEN — focused run after the fix
+
+```
+$ cmake --build build --config Release --target HandsFreeTests
+$ ./build/tests/Release/HandsFreeTests.exe --gtest_filter=*RingRisk*
+[----------] 11 tests from SpectrumView
+[       OK ] SpectrumView.RingRiskBandsAgainstThePublishedThresholdNotAHardcodedOne (0 ms)
+[       OK ] SpectrumView.RingRiskIsUnavailableWheneverTheNumberCannotBeTrusted (0 ms)
+[       OK ] SpectrumView.RingRiskStepsUpImmediately (0 ms)
+[       OK ] SpectrumView.RingRiskHoldsAStepDownForTheHoldTimeThenFalls (0 ms)
+[       OK ] SpectrumView.RingRiskDoesNotFlickerWhileAScoreOscillatesAcrossABoundary (0 ms)
+[       OK ] SpectrumView.RingRiskUnavailableOverridesTheHold (0 ms)
+[       OK ] SpectrumView.RingRiskStepUpRestartsTheHold (0 ms)
+[       OK ] SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows (0 ms)
+[       OK ] SpectrumView.RingRiskFallsSevenFiftyAfterTheLastCriticalObservation (0 ms)
+[       OK ] SpectrumView.RingRiskHoldDoesNotSurviveASlotSwitch (8 ms)
+[       OK ] SpectrumView.RingRiskDisplayedFieldDoesNotSurviveASlotSwitch (7 ms)
+[----------] 1 test from MainComponent
+[       OK ] MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt (212 ms)
+[----------] 8 tests from NotchControllerRingRisk (all OK)
+[  PASSED  ] 20 tests.
+```
+
+### Full suite
+
+```
+$ cd build && ctest -C Release
+450/451 Test #450: SessionLogger.DestructionWithoutStopWritesSessionEnd .... Passed
+451/451 Test #451: logstats_fixture ......................................... Passed
+
+100% tests passed, 0 tests failed out of 451
+
+Total Test time (real) =  32.26 sec
+```
+
+450 (round-1 baseline) + 1 new = 451. No new warnings for the touched files.
+
+### Status
+
+The re-reviewer's one open finding is closed. Concerns 1–5 of round 0 and the
+notes-for-the-next-reviewer of round 1 still stand as written — in particular
+no screenshot is owed until R3 wires the provider and the chip first renders
+a live state.
