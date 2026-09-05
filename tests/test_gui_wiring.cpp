@@ -874,6 +874,33 @@ TEST (MainComponent, RingRiskReadsUnavailableUntilSomethingProvidesIt)
                gui::SpectrumView::RingRisk::Unavailable);
 }
 
+TEST (MainComponent, RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory)
+{
+    // The pinned test above never ticks the timer, so it can only prove the
+    // FIELD'S default -- byte-identical whether or not ringRiskProvider is
+    // wired. This test drives one real poll through the wired provider (the
+    // headless suite pumps no message loop, so timerCallback never fires on
+    // its own) and asserts on the RESULT of that poll: the monitored slot's
+    // controller is idle, so its snapshot reads ringRiskValid == false, and
+    // riskForScore must report that as Unavailable, not as a reassuring Low.
+    // Mutation-checked: forcing riskForScore to return Low for
+    // !ringRiskValid fails this test (see task-R3-report.md Fix round 1).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    NotchController::SnapshotBuffer snap {};
+    app.getNotchControllerForTest (app.getDisplayedSlot())->copySnapshot (snap);
+    ASSERT_FALSE (snap.ringRiskValid) << "precondition: idle detector has no history yet";
+
+    ringRiskTick (app.getSpectrumViewForTest());
+
+    EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Unavailable);
+}
+
 TEST (MainComponent, RingRiskGoesCriticalWhenTheMonitoredSlotsDetectorConfirms)
 {
     // RED before the wiring: ringRiskProvider is null, so the chip stays N/A
