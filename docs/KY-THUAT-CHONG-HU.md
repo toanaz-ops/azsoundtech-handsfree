@@ -247,14 +247,27 @@ ngoài phạm vi [0, 7] bị **bỏ qua và đếm** vào `skippedNotchCount` �
 Notch có key tùy chọn `lane` (0/1; thiếu = mọi làn); slot có key tùy chọn
 `linked`. `lane` sai → từ chối cả file.
 
-**Trạng thái nối dây (27/08/2026)**: hàm seed first-run đã viết và test đầy đủ
-nhưng app **chưa gọi** nó, installer cũng **chưa chép** thư mục presets — user
-hiện chưa tự có Speech/Music trên máy. GUI cũng chưa có nút nạp/lưu preset
-(`MainComponent::loadPreset` không có caller). Cả hai chờ nối ở bản sau.
+**Trạng thái nối dây (05/09/2026, chuỗi preset trọn vẹn)**: installer chép
+`presets/Speech.json` + `Music.json` vào `$INSTDIR\presets`; `MainComponent`
+ctor gọi `seedDefaultPresets(<exe dir>/presets → %APPDATA%/.../presets)` lúc
+khởi động, **không bao giờ ghi đè** file người dùng đã có (thiếu thư mục nguồn
+là no-op vô hại — repo/test/snapshot vẫn dựng được). GUI có hai nút
+**LOAD… / SAVE…** dưới mục INTERFACE: LOAD nối vào `MainComponent::loadPreset`,
+SAVE gom trạng thái notch đang publish (qua `copySnapshot`) rồi
+`PresetManager::saveToFile`. Từ khi hợp nhất với lane S (05/09/2026), SAVE ghi
+**một notch cho mỗi (slot, làn, index)** kèm key `lane` — không gộp hai làn lại
+nữa, vì ở chế độ INDEP hai làn mang notch khác nhau và gộp là mất sạch notch
+làn 1 — và ghi thêm section `"slots"` mang routing cùng cờ `linked` của từng
+slot đang bật, để trạng thái LINK sống sót qua vòng lưu → nạp. `sampleRate` lấy
+từ snapshot để file luôn mở lại được. FileChooser bất đồng bộ được chốt bằng
+`Component::SafePointer` (tránh UAF khi cửa sổ đóng lúc hộp thoại còn mở).
 
-Loader: lỗi version → từ chối ngay kèm trích version lạ; >16 notch hoặc trùng
-index → từ chối (slot notch đánh địa chỉ theo index, "người sau thắng" nghĩa là
-preset tai nghe ≠ preset trong file); notch trên Nyquist của **file** → từ chối
+Loader: lỗi version → từ chối ngay kèm trích version lạ; >16 notch **trên mỗi
+(slot, làn)** hoặc trùng index **trong cùng một (slot, làn)** → từ chối (slot
+notch đánh địa chỉ theo index, "người sau thắng" nghĩa là preset tai nghe ≠
+preset trong file); hai notch cùng index nhưng khác làn là **hợp lệ**, còn
+`lane` = −1 (mọi làn) đụng với bất kỳ làn nào ở cùng index → từ chối; notch
+trên Nyquist của **file** → từ chối
 (file tự mâu thuẫn), notch trên Nyquist của **device hiện tại** → nạp bình
 thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 
@@ -285,17 +298,22 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 - **Không phủ dưới ~117 Hz @ 48 kHz** (5 × sample rate / 2048) — giới hạn
   hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
 
-## 7. Trạng thái & kiểm chứng (05/09/2026, v1.1.0 — chờ release)
+## 7. Trạng thái & kiểm chứng (05/09/2026, v1.1.1 — chờ release)
 
-- Suite: **396/396 test pass** (ctest Release, MSVC, CI GitHub Actions xanh).
+- Suite: **402/402 test pass** (ctest Release, MSVC, CI GitHub
+  Actions xanh) — +2 test cho nút LOAD/SAVE preset (routing qua chooser tiêm
+  được; round-trip save→load), +1 test round-trip theo làn (INDEP hai làn cùng
+  index khác tần số + `linked` sống sót), +2 test validator theo (slot, làn).
 - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
 - DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
   GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
-  SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel):
-  đã hạ cánh. Bản 1.1.0 thêm **phát hiện theo làn** (lane S): mỗi làn của slot
-  stereo tự dò và tự đặt notch (INDEP mặc định), có nút LINK mỗi slot, cột LANE
-  trong bảng ACTIVE NOTCHES và bộ chọn làn L/R trên analyser. Còn mở: code
-  signing (Task 31, chờ EV cert), integration testing với phần cứng thật
-  (Task 32), nối data cho chip RING RISK (hiện luôn "N/A"), nối GUI nạp/lưu
-  preset + seed first-run, và sweep `laneAsymmetryBonus` (lane T).
+  SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel),
+  **chuỗi preset trọn vẹn** (installer ship presets → seed first-run → nút
+  LOAD/SAVE), và **phát hiện theo làn** (lane S): đã hạ cánh. Bản 1.1.x thêm:
+  mỗi làn của slot stereo tự dò và tự đặt notch (INDEP mặc định), có nút LINK
+  mỗi slot, cột LANE trong bảng ACTIVE NOTCHES và bộ chọn làn L/R trên
+  analyser; preset lưu/nạp được cả `lane` lẫn `linked`. Còn mở: code signing
+  (Task 31, chờ EV cert), integration testing với phần cứng thật (Task 32),
+  nối data cho chip RING RISK (hiện luôn "N/A"), và sweep `laneAsymmetryBonus`
+  (lane T).

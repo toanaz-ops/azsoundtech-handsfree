@@ -11,7 +11,7 @@
 > | 12–15 (harmonic detection, controller, auto-release, soundcheck) | ✅ xong qua bridge/DSP spine |
 > | 16–18, 23 (GUI device/rate/buffer/status/mode) | ✅ xong |
 > | 19–22, 24 (spectrum, overlay, notch list, clear) | ✅ xong — đã ship và rebuild 2 lần (fd70d97, b3d589b, 88959b5, 98a4b08, 0351bca) |
-> | 25 (format half), 26 (presets mặc định) | ✅ xong; wiring có (MainComponent.cpp:401, :458 per-slot adoptPreset) — nhưng nút load/save trên GUI + first-run seeding vẫn CHƯA nối (không có caller) |
+> | 25 (format half), 26 (presets mặc định) | ✅ xong; chuỗi preset trọn vẹn 05/09/2026 (v1.0.5): installer ship `presets/` → `MainComponent` ctor seed first-run (không ghi đè) → nút GUI **LOAD…/SAVE…** nối `loadPreset`/`savePreset`. Xem lane P plan `docs/superpowers/plans/2026-08-27-next-wave.md` |
 > | 27–29 (licensing) | ⏸️ **HOÃN theo D-07** — build + test xong, cố tình chưa wire (freeware v1) |
 > | 30 (NSIS installer) | ✅ xong, verify 20/20 install→launch→uninstall |
 > | 31 (code signing) | 🚫 chờ EV certificate (~$300–500/năm) — vẫn cần dù freeware (SmartScreen) |

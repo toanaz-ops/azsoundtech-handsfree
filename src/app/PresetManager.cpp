@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -536,28 +537,71 @@ juce::StringArray PresetManager::validate (const Preset& preset)
                     + " dB and must be negative or zero");
     }
 
-    if (preset.notches.size() > static_cast<size_t> (MAX_NOTCHES))
-    {
-        errors.add ("the preset holds " + juce::String (static_cast<int> (preset.notches.size()))
-                    + " notches, but a chain has only " + juce::String (MAX_NOTCHES) + " slots");
-    }
-
-    std::set<int> seenIndices;
+    // Chain shape, PER (slot, lane) -- decision [S], widened for lane S.
+    //
+    // Before lane S both lanes of a routing slot always carried identical
+    // notches, so "index" alone addressed a chain slot and counting the whole
+    // notch list against MAX_NOTCHES was the same measurement. It is not any
+    // more: with INDEP detection, lane 0 and lane 1 of one routing slot each
+    // own a FULL 16-notch chain, and a notch at index 2 on lane 0 is a
+    // different filter from a notch at index 2 on lane 1. Both rules therefore
+    // key on (slot, lane, index):
+    //
+    //   * two entries sharing (slot, lane, index) -> refuse, for exactly the
+    //     old reason: the chain is index-addressed, so "last one wins" means
+    //     the preset the user hears is not the preset in the file;
+    //   * lane -1 means EVERY lane of that slot, so it collides with any other
+    //     entry at the same (slot, index) -- including another -1;
+    //   * the count is per chain, i.e. per (slot, lane), and a lane -1 entry
+    //     consumes its index on BOTH lanes so it counts against both.
+    std::map<std::pair<int, int>, std::set<int>> lanesPerSlotIndex;   // (slot,index) -> lanes
+    std::map<std::pair<int, int>, int>           notchesPerSlotLane;  // (slot,lane) -> count
 
     for (size_t i = 0; i < preset.notches.size(); ++i)
     {
         const int position = static_cast<int> (i);
+        const auto& notch  = preset.notches[i];
 
-        validateNotchValues (preset.notches[i], position, nyquistHz, errors);
+        validateNotchValues (notch, position, nyquistHz, errors);
 
-        // Slots are index-addressed, so letting the later of two entries win
-        // would mean the preset the user hears is not the preset in the file.
-        if (! seenIndices.insert (preset.notches[i].index).second)
+        auto& lanes = lanesPerSlotIndex[{ notch.slot, notch.index }];
+
+        const bool clash = lanes.count (notch.lane) > 0        // same lane twice
+                        || lanes.count (-1) > 0                // an every-lane entry is already here
+                        || (notch.lane == -1 && ! lanes.empty());   // this one covers every lane
+
+        if (clash)
         {
             errors.add ("notches[" + juce::String (position) + "]: duplicate \"index\" "
-                        + juce::String (preset.notches[i].index)
-                        + " -- each chain slot may appear at most once");
+                        + juce::String (notch.index)
+                        + " on slot " + juce::String (notch.slot)
+                        + (notch.lane < 0 ? juce::String (" (every lane)")
+                                          : " lane " + juce::String (notch.lane))
+                        + " -- each chain slot may appear at most once per lane");
         }
+
+        lanes.insert (notch.lane);
+
+        if (notch.lane < 0)
+        {
+            for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+                ++notchesPerSlotLane[{ notch.slot, lane }];
+        }
+        else
+        {
+            ++notchesPerSlotLane[{ notch.slot, notch.lane }];
+        }
+    }
+
+    for (const auto& entry : notchesPerSlotLane)
+    {
+        if (entry.second <= MAX_NOTCHES)
+            continue;
+
+        errors.add ("the preset holds " + juce::String (entry.second)
+                    + " notches on slot " + juce::String (entry.first.first)
+                    + " lane " + juce::String (entry.first.second)
+                    + ", but a chain has only " + juce::String (MAX_NOTCHES) + " slots");
     }
 
     return errors;

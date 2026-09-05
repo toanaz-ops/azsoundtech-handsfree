@@ -21,6 +21,8 @@
 
 #include "gui/DevicePanel.h"
 
+#include <functional>
+
 namespace gui
 {
 
@@ -38,6 +40,21 @@ public:
     // actually got a usable rect.
     [[nodiscard]] juce::Rectangle<int> wrappedBoundsForTest() const { return wrapped_.getBounds(); }
 
+    // The PRESET row (Task P3): two buttons under the wrapped DevicePanel.
+    // PUBLIC because they ARE this drawer's interface -- MainComponent wires
+    // their requests and headless tests drive their onClick directly (the same
+    // reason ModeRail's buttons are public). Named-ONLY construction: the
+    // 2-arg brace form treats the second string as a tooltip (JUCE 9 trap,
+    // memory juce9-api-traps).
+    juce::TextButton loadButton { "LOAD..." };
+    juce::TextButton saveButton { "SAVE..." };
+
+    // Fired when the matching button is clicked. The drawer knows nothing about
+    // presets or files -- it just reports the request, exactly as ModeRail
+    // reports a mode. MainComponent turns these into a file chooser + load/save.
+    std::function<void()> onLoadRequested;
+    std::function<void()> onSaveRequested;
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -45,6 +62,11 @@ public:
     // groove under it. 48 px was sized for a badge that no longer lives here.
     static constexpr int kHeaderHeight  = 26;
     static constexpr int kContentHeight = 64;   // DevicePanel's two combo rows
+
+    // The PRESET section below the device combos: its own caption band plus a
+    // button row. getPreferredHeight() grows by exactly these two.
+    static constexpr int kPresetCaptionHeight = 26;
+    static constexpr int kPresetRowHeight     = 28;
 
 private:
     DevicePanel& wrapped_;                 // NOT owned

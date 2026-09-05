@@ -122,7 +122,9 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 1. `memory/MEMORY.md` — index of lessons. Search before re-deriving.
 2. `docs/` — design notes.
 3. `docs/superpowers/specs/` — design docs. (`openspec/` holds only
-   `config.yaml`; OpenSpec is not in use.)
+   `config.yaml`; unused from Claude Code's side, but `.opencode/skills/openspec-*`
+   wires OpenCode's `/opsx-*` commands to it — do not delete it. Verified
+   2026-09-04, see `memory/docs-drift-audit-2026-08-27.md`.)
 
 ## Definition of done
 

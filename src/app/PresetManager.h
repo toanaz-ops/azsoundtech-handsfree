@@ -52,10 +52,15 @@
 //     decision D-00 -- deactivate, never clamp. Clamping is what produced a
 //     measured output peak of 4.11e18; see the derivation in Biquad.h.
 //
-// [S] Chain shape. More than MAX_NOTCHES entries, or two entries claiming one
-//     index, are REFUSED. Slots are index-addressed, so letting the last
-//     duplicate win would mean the preset the user hears is not the preset in
-//     the file.
+// [S] Chain shape, measured PER (slot, lane). More than MAX_NOTCHES entries on
+//     one chain, or two entries claiming one (slot, lane, index), are REFUSED.
+//     Slots are index-addressed, so letting the last duplicate win would mean
+//     the preset the user hears is not the preset in the file.
+//     Widened on 2026-09-05, merging lane P (this format) with lane S (per-lane
+//     detection): each lane of a routing slot owns a FULL chain, so index 2 on
+//     lane 0 and index 2 on lane 1 are two different filters and both are
+//     legal. `lane` = -1 means every lane of the slot and therefore collides
+//     with ANY other entry at the same (slot, index), itself included.
 //
 // [D] Device name. METADATA, never a gate. A preset saved on another
 //     interface loads normally and keeps the stored name so the caller can

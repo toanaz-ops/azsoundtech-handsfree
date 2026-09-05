@@ -397,6 +397,38 @@ TEST (PresetManager, MoreNotchesThanTheChainHasSlotsIsRefused)
     EXPECT_FALSE (result.ok);
 }
 
+// Lane S: each lane of a routing slot owns a FULL chain, so index 2 on lane 0
+// and index 2 on lane 1 are two different filters. This is what INDEP
+// detection writes on every save.
+// RED IF validate() goes back to keying uniqueness on "index" alone (or on
+// (slot, index)) -- the file every stereo INDEP slot produces would be refused.
+TEST (PresetManager, DuplicateIndexOnDifferentLanesIsAccepted)
+{
+    const auto result = PresetManager::fromJSON (
+        R"({"version":"1.0","device":"d","sampleRate":48000,"bufferSize":64,"notches":[)"
+        R"({"index":2,"freq":1000.0,"Q":30.0,"depth":-12.0,"slot":0,"lane":0},)"
+        R"({"index":2,"freq":2000.0,"Q":30.0,"depth":-12.0,"slot":0,"lane":1}]})");
+
+    EXPECT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    EXPECT_EQ (result.preset.notches.size(), 2u);
+}
+
+// A notch with no "lane" key means EVERY lane of its slot, so it occupies the
+// index on both and cannot share it with a lane-specific entry -- one of the
+// two would silently lose, which is the whole reason [S] refuses duplicates.
+// RED IF the per-lane widening treats -1 as just another lane value.
+TEST (PresetManager, DuplicateIndexOnLaneMinusOneAndALaneIsRefused)
+{
+    const auto result = PresetManager::fromJSON (
+        R"({"version":"1.0","device":"d","sampleRate":48000,"bufferSize":64,"notches":[)"
+        R"({"index":2,"freq":1000.0,"Q":30.0,"depth":-12.0,"slot":0},)"
+        R"({"index":2,"freq":2000.0,"Q":30.0,"depth":-12.0,"slot":0,"lane":1}]})");
+
+    EXPECT_FALSE (result.ok);
+    EXPECT_TRUE (result.errors.joinIntoString ("; ").containsIgnoreCase ("duplicate"))
+        << result.errors.joinIntoString ("; ");
+}
+
 //==============================================================================
 // Reporting
 //==============================================================================

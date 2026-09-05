@@ -1,5 +1,6 @@
 #include "app/MainComponent.h"
 
+#include "app/PresetFirstRun.h"
 #include "app/PresetManager.h"
 #include "gui/DeviceViewModel.h"
 
@@ -52,6 +53,25 @@ MainComponent::MainComponent()
     // through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
 
+    // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
+    // Source: <exe dir>/presets (the installer puts them there, P1). Running
+    // from the repo, or from a test/snapshot exe with no presets/ beside it,
+    // the source dir is simply absent -- seedDefaultPresets reports that in
+    // SeedResult::errors and the app carries on. Message thread, runs once,
+    // touches no audio state.
+    {
+        const auto exeDir = juce::File::getSpecialLocation (
+            juce::File::currentExecutableFile).getParentDirectory();
+        const auto seeded = presetfirstrun::seedDefaultPresets (
+            exeDir.getChildFile ("presets"),
+            PresetManager::getPresetDirectory());
+        // Result deliberately ignored: the only failure modes are a missing
+        // source dir (the normal repo/test/snapshot case) or a copy error, and
+        // neither should block startup -- the app runs fine without seeded
+        // presets, and logging the missing-source case would just be noise.
+        juce::ignoreUnused (seeded);
+    }
+
     // The window sizes itself from this (DocumentWindow::setContentOwned), so
     // an unsized content component opens at the resize LIMIT instead.
     //
@@ -94,6 +114,78 @@ MainComponent::MainComponent()
         for (auto& controller : notchControllers_)
             remaining = juce::jmax (remaining, controller->getSoundcheckRemainingMs());
         return remaining;
+    };
+
+    // PRESET row (Task P3). The drawer only reports the request; the chooser and
+    // the load/save live here. The choosers are injectable so a headless test
+    // can hand the inner callback a known file with no native dialog.
+    presetLoadChooser = [] (std::function<void (const juce::File&)> onPicked)
+    {
+        // Kept alive across the async call by the shared_ptr captured in the
+        // completion lambda (memory gui-console-lessons-2026-08-24).
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Load preset", PresetManager::getPresetDirectory(), "*.json");
+
+        chooser->launchAsync (
+            juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+            [chooser, onPicked] (const juce::FileChooser& fc)
+            {
+                const auto file = fc.getResult();
+                if (file != juce::File{})   // a cancel returns an invalid file
+                    onPicked (file);
+            });
+    };
+
+    presetSaveChooser = [] (std::function<void (const juce::File&)> onPicked)
+    {
+        auto chooser = std::make_shared<juce::FileChooser> (
+            "Save preset", PresetManager::getPresetDirectory(), "*.json");
+
+        chooser->launchAsync (
+            juce::FileBrowserComponent::saveMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::warnAboutOverwriting,
+            [chooser, onPicked] (const juce::FileChooser& fc)
+            {
+                const auto file = fc.getResult();
+                if (file != juce::File{})
+                    onPicked (file);
+            });
+    };
+
+    // The button requests route through the injectable choosers to load/save.
+    // The outer lambda is invoked synchronously by the drawer's onClick, so a
+    // plain `this` capture there is fine. But the INNER callback (onPicked) is
+    // stored inside the chooser and fires later, after launchAsync returns --
+    // possibly after MainComponent has been destroyed if the user closes the
+    // window while the native picker is open. That inner callback crosses the
+    // async boundary back into MainComponent, so it captures a
+    // Component::SafePointer and no-ops if the component is already gone. The
+    // shared_ptr<FileChooser> above keeps the chooser itself alive for the
+    // duration of the async call; the SafePointer guards the completion.
+    deviceDrawer_.onLoadRequested = [this]
+    {
+        if (presetLoadChooser)
+        {
+            const juce::Component::SafePointer<MainComponent> safe (this);
+            presetLoadChooser ([safe] (const juce::File& f)
+            {
+                if (safe != nullptr)
+                    safe->loadPreset (f);
+            });
+        }
+    };
+    deviceDrawer_.onSaveRequested = [this]
+    {
+        if (presetSaveChooser)
+        {
+            const juce::Component::SafePointer<MainComponent> safe (this);
+            presetSaveChooser ([safe] (const juce::File& f)
+            {
+                if (safe != nullptr)
+                    safe->savePreset (f);
+            });
+        }
     };
 
     // The protection badge is MASTHEAD furniture, not drawer furniture. It
@@ -491,6 +583,94 @@ bool MainComponent::loadPreset (const juce::File& file)
             controller->start();
 
     return true;
+}
+
+bool MainComponent::savePreset (const juce::File& file)
+{
+    Preset preset;
+    preset.device     = engine_.getCurrentDeviceName();
+    preset.bufferSize = engine_.getCurrentBufferSize();
+
+    // The rate the notches were PUBLISHED at (SnapshotBuffer::sampleRate), taken
+    // as the first non-zero one seen -- all slots share the device rate. Never
+    // 0: saveToFile validates each notch's freq against this rate's Nyquist, and
+    // a notch detected at rate R is below R/2 by construction. See PresetManager
+    // decision [N]. If no slot ever published (idle app, no block pumped) this
+    // stays 0 and saveToFile refuses the empty preset -- the honest outcome,
+    // surfaced through the returned bool rather than by inventing a rate.
+    double presetRate = 0.0;
+
+    for (int s = 0; s < kMaxSlots; ++s)
+    {
+        NotchController::SnapshotBuffer snap {};
+        notchControllers_[(std::size_t) s]->copySnapshot (snap);
+
+        if (presetRate <= 0.0 && snap.sampleRate > 0.0)
+            presetRate = snap.sampleRate;
+
+        // ONE PresetNotch per SNAPSHOT notch -- (slot, lane, index), no dedup.
+        //
+        // This loop used to collapse the two lanes of a slot into one entry,
+        // keeping the lowest channel and never writing "lane". That was
+        // correct while lane P owned this file alone: detection was mono and
+        // adoptPreset mirrored every notch onto both lanes, so the two lanes
+        // held identical parameters and one of them described both.
+        //
+        // Spec S (docs/superpowers/specs/2026-09-05-stereo-aware-detection-
+        // design.md) ended that. Every lane of a stereo slot now detects and
+        // places its own notches, INDEP is the default, and LINK is per slot.
+        // Under those rules a dedup silently DROPS every lane-1 notch: the
+        // soundman saves a tuned rig and reopens half of it. So each snapshot
+        // notch is written on its own, carrying sn.channel as `lane`.
+        //
+        // Uniqueness is per (slot, lane, index) in PresetManager::validate --
+        // decision [S] -- so two notches sharing an index on different lanes
+        // are a legal file, which is exactly what INDEP produces.
+        for (std::uint32_t n = 0; n < snap.notchCount; ++n)
+        {
+            const auto& sn = snap.notches[n];
+
+            PresetNotch pn;
+            pn.index   = sn.index;
+            pn.freq    = sn.frequency;
+            pn.Q       = sn.Q;
+            pn.depthDB = sn.depthDB;
+            pn.slot    = s;
+            pn.lane    = sn.channel;
+            preset.notches.push_back (pn);
+        }
+    }
+
+    // The "slots" section: routing AND the per-slot LINK flag, for every slot
+    // the engine reports enabled. Without it a saved preset restores notches
+    // onto default stereo routing and with LINK cleared -- i.e. it loses the
+    // half of the tuning that is not a notch. loadPreset() applies each
+    // entry's `linked` before setWidth(), so the reloaded slot detects in the
+    // mode it was saved in.
+    for (int s = 0; s < kMaxSlots; ++s)
+    {
+        const SlotConfig config = engine_.getSlotConfig (s);
+
+        if (! config.enabled)
+            continue;
+
+        PresetSlot entry;
+        entry.index  = s;
+        entry.config = config;
+        entry.linked = isSlotLinked (s);
+        preset.slots.push_back (entry);
+    }
+
+    preset.sampleRate = presetRate;
+
+    juce::StringArray errors;
+    const bool ok = PresetManager::saveToFile (preset, file, errors);
+
+    if (! ok)
+        juce::Logger::writeToLog (
+            "savePreset \"" + file.getFileName() + "\" refused: " + errors.joinIntoString ("; "));
+
+    return ok;
 }
 
 void MainComponent::setDisplayedSlot (const int slotIndex)

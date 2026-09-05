@@ -41,4 +41,5 @@ bounds.withTrimmedLeft (l).withTrimmedRight (r)
 Ghi lại bởi một phiên agent song song cùng ngày, phiên đó redesign UI theo một
 hướng khác và cuối cùng bị thay bằng "Sodium Rack". Hai bài học trên là thứ duy
 nhất trong nhánh đó không tái tạo được từ nơi khác — phần còn lại là skill cài
-từ GitHub (xem `skills-lock.json`) hoặc code đã bị thay thế.
+từ GitHub (xem `skills-lock.json`, đã xóa 2026-09-04, xem
+memory/docs-drift-audit-2026-08-27.md) hoặc code đã bị thay thế.

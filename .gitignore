@@ -71,3 +71,8 @@ Thumbs.db
 
 # HandsFreeSnapshot output (see README, "Reviewing a GUI change").
 shots/
+
+# CTest scratch dir when ctest runs from repo root, and a stray desktop
+# shortcut a tester dropped there — both untracked at root, 2026-09-04.
+/Testing/
+/*.lnk

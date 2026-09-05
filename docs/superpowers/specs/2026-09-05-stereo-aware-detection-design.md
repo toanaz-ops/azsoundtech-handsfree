@@ -235,10 +235,12 @@ trong `readSlotEntry`. Version giữ `"1.0"`: parser dùng `hasProperty`
 cho key tùy chọn, file cũ không có key vẫn nạp đúng nghĩa cũ.
 
 Serializer (`toJSON`, dùng bởi test round-trip) ghi `lane` và `linked`
-luôn. **App hiện không có đường lưu preset** (`savePreset` không tồn
-tại; `MainComponent` chỉ có `loadPreset`), nên `linked` chỉ đi từ file
-vào app cho đến khi lane P (preset chain, plan 2026-08-27) làm nút
-LOAD/SAVE.
+luôn. **Hợp nhất với lane P ngày 05/09/2026**: `savePreset` ghi **một
+notch cho mỗi (slot, làn, index)** kèm key `lane`, và một section
+`"slots"` mang routing cùng cờ `linked` của từng slot đang bật; quy tắc
+duy nhất của validator cũng tính theo **(slot, làn, index)** (`lane` =
+−1 đụng với bất kỳ làn nào ở cùng index). `linked` vì thế đi được cả hai
+chiều — từ file vào app và từ app ra file.
 
 ### 4.7 GUI
 
@@ -345,7 +347,7 @@ Không có test nào cần card âm thanh.
 | S-7 | LINKED chọn index rảnh ở cả hai làn | Hàm cũ chỉ nhìn làn 0 sẽ ghi đè notch INDEP của làn 1 |
 | S-8 | `adoptPreset` giữ `p.index`, không tìm index rảnh | Identity GUI khóa theo index; round-trip phải giữ |
 | S-9 | `lane` sai → từ chối file ở SHAPE pass | Hai overload `fromJSON` phải hành xử giống nhau; cơ chế skip của `slot` chỉ có ở một overload |
-| S-10 | Không có SAVE preset trong lane này | `savePreset` chưa tồn tại; lane P làm |
+| S-10 | ~~Không có SAVE preset trong lane này~~ → hợp nhất với lane P 05/09/2026 | `savePreset` ghi một notch cho mỗi (slot, làn, index) kèm `lane`, và section `"slots"` mang `linked`; validator tính duy nhất theo (slot, làn, index) |
 
 ## 8. Phản biện đã xử lý
 
