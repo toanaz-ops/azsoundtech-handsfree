@@ -38,3 +38,9 @@ Task 4: complete (commits bea2d03..ae3cfa3, review clean)
 Task 5: dispatched (BASE ae3cfa3, implementer sonnet, brief task-5-brief.md)
 Task 5: minor (deferred, plan-mandated): ensureButtonsFor(key, notch) ignores `notch` — drop the parameter in the final pass
 Task 5: complete (commits ae3cfa3..5fee378, review clean; controller read shots/console-live.png: VERDICT header + GOOD/FALSE legible on all rows, HELD intact)
+Task 6: dispatched (BASE 03a9afd, implementer sonnet, brief task-6-brief.md)
+Task 6: minor (deferred): MainComponent.cpp sink builds the full notch var (3x1025 roundSig3 + arrays) even when the logger is inactive — wrap in `if (sessionLogger_.isActive())`
+Task 6: minor (deferred): global vs per-slot `tuning` events emit int vs double for rise_ms/q/depth_db — cast the global ones to double
+Task 6: minor (deferred): no `mode` recorded at session start unless requestMode is called — log the current mode right after session_start in startSessionLog
+Task 6: minor (deferred): new tests leave %TEMP%\az-handsfree-sessionlog\* dirs behind (self-cleaning next run); sessionHeader()/notchEventToVar() declared mid data-member block (plan-mandated); lastLoadSkipped_ not reset on a failed load
+Task 6: complete (commits 03a9afd..2279109, review clean; extra read-only verifier 11/11 PASS)

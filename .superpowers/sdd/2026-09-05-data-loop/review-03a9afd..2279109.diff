@@ -1,0 +1,876 @@
+# Review package: 03a9afd..HEAD
+
+## Commits
+2279109 feat(app): session log wired through MainComponent; verdict clears with VerdictFalse; version from CMake
+
+## Files changed
+ src/app/MainComponent.cpp | 253 +++++++++++++++++++++++++++++++++++++++++++++-
+ src/app/MainComponent.h   |  28 ++++-
+ src/main.cpp              |   8 +-
+ tests/test_gui_wiring.cpp | 173 +++++++++++++++++++++++++++++++
+ 4 files changed, 458 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index d109062..7143ac8 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -1,16 +1,17 @@
+ #include "app/MainComponent.h"
+ 
+ #include "app/PresetFirstRun.h"
+ #include "app/PresetManager.h"
+ #include "gui/DeviceViewModel.h"
+ 
++#include <cmath>
+ #include <cstddef>
+ #include <vector>
+ 
+ namespace
+ {
+ // 5 Hz. The status line carries a latency figure and two channel counts; there
+ // is nothing here a soundman reads faster than that, and the poll costs three
+ // relaxed atomic loads plus a device query.
+ constexpr int kStatusRefreshMs = 200;
+ 
+@@ -21,20 +22,78 @@ constexpr int kMinSpectrumHeight = 120;
+ // notch rows.
+ constexpr int kNotchListHeight = 120;
+ 
+ // The largest share of the space under the transport the bottom floor may
+ // take, however much its contents want. See floorHeightFor().
+ constexpr float kMaxFloorShare = 0.55f;
+ 
+ // Breathing room added to the height the floor needs, so "it fits" is visibly
+ // true rather than true to the pixel. See heightThatFitsTheFloor().
+ constexpr int kFloorSlack = 24;
++
++//==============================================================================
++// Lane D (data loop): session-log event shaping. roundSig3 is what keeps a
++// 1025-value spectrum array short in the JSONL file -- JSON::toString would
++// otherwise print every double to full precision.
++double roundSig3 (double v)
++{
++    if (v == 0.0 || ! std::isfinite (v)) return 0.0;
++    const double e = std::floor (std::log10 (std::abs (v)));
++    const double scale = std::pow (10.0, 2.0 - e);
++    return std::round (v * scale) / scale;
++}
++
++juce::var spectrumVar (const std::array<float, Detector::kNumBins>& bins)
++{
++    juce::Array<juce::var> out;
++    out.ensureStorageAllocated (Detector::kNumBins);
++    for (float b : bins)
++        out.add (roundSig3 ((double) b));
++    return out;
++}
++
++const char* originName (NotchController::Origin o)
++{
++    switch (o)
++    {
++        case NotchController::Origin::Detector:   return "detector";
++        case NotchController::Origin::Preset:     return "preset";
++        case NotchController::Origin::Manual:     return "manual";
++        case NotchController::Origin::Soundcheck: return "soundcheck";
++    }
++    return "unknown";
++}
++
++const char* reasonName (NotchController::ClearReason r)
++{
++    switch (r)
++    {
++        case NotchController::ClearReason::Manual:             return "manual";
++        case NotchController::ClearReason::ClearAll:           return "clear_all";
++        case NotchController::ClearReason::AutoRelease:        return "auto_release";
++        case NotchController::ClearReason::WidthChange:        return "width_change";
++        case NotchController::ClearReason::VerdictFalse:       return "verdict_false";
++        case NotchController::ClearReason::PartialApplyUnwind: return "partial_apply_unwind";
++    }
++    return "unknown";
++}
++
++const char* modeName (AudioEngine::Mode m)
++{
++    switch (m)
++    {
++        case AudioEngine::Mode::Bypass:     return "bypass";
++        case AudioEngine::Mode::Auto:       return "auto";
++        case AudioEngine::Mode::Soundcheck: return "soundcheck";
++    }
++    return "unknown";
++}
+ } // namespace
+ 
+ MainComponent::MainComponent()
+     : notchControllers_ ([this]
+       {
+           // Heap allocation per slot -- see the member comment in the header
+           // for why these cannot live inside this object's stack frame.
+           decltype (notchControllers_) controllers;
+           for (int i = 0; i < kMaxSlots; ++i)
+               controllers[(std::size_t) i] =
+@@ -46,20 +105,30 @@ MainComponent::MainComponent()
+       }())
+     , spectrumView_ (*notchControllers_[0])
+     , modeRail_ (gui::ModeRail::Orientation::Horizontal)
+     , notchListPanel_ (*notchControllers_[0])
+     , deviceDrawer_ (devicePanel_)
+ {
+     // The Sodium Rack theme, applied once here and inherited by every child
+     // through the Component::getLookAndFeel() chain.
+     setLookAndFeel (&azLookAndFeel_);
+ 
++    // Lane D (data loop): every controller's Set/Clear events feed the
++    // session log. Wired here, with every detector thread still stopped, so
++    // setEventSink()'s precondition holds; see the destructor for the
++    // matching teardown order.
++    for (auto& controller : notchControllers_)
++        controller->setEventSink ([this] (const NotchController::NotchEvent& e)
++        {
++            sessionLogger_.log (notchEventToVar (e));
++        });
++
+     // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
+     // Source: <exe dir>/presets (the installer puts them there, P1). Running
+     // from the repo, or from a test/snapshot exe with no presets/ beside it,
+     // the source dir is simply absent -- seedDefaultPresets reports that in
+     // SeedResult::errors and the app carries on. Message thread, runs once,
+     // touches no audio state.
+     {
+         const auto exeDir = juce::File::getSpecialLocation (
+             juce::File::currentExecutableFile).getParentDirectory();
+         const auto seeded = presetfirstrun::seedDefaultPresets (
+@@ -85,20 +154,38 @@ MainComponent::MainComponent()
+     slotUsesGlobalTuning_.fill (true);
+ 
+     addAndMakeVisible (spectrumView_);
+     addAndMakeVisible (modeRail_);
+     addAndMakeVisible (deviceDrawer_);
+     addAndMakeVisible (slotScroller_);
+     // The notch list is a FIXED bottom strip -- always visible.
+     addAndMakeVisible (notchListPanel_);
+     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
+ 
++    // Lane D: a FALSE verdict is written to the log BEFORE the clear it
++    // causes -- the clear's own notch_clear event carries reason
++    // verdict_false, but the verdict itself (which lane/index/hz a human
++    // rejected) only exists here.
++    notchListPanel_.onVerdict = [this] (int slot, int lane, int index, float hz, bool good, double ageMs)
++    {
++        auto v = SessionLogger::makeEvent ("verdict");
++        auto* o = v.getDynamicObject();
++        o->setProperty ("slot", slot); o->setProperty ("lane", lane); o->setProperty ("index", index);
++        o->setProperty ("hz", (double) hz);
++        o->setProperty ("verdict", good ? "good" : "false");
++        o->setProperty ("age_ms", ageMs);
++        sessionLogger_.log (v);   // written BEFORE the clear it causes
++
++        if (! good && slot >= 0 && slot < kMaxSlots)
++            notchControllers_[(std::size_t) slot]->clearNotch (lane, index, NotchController::ClearReason::VerdictFalse);
++    };
++
+     modeBar_.onModeRequested = [this] (AudioEngine::Mode mode) { requestMode (mode); };
+ 
+     // New console wiring. The rail requests modes through the same
+     // requestMode() path the old bar used -- one route to the engine.
+     modeRail_.onSoundcheck = [this] { requestMode (AudioEngine::Mode::Soundcheck); };
+     modeRail_.onAuto       = [this] { requestMode (AudioEngine::Mode::Auto); };
+     modeRail_.onBypass     = [this] { requestMode (AudioEngine::Mode::Bypass); };
+ 
+     // R-3 already guards this behind ModeRail's confirmation hook. Only the
+     // slots the engine has enabled hold live notches.
+@@ -295,20 +382,31 @@ MainComponent::MainComponent()
+         auto& controller = *notchControllers_[(std::size_t) slotIndex];
+         slotUsesGlobalTuning_[(std::size_t) slotIndex] = t.usesGlobal;
+ 
+         if (! t.usesGlobal)
+         {
+             controller.setRiseReferenceMs (t.riseMs);
+             controller.setPersistenceBlocks (t.persist);
+             controller.setNotchDefaults (t.q, t.depthDb);
+             controller.setPeakinessThreshold ((float) t.thr);
+         }
++
++        auto v = SessionLogger::makeEvent ("tuning");
++        auto* o = v.getDynamicObject();
++        o->setProperty ("slot", slotIndex);
++        o->setProperty ("uses_global", t.usesGlobal);
++        o->setProperty ("rise_ms", t.riseMs);
++        o->setProperty ("persist", t.persist);
++        o->setProperty ("q", t.q);
++        o->setProperty ("depth_db", t.depthDb);
++        o->setProperty ("thr", t.thr);
++        sessionLogger_.log (v);
+     };
+ 
+     // The editor seeds itself from the slot's controller plus its mode flag.
+     slotPanel_.slotTuningProvider = [this] (int slotIndex) -> gui::SlotPanel::SlotTuning
+     {
+         if (slotIndex < 0 || slotIndex >= kMaxSlots)
+             return {};
+ 
+         const auto& c = *notchControllers_[(std::size_t) slotIndex];
+ 
+@@ -336,20 +434,30 @@ MainComponent::MainComponent()
+         {
+             if (! slotUsesGlobalTuning_[(std::size_t) i])
+                 continue;
+ 
+             auto& controller = *notchControllers_[(std::size_t) i];
+             controller.setRiseReferenceMs ((double) p.riseReferenceMs);
+             controller.setPersistenceBlocks (p.persistenceBlocks);
+             controller.setNotchDefaults ((double) p.q, (double) p.depthDb);
+             controller.setPeakinessThreshold (p.peakinessThreshold);
+         }
++
++        auto v = SessionLogger::makeEvent ("tuning");
++        auto* o = v.getDynamicObject();
++        o->setProperty ("slot", -1);
++        o->setProperty ("rise_ms", p.riseReferenceMs);
++        o->setProperty ("persist", p.persistenceBlocks);
++        o->setProperty ("q", p.q);
++        o->setProperty ("depth_db", p.depthDb);
++        o->setProperty ("thr", (double) p.peakinessThreshold);
++        sessionLogger_.log (v);
+     };
+     tuningPanel_.paramsProvider = [this]
+     {
+         const auto& c = *notchControllers_[0];
+         return gui::TuningPanel::Params { (int) c.getRiseReferenceMs(),
+                                           c.getPersistenceBlocks(),
+                                           (int) c.getNotchDepthDb(),
+                                           (int) c.getNotchQ(),
+                                           c.getPeakinessThreshold() };
+     };
+@@ -366,22 +474,29 @@ MainComponent::MainComponent()
+     setSize (800, 600);
+ }
+ 
+ MainComponent::~MainComponent()
+ {
+     stopTimer();
+     // Detach the look and feel while every child is still alive -- a
+     // Component must not outlive the LookAndFeel it points at.
+     setLookAndFeel (nullptr);
+     // §6.5: every detector thread must be dead before the engine tears down.
++    // Lane D (amendment A-3): each stop() flushes its last events into the
++    // logger, which is still alive -- sessionLogger_ is declared before
++    // systemClock_ and the controllers, so it outlives every one of these
++    // joins.
+     for (auto& controller : notchControllers_)
+         controller->stop (1000);
++    sessionLogger_.stop();   // session_end, then the file closes
++    for (auto& controller : notchControllers_)
++        controller->setEventSink (nullptr);   // threads are joined: precondition holds
+     engine_.stop();
+ }
+ 
+ AudioEngine& MainComponent::getAudioEngine()
+ {
+     return engine_;
+ }
+ 
+ NotchController* MainComponent::getNotchControllerForTest (int slot)
+ {
+@@ -398,20 +513,132 @@ void MainComponent::setSlotLinked (int slotIndex, bool linked)
+ 
+     slotLinked_[(std::size_t) slotIndex] = linked;
+     notchControllers_[(std::size_t) slotIndex]->setLinked (linked);
+ }
+ 
+ bool MainComponent::isSlotLinked (int slotIndex) const
+ {
+     return slotIndex >= 0 && slotIndex < kMaxSlots && slotLinked_[(std::size_t) slotIndex];
+ }
+ 
++//==============================================================================
++// Lane D (data loop): the session log.
++
++juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
++{
++    using Ev = NotchController::NotchEvent;
++    auto v = SessionLogger::makeEvent (e.kind == Ev::Kind::Set ? "notch_set" : "notch_clear");
++    auto* o = v.getDynamicObject();
++    o->setProperty ("slot", e.slot);
++    o->setProperty ("lane", e.lane);
++    o->setProperty ("index", e.index);
++    o->setProperty ("hz", (double) e.hz);
++    o->setProperty ("q", (double) e.q);
++    o->setProperty ("depth_db", (double) e.depthDb);
++    o->setProperty ("origin", originName (e.origin));
++
++    if (e.kind == Ev::Kind::Clear)
++    {
++        o->setProperty ("reason", reasonName (e.reason));
++        o->setProperty ("age_ms", e.ageMs);
++        return v;
++    }
++
++    if (! e.hasScore)
++        return v;
++
++    o->setProperty ("confirmed_lane", e.confirmedLane);
++    o->setProperty ("score", (double) e.score);
++    o->setProperty ("peakiness", (double) e.peakiness);
++    o->setProperty ("p_norm", (double) e.pNorm);
++    o->setProperty ("rise", (double) e.rise);
++    o->setProperty ("novelty", (double) e.novelty);
++    o->setProperty ("penalty", (double) e.penalty);
++    o->setProperty ("asymmetry", (double) e.asymmetry);
++    o->setProperty ("persist_needed", e.persistNeeded);
++    o->setProperty ("thr", (double) e.thr);
++
++    if (e.ctx != nullptr)
++    {
++        auto* c = new juce::DynamicObject();
++        c->setProperty ("bins", e.ctx->bins);
++        c->setProperty ("bin_hz", e.ctx->binHz);
++        c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
++        c->setProperty ("now", spectrumVar (e.ctx->now));
++        if (e.ctx->hasRef)   c->setProperty ("ref", spectrumVar (e.ctx->ref));
++        if (e.ctx->hasOther) c->setProperty ("other_lane_now", spectrumVar (e.ctx->other));
++        o->setProperty ("ctx", juce::var (c));
++    }
++
++    return v;
++}
++
++juce::var MainComponent::sessionHeader() const
++{
++    auto v = SessionLogger::makeEvent ("session_start");
++    auto* o = v.getDynamicObject();
++    o->setProperty ("app_version", appVersion_);
++    o->setProperty ("os", juce::SystemStats::getOperatingSystemName());
++    o->setProperty ("device", engine_.getCurrentDeviceName());
++    o->setProperty ("sample_rate", engine_.getCurrentSampleRateHz());
++    o->setProperty ("buffer_size", engine_.getCurrentBufferSize());
++
++    juce::Array<juce::var> slots;
++    for (int i = 0; i < kMaxSlots; ++i)
++    {
++        const auto cfg = engine_.getSlotConfig (i);
++        auto* s = new juce::DynamicObject();
++        s->setProperty ("index", i);
++        s->setProperty ("enabled", cfg.enabled);
++        s->setProperty ("width", cfg.width);
++
++        juce::Array<juce::var> in, out;
++        for (int l = 0; l < cfg.width; ++l)
++        {
++            in.add (cfg.inputChannels[l]);
++            out.add (cfg.outputChannels[l]);
++        }
++        s->setProperty ("in", in);
++        s->setProperty ("out", out);
++        s->setProperty ("linked", slotLinked_[(std::size_t) i]);
++        slots.add (juce::var (s));
++    }
++    o->setProperty ("slots", slots);
++
++    return v;
++}
++
++void MainComponent::setAppVersion (const juce::String& version)
++{
++    appVersion_ = version;
++}
++
++bool MainComponent::startSessionLog (const juce::File& directory)
++{
++    return sessionLogger_.start (directory, sessionHeader());
++}
++
++void MainComponent::stopSessionLog()
++{
++    sessionLogger_.stop();
++}
++
++juce::File MainComponent::sessionLogFileForTest() const
++{
++    return sessionLogger_.currentFile();
++}
++
++int MainComponent::lastLoadSkippedNotchesForTest() const
++{
++    return lastLoadSkipped_;
++}
++
+ void MainComponent::startAudio()
+ {
+     // Task 16: prefer ASIO, but do NOT require it. The plan said "filter to
+     // show ASIO devices only"; the ASIO SDK is excluded from this repo for
+     // licensing reasons, so on CI and on this dev machine the ASIO type is
+     // never registered and an ASIO-only list is empty. Asking the engine for a
+     // type that IS registered also matters: AudioEngine's own default is the
+     // literal string "ASIO", and JUCE silently keeps whatever type is current
+     // when the requested one does not exist.
+     engine_.setAudioDeviceType (gui::chooseDefaultDeviceType (engine_.getAvailableDeviceTypeNames()));
+@@ -441,20 +668,26 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
+     // Soundcheck sets the mode and nothing else. The specified countdown is NOT
+     // implemented, deliberately: owner decision D-06 freezes the detector's
+     // timers while the tap is dead, so a GUI-side wall-clock juce::Timer would
+     // disagree with a frozen detector and show a countdown that does not match
+     // what the app is doing. The remaining time has to come from the detector's
+     // getSoundcheckSecondsRemaining() (bridge design section 4), which does not
+     // exist yet.
+     engine_.setMode (mode);
+     modeBar_.setDisplayedMode (engine_.getMode());
+ 
++    {
++        auto v = SessionLogger::makeEvent ("mode");
++        v.getDynamicObject()->setProperty ("mode", modeName (engine_.getMode()));
++        sessionLogger_.log (v);
++    }
++
+     // KD-9 detection gating lives HERE because this is the one object that owns
+     // both the mode controls and the controllers: Bypass must never place a
+     // notch, Soundcheck detects for its 15 s live-time window (KD-7 exempts its
+     // notches from auto-release), Auto detects continuously. Applied to every
+     // slot the engine has enabled -- a disabled slot has no live chain to
+     // protect and its controller must stay silent.
+     for (int i = 0; i < kMaxSlots; ++i)
+         applyModeGating (i);
+ }
+ 
+@@ -559,36 +792,54 @@ bool MainComponent::loadPreset (const juce::File& file)
+     {
+         if (entry.index < 0 || entry.index >= kMaxSlots)
+             continue;
+ 
+         setSlotLinked (entry.index, entry.linked);
+ 
+         notchControllers_[(std::size_t) entry.index]->setWidth (
+             engine_.getSlotConfig (entry.index).width);
+     }
+ 
++    // Lane D / lane S loose end (A-9): lastLoadSkipped_ starts from
++    // PresetManager's own out-of-range-slot count and adds every notch
++    // adoptPreset() itself skips (today: a lane-1 notch on a mono slot) --
++    // the two are different rejections and neither subsumes the other.
++    lastLoadSkipped_ = result.skippedNotchCount;
++
+     for (int s = 0; s < kMaxSlots; ++s)
+     {
+         std::vector<PresetNotch> notchesForSlot;
+ 
+         for (const auto& notch : result.preset.notches)
+             if (notch.slot == s)
+                 notchesForSlot.push_back (notch);
+ 
+         if (! notchesForSlot.empty())
+-            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot);
++        {
++            int skipped = 0;
++            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
++            if (skipped > 0)
++            {
++                lastLoadSkipped_ += skipped;
++                juce::Logger::writeToLog ("preset \"" + file.getFileName() + "\": slot "
++                    + juce::String (s + 1) + " is mono, skipped " + juce::String (skipped)
++                    + " lane-R notch(es)");
++            }
++        }
+     }
+ 
+     if (detectorsRunning)
+         for (auto& controller : notchControllers_)
+             controller->start();
+ 
++    slotPanel_.refresh();   // the routing table shows what the file just changed (lane S loose end)
++
+     return true;
+ }
+ 
+ bool MainComponent::savePreset (const juce::File& file)
+ {
+     Preset preset;
+     preset.device     = engine_.getCurrentDeviceName();
+     preset.bufferSize = engine_.getCurrentBufferSize();
+ 
+     // The rate the notches were PUBLISHED at (SnapshotBuffer::sampleRate), taken
+diff --git a/src/app/MainComponent.h b/src/app/MainComponent.h
+index 547ea43..dd6188b 100644
+--- a/src/app/MainComponent.h
++++ b/src/app/MainComponent.h
+@@ -14,20 +14,21 @@
+ 
+ // Module headers rather than <JuceHeader.h>. JuceHeader.h is generated only for
+ // targets created with a juce_add_* function, so a plain add_executable test
+ // target could never include it -- which is exactly how AudioEngine::
+ // getTapBuffer() was once declared, never defined, and never noticed. Every
+ // component in this app is therefore reachable from the test target.
+ #include <juce_gui_basics/juce_gui_basics.h>
+ 
+ #include "app/AudioEngine.h"
+ #include "app/NotchController.h"
++#include "app/SessionLogger.h"
+ #include "app/SlotConfig.h"
+ #include "dsp/ClockSource.h"
+ #include "gui/DeviceDrawer.h"
+ #include "gui/DevicePanel.h"
+ #include "gui/ModeBar.h"
+ #include "gui/ModeRail.h"
+ #include "gui/NotchListPanel.h"
+ #include "gui/SlotPanel.h"
+ #include "gui/SlotTabs.h"
+ #include "gui/SpectrumView.h"
+@@ -89,24 +90,37 @@ public:
+ 
+     // Gathers the CURRENT published notch state (what the user sees) across all
+     // routing slots and writes it as a preset file. Returns the saveToFile
+     // result: PresetManager validates FIRST and writes nothing if invalid, so a
+     // false here means the file was NOT created -- an app that saves a preset it
+     // cannot reopen is worse than one that refuses.
+     //
+     // The sample rate written is the one the notches were PUBLISHED at
+     // (SnapshotBuffer::sampleRate), never 0: saveToFile checks each notch's freq
+     // against that rate's Nyquist, and a notch detected at rate R is valid at R
+-    // by construction. Notches mirrored across both lanes are deduped to one per
+-    // (slot, index).
++    // by construction. One PresetNotch per (slot, lane, index) -- lane S ended
++    // the old "one entry per slot, lanes deduped" shape; each lane of a
++    // stereo slot now detects and places its own notches independently.
+     bool savePreset (const juce::File& file);
+ 
++    // Lane D (data loop): the session log. Never started in the constructor --
++    // 26 tests and the snapshot tool construct MainComponent, and a ctor start
++    // would write to (and prune) the developer's real %APPDATA% logs. main.cpp
++    // calls setAppVersion() once at startup (the CMake project() version is the
++    // one true source, D-8) and startSessionLog() AFTER startAudio() so the
++    // header names the device actually in use.
++    void setAppVersion (const juce::String& version);
++    bool startSessionLog (const juce::File& directory);
++    void stopSessionLog();
++    [[nodiscard]] juce::File sessionLogFileForTest() const;
++    [[nodiscard]] int lastLoadSkippedNotchesForTest() const;
++
+     // Injectable for tests: the default opens a native async FileChooser and
+     // invokes onPicked with the file the user picked (a cancel is a no-op). A
+     // headless test replaces these with a fake that hands onPicked a known temp
+     // file. Mirrors ModeRail::confirmHook -- the only way to exercise the
+     // button->chooser->load/save route with JUCE_MODAL_LOOPS_PERMITTED off.
+     std::function<void (std::function<void (const juce::File&)> onPicked)> presetLoadChooser;
+     std::function<void (std::function<void (const juce::File&)> onPicked)> presetSaveChooser;
+ 
+     // THE one route a routing-table change takes (the SlotPanel lambda calls
+     // this): the same detector stop/apply/start cycle as a device change,
+@@ -218,20 +232,30 @@ private:
+     void applyModeGating (int slotIndex);
+ 
+     // Declared BEFORE every child component: the look and feel must outlive
+     // anything that might query it during teardown. The constructor installs
+     // it once with setLookAndFeel(); children inherit it through the normal
+     // Component::getLookAndFeel() chain.
+     az::theme::AzLookAndFeel azLookAndFeel_;
+ 
+     AudioEngine engine_;
+ 
++    // Lane D (data loop). Declared before systemClock_ and the controllers:
++    // declaration order is destruction order, so the logger outlives every
++    // detector thread that can still hand it an event while it joins.
++    SessionLogger sessionLogger_;
++    juce::String  appVersion_ { "0.0.0-unset" };   // main.cpp sets the real one (D-8)
++    int           lastLoadSkipped_ = 0;
++
++    juce::var sessionHeader() const;
++    static juce::var notchEventToVar (const NotchController::NotchEvent& e);
++
+     // Clock first, controllers second: each controller holds a reference to
+     // the clock. Declaration order = destruction order: the controllers'
+     // threads are joined BEFORE engine_ tears down (bridge design §6.5).
+     JuceMonotonicClock systemClock_;
+     // One detector controller per routing slot; element i is wired to
+     // engine_'s slot-i tap and command queue (see the constructor).
+     //
+     // Heap-held (unique_ptr) deliberately: a NotchController is ~1.1 MB
+     // since stereo-aware detection doubled it (two Detectors, two
+     // CandidateScorers -- each with a 128x1025-float history -- and two
+diff --git a/src/main.cpp b/src/main.cpp
+index 2caa9b8..abe7683 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,26 +1,27 @@
+ #include <JuceHeader.h>
+ #include "app/MainComponent.h"
++#include "app/SessionLogger.h"
+ 
+ class HandsFreeApplication : public juce::JUCEApplication
+ {
+ public:
+     HandsFreeApplication() = default;
+ 
+     const juce::String getApplicationName() override
+     {
+         return "AZ Soundtech Hands-free";
+     }
+ 
+     const juce::String getApplicationVersion() override
+     {
+-        return "1.0.0";
++        return JUCE_APPLICATION_VERSION_STRING;   // the one place the number lives: CMakeLists project()
+     }
+ 
+     bool moreThanOneInstanceAllowed() override
+     {
+         return false;
+     }
+ 
+     void initialise(const juce::String&) override
+     {
+         mainWindow = std::make_unique<MainWindow>(getApplicationName());
+@@ -42,38 +43,43 @@ private:
+     public:
+         MainWindow(const juce::String& name)
+             : DocumentWindow(name,
+                              juce::Desktop::getInstance().getDefaultLookAndFeel()
+                                  .findColour(juce::ResizableWindow::backgroundColourId),
+                              DocumentWindow::allButtons)
+         {
+             setUsingNativeTitleBar(true);
+ 
+             auto* content = new MainComponent();
++            content->setAppVersion(JUCE_APPLICATION_VERSION_STRING);
+             setContentOwned(content, true);
+ 
+             setResizable(true, true);
+             // Minimum window: must fit the 96 px rail above a usable spectrum
+             // with no overlap (spec 2026-08-23 section 3).
+             // Lives here because setResizeLimits is a ResizableWindow API.
+             setResizeLimits(MainComponent::kMinimumWidth,
+                             MainComponent::kMinimumHeight,
+                             16384, 16384);
+             centreWithSize(getWidth(), getHeight());
+             setVisible(true);
+ 
+             // Opening the audio device is an explicit call, not a MainComponent
+             // constructor side effect -- that is what keeps the whole component
+             // constructible in a test on a machine with no audio hardware.
+             // Done AFTER setVisible so a device that refuses to open leaves a
+             // visible window showing why, rather than nothing at all.
+             content->startAudio();
++            // Lane D: the session log opens AFTER the device, so its header
++            // names the device actually in use. A failed start (no %APPDATA%)
++            // is not fatal -- the app runs without a log.
++            content->startSessionLog(SessionLogger::defaultDirectory());
+         }
+ 
+         void closeButtonPressed() override
+         {
+             juce::JUCEApplication::getInstance()->systemRequestedQuit();
+         }
+ 
+     private:
+         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
+     };
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index be0860f..314a8b4 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -23,20 +23,21 @@
+ 
+ #include "app/MainComponent.h"
+ #include "app/NotchController.h"
+ #include "app/PresetManager.h"
+ #include "gui/DeviceDrawer.h"
+ #include "gui/theme/AzTheme.h"
+ #include "gui/DevicePanel.h"
+ #include "gui/ModeBar.h"
+ #include "test_gui_helpers.h"
+ 
++#include <cmath>
+ #include <vector>
+ 
+ //==============================================================================
+ // Task 23 -- mode buttons. Auto and Bypass in full; Soundcheck sets the mode
+ // but deliberately runs no countdown (owner decision D-06 -- see ModeBar.cpp).
+ 
+ TEST (ModeBar, ClickingAutoRequestsAutoMode)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+ 
+@@ -979,10 +980,182 @@ TEST (GuiWiring, SavePresetRoundTripsPerLaneNotchesAndTheLinkedFlag)
+             rightFound = true;
+     }
+ 
+     EXPECT_TRUE (leftFound)
+         << "lane 0's 1 kHz notch at index 2 did not survive the round trip";
+     EXPECT_TRUE (rightFound)
+         << "lane 1's 2 kHz notch at index 2 did not survive the round trip";
+     EXPECT_TRUE (reopened.isSlotLinked (1))
+         << "the saved \"slots\" section did not carry `linked`";
+ }
++
++//==============================================================================
++// Lane D (data loop): the session log through the real wiring.
++
++namespace
++{
++juce::File freshLogDir (const juce::String& name)
++{
++    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                   .getChildFile ("az-handsfree-sessionlog").getChildFile (name);
++    dir.deleteRecursively();
++    return dir;
++}
++
++std::vector<juce::var> parsedLines (const juce::File& file)
++{
++    juce::StringArray lines;
++    lines.addLines (file.loadFileAsString());
++    lines.removeEmptyStrings();
++    std::vector<juce::var> out;
++    for (const auto& l : lines)
++    {
++        juce::var v;
++        EXPECT_TRUE (juce::JSON::parse (l, v).wasOk()) << l;
++        out.push_back (v);
++    }
++    return out;
++}
++
++const juce::var* firstEvent (const std::vector<juce::var>& events, const juce::String& name)
++{
++    for (const auto& e : events)
++        if (e["ev"].toString() == name)
++            return &e;
++    return nullptr;
++}
++} // namespace
++
++// Spec test 14. Red if FALSE stops clearing with VerdictFalse, or the logger
++// stops receiving verdict / notch_clear / session_start in order.
++TEST (GuiWiring, FalseVerdictLogsVerdictThenClearsWithVerdictFalse)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++    app.setAppVersion ("9.9.9-test");
++    const auto dir = freshLogDir ("verdict");
++    ASSERT_TRUE (app.startSessionLog (dir));
++    const auto file = app.sessionLogFileForTest();
++
++    auto* c0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (c0, nullptr);
++    ASSERT_TRUE (c0->setNotch (0, 0, 1234.0, 30.0, -12.0, NotchController::Origin::Manual));
++    std::vector<float> hop (512, 0.1f);
++    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
++    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
++    c0->runOnce();   // publishes the snapshot AND flushes the Set event
++
++    auto& panel = app.getNotchListPanelForTest();
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 1);
++    panel.falseButtonForTest (0)->onClick();
++
++    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
++    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
++    c0->runOnce();   // flushes the Clear event; republishes without the notch
++    NotchController::SnapshotBuffer snap {};
++    c0->copySnapshot (snap);
++    EXPECT_EQ (snap.notchCount, 0u);
++
++    app.stopSessionLog();
++    const auto events = parsedLines (file);
++    ASSERT_GE (events.size(), 5u);
++    EXPECT_EQ (events.front()["ev"].toString(), "session_start");
++    EXPECT_EQ (events.front()["app_version"].toString(), "9.9.9-test");
++    EXPECT_TRUE (events.front()["slots"].isArray());
++    EXPECT_EQ (events.back()["ev"].toString(), "session_end");
++
++    const auto* set = firstEvent (events, "notch_set");
++    ASSERT_NE (set, nullptr);
++    EXPECT_EQ ((*set)["origin"].toString(), "manual");
++    EXPECT_NEAR ((double) (*set)["hz"], 1234.0, 0.5);
++    EXPECT_FALSE (set->hasProperty ("ctx"));
++
++    const auto* verdict = firstEvent (events, "verdict");
++    ASSERT_NE (verdict, nullptr);
++    EXPECT_EQ ((*verdict)["verdict"].toString(), "false");
++    EXPECT_EQ ((int) (*verdict)["slot"], 0);
++    EXPECT_EQ ((int) (*verdict)["lane"], 0);
++    EXPECT_EQ ((int) (*verdict)["index"], 0);
++
++    const auto* clear = firstEvent (events, "notch_clear");
++    ASSERT_NE (clear, nullptr);
++    EXPECT_EQ ((*clear)["reason"].toString(), "verdict_false");
++
++    // Order: verdict is written before the clear it causes.
++    EXPECT_LT (verdict - events.data(), clear - events.data());
++}
++
++// Mode and tuning land in the log. Red if requestMode / onTuningChanged stop
++// logging, or the field names drift from the logstats contract.
++TEST (GuiWiring, ModeAndTuningChangesAreLogged)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++    const auto dir = freshLogDir ("mode");
++    ASSERT_TRUE (app.startSessionLog (dir));
++    const auto file = app.sessionLogFileForTest();
++
++    app.requestMode (AudioEngine::Mode::Auto);
++    gui::TuningPanel::Params p;
++    p.riseReferenceMs = 300; p.persistenceBlocks = 4; p.q = 25.0f; p.depthDb = -10.0f; p.peakinessThreshold = 12.0f;
++    app.getTuningPanel().onTuningChanged (p);   // MainComponent.h:151
++
++    app.stopSessionLog();
++    const auto events = parsedLines (file);
++    const auto* mode = firstEvent (events, "mode");
++    ASSERT_NE (mode, nullptr);
++    EXPECT_EQ ((*mode)["mode"].toString(), "auto");
++    const auto* tuning = firstEvent (events, "tuning");
++    ASSERT_NE (tuning, nullptr);
++    EXPECT_EQ ((int) (*tuning)["slot"], -1);
++    EXPECT_EQ ((int) (*tuning)["persist"], 4);
++    EXPECT_NEAR ((double) (*tuning)["depth_db"], -10.0, 1e-6);
++}
++
++// Spec test 15. Red if MainComponent's teardown order lets a detector thread
++// deliver an event into a logger that is already gone (or vice versa).
++TEST (GuiWiring, DestroyingTheAppWhileADetectorIsPlacingNotchesDoesNotCrash)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    for (int run = 0; run < 20; ++run)
++    {
++        const auto dir = freshLogDir ("teardown-" + juce::String (run));
++        MainComponent app;
++        ASSERT_TRUE (app.startSessionLog (dir));
++        auto* c0 = app.getNotchControllerForTest (0);
++        ASSERT_NE (c0, nullptr);
++        c0->setDetectionActive (true);
++        c0->start();   // real detector thread
++
++        // A loud 1 kHz tone into both lanes for ~1 s of audio, then die.
++        std::vector<float> hop (512);
++        double n = 0.0;
++        for (int block = 0; block < 90; ++block)
++        {
++            for (auto& s : hop) { s = std::sin (2.0 * 3.14159265358979 * 1000.0 * n / 48000.0); n += 1.0; }
++            app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
++            app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
++            if (block % 8 == 7) juce::Thread::sleep (1);
++        }
++        // `app` is destroyed here, mid-placement, with the thread running.
++    }
++    SUCCEED();
++}
++
++// Lane S loose end (A-9). Red if loadPreset stops counting a lane-1 notch a
++// mono slot cannot take.
++TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++    const juce::String json =
++        R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
++        R"("slots":[{"index":0,"enabled":true,"width":1,"inputChannels":[0,1],"outputChannels":[0,1]}],)"
++        R"("notches":[{"slot":0,"lane":1,"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
++        R"({"slot":0,"lane":0,"index":1,"freq":982.0,"Q":30.0,"depth":-12.0}]})";
++    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("az-handsfree-d-skipped.json");
++    ASSERT_TRUE (presetFile.replaceWithText (json));
++    ASSERT_TRUE (app.loadPreset (presetFile));
++    presetFile.deleteFile();
++    EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
++}
