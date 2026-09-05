@@ -1,7 +1,12 @@
 # Lane D — Vòng dữ liệu: nhãn oan/đúng và log session có cấu trúc
 
 **Ngày:** 2026-09-05. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md).
-**Trạng thái:** spec, chờ owner duyệt. **Đụng audio path:** không.
+**Trạng thái:** đã thực thi trên nhánh `feat/data-loop` (2026-09-05, 8 task,
+suite 430/430); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
+lane S đã merge trước — nằm trong
+[`../plans/2026-09-05-data-loop.md`](../plans/2026-09-05-data-loop.md):
+mục "Hợp nhất hai phiên" (đầu file) và bảng "Amendments to the spec" (A-1..A-10).
+**Đụng audio path:** không.
 **Mức thay đổi level dự kiến:** 0 dB. Lane này chỉ quan sát và ghi.
 
 ## 1. Vì sao lane này đi trước mọi thứ "AI"

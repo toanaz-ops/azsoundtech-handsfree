@@ -287,6 +287,7 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
 | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
 | Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
+| Logger chặn detector thread | Hàng đợi có cap 4096, bỏ + đếm; sink gọi ngoài modelMutex_ |
 
 ## 6. Những gì hệ thống cố tình KHÔNG làm (v1)
 
@@ -298,22 +299,58 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 - **Không phủ dưới ~117 Hz @ 48 kHz** (5 × sample rate / 2048) — giới hạn
   hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
 
-## 7. Trạng thái & kiểm chứng (05/09/2026, v1.1.1 — chờ release)
+## 7. Log session và nhãn (lane D, v1.1.2)
 
-- Suite: **402/402 test pass** (ctest Release, MSVC, CI GitHub
-  Actions xanh) — +2 test cho nút LOAD/SAVE preset (routing qua chooser tiêm
-  được; round-trip save→load), +1 test round-trip theo làn (INDEP hai làn cùng
-  index khác tần số + `linked` sống sót), +2 test validator theo (slot, làn).
+App ghi một file mỗi lần chạy vào `%APPDATA%\AZSoundtech\HandsFree\logs\session-YYYYMMDD-HHMMSS-mmm.jsonl`,
+mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30 file mới nhất.
+
+| `ev` | Khi nào | Mang gì |
+|---|---|---|
+| `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
+| `mode` | bấm Bypass / Auto / Soundcheck | `mode` |
+| `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
+| `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
+| `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
+| `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
+
+Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
+người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
+thread; hàng đợi 4096 dòng, quá thì bỏ và đếm vào `dropped_events` ở dòng `session_end`.
+Sự kiện của `NotchController` đi qua một outbox 64 phần tử và chỉ được đẩy ra **ngoài**
+`modelMutex_` trên detector thread (spec D-6), nên nút CLEAR ALL không bao giờ chờ I/O.
+
+`FALSE` vừa ghi nhãn vừa xóa notch (đó là điều người vận hành muốn — D-2); `GOOD` chỉ ghi
+nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
+frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
+Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
+
+## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — chờ release)
+
+Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
+`tools/logstats.py`.
+
+- Suite: **430/430 test pass** (ctest Release, MSVC, CI GitHub
+  Actions xanh) — +28 test so với 1.1.1 (402): `SessionLogger` (start/stop,
+  cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
+  mục là no-op), sự kiện `notch_set`/`notch_clear`/`verdict` qua outbox ngoài
+  `modelMutex_`, nút GOOD/FALSE trên `NotchListPanel`, và `logstats_fixture`
+  chạy `tools/logstats.py` dưới ctest.
 - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
 - DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
   GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
   SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel),
   **chuỗi preset trọn vẹn** (installer ship presets → seed first-run → nút
-  LOAD/SAVE), và **phát hiện theo làn** (lane S): đã hạ cánh. Bản 1.1.x thêm:
-  mỗi làn của slot stereo tự dò và tự đặt notch (INDEP mặc định), có nút LINK
-  mỗi slot, cột LANE trong bảng ACTIVE NOTCHES và bộ chọn làn L/R trên
-  analyser; preset lưu/nạp được cả `lane` lẫn `linked`. Còn mở: code signing
-  (Task 31, chờ EV cert), integration testing với phần cứng thật (Task 32),
-  nối data cho chip RING RISK (hiện luôn "N/A"), và sweep `laneAsymmetryBonus`
-  (lane T).
+  LOAD/SAVE), **phát hiện theo làn** (lane S), và **vòng dữ liệu** (lane D:
+  nút GOOD/FALSE ghi nhãn, log session JSONL không audio, `tools/logstats.py`
+  tóm tắt) — đã hạ cánh. Bản 1.1.x thêm: mỗi làn của slot stereo tự dò và tự
+  đặt notch (INDEP mặc định), có nút LINK mỗi slot, cột LANE trong bảng ACTIVE
+  NOTCHES và bộ chọn làn L/R trên analyser; preset lưu/nạp được cả `lane` lẫn
+  `linked`. Còn mở: code signing (Task 31, chờ EV cert), integration testing
+  với phần cứng thật (Task 32), nối data cho chip RING RISK (hiện luôn
+  "N/A"), sweep `laneAsymmetryBonus` (lane T), lane C (classifier, chờ ≥ 300
+  verdict từ ≥ 3 session), và quyết định owner còn treo cho lane S: có nên
+  chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot widen 1→2 hay
+  không (amendment A-9 bị rút khỏi lane D khi review — xem
+  `.superpowers/sdd/2026-09-05-data-loop/progress.md`, "Task 3: CONTROLLER
+  RULING").

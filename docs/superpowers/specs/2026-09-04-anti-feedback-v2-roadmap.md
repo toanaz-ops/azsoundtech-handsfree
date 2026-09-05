@@ -66,9 +66,19 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 | Lane | Trạng thái | Ngày |
 |---|---|---|
 | S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
-| D | spec đã duyệt phản biện, chờ S merge rồi rebase; kế tiếp | 2026-09-05 |
+| D | **đã làm xong** trên nhánh `feat/data-loop` (8 task, suite 430/430, review từng task + verifier độc lập toàn nhánh đang chờ); release 1.1.2 alpha; chờ owner PR vào main | 2026-09-05 |
 | G | chờ S, D | |
 | M | chờ S | |
-| C | chờ D nhãn | |
+| C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
 | L | chờ D | |
 | A | chờ M, G | |
+
+**Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
+plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
+khỏi lane D khi review**. Reset chỉ Detector mà không đụng lịch sử của
+`CandidateScorer` để lại history cũ, khiến hai trục rise/novelty bị bão hòa về
+0 trong ~200 ms trên làn vừa quay lại — **dễ dãi hơn** hành vi 1.1.1 đang
+chạy, không phải chặt hơn. Việc có nên chặn `riseReferenceMs` cho làn tái nhập
+sau khi widen hay không là **quyết định owner còn treo cho lane S**. Chi tiết:
+`.superpowers/sdd/2026-09-05-data-loop/progress.md`, mục "Task 3: CONTROLLER
+RULING".
