@@ -161,6 +161,29 @@ MainComponent::MainComponent()
     slotUsesGlobalTuning_.fill (true);
 
     addAndMakeVisible (spectrumView_);
+
+    // RING RISK (docs/spec-ring-risk.md section 4, lane R ruling A-R6). The
+    // number comes from the DETECTOR of the slot the console is MONITORING --
+    // not slot 0, and never from anything the GUI computes for itself: a
+    // second, separately-derived peakiness on screen would disagree with the
+    // one the filters follow, and the operator could not tell which.
+    //
+    // The band this returns is RAW. SpectrumView::timerCallback runs it
+    // through the 750 ms anti-flicker hold before anything is painted, so
+    // holding here as well would hold twice.
+    //
+    // A fresh copySnapshot per tick, as the spec asks: ~8 KB at 30 fps, off
+    // one uncontended mutex, on the message thread. Reusing the view's own
+    // snapshot_ would save that and couple the readout to the refresh order
+    // of the plot -- not a trade worth making before anything has measured a
+    // problem.
+    spectrumView_.ringRiskProvider = [this]
+    {
+        NotchController::SnapshotBuffer snapshot {};
+        notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (snapshot);
+        return gui::SpectrumView::riskForScore (snapshot);
+    };
+
     addAndMakeVisible (modeRail_);
     addAndMakeVisible (deviceDrawer_);
     addAndMakeVisible (slotScroller_);

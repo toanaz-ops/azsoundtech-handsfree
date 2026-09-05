@@ -317,6 +317,14 @@ public:
     // the DISPLAYED chip was.
     [[nodiscard]] RingRisk& ringRiskForTest() { return ringRisk_; }
 
+    // One frame of the 30 fps poll, on demand. juce::Timer is a PRIVATE base
+    // (nothing outside should be able to start/stop this component's clock),
+    // and the headless suite pumps no message loop, so a test that wants to
+    // see what the provider produced has no other way to run the real
+    // timerCallback() -- and asserting on a hand-set ringRisk_ instead would
+    // prove nothing about the wiring.
+    void tickForTest() { timerCallback(); }
+
     void paint (juce::Graphics&) override;
     void resized() override;
 

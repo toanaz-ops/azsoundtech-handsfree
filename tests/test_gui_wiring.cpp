@@ -30,6 +30,7 @@
 #include "gui/ModeBar.h"
 #include "test_gui_helpers.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -766,7 +767,94 @@ TEST (MainComponent, HidingTheMonitoredRowFallsBackToSlotZero)
 }
 
 //==============================================================================
-// RING RISK -- the readout exists, its data source does not yet.
+// RING RISK -- the readout, now wired to the MONITORED slot's detector
+// (task R3, docs/spec-ring-risk.md section 4).
+//
+// How these drive a real score, and why it costs one wall-clock sleep
+// ===================================================================
+// MainComponent's controllers run on JuceMonotonicClock -- there is no clock
+// to inject here, unlike tests/test_notchcontroller.cpp's FakeClock harness.
+// CandidateScorer's rise axis compares against the newest history frame at
+// least 0.45 x riseReferenceMs old (~202 ms at the default 450 ms), and the
+// scorer's clock only advances by the REAL gap between drained blocks. So a
+// loop that pumps hops back to back scores rNorm 0 forever, whatever it feeds.
+// One quiet frame, one real 260 ms gap, then tone frames is the smallest
+// shape that gives the scorer a genuine "this bin just rose" to measure.
+//
+// The chip is read through getRingRisk() -- the field paint() reads -- after
+// calling timerCallback() directly: the headless suite pumps no message loop,
+// so the 30 fps timer never fires on its own (test_moderail.cpp:76 makes the
+// same point about triggerClick).
+
+namespace
+{
+constexpr double kRingRiskPi = 3.14159265358979323846;
+constexpr double kRingRiskSr = 48000.0;
+
+std::vector<float> ringRiskToneHop (double& nextSample, double freq = 1000.0, float amp = 1.0f)
+{
+    std::vector<float> out ((std::size_t) Detector::kHopSize);
+    for (int i = 0; i < Detector::kHopSize; ++i)
+    {
+        out[(std::size_t) i] = amp * (float) std::sin (2.0 * kRingRiskPi * freq * nextSample / kRingRiskSr);
+        nextSample += 1.0;
+    }
+    return out;
+}
+
+std::vector<float> ringRiskQuietHop (std::mt19937& rng)
+{
+    std::uniform_real_distribution<float> dist { -1.0f, 1.0f };
+    std::vector<float> out ((std::size_t) Detector::kHopSize);
+    for (int i = 0; i < Detector::kHopSize; ++i)
+        out[(std::size_t) i] = 0.01f * dist (rng);
+    return out;
+}
+
+// One hop into the slot's lane-0 tap, then one detector pass -- the same
+// route the preset tests above use, minus the message loop.
+void ringRiskPump (MainComponent& app, int slot, const std::vector<float>& hop)
+{
+    app.getAudioEngine().getTapBuffer (slot, 0).write (hop.data(), hop.size());
+    app.getNotchControllerForTest (slot)->runOnce();
+}
+
+void ringRiskTick (gui::SpectrumView& view)
+{
+    // juce::Timer is a private base of SpectrumView, so the poll is reached
+    // through the component's own accessor -- it runs the real timerCallback().
+    view.tickForTest();
+}
+
+// Feeds one slot a howl until its snapshot reads at or past the confirm
+// score. Returns the highest score it saw, so a failure says how close it got.
+float ringRiskDriveSlotToCritical (MainComponent& app, int slot)
+{
+    auto* controller = app.getNotchControllerForTest (slot);
+    controller->setDetectionActive (true);
+
+    std::mt19937 rng { 777u };
+    ringRiskPump (app, slot, ringRiskQuietHop (rng));   // the reference frame
+
+    juce::Thread::sleep (260);   // see the note above: real history, real gap
+
+    double phase = 0.0;
+    float best = 0.0f;
+
+    for (int i = 0; i < 40; ++i)
+    {
+        ringRiskPump (app, slot, ringRiskToneHop (phase));
+
+        NotchController::SnapshotBuffer snap {};
+        controller->copySnapshot (snap);
+        if (snap.ringRiskValid)
+            best = std::max (best, snap.ringRiskScore);
+        if (snap.ringRiskValid && snap.ringRiskScore >= snap.ringRiskThreshold)
+            break;
+    }
+    return best;
+}
+} // namespace
 
 TEST (MainComponent, RingRiskReadsUnavailableUntilSomethingProvidesIt)
 {
@@ -774,10 +862,72 @@ TEST (MainComponent, RingRiskReadsUnavailableUntilSomethingProvidesIt)
     // regress: an unwired risk indicator that reads "low" is worse than one
     // that reads "n/a", because a soundman would act on it. See
     // docs/spec-ring-risk.md.
+    //
+    // Still true with the provider WIRED (task R3): an idle controller has
+    // scored nothing, so it publishes ringRiskValid = false, which
+    // riskForScore reports as Unavailable rather than as a reassuring "low".
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
     MainComponent app;
 
+    EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Unavailable);
+}
+
+TEST (MainComponent, RingRiskGoesCriticalWhenTheMonitoredSlotsDetectorConfirms)
+{
+    // RED before the wiring: ringRiskProvider is null, so the chip stays N/A
+    // however loud the room gets -- which is the whole defect lane R closes.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    ASSERT_EQ (app.getDisplayedSlot(), 0);
+
+    const float best = ringRiskDriveSlotToCritical (app, 0);
+
+    NotchController::SnapshotBuffer snap {};
+    app.getNotchControllerForTest (0)->copySnapshot (snap);
+    ASSERT_TRUE (snap.ringRiskValid) << "detector never scored a frame";
+    ASSERT_GE (snap.ringRiskScore, snap.ringRiskThreshold)
+        << "highest score seen was " << best << " against threshold " << snap.ringRiskThreshold;
+
+    ringRiskTick (app.getSpectrumViewForTest());
+
+    EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Critical);
+}
+
+TEST (MainComponent, RingRiskFollowsTheMonitoredSlotAcrossASwitch)
+{
+    // The readout describes the slot the masthead says it describes. Slot 0
+    // howls; slot 1 has never been fed. Switching must not leave slot 0's
+    // Critical on screen attributed to slot 1 -- and the 750 ms hold must not
+    // keep it there either (Unavailable overrides the hold, and setController
+    // drops both the hold and the painted field).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+    app.getSlotPanelForTest().setVisibleRowCount (4);
+
+    ringRiskDriveSlotToCritical (app, 0);
+    ringRiskTick (app.getSpectrumViewForTest());
+    ASSERT_EQ (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Critical);
+
+    app.setDisplayedSlot (1);
+    ASSERT_EQ (app.getDisplayedSlot(), 1);
+
+    ringRiskTick (app.getSpectrumViewForTest());
+
+    // Slot 1's detector has scored nothing, so the honest answer is N/A. The
+    // one thing this must never be is the slot it just left.
+    EXPECT_NE (app.getSpectrumViewForTest().getRingRisk(),
+               gui::SpectrumView::RingRisk::Critical);
     EXPECT_EQ (app.getSpectrumViewForTest().getRingRisk(),
                gui::SpectrumView::RingRisk::Unavailable);
 }
