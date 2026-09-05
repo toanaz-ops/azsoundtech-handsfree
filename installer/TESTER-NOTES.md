@@ -1,9 +1,9 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.0.5
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.1.3
 
-Ngày build: 2026-09-05 · suite test 368/368 xanh · installer ~26.8 MB
+Ngày build: 2026-09-06 · suite test 454/454 xanh · installer ~26.8 MB
 
-SHA-256 của Setup 1.0.5:
-`D76FCDB8637914A3CDACE306A6C19EA1FB045F3C7B3C014390968E1E3DA2C7AA`
+SHA-256 của Setup 1.1.3:
+`0B09D7FDBF71B39C31EF9114800CDF10523273E4C817DC68E15EC5AEB7376E26`
 
 Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
 nhờ test bản cũ.
