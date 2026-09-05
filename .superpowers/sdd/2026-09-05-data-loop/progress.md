@@ -44,3 +44,9 @@ Task 6: minor (deferred): global vs per-slot `tuning` events emit int vs double 
 Task 6: minor (deferred): no `mode` recorded at session start unless requestMode is called — log the current mode right after session_start in startSessionLog
 Task 6: minor (deferred): new tests leave %TEMP%\az-handsfree-sessionlog\* dirs behind (self-cleaning next run); sessionHeader()/notchEventToVar() declared mid data-member block (plan-mandated); lastLoadSkipped_ not reset on a failed load
 Task 6: complete (commits 03a9afd..2279109, review clean; extra read-only verifier 11/11 PASS)
+Task 7: dispatched (BASE 04239d1, implementer sonnet, brief task-7-brief.md)
+Task 7: review NEEDS FIXES — Important (plan-mandated): fixture ctx.bin_hz=12000 collapses recurrence into one x4 group; fix = 23.4375 (48000/2048). Minors: no recurrence coverage in the --expect gate, dead defaultdict import, chaining in first-match grouping, verdict-after-clear key reuse (theoretical).
+Task 7: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE c27f724; findings: Important fixture bin_hz + add --expect-recurrence-max gate + drop dead import)
+Task 7: fix round 1/5 (3 addressed, 0 open; commits c27f724..d14e581; controller ran the tool: 1007.8 Hz x2 only, 4-flag gate exit 0)
+Task 7: minor (deferred): first-match grouping can chain across adjacent bins; verdict-after-clear on a reused (slot,lane,index) key is theoretical
+Task 7: complete (commits 04239d1..d14e581, review clean after 1 fix round)
