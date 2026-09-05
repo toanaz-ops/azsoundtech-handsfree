@@ -65,7 +65,7 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 
 | Lane | Trạng thái | Ngày |
 |---|---|---|
-| S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); release 1.1.0 alpha; chờ owner merge và nghe thử | 2026-09-05 |
+| S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
 | D | spec đã duyệt phản biện, chờ S merge rồi rebase; kế tiếp | 2026-09-05 |
 | G | chờ S, D | |
 | M | chờ S | |
