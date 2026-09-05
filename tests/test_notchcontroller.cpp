@@ -1445,3 +1445,53 @@ TEST (NotchControllerPreset, AdoptPresetCountsLaneOneNotchesSkippedOnAMonoSlot)
     EXPECT_EQ (h.controller.adoptPreset ({ onLaneOne, onLaneZero }, &skipped), 1);
     EXPECT_EQ (skipped, 1);
 }
+
+// Spec test 7. Red if the detector's Set event stops carrying the frame it
+// scored (ctx.now), the frame the rise axis compared against (ctx.ref, with
+// its age), or the other lane's frame; or if the recorded axes stop
+// multiplying to the recorded score.
+TEST (NotchControllerEvents, DetectorPlacementCarriesTheScoredFrameAndTheScorersReference)
+{
+    StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+    h.controller.setDetectionActive (true);
+    NoiseSource quietL; SineSource toneR;
+    const auto cmds = warmThenDrive (h, quietL, toneR);
+    ASSERT_FALSE (cmds.empty());
+
+    const Ev* set = nullptr;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Set && e.hasScore) { set = &e; break; }
+    ASSERT_NE (set, nullptr) << "no scored Set event reached the sink";
+
+    EXPECT_EQ (set->lane, 1);
+    EXPECT_EQ (set->confirmedLane, 1);
+    EXPECT_EQ (set->origin, NotchController::Origin::Detector);
+    EXPECT_GT (set->score, CandidateScorer::kConfirmScore);
+    EXPECT_FLOAT_EQ (set->pNorm * set->rise * set->novelty * set->penalty * set->asymmetry, set->score);
+    EXPECT_EQ (set->persistNeeded, NotchController::kPersistenceBlocks);
+    EXPECT_FLOAT_EQ (set->thr, PeakinessAnalyzer::kDefaultThreshold);
+
+    ASSERT_NE (set->ctx, nullptr);
+    const auto& ctx = *set->ctx;
+    EXPECT_EQ (ctx.bins, Detector::kNumBins);
+    EXPECT_NEAR (ctx.binHz, kTestSr / Detector::kFftSize, 1e-9);
+
+    // ctx.now IS the scored frame: its peak bin is the howl.
+    const int bin = (int) std::lround (set->hz / ctx.binHz);
+    int argmax = 0;
+    for (int b = 1; b < Detector::kNumBins; ++b)
+        if (ctx.now[(std::size_t) b] > ctx.now[(std::size_t) argmax]) argmax = b;
+    EXPECT_EQ (argmax, bin);
+
+    // ctx.ref is the frame the rise axis used (D-7): at least 0.45 x rise old,
+    // and the rise it implies is the rise the score encodes (rNorm >= 0.7
+    // means now/was >= 1.35).
+    ASSERT_TRUE (ctx.hasRef);
+    EXPECT_GE (ctx.refAgeMs, 0.45 * CandidateScorer::kDefaultRiseReferenceMs - 1e-6);
+    EXPECT_LE (ctx.refAgeMs, CandidateScorer::kRiseHistoryWindowMs);
+    EXPECT_GE (ctx.now[(std::size_t) bin], 1.35f * ctx.ref[(std::size_t) bin]);
+
+    // The other lane was quiet: its frame is there and small at the howl bin.
+    ASSERT_TRUE (ctx.hasOther);
+    EXPECT_LT (ctx.other[(std::size_t) bin], 0.1f * ctx.now[(std::size_t) bin]);
+}

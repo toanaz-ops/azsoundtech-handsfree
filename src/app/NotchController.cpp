@@ -541,7 +541,8 @@ int NotchController::firstFreeIndexAllLanesLocked() const
 
 // The one place a confirmed candidate becomes notches. INDEP touches `lane`
 // alone; LINKED takes one index free on every driven lane and writes them all.
-void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow)
+void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
+                                      const PlacementContext& pc)
 {
     // soundcheckActive() takes modelMutex_ itself, so it is asked BEFORE the
     // lock below -- never underneath it.
@@ -558,9 +559,40 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     if (index < 0)
         return;   // chain full on the lanes concerned: same outcome as today
 
+    // Lane D (data loop): the one allocation per placed notch, on the
+    // detector thread (plan A-4). Shared by the lane-0 and lane-1 Set events
+    // of a LINKED placement -- never allocated twice for one confirm.
+    // pc.breakdown.refFrame points into the scorer's history_ and is only
+    // guaranteed valid until la.scorer.commitBlock() runs; that call happens
+    // AFTER the whole candidate loop in processSpectrumForDetection(), i.e.
+    // after this placeConfirmed() returns, so copying it here is safe.
+    auto ctx = std::make_shared<SpectralContext>();
+    ctx->binHz = pc.sampleRate / (double) Detector::kFftSize;
+    std::copy_n (pc.now, Detector::kNumBins, ctx->now.begin());
+    if (pc.breakdown.refFrame != nullptr)
+    {
+        ctx->hasRef = true;
+        ctx->refAgeMs = pc.breakdown.refAgeMs;
+        std::copy_n (pc.breakdown.refFrame, Detector::kNumBins, ctx->ref.begin());
+    }
+    if (pc.other != nullptr)
+    {
+        ctx->hasOther = true;
+        std::copy_n (pc.other, Detector::kNumBins, ctx->other.begin());
+    }
+
+    NotchEvent scored;
+    scored.hasScore = true;
+    scored.confirmedLane = lane;
+    scored.score = pc.finalScore; scored.peakiness = pc.breakdown.rawPeakiness;
+    scored.pNorm = pc.breakdown.pNorm; scored.rise = pc.breakdown.rNorm;
+    scored.novelty = pc.breakdown.mNorm; scored.penalty = pc.breakdown.penalty;
+    scored.asymmetry = pc.asymmetry; scored.persistNeeded = pc.persistNeeded; scored.thr = pc.thr;
+    scored.ctx = ctx;
+
     int applied = 0;
     for (int l = firstLane; l <= lastLane; ++l)
-        if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
+        if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
             ++applied;
 
     // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
@@ -724,12 +756,13 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
             continue;
         }
 
-        float score = la.scorer.scoreCandidate (
+        const auto breakdown = la.scorer.scoreCandidateDetailed (
             cand, block.magnitudes,
             { locked.data(), locked.size() });
         // Design §4.4: neutral at the default bonus of 1.0.
-        score *= asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
-                                      laneAsymmetryBonus_.load (std::memory_order_relaxed));
+        const float asym = asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
+                                                laneAsymmetryBonus_.load (std::memory_order_relaxed));
+        const float score = breakdown.score * asym;
 
         if (score > CandidateScorer::kConfirmScore)
         {
@@ -744,7 +777,13 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                 // lands on is now the placement policy's business (§4.3);
                 // persistence is still counted per (lane, bin), so under LINK
                 // a confirm on either lane is enough for the pair.
-                placeConfirmed (lane, cand, linkedNow);
+                PlacementContext pc;
+                pc.now = block.magnitudes; pc.other = otherLaneMagnitudes;
+                pc.breakdown = breakdown; pc.finalScore = score; pc.asymmetry = asym;
+                pc.persistNeeded = (int) requiredBlocks;
+                pc.thr = la.analyzer.getThreshold();
+                pc.sampleRate = block.sampleRate;
+                placeConfirmed (lane, cand, linkedNow, pc);
             }
         }
         else

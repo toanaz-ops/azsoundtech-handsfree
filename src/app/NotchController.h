@@ -337,7 +337,24 @@ private:
     // INDEP had placed, with no Clear to tell the chain about it.
     int  firstFreeIndexLocked (int lane) const;
     int  firstFreeIndexAllLanesLocked() const;
-    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow);
+
+    // Lane D (data loop): everything placeConfirmed needs to build the scored
+    // NotchEvent and its SpectralContext, gathered by the candidate loop
+    // while the frame it scored is still current (see the .cpp comment on
+    // refFrame's lifetime).
+    struct PlacementContext
+    {
+        const float* now = nullptr;
+        const float* other = nullptr;        // may be null
+        CandidateScorer::ScoreBreakdown breakdown;
+        float finalScore = 0.0f;             // after the asymmetry multiplier
+        float asymmetry = 1.0f;
+        int   persistNeeded = 0;
+        float thr = 0.0f;
+        double sampleRate = 0.0;
+    };
+    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
+                         const PlacementContext& pc);
 
     double remainingSoundcheckMs() const;
 
