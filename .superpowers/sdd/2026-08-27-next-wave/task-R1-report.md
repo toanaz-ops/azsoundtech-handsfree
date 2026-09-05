@@ -258,3 +258,148 @@ Not touched: `src/gui/*`, `MainComponent*` (tasks R2/R3),
 6. **`docs/spec-ring-risk.md` still carries the superseded §2 banding** and
    still says the data source is not implemented. A-R3 / A-R10 assign that edit
    to R3; I left it alone rather than half-editing a doc another task owns.
+
+
+---
+
+# Fix round 1 — A-R4 "since its last reset" made real
+
+**Finding fixed (Important):** `ringRiskValid` survived a sample-rate / device
+change. `CandidateScorer::hasHistory()` meant "ever committed since
+construction", nothing ever reconstructs `LaneAnalysis`, so after a device or
+SR change the chip published `true` on the very first frame while the scorer's
+rise history and baseline EMAs still held old-rate magnitudes at bin indices
+that now map to different frequencies — the "tran an sai" case the spec forbids.
+
+**Expected level change: still 0 dB.** No placement or clear decision, no
+`NotchCommand`, no `outbox_`, no filter coefficient, no `CandidateScorer`
+arithmetic changed. The scorer itself is still NOT reset (lane D removed that
+deliberately); placement behaviour is bit-identical.
+
+## What changed
+
+| File | Change |
+|---|---|
+| `src/app/NotchController.h` | `std::uint32_t blocksSinceReset = 0;` on `LaneAnalysis` (per lane), with the reasoning comment |
+| `src/app/NotchController.cpp` | increment beside `la.scorer.commitBlock(...)` (saturating); zero all lanes in `setSampleRate()` and in `setWidth()`; validity now reads the counter; `#include <limits>` |
+| `src/dsp/CandidateScorer.h` | `hasHistory()` **removed** — its only caller is gone, no dead accessors |
+| `tests/test_notchcontroller.cpp` | 2 new `NotchControllerRingRisk` tests |
+
+The counter lives on `LaneAnalysis`, not on the scorer, exactly because the
+scorer must not be reset: this is the readout's own memory, and clearing it
+changes nothing a notch depends on. It saturates at `UINT32_MAX` instead of
+wrapping — a wrap to 0 would blink the chip to N/A once every ~1.4 years of
+continuous running for no reason.
+
+`frameScoreValid_` is still evaluated BEFORE this frame's `commitBlock`, so the
+first frame after a reset publishes N/A and the next one publishes a
+measurement. That is the behaviour the two new tests pin.
+
+## Reset paths I found
+
+Searched every caller of `NotchController::setSampleRate` / `setWidth` and every
+`Detector` mutation in `src/app` and `src/gui`:
+
+1. **`NotchController::setSampleRate` (`NotchController.cpp:845`)** — the only
+   place a `Detector` is retuned. Zeroed. Note for the record: **nothing outside
+   the tests calls it** (`grep -rn setSampleRate src` — the other hits are
+   `AudioEngine`/`NotchChain`, a different object). So in the shipping app the
+   controller's `Detector` keeps its constructed 48 kHz. That is a pre-existing
+   gap unrelated to lane R (it predates this branch and is not a readout bug);
+   flagged here so it is not mistaken for something this fix introduced.
+2. **`NotchController::setWidth` (`NotchController.cpp:79`)** — zeroed
+   **unconditionally**, not only when the width value changes. This is the path
+   a real device or sample-rate change actually takes:
+   `DevicePanel::changeDevice / changeSampleRate / changeBufferSize` all fire
+   `onBeforeRestart` → `onAfterRestart` (`DevicePanel.cpp:101/136/159`), and
+   `MainComponent`'s `onAfterRestart` hook calls
+   `controller.setWidth (engine_.getSlotConfig (i).width)` for every slot on
+   every restart (`MainComponent.cpp:316-327`), usually with the SAME width.
+   A conditional zero would therefore have missed the device/SR case entirely.
+   A brief N/A after a restart is honest; a stale number is not.
+3. **No other reset path exists.** `Detector::reset()` has no caller in
+   `src/app` or `src/gui`; the only `.reset()` hits there are
+   `NotchChain::reset()` (`AudioEngine.cpp:617,711`) and
+   `SessionLogger`'s stream. `setDetectionActive(false)` already forced
+   `ringRiskValid` false via the early return, and is covered by the existing
+   `DetectionDisabledPublishesInvalidNotZero`.
+
+Concern 1 of the original report ("`hasHistory()` is 'ever committed', because
+nothing ever resets the scorer") is now closed: validity no longer depends on
+the scorer's internal counter at all.
+
+## Covering tests
+
+| Test | Claim |
+|---|---|
+| `SampleRateChangeInvalidatesUntilTheNextBlock` | warm to valid → `setSampleRate(44100)` → next published frame reads `valid == false`, `score == 0` → one more block → `valid == true` again |
+| `WidthChangeInvalidatesUntilTheNextBlock` | warm to valid → `setWidth(1)` → next published frame N/A → next block valid again. Comment names it as the path `onAfterRestart` takes |
+
+**Mutation check (the tests actually bite).** With both zeroing sites commented
+out and everything else identical:
+
+```
+build/tests/Release/HandsFreeTests.exe --gtest_filter='NotchControllerRingRisk*Invalidates*'
+```
+
+```
+[  FAILED  ] NotchControllerRingRisk.SampleRateChangeInvalidatesUntilTheNextBlock
+[  FAILED  ] NotchControllerRingRisk.WidthChangeInvalidatesUntilTheNextBlock
+
+ 2 FAILED TESTS
+```
+
+The mutation was reverted before the final build below.
+
+## Commands run
+
+### Focused
+
+```
+build/tests/Release/HandsFreeTests.exe --gtest_filter='NotchControllerRingRisk*'
+```
+
+```
+[==========] Running 8 tests from 1 test suite.
+[       OK ] NotchControllerRingRisk.InvalidBeforeAnyFrame (0 ms)
+[       OK ] NotchControllerRingRisk.PublishesThresholdSoTheGuiNeverHardcodesIt (0 ms)
+[       OK ] NotchControllerRingRisk.ValidWithHistoryAndScoreCrossesThresholdOnThePlacingFrame (2 ms)
+[       OK ] NotchControllerRingRisk.NoiseOnlyFramesAreValidAndReadLow (2 ms)
+[       OK ] NotchControllerRingRisk.DetectionDisabledPublishesInvalidNotZero (2 ms)
+[       OK ] NotchControllerRingRisk.ScoreIsMaxOverBothLanesOfTheSlot (5 ms)
+[       OK ] NotchControllerRingRisk.SampleRateChangeInvalidatesUntilTheNextBlock (2 ms)
+[       OK ] NotchControllerRingRisk.WidthChangeInvalidatesUntilTheNextBlock (2 ms)
+[  PASSED  ] 8 tests.
+```
+
+The six original ring-risk tests are unchanged and still pass.
+
+### Full build + full suite
+
+```
+cmake --build build --config Release
+cd build && ctest -C Release
+```
+
+```
+440/440 Test #440: logstats_fixture .............................................................................   Passed    0.13 sec
+
+100% tests passed, 0 tests failed out of 440
+
+Total Test time (real) =  43.31 sec
+```
+
+438 before this fix + 2 new = **440/440**, zero failures, no existing test
+edited. No new compiler warnings (the pre-existing C4324 in
+`LockFreeRingBuffer.h` and C4244 in `NotchListPanel.cpp` are the only ones).
+
+## Residual concerns
+
+1. **`NotchController::setSampleRate` is production-dead** (item 1 above). Lane
+   R now handles it correctly if it is ever wired up, and the restart path is
+   covered through `setWidth` regardless — but somebody should decide whether
+   the controller's `Detector` ought to follow the device rate at all. Out of
+   scope here (it would change detection behaviour); worth a ledger line.
+2. Concerns 2-6 of the original report stand unchanged (LINKED skip path,
+   `ringRiskThreshold` being a compile-time constant today, A-R7 still open,
+   no rig listen, `docs/spec-ring-risk.md` §2 still superseded and owned by R3).
