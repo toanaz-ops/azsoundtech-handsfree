@@ -99,3 +99,15 @@ Task R2: fix round 2/5 dispatched (fresh implementer sonnet; FIX_BASE e0badb5; f
 Task R2: fix round 2/5 (1 addressed, 0 open; commits e0badb5..730b986; re-review (sonnet) clean: ringRisk_ reset beside the hold in setController, displayed-field test mutation-checked, FP self-check margin 3.9×; 451/451)
 Task R2: complete (commits bbc1cfb..730b986, review clean after 2 fix rounds)
 Task R3: dispatched (BASE 730b986, implementer opus, brief task-R3-brief.md)
+Task R3: implementer DONE — 4342ec4 (wiring + 2 tests + tickForTest), 767d9d7 (snapshot tool stages CRITICAL via ringRiskForTest, printed+commented), bdc6265 (docs: spec/GIOI-THIEU/KY-THUAT/1.1.3 note/memory), 4cf0464 (report); 453/453; controller READ both PNGs: live = filled red CRITICAL chip, idle = hollow N/A, both legible; sent to owner.
+Task R3: review (opus) NEEDS FIXES — Important 1: Acceptance 1 "PROVEN" cites the pinned test, which never calls tickForTest (headless suite pumps no timer) so it asserts the default field, not the wired idle path; console-idle.png likewise. Real coverage exists only as the last EXPECT in RingRiskFollowsTheMonitoredSlotAcrossASwitch. Fix = ticking companion test + point the citations at it; pinned assertion untouched.
+Task R3: CONTROLLER RULING on Minor 2 (pinned test name now permanently satisfied): keep the name — spec and brief cite it; the companion test carries the wired-idle meaning.
+Task R3: minor (fix in round 1, docs): GIOI-THIEU + 1.1.3 note say CRITICAL = "đang hoặc vừa đặt notch" — placement also needs capacity/guard-bin, so a full table can hold Critical with nothing placed; soften wording. KY-THUAT pending-list line unwrapped.
+Task R3: minor (deferred): spec-ring-risk.md status header mixes Vietnamese into an English doc; two copySnapshot per tick is A-R6-mandated and documented
+Task R3: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE 4cf0464; findings: Important 1 + docs minors 3, 4)
+Task R3: fix round 1/5 (2 addressed + Important 1 partially — companion ticking test 7deea20 mutation-checked, spec Acceptance 1 corrected 6b71dc7, GIOI-THIEU/1.1.3 CRITICAL wording softened, KY-THUAT re-wrapped; residual: task-R3-report.md §4 row 1 and §6 still carry the disproven "measured no-data" claim, only §8 explains it; commits 4cf0464..3247b16; 454/454)
+Task R3: minor (deferred → final review): GUI bands Critical at score >= threshold (SpectrumView.cpp:679-684) while placement needs score > kConfirmScore strictly (NotchController.cpp:817) — chip may read Critical one tick before placement at the exact boundary; float equality, negligible in practice
+Task R3: fix round 2/5 dispatched (fresh implementer sonnet; FIX_BASE 3247b16; finding: Important 1 residual — report §4/§6 in-place correction)
+Task R3: fix round 2/5 (1 addressed, 0 open; commit 3247b16..a710b87 report-only; re-review (sonnet) clean)
+Task R3: complete (commits cbce71f..a710b87, review clean after 2 fix rounds)
+LANE R: final whole-branch review (opus, package review-d58eac0..a710b87.diff) + independent read-only verifier (az-harness:verifier) dispatched in parallel; deferred-minor and parked lines above are the triage list.
