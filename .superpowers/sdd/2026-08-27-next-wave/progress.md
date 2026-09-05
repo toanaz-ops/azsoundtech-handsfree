@@ -86,3 +86,16 @@ Task R1: fix round 1/5 (1 addressed, 0 open; commits 6dea381..afc4dfc; re-review
 Task R1: parked for OWNER (pre-existing, out of lane R scope): NotchController::setSampleRate has NO production caller — the detector never follows the device sample rate (device/SR change goes through setWidth via MainComponent.cpp:316-327 only). Placement-behaviour question; nobody in lane R touches it.
 Task R1: complete (commits 8951e6a..afc4dfc, review clean after 1 fix round)
 Task R2: dispatched (BASE afc4dfc, implementer opus, brief task-R2-brief.md)
+Task R2: implementer DONE_WITH_CONCERNS — 7fe7636 (code+tests), f17a46b (report); 447/447; concerns: no screenshot (paint untouched, provider null → R3), extra guard thr<=0/non-finite → Unavailable, hold expiry drops straight to raw band, spec §2/§3 text → R3
+Task R2: review (opus) NEEDS FIXES — Important 1: hold re-arms only on a STRICT step up (SpectrumView.cpp:706-711), so a sustained borderline score blinks Critical→Rising ~33 ms every 750 ms (Acceptance 4 violated); the flicker test stops before the hold expires so it cannot see it. Important 2: setController (SpectrumView.cpp:519-543) clears every per-slot field but not ringRiskHold_ → new slot shows the old slot's Critical for up to 750 ms.
+Task R2: minor (deferred): dead `stepUpMs_ = nowMs` in the Unavailable branch (SpectrumView.cpp:698)
+Task R2: minor (deferred): nowMs running backwards holds forever (SpectrumView.cpp:718) — add `|| nowMs < stepUpMs_`; clock is monotonic in practice
+Task R2: minor (deferred → R3): header block (SpectrumView.h:214-221) never names riskForScore as the function R3's lambda must call
+Task R2: minor (deferred): boundary test restates 0.55f*thr (tautological on its own; discriminating rows at thr=0.42 do the real work)
+Task R2: fix round 1/5 dispatched (fresh implementer opus — harness cannot resume; FIX_BASE f17a46b; findings: Important 1, Important 2)
+Task R2: fix round 1/5 (1 addressed, 1 partially — Important 2 residual: setController resets ringRiskHold_ but not the painted ringRisk_ (SpectrumView.cpp:519-548 vs timerCallback :750-754), so the old slot's badge can paint for ≤1 frame (33 ms) after a switch; commits f17a46b..e0badb5; 450/450)
+Task R2: minor (deferred): tests/test_spectrumview.cpp:742 `EXPECT_GT (now - 100.0, 4.0 * kHoldMs)` sits on the exact FP boundary (passes by ~3e-12) — use 3.9×
+Task R2: fix round 2/5 dispatched (fresh implementer sonnet; FIX_BASE e0badb5; finding: Important 2 residual)
+Task R2: fix round 2/5 (1 addressed, 0 open; commits e0badb5..730b986; re-review (sonnet) clean: ringRisk_ reset beside the hold in setController, displayed-field test mutation-checked, FP self-check margin 3.9×; 451/451)
+Task R2: complete (commits bbc1cfb..730b986, review clean after 2 fix rounds)
+Task R3: dispatched (BASE 730b986, implementer opus, brief task-R3-brief.md)
