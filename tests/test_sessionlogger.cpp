@@ -82,6 +82,12 @@ TEST (SessionLogger, StartWritesHeaderFirstStopWritesEndLastEveryLineParses)
     EXPECT_TRUE (mid.hasProperty ("t"));
     EXPECT_EQ (last["ev"].toString(), "session_end");
     EXPECT_EQ ((int) last["dropped_events"], 0);
+    // M-1. Red if writeLineNow() stops recording refused writes, or the field
+    // stops being emitted -- a reader could then no longer tell a truncated
+    // log from a quiet one. A real disk-full is not simulated here; what is
+    // pinned is that the field EXISTS and reads false on a healthy session.
+    ASSERT_TRUE (last.hasProperty ("write_failed"));
+    EXPECT_FALSE ((bool) last["write_failed"]);
 }
 
 // Spec test 2. Red if log() ever blocks on the file, or if the deque stops

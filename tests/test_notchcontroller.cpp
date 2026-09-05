@@ -1269,6 +1269,11 @@ TEST (NotchControllerStereo, AdoptPresetHonoursLaneAndKeepsTheFilesIndex)
 namespace {
 using Ev = NotchController::NotchEvent;
 
+// M-5: DECLARE A Recorder BEFORE THE HARNESS IT IS WIRED TO. The controller's
+// destructor runs stop(), which flushes its remaining events through the sink
+// -- into this object. Declaration order is the reverse of destruction order,
+// so a Recorder declared after its Harness is already gone by then and the
+// flush writes into a destroyed vector.
 struct Recorder
 {
     std::vector<Ev> events;
@@ -1292,7 +1297,7 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
 {
     // Manual (default), VerdictFalse, ClearAll -- one Harness.
     {
-        Harness h; Recorder r; h.controller.setEventSink (r.sink());
+        Recorder r; Harness h; h.controller.setEventSink (r.sink());
         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
         ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
         ASSERT_TRUE (h.controller.setNotch (0, 2, 3000.0, 30.0, -12.0, NotchController::Origin::Manual));
@@ -1313,7 +1318,7 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
     }
     // AutoRelease: mirror LiveTapReleasesAfter30s (this file, ~line 151).
     {
-        Harness h; Recorder r; h.controller.setEventSink (r.sink());
+        Recorder r; Harness h; h.controller.setEventSink (r.sink());
         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
         NoiseSource quiet;
         const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 10;
@@ -1326,7 +1331,7 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
     }
     // WidthChange: lane-1 notch, narrow to mono.
     {
-        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+        Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
         ASSERT_TRUE (h.controller.setNotch (1, 2, 800.0, 30.0, -12.0, NotchController::Origin::Manual));
         h.controller.setWidth (1);
         h.controller.runOnce();
@@ -1337,7 +1342,7 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
     }
     // PartialApplyUnwind: adoptPreset with lane -1 on a stereo slot, lane 1 forced to fail.
     {
-        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+        Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
         h.controller.failNextSetNotchOnLaneForTest (1);
         EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (4, 1000.0)), 0);
         h.controller.runOnce();
@@ -1392,7 +1397,7 @@ TEST (NotchControllerEvents, NoSinkMeansNoAccumulation)
 // and counting.
 TEST (NotchControllerEvents, OutboxDropsAndCountsPastTheCap)
 {
-    Harness h; Recorder r; h.controller.setEventSink (r.sink());
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
     for (int i = 0; i < 100; ++i)
     {
         ASSERT_TRUE (h.controller.setNotch (0, i % 16, 1000.0 + i, 30.0, -12.0, NotchController::Origin::Manual));
@@ -1407,7 +1412,7 @@ TEST (NotchControllerEvents, OutboxDropsAndCountsPastTheCap)
 // Spec test 11. Red if stop() stops flushing what is still queued.
 TEST (NotchControllerEvents, StopFlushesPendingEventsEvenWhenTheThreadNeverRan)
 {
-    Harness h; Recorder r; h.controller.setEventSink (r.sink());
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
     h.controller.stop (1000);
     ASSERT_EQ (r.events.size(), 1u);
@@ -1419,7 +1424,7 @@ TEST (NotchControllerEvents, StopFlushesPendingEventsEvenWhenTheThreadNeverRan)
 // nothing would drain once the thread is already joined and gone.
 TEST (NotchControllerEvents, StopDrainsEventsQueuedByAReentrantSinkDuringItsOwnFlush)
 {
-    Harness h; Recorder r;
+    Recorder r; Harness h;
     h.controller.setEventSink ([&] (const Ev& e)
     {
         r.events.push_back (e);
@@ -1452,7 +1457,7 @@ TEST (NotchControllerPreset, AdoptPresetCountsLaneOneNotchesSkippedOnAMonoSlot)
 // multiplying to the recorded score.
 TEST (NotchControllerEvents, DetectorPlacementCarriesTheScoredFrameAndTheScorersReference)
 {
-    StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
+    Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
     h.controller.setDetectionActive (true);
     NoiseSource quietL; SineSource toneR;
     const auto cmds = warmThenDrive (h, quietL, toneR);

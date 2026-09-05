@@ -421,8 +421,8 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     // change that widens the string fails this test too.
     const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
     ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
-    const float statusW360 = gui::NotchListPanel::statusWidthFor (440.0f);
-    EXPECT_LE (widthOf (widestAge) + kInset, statusW360);
+    const float statusWNarrowest = gui::NotchListPanel::statusWidthFor (440.0f);
+    EXPECT_LE (widthOf (widestAge) + kInset, statusWNarrowest);
 }
 
 //==============================================================================
@@ -515,6 +515,57 @@ TEST (NotchListPanelVerdict, ButtonsPersistAcrossRefreshesAndDieWithTheirIdentit
     panel.refreshFromSnapshot();
     EXPECT_EQ (panel.getNumChildComponents(), 2);
     EXPECT_NE (panel.goodButtonForTest (0), good0);   // the surviving row is the other identity
+}
+
+// I-1. Red without NotchListPanel's lastRefreshMs_ reset: buttons_ is keyed by
+// identity and lives for kTrackingTimeoutMs (60 s), so a howl cleared and then
+// re-placed at the same lane/index/Hz came back already carrying the verdict a
+// human gave the PREVIOUS notch -- and reportVerdict() refuses to overwrite a
+// verdict, so nobody could correct it either.
+TEST (NotchListPanelVerdict, ReplacedNotchAtTheSameIdentityStartsUnjudged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TwoNotchController fed;
+    FakeClock clock;
+    // By reference -- the identity has to be seen ABSENT at a later clock
+    // reading than its last sighting for the reset to fire.
+    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
+    panel.setSize (640, 200);
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 2);
+
+    ASSERT_NE (panel.goodButtonForTest (0), nullptr);
+    panel.goodButtonForTest (0)->onClick();          // 987 Hz judged GOOD
+    ASSERT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::Good);
+
+    // The notch goes away for one whole refresh...
+    fed.controller.clearNotch (0, 0);
+    fed.republish();
+    clock.nowMs += 250.0;
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 1);
+
+    // ...and a NEW howl is placed at exactly the same identity.
+    ASSERT_TRUE (fed.controller.setNotch (0, 0, 987.0, 4.0, -12.0,
+                                          NotchController::Origin::Manual));
+    fed.republish();
+    clock.nowMs += 250.0;
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 2);
+    EXPECT_NEAR (panel.rowForTest (0).ageMs, 500.0, 1.0);   // age still carries over (R-2)
+    EXPECT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::None);
+    EXPECT_EQ (panel.rowForTest (0).verdictText, juce::String());
+    ASSERT_NE (panel.goodButtonForTest (0), nullptr);
+    EXPECT_TRUE (panel.goodButtonForTest (0)->isVisible());
+    EXPECT_TRUE (panel.falseButtonForTest (0)->isVisible());
+
+    // A row that never left keeps whatever it had: the reset is about absence,
+    // not about time passing.
+    panel.goodButtonForTest (1)->onClick();
+    clock.nowMs += 250.0;
+    fed.republish();
+    panel.refreshFromSnapshot();
+    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
 }
 
 // Column budget: the VERDICT column fits two buttons and its own caption.
