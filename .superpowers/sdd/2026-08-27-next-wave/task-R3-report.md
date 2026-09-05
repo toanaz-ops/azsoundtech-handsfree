@@ -246,3 +246,59 @@ $ git diff 4342ec4~1..bdc6265 --stat -- src/app/NotchController.cpp src/app/Notc
 5. **Release** is the controller's, after final review: patch 1.1.2 → 1.1.3
    (A-R10). `docs/release-notes/1.1.3-alpha.md` is written and ready to be
    folded into `TESTER-NOTES.md` at that point — I did not edit the drop folder.
+
+## 8. Fix round 1 (reviewer: Important 1, Minor 3, Minor 4)
+
+**What was wrong.** §4's row 1 and §6's second bullet both credited
+`MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt` with proving
+the *wired* idle path. It does not: that test constructs `MainComponent` and
+reads `getRingRisk()` without ever calling `tickForTest()`. The headless suite
+pumps no message loop, so `timerCallback()` never runs on its own, and the
+assertion is on `ringRisk_`'s default-constructed value — identical whether or
+not `ringRiskProvider` is assigned at all. §6's claim "with the provider
+wired, `Unavailable` is a measured 'no data', not an unassigned
+`std::function`" was false for that test. `console-idle.png` was cited
+alongside as if it corroborated the wiring; `tools/snapshot.cpp` also runs no
+dispatch loop, so the `N/A` in that PNG is the same unpolled default field,
+not a measured reading.
+
+**What now proves it.** Added
+`MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory`
+in `tests/test_gui_wiring.cpp`, right after the pinned test: constructs
+`MainComponent` exactly like the pinned test, confirms the monitored
+controller has no history yet (`ASSERT_FALSE (snap.ringRiskValid)`), calls
+`tickForTest()` once to run the real `timerCallback()` through the wired
+provider, then asserts `getRingRisk() == RingRisk::Unavailable`. Mutation
+check: temporarily changed `SpectrumView::riskForScore`'s
+`if (! snapshot.ringRiskValid) return RingRisk::Unavailable;` to
+`return RingRisk::Low;` — the new test failed (and so did
+`RingRiskFollowsTheMonitoredSlotAcrossASwitch`, corroborating), confirming it
+actually exercises the guard:
+
+```
+[ RUN      ] MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory
+tests\test_gui_wiring.cpp(901): error: Expected equality of these values:
+  app.getSpectrumViewForTest().getRingRisk()
+    Which is: 4-byte object <01-00 00-00>
+  gui::SpectrumView::RingRisk::Unavailable
+    Which is: 4-byte object <00-00 00-00>
+[  FAILED  ] MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory
+```
+
+Reverted the mutation immediately after (`git diff -- src/` empty, confirmed).
+The pinned test's name and assertion are untouched, per the controller
+ruling — it stays cited for the thing it actually proves: the readout never
+defaults to `Low` when nothing has assigned `ringRiskProvider`.
+`docs/spec-ring-risk.md` Acceptance 1 now cites the new companion test for the
+wired idle path and notes `console-idle.png` shows the default field, not a
+polled one.
+
+Full suite after the fix: 453 → **454/454**, `ctest -C Release`
+(`build && ctest -C Release`).
+
+**Minor 3** (CRITICAL wording overstates placement — a full notch table or a
+guarded bin can hold the chip at Critical with nothing placed): softened one
+sentence each in `docs/GIOI-THIEU.md` and `docs/release-notes/1.1.3-alpha.md`.
+
+**Minor 4**: re-wrapped the `docs/KY-THUAT-CHONG-HU.md` pending-list line left
+ragged after the RING RISK item was removed.
