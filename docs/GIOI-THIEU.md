@@ -82,8 +82,12 @@ nguồn dữ liệu sẽ được nối ở bản sau.
 
 Thấy app cắt oan một nốt nhạc: bấm **FALSE** trên dòng đó — notch nhả ngay và app ghi
 lại "đây là cắt oan". Thấy nó cắt đúng tiếng hú: bấm **GOOD**. Không bắt buộc, nhưng mỗi
-lần bấm là một mẫu huấn luyện. Log nằm ở `%APPDATA%\AZSoundtech\HandsFree\logs\`, một
-file mỗi lần mở app, không chứa audio; gửi file khi được hỏi.
+lần bấm là một mẫu huấn luyện. Nếu một tiếng hú **quay lại đúng tần số cũ**, dòng đó
+hiện lại hai nút trắng: đó là một notch MỚI và nó chờ đánh giá mới, không mang theo
+GOOD/FALSE của lần trước. Log nằm ở `%APPDATA%\AZSoundtech\HandsFree\logs\`, một
+file mỗi lần mở app, không chứa audio; gửi file khi được hỏi. Nếu app **không ghi được
+log** (thư mục bị chặn), dòng trạng thái dưới đáy báo `LOG: khong ghi duoc ...` — app vẫn
+chạy bình thường, chỉ là không có file để gửi.
 
 ## Freeware
 

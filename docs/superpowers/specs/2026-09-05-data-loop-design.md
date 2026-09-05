@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-09-05. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md).
 **Trạng thái:** đã thực thi trên nhánh `feat/data-loop` (2026-09-05, 8 task,
-suite 430/430); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
+suite 432/432 sau fix wave 2026-09-05); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
 lane S đã merge trước — nằm trong
 [`../plans/2026-09-05-data-loop.md`](../plans/2026-09-05-data-loop.md):
 mục "Hợp nhất hai phiên" (đầu file) và bảng "Amendments to the spec" (A-1..A-10).
@@ -121,8 +121,10 @@ rồi `sessionLogger_.stop()`.
 }
 ```
 
-~6 KB mỗi mảng; một sự kiện `notch_set` ~12–18 KB. Một show tệ nhất vài
-trăm notch → vài MB. Chấp nhận được; `keepFiles = 30` chặn tích lũy.
+~6 KB mỗi mảng; một sự kiện `notch_set` ~12–18 KB. **Đo lại 2026-09-05
+(fix wave lane D): 19,5–19,7 KB/dòng** cho slot stereo có đủ `now` + `ref` +
+`other_lane_now`; ở chế độ LINK một lần xác nhận phát hai Set (~40 KB). Một
+show 3 giờ với ~300 lần đặt notch → ~6–14 MB. Chấp nhận được; `keepFiles = 30` chặn tích lũy.
 
 Để có các thành phần điểm tách riêng, `CandidateScorer::scoreCandidate`
 thêm một overload trả:

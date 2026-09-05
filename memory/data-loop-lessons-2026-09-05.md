@@ -8,32 +8,51 @@ metadata:
 # Bài học từ lane D (vòng dữ liệu: log session + nhãn GOOD/FALSE) — 2026-09-05
 
 **Bối cảnh:** lane D thêm `SessionLogger` (JSONL, thread riêng), nút GOOD/FALSE
-trên `NotchListPanel`, và `tools/logstats.py`. 8 task, suite 402 → 430, không
+trên `NotchListPanel`, và `tools/logstats.py`. 8 task + một fix wave sau verifier, suite 402 → 432, không
 đụng audio path (0 dB). Spec: `docs/superpowers/specs/2026-09-05-data-loop-design.md`.
 Plan + amendments A-1..A-10: `docs/superpowers/plans/2026-09-05-data-loop.md`.
 
-## 1. `juce::JSON::toString` in double tới 18 chữ số — làm tròn TRƯỚC khi vào `var`
+## 1. `juce::JSON::toString` in double đủ dài để round-trip — làm tròn TRƯỚC khi vào `var`
 
-`serialiseDouble` của JUCE không giới hạn số chữ số: một magnitude 0.00123 có
-thể in ra `0.001229999999999999`. Không sửa được ở bước serialise vì lúc đó
-giá trị đã là double thật trong `var`. Phải làm tròn về 3 chữ số có nghĩa
-(`roundSig3`) **trước khi** nhét vào `var`, không phải format lại chuỗi sau.
+Cạm bẫy KHÔNG phải là một double "tròn" như `0.0123`: cái đó in ra đúng
+`0.0123`. Cạm bẫy là một magnitude **float chưa làm tròn** bị nới lên double.
+`(double) 0.0123456789f` là `0.012345679104328156` — 20 ký tự cho MỘT bin, và
+`serialiseDouble` của JUCE phải in đủ chừng đó để round-trip lại đúng giá trị.
+Nhân với 1025 bin × 3 mảng thì một dòng `notch_set` phình ra vài chục KB thừa.
+Không sửa được ở bước serialise vì lúc đó giá trị đã là double thật trong
+`var`. Phải làm tròn về 3 chữ số có nghĩa (`roundSig3`) **trước khi** nhét vào
+`var`, không phải format lại chuỗi sau.
+(Kiểm chứng lại 2026-09-05: dòng `notch_set` stereo thật đo được 19,5–19,7 KB
+sau khi đã `roundSig3`.)
 
-## 2. `SessionLogger::log(const var&)` phải clone trước khi stamp `t` — sửa `var` const vẫn mutate được caller
+## 2. `SessionLogger::log(const var&)` phải COPY object trước khi stamp `t` — sửa `var` const vẫn mutate được caller
 
 `getDynamicObject()` trên một `var` là non-const về mặt kỹ thuật của kiểu trả
 về (con trỏ tới `DynamicObject` dùng chung), nên gọi nó trên một tham số
 `const var&` rồi set thêm property `"t"` **sửa luôn object của caller** — dù
-chữ ký hàm là const-correct trên giấy. Phải `var::clone()` (deep copy) trước
-khi thêm `t`, nếu không caller giữ một `var` đã bị logger tự ý thêm field.
+chữ ký hàm là const-correct trên giấy.
+
+Cách sửa thực tế trong code là một bản sao **một tầng**:
+
+```cpp
+juce::var stamped (new juce::DynamicObject (*obj));
+```
+
+`DynamicObject`'s copy ctor sao chép `NamedValueSet` của nó, đủ để `setProperty
+("t", ...)` không chạm vào object của caller. Đây **không** phải `var::clone()`:
+`clone()` là deep copy, nó sẽ nhân bản cả ba mảng 1025 phần tử trong `ctx` chỉ
+để thêm một field — tốn kém vô ích. Các mảng con được chia sẻ, và không ai sửa
+chúng sau khi dựng.
 
 ## 3. Không bao giờ start logger trong ctor của `MainComponent`
 
 26 test hiện có cộng `HandsFreeSnapshot` đều dựng `MainComponent` để test
 layout/logic, không phải để chạy một phiên thật. Nếu logger start trong ctor,
 mỗi lần chạy test suite sẽ ghi — và **prune** — thư mục log thật ở
-`%APPDATA%`. Logger chỉ start từ `startAudio()` (production) hoặc
-`startSessionLog(dir)` test-only, không bao giờ từ constructor.
+`%APPDATA%`. Logger chỉ start qua `MainComponent::startSessionLog(dir)`, và
+lời gọi production duy nhất nằm trong **`main.cpp`**, ngay SAU `startAudio()`
+(để header ghi đúng device đang mở) — không phải bên trong `startAudio()`, và
+không bao giờ từ constructor. Test gọi cùng hàm đó với một thư mục temp.
 
 ## 4. Test headless phải gọi `button->onClick()`, không phải `triggerClick()`
 

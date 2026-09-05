@@ -307,11 +307,13 @@ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30
 | `ev` | Khi nào | Mang gì |
 |---|---|---|
 | `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
-| `mode` | bấm Bypass / Auto / Soundcheck | `mode` |
+| `mode` | ngay sau `session_start` (mode lúc mở phiên), rồi mỗi lần bấm Bypass / Auto / Soundcheck | `mode` |
 | `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
 | `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
 | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
 | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
+| `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono) |
+| `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
 
 Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
 người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
@@ -319,18 +321,30 @@ thread; hàng đợi 4096 dòng, quá thì bỏ và đếm vào `dropped_events`
 Sự kiện của `NotchController` đi qua một outbox 64 phần tử và chỉ được đẩy ra **ngoài**
 `modelMutex_` trên detector thread (spec D-6), nên nút CLEAR ALL không bao giờ chờ I/O.
 
+**Hai `age_ms` không cùng đồng hồ.** `verdict.age_ms` là tuổi theo **đồng hồ tường** của
+GUI tính từ lần đầu bảng ACTIVE NOTCHES nhìn thấy notch đó; `notch_clear.age_ms` là tuổi
+theo **đồng hồ sống của detector** — đồng hồ này *đứng lại* khi tap chết (D-06). Mất tín
+hiệu 10 giây thì `verdict.age_ms` vẫn cộng đủ 10 giây còn `notch_clear.age_ms` thì không:
+hai số lệch nhau đúng bằng thời gian tap chết, và đó là hành vi đúng của cả hai.
+
 `FALSE` vừa ghi nhãn vừa xóa notch (đó là điều người vận hành muốn — D-2); `GOOD` chỉ ghi
 nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
 frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
 Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
+
+**Kích thước.** Một dòng `notch_set` có `ctx` là dòng nặng nhất: trên slot stereo nó mang
+ba mảng 1025 bin (`now`, `ref`, `other_lane_now`) → **đo được 19,5–19,7 KB/dòng** (log thật
+của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 3 chữ số có nghĩa). Ở chế độ
+LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
+với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
 
 ## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — chờ release)
 
 Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
 `tools/logstats.py`.
 
-- Suite: **430/430 test pass** (ctest Release, MSVC, CI GitHub
-  Actions xanh) — +28 test so với 1.1.1 (402): `SessionLogger` (start/stop,
+- Suite: **432/432 test pass** (ctest Release, MSVC, CI GitHub
+  Actions xanh) — +30 test so với 1.1.1 (402): `SessionLogger` (start/stop,
   cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
   mục là no-op), sự kiện `notch_set`/`notch_clear`/`verdict` qua outbox ngoài
   `modelMutex_`, nút GOOD/FALSE trên `NotchListPanel`, và `logstats_fixture`
