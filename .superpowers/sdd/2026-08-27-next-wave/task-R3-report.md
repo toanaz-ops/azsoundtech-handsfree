@@ -174,7 +174,7 @@ by this image.
 
 | # | Claim | Status | Evidence / who finishes it |
 |---|---|---|---|
-| 1 | Detector stopped or without history → `N/A`, hollow; the existing test passes unchanged | **PROVEN HERE** | `MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt` (assertion untouched), `NotchControllerRingRisk.InvalidBeforeAnyFrame`, `...DetectionDisabledPublishesInvalidNotZero`; `console-idle.png` |
+| 1 | Detector stopped or without history → `N/A`, hollow; the existing test passes unchanged | **PROVEN HERE** | `MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory` (ticks the wired provider), `NotchControllerRingRisk.InvalidBeforeAnyFrame`, `...DetectionDisabledPublishesInvalidNotZero`; the pinned test `RingRiskReadsUnavailableUntilSomethingProvidesIt` never ticks, so it asserts the default field, only proving "never defaults to Low when nothing provides"; `console-idle.png` shows that same unpolled default field — the tool runs no dispatch loop. (corrected in fix round 1, see §8) |
 | 2 | A 1 kHz tone drives the chip Critical **before** the notch appears in ACTIVE NOTCHES | **NEEDS THE RIG** | The ordering is built (A-R2: the notch list is gathered before the frame is scored, so this frame's notch lands in the NEXT snapshot) and the Critical transition is tested off a real detector — but "one frame earlier, in a real room" is a human observation. In the 1.1.3 tester note, item 1. |
 | 3 | Broadband noise holds `Low` | **PROVEN in unit form, NEEDS THE RIG for level** | Restated per A-R3: the scorer gates on peakiness before scoring, so a noise-only frame scores exactly 0 → `Low`, and `NotchControllerRingRisk.NoiseOnlyFramesAreValidAndReadLow` pins it. A real stage noise floor is not `NoiseSource`. Tester note, item 2. |
 | 4 | A borderline signal does not visibly flicker | **PROVEN HERE** | `SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows`, `...FallsSevenFiftyAfterTheLastCriticalObservation`, `...StepUpRestartsTheHold`, `...UnavailableOverridesTheHold` (R2) |
@@ -213,10 +213,14 @@ $ git diff 4342ec4~1..bdc6265 --stat -- src/app/NotchController.cpp src/app/Notc
 
 - **Did the wiring change any placement decision?** No. The lambda only reads a
   snapshot copy. The detector's own code is byte-identical (diff above).
-- **Does the pinned test still test what it was written to test?** Yes, and it
-  now tests something stronger: with the provider wired, `Unavailable` is a
-  measured "no data", not an unassigned `std::function`. Its assertion is
-  unchanged. Its name is now slightly misleading — flagged, not changed.
+- **Does the pinned test still test what it was written to test?** Yes, but not
+  more: the pinned test never calls `tickForTest()`, so it never ticks the
+  wired provider — it still only asserts the default-constructed field, the
+  same thing it asserted before this lane. The wired idle path (a measured
+  "no data", not an unassigned `std::function`) is proven instead by the
+  companion test, `MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory`.
+  The pinned test's assertion is unchanged. Its name is now slightly
+  misleading — flagged, not changed. (corrected in fix round 1, see §8)
 - **Is `tickForTest()` a hole in the class?** It exposes a call that a timer
   would make anyway; it cannot start or stop the timer, and the private
   `juce::Timer` base is still private. The alternative was making `timerCallback`
