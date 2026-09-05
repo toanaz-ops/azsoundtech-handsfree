@@ -538,6 +538,15 @@ void SpectrumView::setController (const NotchController& controller)
     displayLane_ = 0;
     laneGroup_.setSelectedIndex (0);
 
+    // The anti-flicker hold is per-slot state by exactly the same argument: a
+    // Critical held from the slot we just left would otherwise be attributed
+    // to this one for up to 750 ms. ringRisk_ is the DISPLAYED field paint()
+    // actually reads -- resetting the hold alone left the old slot's chip on
+    // screen for up to one 30 fps frame, since the unconditional repaint()
+    // below fires before the next timerCallback() can correct it.
+    ringRiskHold_ = {};
+    ringRisk_     = RingRisk::Unavailable;
+
     refreshFromSnapshot();
     repaint();
 }
@@ -643,6 +652,93 @@ juce::Colour SpectrumView::ringRiskColour (const RingRisk risk)
     return faded;
 }
 
+SpectrumView::RingRisk
+SpectrumView::riskForScore (const NotchController::SnapshotBuffer& snapshot)
+{
+    // The detector did not score this frame -- 0.0 here means "no number",
+    // not "quiet room". See the header for why all three of these guards
+    // report Unavailable rather than a band.
+    if (! snapshot.ringRiskValid)
+        return RingRisk::Unavailable;
+
+    const float score     = snapshot.ringRiskScore;
+    const float threshold = snapshot.ringRiskThreshold;
+
+    // NaN score: every comparison below is false, so without this it would
+    // fall through to Critical on garbage.
+    if (! std::isfinite (score))
+        return RingRisk::Unavailable;
+
+    // No usable band line: against threshold <= 0 every score reads Critical.
+    if (! std::isfinite (threshold) || threshold <= 0.0f)
+        return RingRisk::Unavailable;
+
+    if (score < kRingRiskRisingFraction * threshold)
+        return RingRisk::Low;
+
+    if (score < threshold)
+        return RingRisk::Rising;
+
+    // At or past the line the placement decision itself uses: the detector is
+    // about to place, or has just placed, a notch.
+    return RingRisk::Critical;
+}
+
+int SpectrumView::RingRiskHysteresis::severity (const RingRisk risk)
+{
+    switch (risk)
+    {
+        case RingRisk::Unavailable: return 0;
+        case RingRisk::Low:         return 1;
+        case RingRisk::Rising:      return 2;
+        case RingRisk::Critical:    return 3;
+    }
+    return 0;
+}
+
+SpectrumView::RingRisk
+SpectrumView::RingRiskHysteresis::apply (const RingRisk raw, const double nowMs)
+{
+    // Unavailable wins outright, hold or no hold: holding a stale Critical
+    // after the detector stopped scoring would be inventing data.
+    if (raw == RingRisk::Unavailable)
+    {
+        state_    = RingRisk::Unavailable;
+        stepUpMs_ = nowMs;
+        return state_;
+    }
+
+    const int rawSeverity = severity (raw);
+    const int heldSeverity = severity (state_);
+
+    // Step UP, or the held level CONFIRMED again: both (re)start the hold. A
+    // step up is immediate; an equal-severity frame changes nothing on screen
+    // but IS the level being observed again, and the hold runs from the last
+    // OBSERVATION, not from the last change. Re-arming only on a strict step
+    // up lets the hold expire under a score still sitting on the band edge,
+    // and the chip blinks down for one frame every 750 ms -- the exact
+    // flicker spec section 3 / Acceptance 4 exists to forbid.
+    if (rawSeverity >= heldSeverity)
+    {
+        state_    = raw;
+        stepUpMs_ = nowMs;
+        return state_;
+    }
+
+    // Step DOWN: only once the hold has run out, and then straight to the raw
+    // band rather than one notch at a time (the hold has already absorbed the
+    // flicker this exists to suppress).
+    if (rawSeverity < heldSeverity)
+    {
+        if (nowMs - stepUpMs_ < kHoldMs)
+            return state_;
+
+        state_ = raw;
+    }
+
+    return state_;
+}
+
 void SpectrumView::timerCallback()
 {
     if (! isVisible())
@@ -650,9 +746,12 @@ void SpectrumView::timerCallback()
 
     // Resolved on the plot's own poll: the readout describes the same instant
     // the trace does, and a provider that is null stays Unavailable forever
-    // without any special casing further down.
-    const auto risk = ringRiskProvider != nullptr ? ringRiskProvider()
-                                                  : RingRisk::Unavailable;
+    // without any special casing further down. The raw band then goes through
+    // the hold, so a score dithering across a band edge at 30 fps changes the
+    // chip once rather than on every frame (spec section 3).
+    const auto raw = ringRiskProvider != nullptr ? ringRiskProvider()
+                                                 : RingRisk::Unavailable;
+    const auto risk = ringRiskHold_.apply (raw, juce::Time::getMillisecondCounterHiRes());
     if (risk != ringRisk_)
     {
         ringRisk_ = risk;

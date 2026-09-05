@@ -25,6 +25,7 @@ using gui_test::paintHeadless;
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace
@@ -543,4 +544,289 @@ TEST (SpectrumView, LaneOneStemsPaintDashedWithoutGrowingTheDashedPath)
     EXPECT_GT (elementsAtFourK, elementsBefore);   // taller plot, longer stem, more dashes
     EXPECT_LE (elementsAtFourK,
                (std::size_t) gui::SpectrumView::kDashedStemReserveFloats / 3);
+}
+
+//==============================================================================
+// RING RISK -- score -> state banding, and the anti-flicker hold.
+//
+// riskForScore() is a pure function of a SnapshotBuffer, and the hysteresis
+// takes "now" as an argument, so neither of these needs a component, a
+// message loop, or a wall-clock sleep. The banding is deliberately exercised
+// against a NON-DEFAULT threshold: an implementation that hardcoded 0.7 (or
+// the old 10.0 from the pre-amendment spec) fails these.
+
+namespace
+{
+// A snapshot carrying nothing but the three ring-risk fields -- everything
+// riskForScore is allowed to look at.
+NotchController::SnapshotBuffer riskSnapshot (const bool valid,
+                                              const float score,
+                                              const float threshold)
+{
+    NotchController::SnapshotBuffer snapshot {};
+    snapshot.ringRiskValid     = valid;
+    snapshot.ringRiskScore     = score;
+    snapshot.ringRiskThreshold = threshold;
+    return snapshot;
+}
+
+using Risk = gui::SpectrumView::RingRisk;
+} // namespace
+
+TEST (SpectrumView, RingRiskBandsAgainstThePublishedThresholdNotAHardcodedOne)
+{
+    // Deliberately NOT CandidateScorer::kConfirmScore: every expectation below
+    // differs from what a hardcoded 0.7 would produce.
+    const float thr  = 0.42f;
+    const float rise = 0.55f * thr;   // same expression the mapping must use
+
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.0f, thr)),
+               Risk::Low);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, rise * 0.5f, thr)),
+               Risk::Low);
+
+    // Exact lower boundary belongs to Rising (>= 0.55x thr).
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, rise, thr)),
+               Risk::Rising);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.3f, thr)),
+               Risk::Rising);   // hardcoded 0.7 would call this Low
+
+    // Exact threshold belongs to Critical (>= thr): "about to place a notch".
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, thr, thr)),
+               Risk::Critical);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.5f, thr)),
+               Risk::Critical);   // hardcoded 0.7 would call this Rising
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 1.0f, thr)),
+               Risk::Critical);
+
+    // And it tracks a DIFFERENT published threshold with the same code path.
+    const float thr2 = 0.7f;
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.3f, thr2)),
+               Risk::Low);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.5f, thr2)),
+               Risk::Rising);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.7f, thr2)),
+               Risk::Critical);
+}
+
+TEST (SpectrumView, RingRiskIsUnavailableWheneverTheNumberCannotBeTrusted)
+{
+    // Detector not scoring this frame: never render 0.0 as "low".
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (false, 0.0f, 0.7f)),
+               Risk::Unavailable);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (false, 0.95f, 0.7f)),
+               Risk::Unavailable);
+
+    // A NaN score bands into nothing; reporting it as Low would be a lie and
+    // reporting it as Critical a false alarm.
+    EXPECT_EQ (gui::SpectrumView::riskForScore (
+                   riskSnapshot (true, std::numeric_limits<float>::quiet_NaN(), 0.7f)),
+               Risk::Unavailable);
+
+    // No usable band line published -> nothing to compare against. With a
+    // threshold of 0 every score would read Critical, which is worse noise
+    // than an honest N/A.
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.1f, 0.0f)),
+               Risk::Unavailable);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (riskSnapshot (true, 0.1f, -1.0f)),
+               Risk::Unavailable);
+    EXPECT_EQ (gui::SpectrumView::riskForScore (
+                   riskSnapshot (true, 0.1f, std::numeric_limits<float>::quiet_NaN())),
+               Risk::Unavailable);
+}
+
+TEST (SpectrumView, RingRiskStepsUpImmediately)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    EXPECT_EQ (hold.apply (Risk::Low, 1000.0), Risk::Low);
+    // Same millisecond: a rise must never wait. A warning that arrives late
+    // is not a warning.
+    EXPECT_EQ (hold.apply (Risk::Critical, 1000.0), Risk::Critical);
+}
+
+TEST (SpectrumView, RingRiskHoldsAStepDownForTheHoldTimeThenFalls)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Low, 1000.0), Risk::Low);
+    ASSERT_EQ (hold.apply (Risk::Critical, 2000.0), Risk::Critical);
+
+    // Inside the hold: the raw band collapses to Low, the readout does not.
+    EXPECT_EQ (hold.apply (Risk::Low, 2001.0),   Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Rising, 2400.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Low, 2749.0),   Risk::Critical);
+
+    // At exactly the hold time it is free to fall, straight to the raw band.
+    EXPECT_EQ (hold.apply (Risk::Low, 2750.0), Risk::Low);
+}
+
+TEST (SpectrumView, RingRiskDoesNotFlickerWhileAScoreOscillatesAcrossABoundary)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Rising, 0.0), Risk::Rising);
+    ASSERT_EQ (hold.apply (Risk::Critical, 100.0), Risk::Critical);
+
+    // 30 fps of a score sitting exactly on the Rising/Critical line for the
+    // rest of the hold: 21 frames, not one state change.
+    double now = 100.0;
+    for (int frame = 0; frame < 21; ++frame)
+    {
+        now += 1000.0 / 30.0;                       // ~33.3 ms per frame
+        const auto raw = (frame % 2 == 0) ? Risk::Rising : Risk::Critical;
+        EXPECT_EQ (hold.apply (raw, now), Risk::Critical) << "frame " << frame;
+    }
+    EXPECT_LT (now, 100.0 + 750.0);                 // still inside the hold
+}
+
+TEST (SpectrumView, RingRiskUnavailableOverridesTheHold)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Critical, 5000.0), Risk::Critical);
+
+    // The detector stopped scoring mid-hold. N/A is the honest answer and it
+    // must not wait 750 ms to be told.
+    EXPECT_EQ (hold.apply (Risk::Unavailable, 5010.0), Risk::Unavailable);
+
+    // And coming back is immediate too.
+    EXPECT_EQ (hold.apply (Risk::Low, 5020.0), Risk::Low);
+}
+
+TEST (SpectrumView, RingRiskStepUpRestartsTheHold)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Low, 0.0), Risk::Low);
+    ASSERT_EQ (hold.apply (Risk::Rising, 100.0), Risk::Rising);   // hold from 100
+
+    // A further step UP at 700 restarts the clock, so the drop that would
+    // have been allowed at 850 is still held.
+    ASSERT_EQ (hold.apply (Risk::Critical, 700.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Low, 850.0),  Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Low, 1449.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Low, 1450.0), Risk::Low);        // 700 + 750
+}
+
+//==============================================================================
+// Fix round 1, review finding 1: the hold must run from the last time the
+// level was OBSERVED at or above the held state, not from the last time the
+// state CHANGED. The test above stops inside one hold window, so it cannot
+// see the difference; this one runs for seconds.
+//
+// Red against a hold that re-arms only on a strict step UP: the equal-severity
+// Critical frames leave stepUpMs_ where it was, so the hold expires ~750 ms
+// after the last change and the chip blinks down to Rising for one frame,
+// over and over, for as long as the score sits on the line.
+
+TEST (SpectrumView, RingRiskDoesNotFlickerAcrossManyHoldWindows)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Rising, 0.0), Risk::Rising);
+    ASSERT_EQ (hold.apply (Risk::Critical, 100.0), Risk::Critical);
+
+    // 3 seconds of 30 fps -- four hold windows, not one.
+    auto  shown  = Risk::Critical;
+    int   changes = 0;
+    double now   = 100.0;
+    for (int frame = 0; frame < 90; ++frame)
+    {
+        now += 1000.0 / 30.0;                       // ~33.3 ms per frame
+        const auto raw  = (frame % 2 == 0) ? Risk::Rising : Risk::Critical;
+        const auto next = hold.apply (raw, now);
+        if (next != shown)
+        {
+            ++changes;
+            shown = next;
+        }
+    }
+
+    EXPECT_EQ (changes, 0) << "the chip changed state while the score sat on the band edge";
+    EXPECT_EQ (shown, Risk::Critical);
+    // The run really did outlast several hold windows -- otherwise the zero
+    // above would be the old test's claim wearing a new name.
+    EXPECT_GT (now - 100.0, 3.9 * gui::SpectrumView::RingRiskHysteresis::kHoldMs);
+}
+
+// Fix round 1: the flip side of the rule above -- confirming the level must
+// not make the hold immortal. After the score GENUINELY drops and stays down,
+// the readout falls exactly 750 ms after the LAST Critical frame.
+
+TEST (SpectrumView, RingRiskFallsSevenFiftyAfterTheLastCriticalObservation)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Critical, 1000.0), Risk::Critical);
+
+    // A second of the level being re-observed, each frame re-arming the hold.
+    for (double t = 1033.0; t <= 2000.0; t += 33.0)
+        ASSERT_EQ (hold.apply (Risk::Critical, t), Risk::Critical) << "t = " << t;
+    ASSERT_EQ (hold.apply (Risk::Critical, 2000.0), Risk::Critical);
+
+    // Now the room genuinely calms down and stays calm.
+    // 750 ms after the FIRST Critical (1750) is much too early to fall.
+    EXPECT_EQ (hold.apply (Risk::Rising, 2033.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Rising, 2500.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Rising, 2749.0), Risk::Critical);
+
+    // 750 ms after the LAST Critical observation, and not a frame earlier.
+    EXPECT_EQ (hold.apply (Risk::Rising, 2750.0), Risk::Rising);
+}
+
+// Fix round 1, review finding 2: the hold is per-slot state, exactly like
+// firstSeenMs_ / snapshot_ / displayLane_, and setController exists to drop
+// per-slot state. Red if it survives the switch: the new slot then shows the
+// old slot's Critical for up to 750 ms.
+
+TEST (SpectrumView, RingRiskHoldDoesNotSurviveASlotSwitch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController slotA (false, false);
+    FedController slotB (false, false);
+
+    gui::SpectrumView view (slotA.controller);
+    view.setSize (800, 400);
+
+    // Slot A goes Critical, then quiet -- and is correctly still holding.
+    ASSERT_EQ (view.ringRiskHoldForTest().apply (Risk::Critical, 1000.0), Risk::Critical);
+    ASSERT_EQ (view.ringRiskHoldForTest().apply (Risk::Low, 1100.0), Risk::Critical);
+
+    view.setController (slotB.controller);
+
+    // Slot B is a different room. Attributing slot A's alarm to it, even for
+    // one frame, is the readout lying about which slot it is describing.
+    EXPECT_EQ (view.ringRiskHoldForTest().apply (Risk::Low, 1101.0), Risk::Low);
+}
+
+// Fix round 2, re-review finding: the hold clearing above only proves
+// ringRiskHold_ was reset -- it says nothing about ringRisk_, the SEPARATE
+// field paint() actually reads. setController() used to leave ringRisk_
+// holding whatever the OLD slot last showed and then call repaint()
+// unconditionally, so the new slot's first frame could still paint the old
+// slot's Critical badge for up to one 30 fps tick, until the next
+// timerCallback() corrected it.
+
+TEST (SpectrumView, RingRiskDisplayedFieldDoesNotSurviveASlotSwitch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController slotA (false, false);
+    FedController slotB (false, false);
+
+    gui::SpectrumView view (slotA.controller);
+    view.setSize (800, 400);
+
+    // Put the DISPLAYED field into the state slot A's alarm would have left
+    // it in -- the same way timerCallback() would have, without needing a
+    // live provider or a timer tick.
+    view.ringRiskForTest() = Risk::Critical;
+    ASSERT_EQ (view.getRingRisk(), Risk::Critical);
+
+    view.setController (slotB.controller);
+
+    // The very next paint() must not still show slot A's alarm.
+    EXPECT_EQ (view.getRingRisk(), Risk::Unavailable);
 }

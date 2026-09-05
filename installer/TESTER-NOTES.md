@@ -1,9 +1,9 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.0.5
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.1.3
 
-Ngày build: 2026-09-05 · suite test 368/368 xanh · installer ~26.8 MB
+Ngày build: 2026-09-06 · suite test 454/454 xanh · installer ~26.8 MB
 
-SHA-256 của Setup 1.0.5:
-`D76FCDB8637914A3CDACE306A6C19EA1FB045F3C7B3C014390968E1E3DA2C7AA`
+SHA-256 của Setup 1.1.3:
+`0B09D7FDBF71B39C31EF9114800CDF10523273E4C817DC68E15EC5AEB7376E26`
 
 Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
 nhờ test bản cũ.
@@ -14,8 +14,21 @@ nhờ test bản cũ.
    anyway". Hành vi đúng của bản unsigned, không phải virus.
 2. **Chưa kèm driver ASIO** (licence Steinberg). Không có ASIO thì app chạy
    Windows Audio — vẫn test được mọi thứ, chỉ đừng đo latency thật.
-3. **Ô RING RISK luôn hiện "N/A"** — nguồn dữ liệu chưa nối, ĐÂY KHÔNG PHẢI
-   BUG. Sẽ hoạt động ở bản sau.
+3. **Ô RING RISK — cách đọc (từ 1.1.3 đã có dữ liệu thật).** Chip đọc số của
+   detector trên slot đang theo dõi:
+   - **N/A** — chưa có gì để nói: detection đang tắt, detector chưa đủ lịch sử,
+     hoặc vừa đổi slot / đổi device. **Không phải bug.**
+   - **LOW** — có đo, phòng đang yên.
+   - **RISING** — có gai đang lên, sắp đặt notch.
+   - **CRITICAL** — detector đã vượt ngưỡng đặt notch; thường thấy dòng notch
+     mới trong ACTIVE NOTCHES ngay sau, trừ khi bảng đã đầy, bin đó đang bị
+     chặn, hoặc đỉnh chưa trụ đủ số frame liên tiếp (persistence).
+
+   Chip đã bước lên thì **giữ 750 ms** trước khi được bước xuống — để nó không
+   nháy trên tín hiệu sát ngưỡng. **Khi rig dừng hoặc đang restart, chip đứng
+   nguyên ở mức đọc cuối** thay vì về N/A: khoảng trống đã biết của bản này,
+   đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
+   **hú mà chip vẫn LOW**.
 
 ## Mới trong 1.0.5 (so với 1.0.4)
 

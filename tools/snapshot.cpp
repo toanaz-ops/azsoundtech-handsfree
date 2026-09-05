@@ -22,7 +22,8 @@
 //                      design is built around is actually visible -- two of
 //                      them on lane 0 (L) and one on lane 1 (R), so the LANE
 //                      column, the dashed R stem and the L/R picker all render
-//                      with something real behind them
+//                      with something real behind them, plus a RING RISK chip
+//                      STAGED to Critical (see the note where it is set)
 //
 // The live shot uses the REAL path: audio is written into BOTH of slot 0's tap
 // rings and the controller's runOnce() publishes genuine two-lane snapshots,
@@ -320,6 +321,32 @@ int main (int argc, char** argv)
         goodButton->onClick();     // 247 Hz  -> GOOD
         falseButton->onClick();    // 1.9 kHz -> FALSE, clears the notch
     }
+
+    // RING RISK, STAGED -- the one thing in this file that is not the real
+    // path, and it is marked as such on stdout so no reviewer mistakes it for
+    // a measurement.
+    //
+    // The chip is now wired (task R3): it reads riskForScore() off the
+    // monitored slot's snapshot every timer tick. But this tool's programme
+    // material is a musical composite fed with detection DISARMED, so the
+    // detector scores nothing and the honest reading here is N/A -- which is
+    // exactly what console-idle.png already shows. Lighting it for real would
+    // mean arming detection and feeding a howl with real gaps between blocks
+    // (CandidateScorer's rise axis needs ~200 ms of scorer history -- see
+    // tests/test_gui_wiring.cpp), and the auto-placed notch that follows would
+    // wreck the three staged ages this shot exists to show.
+    //
+    // So the DISPLAYED field is set directly, through the accessor R2 added
+    // for exactly this kind of "put the component in a known on-screen state"
+    // job. What the picture proves is what the chip LOOKS like when it is lit
+    // -- legibility, colour, whether CRITICAL fits its box. That the chip
+    // reaches Critical from a real detector is proven by a test, not here
+    // (MainComponent.RingRiskGoesCriticalWhenTheMonitoredSlotsDetectorConfirms).
+    app.getSpectrumViewForTest().ringRiskForTest()
+        = gui::SpectrumView::RingRisk::Critical;
+    std::cout << "console-live: RING RISK chip STAGED to Critical "
+                 "(not measured -- see the comment in tools/snapshot.cpp)"
+              << std::endl;
 
     return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
 }

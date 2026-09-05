@@ -3,6 +3,7 @@
 #include "app/NotchController.h"
 #include "dsp/PeakinessAnalyzer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -1499,4 +1500,182 @@ TEST (NotchControllerEvents, DetectorPlacementCarriesTheScoredFrameAndTheScorers
     // The other lane was quiet: its frame is there and small at the howl bin.
     ASSERT_TRUE (ctx.hasOther);
     EXPECT_LT (ctx.other[(std::size_t) bin], 0.1f * ctx.now[(std::size_t) bin]);
+}
+
+// ===========================================================================
+// Lane R (RING RISK readout, spec docs/spec-ring-risk.md §1, amendment A-R1..
+// A-R4/A-R8). The snapshot carries the SAME confidence number the placement
+// decision used -- not a second, independently-computed peakiness. These
+// tests pin that identity, the validity gate, and the published threshold.
+// ===========================================================================
+
+TEST (NotchControllerRingRisk, InvalidBeforeAnyFrame)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);      // GUI must read this as Unavailable
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+}
+
+TEST (NotchControllerRingRisk, PublishesThresholdSoTheGuiNeverHardcodesIt)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < 4; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    // A-R3: the band line is the confirm score, published live -- score is a
+    // 0..1 product, so the spec's 10.0 could never be crossed.
+    EXPECT_FLOAT_EQ (snap.ringRiskThreshold, CandidateScorer::kConfirmScore);
+}
+
+TEST (NotchControllerRingRisk, ValidWithHistoryAndScoreCrossesThresholdOnThePlacingFrame)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.ringRiskValid);
+    // The frame that confirmed a notch scored above kConfirmScore by
+    // definition (NotchController.cpp: `if (score > kConfirmScore)`), so the
+    // published number -- being that same `score` -- must read Critical.
+    EXPECT_GT (snap.ringRiskScore, snap.ringRiskThreshold);
+}
+
+TEST (NotchControllerRingRisk, NoiseOnlyFramesAreValidAndReadLow)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    // Acceptance 3 (as amended): noise is not "unknown", it is "quiet".
+    EXPECT_TRUE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+    EXPECT_LT (snap.ringRiskScore, 0.55f * snap.ringRiskThreshold);   // Low band
+}
+
+TEST (NotchControllerRingRisk, DetectionDisabledPublishesInvalidNotZero)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    {
+        NotchController::SnapshotBuffer armed;
+        h.controller.copySnapshot (armed);
+        ASSERT_TRUE (armed.ringRiskValid);
+    }
+
+    // A-R4: a disarmed detector scores nothing, so the chip must go back to
+    // N/A rather than reassure the operator with a "Low" it did not measure.
+    h.controller.setDetectionActive (false);
+    pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+}
+
+TEST (NotchControllerRingRisk, ScoreIsMaxOverBothLanesOfTheSlot)
+{
+    // A-R8: one score per SLOT after lane S. A howl on lane 1 only must still
+    // raise the slot's readout -- max over lanes, not lane 0's number.
+    StereoHarness h;
+    h.controller.setDetectionActive (true);
+
+    NoiseSource quietL, quietR;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+
+    NotchController::SnapshotBuffer beforeTone;
+    h.controller.copySnapshot (beforeTone);
+    ASSERT_TRUE (beforeTone.ringRiskValid);
+
+    SineSource tone;
+    float peak = 0.0f;
+    for (int i = 0; i < 8; ++i)
+    {
+        pumpStereo (h, quietL.hop(), tone.hop());   // howl on lane 1 only
+        NotchController::SnapshotBuffer snap;
+        h.controller.copySnapshot (snap);
+        peak = std::max (peak, snap.ringRiskScore);
+    }
+    EXPECT_GT (peak, 0.0f);
+}
+
+// A-R4's reset boundaries. The scorer is deliberately NOT reset (lane D
+// removed that; resetting it would move notches), so after a device/SR change
+// its rise history and baseline EMAs still hold old-rate magnitudes at bin
+// indices that now map to different frequencies. The readout must say N/A
+// rather than publish a number computed from them -- "khong tran an sai".
+TEST (NotchControllerRingRisk, SampleRateChangeInvalidatesUntilTheNextBlock)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_TRUE (snap.ringRiskValid);
+
+    h.controller.setSampleRate (44100.0);
+
+    // First frame at the new rate: nothing has been committed since the reset,
+    // so the chip goes back to N/A.
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+
+    // One committed block later it is a measurement again.
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.ringRiskValid);
+}
+
+TEST (NotchControllerRingRisk, WidthChangeInvalidatesUntilTheNextBlock)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_TRUE (snap.ringRiskValid);
+
+    // Legal here: the detector thread was never started, these harnesses drive
+    // runOnce() by hand. This is also the call MainComponent's onAfterRestart
+    // hook makes for every slot after EVERY engine restart, so it is the path
+    // a real device or sample-rate change takes.
+    h.controller.setWidth (1);
+
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.ringRiskValid);
 }

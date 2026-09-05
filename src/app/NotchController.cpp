@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
                                   LockFreeRingBuffer<float>* tapLane1,
@@ -101,6 +102,18 @@ void NotchController::setWidth (int lanes)
     // for riseReferenceMs after a widen is an OPEN OWNER DECISION for lane S
     // -- see SDD ledger 2026-09-05-data-loop, Task 3 ruling.
     width_ = newWidth;
+
+    // A-R4 reset boundary, and the one that actually fires in the shipping
+    // app: MainComponent's onAfterRestart hook calls setWidth() on every slot
+    // after EVERY engine restart -- device change, sample-rate change, buffer
+    // change (DevicePanel::onBeforeRestart/onAfterRestart) -- so this covers
+    // the device/SR case even though nothing outside tests calls
+    // setSampleRate(). Unconditional for that reason: a restart that keeps
+    // the same width still invalidated the scorer's view of the room. A brief
+    // N/A on the chip is honest; a stale number is not. Readout only -- the
+    // scorer, the persistence streaks and the model are untouched here.
+    for (auto& l : lanes_)
+        l.blocksSinceReset = 0;
 }
 
 void NotchController::run()
@@ -269,7 +282,12 @@ void NotchController::runOnce()
         if (! any)
             break;
 
-        // --- snapshot publish: identical to today's block, but per lane ---
+        // --- the frame the GUI will see -------------------------------
+        // The notch list is gathered HERE, before this frame is scored, so
+        // a notch this frame places still appears in the NEXT snapshot --
+        // exactly as it did before the publish moved (spec acceptance 2: the
+        // risk chip must reach Critical BEFORE the notch shows up in ACTIVE
+        // NOTCHES, not with it).
         std::array<SnapshotNotch, kTotalSlots> notchList {};
         std::uint32_t notchCount = 0;
         {
@@ -284,6 +302,40 @@ void NotchController::runOnce()
                                                 (std::uint8_t) c, (std::uint8_t) i };
                 }
         }
+
+        // One tick per lockstep drain iteration, BEFORE the per-lane dispatch
+        // below, so every lane processed in this pass reads the same number.
+        // Skipping 0 on wrap keeps the never-placed sentinel in
+        // linkedPlacedAt_ unambiguous (the wrap is ~1.4 years of continuous
+        // 10.7 ms drains away, but a stale stamp matching costs a missed
+        // notch, so it is not left to luck).
+        if (++drainIteration_ == 0)
+            ++drainIteration_;
+
+        // RING RISK accumulator for THIS frame (A-R2/A-R8): cleared before
+        // the pass, filled by every lane in it, published just after it.
+        frameMaxScore_   = 0.0f;
+        frameScoreValid_ = false;
+
+        // The cross-lane comparison (§4.4) compares magnitudes that are, per
+        // the invariant above, never more than one hop apart: `other` is
+        // handed over only when the opposite lane produced a block in THIS
+        // drain iteration, and is nullptr otherwise.
+        for (int l = 0; l < lanesToRead; ++l)
+            if (spec[(std::size_t) l].magnitudes != nullptr)
+            {
+                const float* other = (lanesToRead == 2 && spec[(std::size_t) (1 - l)].magnitudes != nullptr)
+                                         ? spec[(std::size_t) (1 - l)].magnitudes : nullptr;
+                processSpectrumForDetection (l, spec[(std::size_t) l], other, now);
+            }
+
+        // --- snapshot publish (A-R2) ---------------------------------
+        // Below the detection pass, not above it: the RING RISK score only
+        // exists once this frame has been scored, and score, magnitudes and
+        // notch list must leave under ONE lock as one instant. Nothing else
+        // moved with it -- no new lock, no new thread, and spec[] is still
+        // alive here (it dies at the next processLatestBlock, one iteration
+        // from now).
         {
             const std::lock_guard<std::mutex> lock (snapshotMutex_);
             // magnitudeCount/laneCount below are set unconditionally even
@@ -311,29 +363,13 @@ void NotchController::runOnce()
             latest_.sampleRate     = spec[0].magnitudes != nullptr ? spec[0].sampleRate : spec[1].sampleRate;
             latest_.notches        = notchList;
             latest_.notchCount     = notchCount;
+            // RING RISK: the frame just scored, straight from the placement
+            // path -- 0 with valid=false when nothing scored this frame.
+            latest_.ringRiskScore     = frameMaxScore_;
+            latest_.ringRiskValid     = frameScoreValid_;
+            latest_.ringRiskThreshold = CandidateScorer::kConfirmScore;
             ++latest_.sequence;
         }
-
-        // One tick per lockstep drain iteration, BEFORE the per-lane dispatch
-        // below, so every lane processed in this pass reads the same number.
-        // Skipping 0 on wrap keeps the never-placed sentinel in
-        // linkedPlacedAt_ unambiguous (the wrap is ~1.4 years of continuous
-        // 10.7 ms drains away, but a stale stamp matching costs a missed
-        // notch, so it is not left to luck).
-        if (++drainIteration_ == 0)
-            ++drainIteration_;
-
-        // The cross-lane comparison (§4.4) compares magnitudes that are, per
-        // the invariant above, never more than one hop apart: `other` is
-        // handed over only when the opposite lane produced a block in THIS
-        // drain iteration, and is nullptr otherwise.
-        for (int l = 0; l < lanesToRead; ++l)
-            if (spec[(std::size_t) l].magnitudes != nullptr)
-            {
-                const float* other = (lanesToRead == 2 && spec[(std::size_t) (1 - l)].magnitudes != nullptr)
-                                         ? spec[(std::size_t) (1 - l)].magnitudes : nullptr;
-                processSpectrumForDetection (l, spec[(std::size_t) l], other, now);
-            }
     }
 
     // 2. Advance the LIVE clock. Wall-clock dt, gated by tap liveness --
@@ -683,6 +719,14 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
 
     la.scorer.beginBlock (block.sampleRate);
 
+    // RING RISK validity (A-R4), taken BEFORE this frame is committed: a
+    // scorer with no committed frame SINCE THE LAST RESET takes the "no
+    // history at all -> rNorm 1" branch, or compares against magnitudes from
+    // a rate/width this lane no longer runs at, so whatever it returns is not
+    // a measurement of the room now. OR across the lanes analysed this
+    // iteration -- one readout per slot.
+    frameScoreValid_ = frameScoreValid_ || la.blocksSinceReset > 0;
+
     // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
     // same frame the scorer looks at (spec 5.2 step 7).
     //
@@ -764,6 +808,12 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                                                 laneAsymmetryBonus_.load (std::memory_order_relaxed));
         const float score = breakdown.score * asym;
 
+        // RING RISK readout (A-R1/A-R8): the highest of exactly these numbers
+        // over every candidate of every lane of the slot, recorded before the
+        // confirm test so the readout cannot disagree with the decision. Read
+        // only -- nothing below this line looks at it.
+        frameMaxScore_ = std::max (frameMaxScore_, score);
+
         if (score > CandidateScorer::kConfirmScore)
         {
             const std::uint32_t requiredBlocks =
@@ -794,6 +844,10 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
     }
 
     la.scorer.commitBlock (block.magnitudes, elapsedMs);
+    // Counted next to the commit it counts (A-R4). Saturates instead of
+    // wrapping -- see the member's comment.
+    if (la.blocksSinceReset < std::numeric_limits<std::uint32_t>::max())
+        ++la.blocksSinceReset;
 }
 
 void NotchController::copySnapshot (SnapshotBuffer& destOwnedByCaller) const
@@ -810,7 +864,16 @@ std::uint64_t NotchController::retryCount() const
 void NotchController::setSampleRate (double sampleRate)
 {
     for (auto& l : lanes_)
+    {
         l.detector.setSampleRate (sampleRate);
+        // A-R4 reset boundary. The scorer itself is deliberately NOT reset
+        // (that would move notches; lane D removed it), so its rise history
+        // and baseline EMAs still hold old-rate magnitudes at bin indices
+        // that now mean different frequencies. Zeroing the readout's counter
+        // is what stops the chip claiming a measurement it does not have --
+        // it reads N/A until this lane has committed a block at the new rate.
+        l.blocksSinceReset = 0;
+    }
 }
 
 void NotchController::flushOutbox()

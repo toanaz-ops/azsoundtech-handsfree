@@ -284,6 +284,25 @@ public:
         std::array<SnapshotNotch, kTotalSlots> notches {};
         std::uint32_t notchCount = 0;
         std::uint64_t sequence = 0;   // increments on every published frame
+
+        // --- RING RISK readout (docs/spec-ring-risk.md §1) ---------------
+        // The highest candidate confidence seen in the frame this snapshot
+        // describes, 0 when no bin was scoreable. It is the SAME `score` the
+        // placement decision compared against kConfirmScore -- post
+        // asymmetry multiplier, max over every candidate of every analysed
+        // lane of this slot (A-R1, A-R8) -- and never a second, separately
+        // computed measure of the same thing.
+        float ringRiskScore = 0.0f;
+        // False until the detector actually scored this frame: detection
+        // disarmed, or no lane had committed history to score against. The
+        // GUI renders Unavailable while this is false rather than rendering
+        // 0.0 as "low" -- an unwired indicator reading "low" is worse than
+        // one reading "n/a", because a soundman would act on it.
+        bool  ringRiskValid = false;
+        // The live band line the GUI compares ringRiskScore against, so no
+        // threshold is hardcoded on the GUI side (A-R3). Score is a 0..1
+        // product, so this is CandidateScorer::kConfirmScore.
+        float ringRiskThreshold = 0.0f;
     };
 
     void copySnapshot (SnapshotBuffer& destOwnedByCaller) const;
@@ -379,6 +398,18 @@ private:
         CandidateScorer   scorer;
         std::array<std::uint32_t, Detector::kNumBins> persistence {};
         double previousBlockNowMs = 0.0;   // <= 0: no previous block yet
+        // Lane R (RING RISK validity, ruling A-R4): blocks this lane's scorer
+        // has committed SINCE THE LAST RESET. It lives here, not in
+        // CandidateScorer, precisely because the scorer must NOT be reset --
+        // lane D removed that, and resetting it would change where notches
+        // land. This counter is the readout's own memory: cleared by
+        // setSampleRate() and setWidth(), so after a device/SR change the
+        // chip reads N/A instead of publishing a number computed from rise
+        // history and baseline EMAs that belong to the old rate, at bin
+        // indices that now map to different frequencies. Saturating rather
+        // than wrapping: a wrap to 0 would blink the chip to N/A once every
+        // ~1.4 years of continuous running for no reason.
+        std::uint32_t blocksSinceReset = 0;
     };
     std::array<LockFreeRingBuffer<float>*, kChannels> taps_ {};   // [0] never null
     std::array<LaneAnalysis, kChannels> lanes_;
@@ -394,6 +425,13 @@ private:
     // wrap, so a stale zero can never match (see placeConfirmed's note).
     std::uint32_t drainIteration_ = 0;
     std::array<std::uint32_t, Detector::kNumBins> linkedPlacedAt_ {};
+
+    // RING RISK accumulator for the drain iteration in flight (A-R2). The
+    // per-lane detection pass writes them; runOnce() clears them before that
+    // pass and publishes them with the same frame's magnitudes, so the score
+    // and the spectrum the operator sees describe one instant.
+    float frameMaxScore_   = 0.0f;
+    bool  frameScoreValid_ = false;
 
     // Lanes actually analysed this run: 2 only when stereo AND a lane-1 tap exists.
     int analysedLanes() const { return (width_ == 2 && taps_[1] != nullptr) ? 2 : 1; }

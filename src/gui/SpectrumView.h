@@ -205,26 +205,131 @@ public:
     //==========================================================================
     // RING RISK -- how close the room is to ringing right now.
     //
-    // THE DATA SOURCE DOES NOT EXIST YET. NotchController::SnapshotBuffer
-    // publishes magnitudes and placed notches, and nothing that scores how
-    // close the room is to howling. Wiring this to something derived GUI-side
-    // would put a SECOND, different peakiness number on screen next to the
-    // detector's own, which is worse than showing nothing.
+    // The number comes from the DETECTOR, never from anything derived here:
+    // NotchController::SnapshotBuffer publishes ringRiskScore / ringRiskValid
+    // / ringRiskThreshold (task R1). A GUI-side peakiness of its own would put
+    // a SECOND, different number on screen next to the one the filters
+    // actually follow, and the operator would have no way to tell which.
     //
-    // So the control is built, laid out and painted, and `ringRiskProvider`
-    // is null until the DSP side publishes a score. Null renders as
-    // Unavailable -- an explicit "n/a", never a reassuring "low".
+    // This class turns that number into a state (riskForScore) and keeps the
+    // state from flickering (RingRiskHysteresis). It does NOT read the
+    // snapshot itself: `ringRiskProvider` supplies the band, and MainComponent
+    // assigns it in its constructor to the slot the console is MONITORING --
+    // the lambda copies that slot's snapshot and returns riskForScore() RAW.
+    // The 750 ms anti-flicker hold is applied HERE, in timerCallback(), so a
+    // provider must never hold as well or the chip holds twice.
     //
-    // Contract for whoever fills this in: docs/spec-ring-risk.md.
+    // A null provider still renders Unavailable -- an explicit "n/a" and never
+    // a reassuring "low" -- which is the resting state the spec pins.
+    //
+    // Contract: docs/spec-ring-risk.md sections 2-4, as amended by the
+    // "Amendment lane R -- 2026-09-06" block in
+    // docs/superpowers/plans/2026-08-27-next-wave.md.
     enum class RingRisk { Unavailable, Low, Rising, Critical };
 
     // Polled once per frame by the same timer that refreshes the plot. Null
     // means Unavailable. Must not block: it runs on the message thread.
     std::function<RingRisk()> ringRiskProvider;
 
+    // Where Rising starts, as a fraction of the threshold the DETECTOR
+    // published (snapshot.ringRiskThreshold). Nothing here hardcodes that
+    // threshold: it tracks the RESPONSE preset instead of being one more
+    // magic constant, and a GUI-side constant would silently disagree with
+    // the machine it describes the moment the DSP side moved.
+    static constexpr float kRingRiskRisingFraction = 0.55f;
+
+    // Score -> state, spec section 2 as amended by lane R ruling A-R3. PURE:
+    // it reads the three ring-risk fields of one snapshot and nothing else,
+    // which is what lets it be tested on a hand-filled buffer.
+    //
+    //   ! ringRiskValid                  -> Unavailable
+    //   score <  0.55 x ringRiskThreshold -> Low
+    //   score <         ringRiskThreshold -> Rising
+    //   score >=        ringRiskThreshold -> Critical
+    //
+    // Three ways the number cannot be banded at all, all reported as
+    // Unavailable rather than guessed at -- an indicator that reassures
+    // wrongly is worse than one that admits it has nothing:
+    //   - the detector did not score this frame (ringRiskValid false),
+    //   - the score is NaN (every comparison below would be false, which
+    //     would otherwise fall through to Critical and cry wolf),
+    //   - no usable band line was published (threshold non-finite, or <= 0,
+    //     against which EVERY score reads Critical).
+    [[nodiscard]] static RingRisk riskForScore (const NotchController::SnapshotBuffer&);
+
+    // Anti-flicker, spec section 3. Of the two offered shapes -- a hold time,
+    // or split rise/fall thresholds -- this is the HOLD (lane R ruling A-R5):
+    // after stepping UP, the readout may not step DOWN for kHoldMs.
+    //
+    // The hold runs from the last time the level was OBSERVED AT OR ABOVE the
+    // held state, not from the last time the state CHANGED. A frame whose raw
+    // band equals the held one changes nothing on screen, but it is still the
+    // level being confirmed, so it re-arms the hold. Arming only on a strict
+    // step up would let the hold expire under a score that is still sitting
+    // on the band edge: the chip would blink down for one frame roughly every
+    // kHoldMs, for as long as the condition lasted.
+    //
+    // Why hold rather than split thresholds: the bands are already expressed
+    // as fractions of a live threshold, so a second set of fall fractions
+    // would be a second thing to keep in step with the DSP. A hold is one
+    // number, and it is the one that matches what the chip is FOR -- a
+    // soundman who glanced away for half a second still sees that the room
+    // just went Critical.
+    //
+    // Two things are deliberately immediate, both because a late warning is
+    // not a warning:
+    //   - a step UP (and it restarts the hold), and
+    //   - Unavailable, which overrides an in-flight hold outright: once the
+    //     detector stops scoring, continuing to show a stale Critical would
+    //     be inventing data.
+    //
+    // Time is a PARAMETER, not a clock this object owns -- the same shape
+    // ageMsOf() already uses in this class. The caller (timerCallback) passes
+    // juce::Time::getMillisecondCounterHiRes(); a test passes numbers, and so
+    // needs no wall-clock sleep to prove a 750 ms rule.
+    struct RingRiskHysteresis
+    {
+        // 750 ms: spec section 3's own figure. At 30 fps that is ~22 frames,
+        // long enough that a score dithering across a band edge produces one
+        // state change instead of twenty.
+        static constexpr double kHoldMs = 750.0;
+
+        // Feeds one raw band in, returns what the readout should show.
+        RingRisk apply (RingRisk raw, double nowMs);
+
+    private:
+        // Severity order for "is this a step up or a step down". Unavailable
+        // is not a severity, so it ranks below Low and is handled by apply()
+        // before any ranking happens.
+        [[nodiscard]] static int severity (RingRisk);
+
+        RingRisk state_    = RingRisk::Unavailable;
+        double   stepUpMs_ = 0.0;   // when the current hold started
+    };
+
     // What the readout currently shows. Exposed so a headless test can assert
     // the honest default without reaching into paint().
     [[nodiscard]] RingRisk getRingRisk() const { return ringRisk_; }
+
+    // The live hold, so a test can drive the 750 ms rule through the SAME
+    // instance the component uses -- which is what makes the slot-switch
+    // reset observable at all.
+    [[nodiscard]] RingRiskHysteresis& ringRiskHoldForTest() { return ringRiskHold_; }
+
+    // Read/write access to the field paint() actually reads, so a test can
+    // put the component into a known on-screen state (e.g. Critical) before
+    // an action and then observe what setController() left showing --
+    // ringRiskHoldForTest() alone only proves the HOLD was cleared, not that
+    // the DISPLAYED chip was.
+    [[nodiscard]] RingRisk& ringRiskForTest() { return ringRisk_; }
+
+    // One frame of the 30 fps poll, on demand. juce::Timer is a PRIVATE base
+    // (nothing outside should be able to start/stop this component's clock),
+    // and the headless suite pumps no message loop, so a test that wants to
+    // see what the provider produced has no other way to run the real
+    // timerCallback() -- and asserting on a hand-set ringRisk_ instead would
+    // prove nothing about the wiring.
+    void tickForTest() { timerCallback(); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -265,6 +370,10 @@ private:
     [[nodiscard]] static juce::Colour ringRiskColour (RingRisk);
 
     RingRisk ringRisk_ = RingRisk::Unavailable;
+
+    // What timerCallback() feeds the provider's raw band through before it
+    // reaches ringRisk_. Owns no clock; see RingRiskHysteresis.
+    RingRiskHysteresis ringRiskHold_;
 
     // Reserved at the toolbar's left, after the ANALYSER caption.
     static constexpr int kRiskLegendWidth = 74;
