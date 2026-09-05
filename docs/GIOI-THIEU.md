@@ -80,10 +80,13 @@ analyser) cho biết phòng đang gần hú tới đâu, đọc thẳng số c�
 slot đang theo dõi: **N/A** = chưa có dữ liệu (detection tắt, detector chưa đủ
 lịch sử, hoặc vừa đổi slot/đổi device); **LOW** = yên; **RISING** = detector
 sắp đặt notch; **CRITICAL** = detector đã vượt ngưỡng đặt notch tại tần số đó —
-thường sẽ thấy notch mới trong **ACTIVE NOTCHES** ngay sau, trừ khi bảng đã đầy
-hoặc bin đó đang bị chặn (guard). Chip đã bước
-lên thì giữ ít nhất **750 ms** trước khi được bước xuống, nên nó không nháy
-trên tín hiệu sát ngưỡng.
+thường sẽ thấy notch mới trong **ACTIVE NOTCHES** ngay sau, trừ khi bảng đã đầy,
+bin đó đang bị chặn (guard), hoặc đỉnh chưa trụ đủ số frame liên tiếp
+(persistence). Chip đã bước lên thì giữ ít nhất **750 ms** trước khi được bước
+xuống, nên nó không nháy trên tín hiệu sát ngưỡng. Lưu ý một khoảng trống đã
+biết: khi rig **dừng hoặc đang restart** thì không còn snapshot nào được publish,
+nên chip **đứng nguyên ở mức đọc cuối** thay vì về N/A — đừng tin chip khi máy
+không chạy.
 
 ## Chấm notch để app học
 

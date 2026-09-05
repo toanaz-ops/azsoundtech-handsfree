@@ -14,8 +14,21 @@ nhờ test bản cũ.
    anyway". Hành vi đúng của bản unsigned, không phải virus.
 2. **Chưa kèm driver ASIO** (licence Steinberg). Không có ASIO thì app chạy
    Windows Audio — vẫn test được mọi thứ, chỉ đừng đo latency thật.
-3. **Ô RING RISK luôn hiện "N/A"** — nguồn dữ liệu chưa nối, ĐÂY KHÔNG PHẢI
-   BUG. Sẽ hoạt động ở bản sau.
+3. **Ô RING RISK — cách đọc (từ 1.1.3 đã có dữ liệu thật).** Chip đọc số của
+   detector trên slot đang theo dõi:
+   - **N/A** — chưa có gì để nói: detection đang tắt, detector chưa đủ lịch sử,
+     hoặc vừa đổi slot / đổi device. **Không phải bug.**
+   - **LOW** — có đo, phòng đang yên.
+   - **RISING** — có gai đang lên, sắp đặt notch.
+   - **CRITICAL** — detector đã vượt ngưỡng đặt notch; thường thấy dòng notch
+     mới trong ACTIVE NOTCHES ngay sau, trừ khi bảng đã đầy, bin đó đang bị
+     chặn, hoặc đỉnh chưa trụ đủ số frame liên tiếp (persistence).
+
+   Chip đã bước lên thì **giữ 750 ms** trước khi được bước xuống — để nó không
+   nháy trên tín hiệu sát ngưỡng. **Khi rig dừng hoặc đang restart, chip đứng
+   nguyên ở mức đọc cuối** thay vì về N/A: khoảng trống đã biết của bản này,
+   đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
+   **hú mà chip vẫn LOW**.
 
 ## Mới trong 1.0.5 (so với 1.0.4)
 

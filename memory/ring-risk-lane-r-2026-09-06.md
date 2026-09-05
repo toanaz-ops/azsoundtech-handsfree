@@ -3,8 +3,8 @@
 **Bối cảnh:** 3 task (R1 publish score, R2 banding + hold, R3 wiring + docs),
 readout thuần, **0 dB**. Spec `docs/spec-ring-risk.md` viết 25/08 và plan viết
 27/08 đều đã lỗi thời so với code sau lane S + lane D; khối "Amendment lane R —
-2026-09-06" trong `.superpowers/sdd/2026-08-27-next-wave/task-R3-brief.md` là
-thứ thắng, không phải spec. Suite 451 → 453.
+2026-09-06" trong `docs/superpowers/plans/2026-08-27-next-wave.md` là thứ
+thắng, không phải spec. Suite 451 → 454.
 
 ## 1. Khối publish phải nằm DƯỚI vòng detection
 
@@ -74,3 +74,24 @@ các frame tone**. Suite hiện trả 2 × ~0,5 s cho hai test đó.
 nói rõ là dàn dựng**. Không đi arm detection + bơm hú: notch tự đặt sẽ phá ba
 mốc tuổi mà ảnh live tồn tại để cho thấy. Ảnh chứng minh chip **trông** thế nào
 khi sáng; chuyện chip lên được Critical từ detector thật là việc của test.
+
+
+## 9. Provider phải trả lời được cả trạng thái DỪNG, không chỉ trạng thái chạy
+
+Snapshot **đóng băng** khi không còn block nào tới: rig dừng hoặc đang restart
+thì không ai publish nữa, bản ghi cuối vẫn đọc được nguyên vẹn, và hold 750 ms
+lại được nạp lại trên đúng band cũ đó. Kết quả: chip có thể nằm đỏ CRITICAL
+trên một PA đang im. Một provider chỉ dịch "số cuối cùng tôi đọc được" là chưa
+đủ — nó phải trả lời được câu "nguồn của tôi còn sống không".
+
+Rào chắn hiển nhiên (`! engine_.isRunning()` → Unavailable ngay đầu lambda)
+**không ship được** với bộ test hiện tại: không test headless nào mở device,
+nên `engine_.isRunning()` luôn false, và rào chắn biến RING RISK thành N/A
+vĩnh viễn trong suite — đo được: 2 test xanh (`RingRiskGoesCritical...`,
+`RingRiskFollowsTheMonitoredSlot...`) đổ ngay, vì chúng lái detector bằng
+`runOnce()` thủ công trong khi engine đứng yên. Bài học quy trình: **một ruling
+"thêm guard X" phải được đối chiếu với fixture trước khi ghi vào spec** — ở đây
+fixture mô phỏng detector đang chạy mà không có cờ chạy nào bật, nên mọi guard
+dựa trên sự thật-chạy đều đụng nó. Đường còn lại (cổng "cũ quá" theo
+`lastDataMs_`/sequence number) vá được cả rig-dừng lẫn tap-chết và test headless
+được — đang chờ chủ sở hữu quyết.

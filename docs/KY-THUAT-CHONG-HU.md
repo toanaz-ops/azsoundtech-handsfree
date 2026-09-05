@@ -264,6 +264,16 @@ hold, nếu không chip sẽ chớp xuống một frame mỗi 750 ms khi score n
 band). `Unavailable` thắng hold — detector ngừng chấm thì giữ tiếp một CRITICAL
 cũ là bịa dữ liệu.
 
+**Khoảng trống đã biết (chưa vá).** Luật trên chỉ áp dụng khi vẫn còn snapshot
+được **publish**: rig dừng/đang restart, hoặc tap còn sống mà không block nào
+tới, thì không ai ghi snapshot mới, bản ghi cuối vẫn đọc được và hold nạp lại
+trên đúng band cũ — chip có thể nằm CRITICAL trên một PA đang im. Rào chắn
+`! engine_.isRunning()` phía provider **không ship được** với fixture headless
+hiện tại (không test nào mở device nên cờ đó luôn false, và rào chắn làm hai test
+wiring đang xanh đổ đỏ — đo 06/09/2026). Hướng vá đã đặt tên: cổng "cũ quá"
+theo `lastDataMs_`/sequence number trong provider, vá được cả hai trường hợp —
+chờ chủ sở hữu quyết, xem `docs/spec-ring-risk.md` mục "Known gaps (owner)".
+
 **Mức thay đổi level: 0 dB.** Toàn bộ phần này là readout: không đổi
 `NotchCommand`, không đổi hệ số filter, không đổi quyết định đặt/xóa notch.
 

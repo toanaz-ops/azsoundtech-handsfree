@@ -7,8 +7,8 @@ and wired to the monitored slot (R3). Acceptance 1 and 4 are proven by tests;
 claimed done here.
 **Raised:** 2026-08-25, with the console rebuild.
 **Amended:** by the "Amendment lane R — 2026-09-06" block in
-`.superpowers/sdd/2026-08-27-next-wave/task-R3-brief.md`, which governs where it
-and this file disagree. Sections 1-3 below are rewritten to match it.
+`docs/superpowers/plans/2026-08-27-next-wave.md`, which governs where it and
+this file disagree. Sections 1-3 below are rewritten to match it.
 
 ---
 
@@ -129,8 +129,26 @@ ignore. Of the two shapes originally offered, **the HOLD is the one chosen**
   that observed the level at or above the held state — a frame *equal* to the
   held band re-arms it too, otherwise the chip blinks down for one frame roughly
   every 750 ms while a score sits on a band edge;
-- `Unavailable` overrides an in-flight hold outright: once the detector stops
-  scoring, showing a stale `Critical` would be inventing data.
+- `Unavailable` overrides an in-flight hold outright: once the detector
+  publishes `ringRiskValid == false`, showing a stale `Critical` would be
+  inventing data.
+
+That last rule only covers the case where a snapshot is still being **published**.
+It is not a guarantee that a stale `Critical` can never be on screen, and the
+original wording here claimed it was. The snapshot is the only channel, so when
+nothing publishes, the last one written stays readable and the hold re-arms on
+that unchanged raw band:
+
+- **Rig stopped or restarting.** No block arrives, so no snapshot is published
+  and the chip keeps its last band — including `Critical`, over a silent PA.
+  **Still open** (see "Known gaps"): the obvious provider-side guard
+  (`! engine_.isRunning()` → `Unavailable`) cannot ship against the current
+  headless fixture, which drives detectors through `runOnce()` with the engine
+  stopped, so the guard would read `Unavailable` in every test and turn two
+  green wiring tests red. Measured 2026-09-06, not a prediction.
+- **Tap alive, no blocks, detector running.** Same freeze, without the engine
+  ever leaving the running state — so no engine-level guard would catch it
+  either.
 
 Why the hold rather than split thresholds: the bands are already fractions of a
 live threshold, so a second set of fall fractions would be a second thing to
@@ -207,6 +225,13 @@ Not optimised before anything has measured a problem.
   reset path rides on `setWidth` like everything else — but a reader of
   `setSampleRate` would reasonably assume the device path calls it, and it does
   not.
+- **A stale band survives a source that stops publishing** (§3). Both the
+  stopped/restarting rig and the alive-but-silent tap freeze the chip on its
+  last raw band. The named follow-up is a `lastDataMs_` (or sequence-number)
+  timeout gate in the provider: if the snapshot has not advanced within N ms,
+  report `Unavailable`. It covers **both** cases, needs no change to
+  `NotchController`, and — unlike the engine-state guard — is drivable from the
+  headless suite. **Owner decision**, not taken in lane R.
 - A-R7: `CandidateScorer.cpp` gates on `PeakinessAnalyzer::kDefaultThreshold`
   (compile-time) rather than the live `analyzer.getThreshold()`, so the RESPONSE
   preset does not move the scorer's gate. Out of scope for lane R — changing it
