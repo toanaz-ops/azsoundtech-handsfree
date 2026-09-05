@@ -2,7 +2,7 @@
 """Summarise a Hands-free session log (lane D, data-loop design §3.5).
 
     python tools/logstats.py <session-*.jsonl>
-    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1
+    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2
 
 Stdlib only. Never assumes 1025 bins; never reads audio (there is none).
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 
@@ -125,6 +124,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-notches", type=int)
     ap.add_argument("--expect-verdicts", type=int)
     ap.add_argument("--expect-false", type=int)
+    ap.add_argument("--expect-recurrence-max", type=int)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -141,6 +141,10 @@ def main(argv: list[str]) -> int:
         failures.append(f"verdicts {s['verdicts']} != {args.expect_verdicts}")
     if args.expect_false is not None and s["false"] != args.expect_false:
         failures.append(f"false {s['false']} != {args.expect_false}")
+    if args.expect_recurrence_max is not None:
+        recurrence_max = max((g["count"] for g in s["groups"]), default=0)
+        if recurrence_max != args.expect_recurrence_max:
+            failures.append(f"recurrence-max {recurrence_max} != {args.expect_recurrence_max}")
     for f in failures:
         print("EXPECT FAILED: " + f, file=sys.stderr)
     return 1 if failures else 0
