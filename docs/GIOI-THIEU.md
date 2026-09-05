@@ -75,8 +75,13 @@ thực. Màn hình phổ (RTA) có averaging Off/0.1/0.3/0.5/1/3/5/10 s, peak ho
 độ phân giải 1/1–1/3 octave; tab per-slot theo dõi từng slot riêng. Với slot
 stereo, bộ chọn **L/R** trên thanh analyser đổi làn đang vẽ, notch của làn phải
 vẽ bằng nét đứt kèm nhãn "R", và bảng **ACTIVE NOTCHES** có cột **LANE** cho
-biết mỗi notch nằm ở làn nào. Chip **RING RISK** hiện luôn hiển thị "N/A" —
-nguồn dữ liệu sẽ được nối ở bản sau.
+biết mỗi notch nằm ở làn nào. Chip **RING RISK** (góc phải thanh
+analyser) cho biết phòng đang gần hú tới đâu, đọc thẳng số của detector trên
+slot đang theo dõi: **N/A** = chưa có dữ liệu (detection tắt, detector chưa đủ
+lịch sử, hoặc vừa đổi slot/đổi device); **LOW** = yên; **RISING** = detector
+sắp đặt notch; **CRITICAL** = detector đang/vừa đặt notch ngay đó. Chip đã bước
+lên thì giữ ít nhất **750 ms** trước khi được bước xuống, nên nó không nháy
+trên tín hiệu sát ngưỡng.
 
 ## Chấm notch để app học
 

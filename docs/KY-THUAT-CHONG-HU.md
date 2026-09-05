@@ -229,6 +229,44 @@ stateDiagram-v2
 Soundcheck dùng cho 15 giây đầu buổi: để phòng "tự khai" — đẩy monitor lên,
 bật mic, app khóa sẵn các tần số nguy hiểm trước khi khán giả vào.
 
+### 3.6 Chip RING RISK — số của detector, không phải số thứ hai
+
+Chip **RING RISK** trên thanh analyser (nối data 06/09/2026, lane R) đọc đúng
+`score` mà quyết định đặt notch dùng — `breakdown.score × asym`, lấy **max**
+trên mọi candidate của mọi làn đang phân tích của slot. GUI **không** tự tính
+peakiness: hai con số cùng đo một thứ nhưng khác cửa sổ/khác frame sẽ mâu thuẫn
+nhau trên màn hình, và người vận hành không có cách nào biết filter đang nghe
+số nào.
+
+**Đường dữ liệu.** Vòng detection gom `frameMaxScore_` / `frameScoreValid_` cho
+frame đang xử lý; khối publish nằm **dưới** vòng đó nên score, phổ và danh sách
+notch cùng rời ra trong **một** lần khóa `snapshotMutex_`, cùng một khoảnh khắc.
+Không thêm lock, không thêm thread. Danh sách notch vẫn được gom **trước** khi
+frame được chấm, nên notch mà chính frame này đặt chỉ xuất hiện ở snapshot **kế
+tiếp** — đó là điều làm cho chip đỏ **trước** khi dòng notch hiện ra trong ACTIVE
+NOTCHES, chứ không phải cùng lúc.
+
+**Cờ valid.** `ringRiskValid` chỉ đúng khi detection đang bật **và** ít nhất một
+làn đang chạy đã commit ≥ 1 block lịch sử **kể từ lần reset gần nhất** (start,
+đổi device, đổi sample rate, `setWidth`). Sai → chip hiện `N/A`. Số 0 khi không
+đo được **không** được vẽ thành "LOW": một chỉ báo trấn an sai còn tệ hơn một
+chỉ báo thú nhận là nó không biết.
+
+**Banding (phía GUI).** `score` là tích 0..1, nên ngưỡng là
+`CandidateScorer::kConfirmScore` (0.7) và nó được **publish trong snapshot** —
+GUI không hardcode con số nào: `!valid → N/A`; `< 0.55 × thr → LOW`;
+`< thr → RISING`; `≥ thr → CRITICAL`. Score NaN, hoặc threshold không hữu hạn
+hay ≤ 0, cũng cho `N/A` (nếu không, mọi score sẽ đọc thành CRITICAL).
+
+**Chống nháy.** Hold 750 ms: bước LÊN tức thì, bước XUỐNG phải chờ 750 ms kể từ
+lần cuối mức đó còn được xác nhận (frame bằng đúng mức đang giữ cũng nạp lại
+hold, nếu không chip sẽ chớp xuống một frame mỗi 750 ms khi score nằm ngay mép
+band). `Unavailable` thắng hold — detector ngừng chấm thì giữ tiếp một CRITICAL
+cũ là bịa dữ liệu.
+
+**Mức thay đổi level: 0 dB.** Toàn bộ phần này là readout: không đổi
+`NotchCommand`, không đổi hệ số filter, không đổi quyết định đặt/xóa notch.
+
 ## 4. Preset
 
 File JSON `%APPDATA%/AZSoundtech/HandsFree/presets/*.json`: version, device
@@ -361,8 +399,7 @@ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL
   đặt notch (INDEP mặc định), có nút LINK mỗi slot, cột LANE trong bảng ACTIVE
   NOTCHES và bộ chọn làn L/R trên analyser; preset lưu/nạp được cả `lane` lẫn
   `linked`. Còn mở: code signing (Task 31, chờ EV cert), integration testing
-  với phần cứng thật (Task 32), nối data cho chip RING RISK (hiện luôn
-  "N/A"), sweep `laneAsymmetryBonus` (lane T), lane C (classifier, chờ ≥ 300
+  với phần cứng thật (Task 32), sweep `laneAsymmetryBonus` (lane T), lane C (classifier, chờ ≥ 300
   verdict từ ≥ 3 session), và quyết định owner còn treo cho lane S: có nên
   chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot widen 1→2 hay
   không (amendment A-9 bị rút khỏi lane D khi review — xem
