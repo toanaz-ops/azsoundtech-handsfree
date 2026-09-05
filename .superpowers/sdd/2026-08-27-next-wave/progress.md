@@ -64,3 +64,11 @@ in the generic case, but here the intent is the files stay in the tree too.
 Leaving `.superpowers/sdd/2026-08-27-next-wave/` in place.
 
 Next: superpowers:finishing-a-development-branch.
+
+---
+## LANE R — 2026-09-06, session "merge-branches-subagent" (worktree chore-infra-prune-orphans-948d0e, branch claude_desk/merge-branches-subagent-c76c7f, base d58eac0 = main tip)
+Scope this session: LANE R (Task R1, R2, R3). Lanes P/C done earlier; T1 done (lane T1 merged 9735a78); T2/C3 need a human.
+Baseline: ctest -C Release 432/432 at d58eac0 (controller ran it; logs baseline-*.log).
+Pre-flight: plan R verified against post-S/post-D code by read-only agent (opus) — 3 blocking mismatches (publish before detection; score units 0..1 vs kConfirmScore, not peakiness 10.0; two LaneAnalysis per slot). CONTROLLER RULINGS A-R1..A-R10 written into the plan as "Amendment lane R — 2026-09-06" (before Task R1). Owner may overturn: stereo max-over-lanes (A-R1/A-R8), post-asym score (A-R1), publish moved below detection (A-R2), bands vs kConfirmScore (A-R3), valid = detectionActive && scorer history (A-R4), hold-750 ms hysteresis (A-R5), keep spec §4 lambda (A-R6), release by controller only (A-R10).
+Parked for OWNER (out of lane R scope, placement behaviour): CandidateScorer.cpp:51 gates on compile-time kDefaultThreshold, not the live analyzer threshold (A-R7).
+Expected level change: 0 dB (readout only).
