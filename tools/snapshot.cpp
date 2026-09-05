@@ -280,5 +280,33 @@ int main (int argc, char** argv)
     app.getSpectrumViewForTest().refreshFromSnapshot();
     app.getNotchListPanelForTest().refreshFromSnapshot();
 
+    // Lane D: one row unjudged, one GOOD, one FALSE -- the FALSE row is
+    // still in this (stale) snapshot because nothing is pumped after the
+    // click, which is exactly the frame an operator sees for the ~250 ms
+    // before the panel's next refresh drops it. Rows are found by their
+    // displayed frequency text rather than by index: placement order in the
+    // loop above is an implementation detail, not a promise about row order.
+    {
+        auto& list = app.getNotchListPanelForTest();
+        int goodRow = -1, falseRow = -1;
+        for (int i = 0; i < list.rowCountForTest(); ++i)
+        {
+            const auto freq = list.rowForTest (i).freq;
+            if (freq == "247 Hz")
+                goodRow = i;
+            else if (freq == "1.9 kHz")
+                falseRow = i;
+        }
+        if (goodRow < 0 || falseRow < 0)
+        {
+            std::cerr << "snapshot: could not find 247 Hz / 1.9 kHz rows to "
+                          "click verdicts on (goodRow=" << goodRow
+                       << " falseRow=" << falseRow << ")" << std::endl;
+            return 1;
+        }
+        list.goodButtonForTest (goodRow)->onClick();     // 247 Hz  -> GOOD
+        list.falseButtonForTest (falseRow)->onClick();   // 1.9 kHz -> FALSE, clears the notch
+    }
+
     return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
 }
