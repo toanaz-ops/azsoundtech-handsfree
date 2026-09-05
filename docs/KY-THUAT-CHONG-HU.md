@@ -399,9 +399,9 @@ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL
   đặt notch (INDEP mặc định), có nút LINK mỗi slot, cột LANE trong bảng ACTIVE
   NOTCHES và bộ chọn làn L/R trên analyser; preset lưu/nạp được cả `lane` lẫn
   `linked`. Còn mở: code signing (Task 31, chờ EV cert), integration testing
-  với phần cứng thật (Task 32), sweep `laneAsymmetryBonus` (lane T), lane C (classifier, chờ ≥ 300
-  verdict từ ≥ 3 session), và quyết định owner còn treo cho lane S: có nên
-  chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot widen 1→2 hay
-  không (amendment A-9 bị rút khỏi lane D khi review — xem
+  với phần cứng thật (Task 32), sweep `laneAsymmetryBonus` (lane T), lane C
+  (classifier, chờ ≥ 300 verdict từ ≥ 3 session), và quyết định owner còn treo
+  cho lane S: có nên chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot
+  widen 1→2 hay không (amendment A-9 bị rút khỏi lane D khi review — xem
   `.superpowers/sdd/2026-09-05-data-loop/progress.md`, "Task 3: CONTROLLER
   RULING").

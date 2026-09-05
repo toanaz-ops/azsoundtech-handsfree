@@ -160,10 +160,21 @@ Not optimised before anything has measured a problem.
 ## Acceptance
 
 1. With the detector stopped, or before it has history, the chip reads `N/A`
-   and is hollow. The existing test still passes unchanged. **PROVEN**
-   (`MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt`, plus
+   and is hollow. The existing test still passes unchanged. **PROVEN** — the
+   wired idle path is proven by
+   `MainComponent.RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory`
+   (R3 fix round 1: it ticks the timer once through the real provider and
+   asserts on the result, which the pinned test below cannot, since the
+   headless suite pumps no message loop and the pinned test never calls
+   `tickForTest()`); the pinned
+   `MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt` stays cited
+   for what it actually proves — the readout never defaults to a reassuring
+   `Low` when nothing has assigned `ringRiskProvider` — plus
    `NotchControllerRingRisk.InvalidBeforeAnyFrame` /
-   `DetectionDisabledPublishesInvalidNotZero`).
+   `DetectionDisabledPublishesInvalidNotZero`. `console-idle.png` shows the
+   same `N/A` field, but the snapshot tool also runs no dispatch loop, so the
+   picture shows the default field, not a polled reading — it illustrates the
+   look, not the wiring.
 2. Feeding the rig a 1 kHz tone at a level that provokes a notch drives the
    chip to `Critical` **before** the notch appears in ACTIVE NOTCHES, not
    after. A warning that arrives with the fix is not a warning. **NEEDS THE
