@@ -39,6 +39,7 @@ add_executable(HandsFreeTests
     test_notchcontroller.cpp
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
+    test_sessionlogger.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 

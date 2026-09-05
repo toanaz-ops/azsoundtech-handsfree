@@ -92,6 +92,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/PresetManager.h
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.cpp
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.h
+    ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
