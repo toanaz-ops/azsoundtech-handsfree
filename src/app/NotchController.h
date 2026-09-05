@@ -155,17 +155,19 @@ public:
     // installed on ALL width_ lanes of this slot (design §2 sizes the command
     // burst as lanes x 16). Returns how many preset notches were adopted; a
     // notch whose parameters fail validation on a lane is skipped entirely.
-    // `skippedOut` (optional) receives the number of notches this slot could
-    // not take at all -- today only a lane-1 notch on a mono slot.
+    // `skippedOut` (optional) receives the count of notches naming a lane
+    // this slot does not have -- today only lane 1 on a mono slot. A notch
+    // that fails validation on every lane it targets is neither adopted nor
+    // counted here.
     int adoptPreset (const std::vector<PresetNotch>& notches, int* skippedOut = nullptr);
 
     // Lane D (data loop): one event per notch set / clear, delivered to the
-    // sink from the DETECTOR thread by flushEventOutbox(), never under
-    // modelMutex_ (D-6) and never from the audio thread. Events queue in
-    // eventOutbox_ (cap kMaxPendingEvents, then drop + count) and go out at
-    // the end of every runOnce() and once more from stop(). With no sink the
-    // outbox is emptied, never grown. setEventSink() requires the thread to
-    // be STOPPED, like setWidth().
+    // sink from the detector thread by flushEventOutbox(), or from the
+    // caller of stop() after the join; never concurrently. Never from the
+    // audio thread. Events queue in eventOutbox_ (cap kMaxPendingEvents, then
+    // drop + count) and go out at the end of every runOnce() and once more
+    // from stop(). With no sink the outbox is emptied, never grown.
+    // setEventSink() requires the thread to be STOPPED, like setWidth().
     struct SpectralContext            // filled by Task 4 only
     {
         int    bins = Detector::kNumBins;
@@ -195,6 +197,11 @@ public:
     using EventSink = std::function<void (const NotchEvent&)>;
 
     static constexpr int kMaxPendingEvents = 64;
+    // Lifetime: the sink must outlive this controller's LAST stop() -- the
+    // destructor calls stop(2000) and may invoke the sink from it. An owner
+    // that captures `this` in the sink must call stop() on the controller
+    // before its own members are destroyed, or call setEventSink(nullptr)
+    // after that join.
     void setEventSink (EventSink sink);              // detector thread STOPPED; nullptr = off
     std::uint64_t droppedEvents() const;
     // TEST ACCESSORS ONLY
@@ -309,7 +316,11 @@ private:
                        Origin origin, const NotchEvent* scored);
     void pushClearLocked (int channel, int index, ClearReason reason);
     void pushEventLocked (NotchEvent&& event);   // modelMutex_ HELD
-    void flushEventOutbox();                     // modelMutex_ NOT held when the sink runs
+    // modelMutex_ NOT held when the sink runs. Returns true if it delivered
+    // (or attempted to deliver, with no sink) anything -- false when the
+    // outbox was already empty. stop() loops on this so a sink re-entering
+    // clearNotch()/setNotch() during the flush still gets drained.
+    bool flushEventOutbox();
 
     // `otherLaneMagnitudes` is the opposite lane's spectrum, at most one hop
     // apart from `block` (runOnce()'s per-lane drain invariant), or nullptr

@@ -1355,12 +1355,12 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
 TEST (NotchControllerEvents, SinkRunsOutsideTheModelMutexAndMayReenter)
 {
     Harness h;
-    bool mutexWasFree = false;
+    bool mutexWasFree = true;
     int  calls = 0;
     h.controller.setEventSink ([&] (const Ev& e)
     {
         ++calls;
-        mutexWasFree = h.controller.modelMutexIsFreeForTest();
+        mutexWasFree = mutexWasFree && h.controller.modelMutexIsFreeForTest();
         if (e.kind == Ev::Kind::Set && e.index == 0)
             h.controller.clearNotch (0, 1);   // re-entrant policy call from inside the sink
     });
@@ -1368,6 +1368,8 @@ TEST (NotchControllerEvents, SinkRunsOutsideTheModelMutexAndMayReenter)
     ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
     h.controller.runOnce();   // delivers the two Sets; the re-entrant clear lands in the outbox
     h.controller.runOnce();   // delivers that Clear
+    // mutexWasFree is the AND of all three observations (review round 1: the
+    // original overwrote it on each call, so only the last one was checked).
     EXPECT_TRUE (mutexWasFree);
     EXPECT_EQ (calls, 3);
 }
@@ -1412,30 +1414,23 @@ TEST (NotchControllerEvents, StopFlushesPendingEventsEvenWhenTheThreadNeverRan)
     EXPECT_EQ (r.events[0].kind, Ev::Kind::Set);
 }
 
-// Lane S loose end (A-9). Red if widening 1 -> 2 leaves lane 1's analysis
-// window holding audio from before it went mono: one silent hop after the
-// widen must publish a near-silent lane-1 spectrum, not 1536 stale samples
-// of tone.
-TEST (NotchControllerSlotAware, WideningResetsLaneOneDetectorState)
+// Review round 1, finding 5. Red if stop()'s flush stops at one pass: the
+// sink re-enters clearNotch() while handling the Set, queuing a Clear that
+// nothing would drain once the thread is already joined and gone.
+TEST (NotchControllerEvents, StopDrainsEventsQueuedByAReentrantSinkDuringItsOwnFlush)
 {
-    StereoHarness h;
-    SineSource tone; NoiseSource quiet;
-    for (int i = 0; i < 8; ++i)
-        pumpStereo (h, quiet.hop(), tone.hop());   // lane 1 window full of 1 kHz
-    h.controller.setWidth (1);
-    h.controller.setWidth (2);
-
-    std::vector<float> silence ((std::size_t) Detector::kHopSize, 0.0f);
-    pumpStereo (h, silence, silence);
-
-    NotchController::SnapshotBuffer snap; h.controller.copySnapshot (snap);
-    ASSERT_EQ (snap.laneCount, 2u);
-    float peak = 0.0f;
-    for (int b = 0; b < Detector::kNumBins; ++b)
-        peak = std::max (peak, snap.magnitudes[1][(std::size_t) b]);
-    // A window of pure tone gives bin 43 ~ 0.5 (amp 1, Hann); 512 zeros in a
-    // 2048 window still leaves ~0.37. A reset window gives exactly 0.
-    EXPECT_LT (peak, 1.0e-3f);
+    Harness h; Recorder r;
+    h.controller.setEventSink ([&] (const Ev& e)
+    {
+        r.events.push_back (e);
+        if (e.kind == Ev::Kind::Set)
+            h.controller.clearNotch (0, e.index);   // re-entrant, from inside stop()'s flush
+    });
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.stop (1000);   // thread never started; flush must still drain the re-entrant Clear
+    const auto c = r.clears();
+    ASSERT_EQ (c.size(), 1u);
+    EXPECT_EQ (c[0].index, 0);
 }
 
 // Lane S loose end (A-9). Red if a lane-1 notch skipped on a mono slot is

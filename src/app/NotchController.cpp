@@ -41,8 +41,12 @@ void NotchController::stop (int timeoutMs)
     if (isThreadRunning())
         stopThread (timeoutMs);
     // Whatever queued since the last poll -- or ever, if the thread never
-    // ran -- reaches the sink before this returns (spec test 11).
-    flushEventOutbox();
+    // ran -- reaches the sink before this returns (spec test 11). A sink
+    // that re-enters clearNotch()/setNotch() from THIS flush queues more
+    // events that nothing drains afterwards, so loop until the outbox is
+    // actually empty; capped so a sink that never stops re-entering cannot
+    // hang shutdown forever (review round 1).
+    for (int i = 0; i < 8 && flushEventOutbox(); ++i) {}
 }
 
 void NotchController::setEventSink (EventSink sink)
@@ -87,20 +91,15 @@ void NotchController::setWidth (int lanes)
             for (int i = 0; i < kSlots; ++i)
                 pushClearLocked (c, i, ClearReason::WidthChange);
     }
-    if (newWidth > width_)
-    {
-        // A lane coming back into scope must not analyse the tail of what it
-        // heard before it left: the analysis window and the candidate streaks
-        // describe audio the operator stopped routing. Same discontinuity
-        // rule Detector::reset() documents for a device restart.
-        for (int c = width_; c < newWidth; ++c)
-        {
-            auto& la = lanes_[(std::size_t) c];
-            la.detector.reset();
-            la.persistence.fill (0);
-            la.previousBlockNowMs = 0.0;
-        }
-    }
+    // No widening branch here (review round 1): resetting only the Detector
+    // leaves CandidateScorer's rise history and baseline EMA holding
+    // pre-mono audio, and once the zeroed frames age past
+    // 0.45 x riseReferenceMs they become the reference and saturate the
+    // rise/novelty axes (max(ref, 1e-12) floor) for ~100 ms -- a MORE
+    // permissive detection window than the shipped behaviour. Lane D may not
+    // change detection behaviour. Whether a re-entering lane should be gated
+    // for riseReferenceMs after a widen is an OPEN OWNER DECISION for lane S
+    // -- see SDD ledger 2026-09-05-data-loop, Task 3 ruling.
     width_ = newWidth;
 }
 
@@ -799,12 +798,12 @@ void NotchController::flushOutbox()
     }
 }
 
-void NotchController::flushEventOutbox()
+bool NotchController::flushEventOutbox()
 {
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         if (eventOutbox_.empty())
-            return;
+            return false;
         eventScratch_.clear();
         eventScratch_.swap (eventOutbox_);   // both keep their reserve()
     }
@@ -815,4 +814,5 @@ void NotchController::flushEventOutbox()
         for (const auto& e : eventScratch_)
             eventSink_ (e);
     eventScratch_.clear();
+    return true;
 }
