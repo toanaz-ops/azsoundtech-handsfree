@@ -1,0 +1,441 @@
+# Review package: 7515085..HEAD
+
+## Commits
+418f11c fix(log): SessionLogger — close under the queue lock, never mutate the caller's var, unique file names (review round 1)
+
+## Files changed
+ src/app/SessionLogger.cpp    |  74 +++++++++++++++---
+ src/app/SessionLogger.h      |  14 +++-
+ tests/test_sessionlogger.cpp | 177 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 254 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/src/app/SessionLogger.cpp b/src/app/SessionLogger.cpp
+index 900cef0..0f4be18 100644
+--- a/src/app/SessionLogger.cpp
++++ b/src/app/SessionLogger.cpp
+@@ -31,45 +31,62 @@ juce::var SessionLogger::makeEvent (const juce::String& name)
+ 
+ double SessionLogger::elapsedMs() const
+ {
+     return std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - t0_).count();
+ }
+ 
+ bool SessionLogger::start (const juce::File& directory, const juce::var& sessionHeader)
+ {
+     stop();
+ 
++    // Minor 3: a failed start() below must not leave currentFile()/
++    // directory_ reporting the PREVIOUS session -- clear both up front so
++    // every early-return branch already reflects "no active file".
++    file_      = {};
++    directory_ = {};
++
+     if (directory.existsAsFile())
+         return false;
+     if (! directory.createDirectory().wasOk())
+         return false;
+ 
+     const auto now = juce::Time::getCurrentTime();
+-    const auto name = "session-" + now.formatted ("%Y%m%d-%H%M%S")
+-                      + "-" + juce::String (now.getMilliseconds()).paddedLeft ('0', 3)
+-                      + ".jsonl";
++    const auto stamp = "session-" + now.formatted ("%Y%m%d-%H%M%S")
++                       + "-" + juce::String (now.getMilliseconds()).paddedLeft ('0', 3);
++
++    // Minor 7: the ms suffix alone can collide (two sessions started inside
++    // the same millisecond). Append _2, _3, ... before .jsonl on collision.
++    // "_" (0x5F) sorts after "." (0x2E), so a suffixed name still sorts
++    // lexically after its un-suffixed base -- pruneOldFiles()'s "lexical
++    // order == chronological order" assumption keeps holding.
++    juce::File candidate = directory.getChildFile (stamp + ".jsonl");
++    for (int suffix = 2; candidate.existsAsFile(); ++suffix)
++        candidate = directory.getChildFile (stamp + "_" + juce::String (suffix) + ".jsonl");
++
+     directory_ = directory;
+-    file_      = directory.getChildFile (name);
++    file_      = candidate;
+ 
+     stream_ = std::make_unique<juce::FileOutputStream> (file_);
+     if (! stream_->openedOk())
+     {
+         stream_.reset();
+-        file_ = {};
++        file_      = {};
++        directory_ = {};
+         return false;
+     }
+ 
+     t0_ = std::chrono::steady_clock::now();
+     dropped_.store (0, std::memory_order_relaxed);
+     {
+         const std::lock_guard<std::mutex> lock (queueMutex_);
+         pending_.clear();
++        accepting_ = true;
+     }
+ 
+     juce::var header = sessionHeader;
+     if (header.getDynamicObject() == nullptr)
+         header = makeEvent ("session_start");
+     header.getDynamicObject()->setProperty ("ev", "session_start");
+     header.getDynamicObject()->setProperty ("t", 0);
+     writeLineNow (juce::JSON::toString (header, true));
+     stream_->flush();
+ 
+@@ -88,44 +105,83 @@ void SessionLogger::stop()
+     {
+         // Never started, or already stopped -- but a thread may still be
+         // joining from a previous stop(); be safe.
+         if (isThreadRunning())
+             stopThread (5000);
+         return;
+     }
+ 
+     notify();
+     stopThread (5000);
+-    drainToFile();
++
++    // Important 1 fix: close is ONE state transition under queueMutex_ --
++    // clear accepting_ and take the final batch together, atomically. A
++    // log() call still in flight either wins the lock first (pushes
++    // successfully, picked up in finalBatch below) or loses it and finds
++    // accepting_ already false (counts itself into dropped_ instead of
++    // pushing into a queue nobody will ever drain again).
++    std::deque<juce::String> finalBatch;
++    {
++        const std::lock_guard<std::mutex> lock (queueMutex_);
++        accepting_ = false;
++        finalBatch.swap (pending_);
++    }
++    for (const auto& line : finalBatch)
++        writeLineNow (line);
++
++    // Read dropped_ only now, after the final drain above: any log() call
++    // that lost the race for queueMutex_ has, by this point, already
++    // incremented it, so session_end reports the true final count.
++    const auto droppedAtClose = dropped_.load (std::memory_order_relaxed);
+ 
+     auto end = makeEvent ("session_end");
+     end.getDynamicObject()->setProperty ("t", elapsedMs());
+-    end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) dropped_.load (std::memory_order_relaxed));
++    end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) droppedAtClose);
+     writeLineNow (juce::JSON::toString (end, true));
+ 
+     if (stream_ != nullptr)
+         stream_->flush();
+     stream_.reset();
+ }
+ 
+ void SessionLogger::log (const juce::var& event)
+ {
++    // Fast, unlocked pre-filter: skip all work (clone, stamp, serialise) for
++    // the common inactive cases -- never started, or long since stopped.
++    // This is NOT the authoritative check; see the accepting_ recheck below.
+     if (! isActive())
+         return;
++
+     auto* obj = event.getDynamicObject();
+     if (obj == nullptr)
+         return;
+ 
+-    obj->setProperty ("t", elapsedMs());
+-    juce::String line = juce::JSON::toString (event, true);
++    // Important 2 fix: never mutate the caller's object. getDynamicObject()
++    // is non-const even from a const juce::var, so setProperty("t") would
++    // otherwise write into whatever DynamicObject the caller passed in --
++    // visible to them afterwards, and a data race if they log the same var
++    // from two threads. Clone first, stamp the clone, serialise the clone.
++    juce::var stamped (new juce::DynamicObject (*obj));
++    stamped.getDynamicObject()->setProperty ("t", elapsedMs());
++    juce::String line = juce::JSON::toString (stamped, true);
+ 
+     const std::lock_guard<std::mutex> lock (queueMutex_);
++
++    // Important 1 fix: the authoritative check, under the same lock stop()
++    // uses to close the session. A call that read isActive()==true above
++    // but loses the race for this lock to a concurrent stop() lands here
++    // instead of pushing into an already-abandoned queue.
++    if (! accepting_)
++    {
++        dropped_.fetch_add (1, std::memory_order_relaxed);
++        return;
++    }
+     if ((int) pending_.size() >= kMaxPendingLines)
+     {
+         dropped_.fetch_add (1, std::memory_order_relaxed);
+         return;
+     }
+     pending_.push_back (std::move (line));
+ }
+ 
+ juce::File SessionLogger::currentFile() const
+ {
+diff --git a/src/app/SessionLogger.h b/src/app/SessionLogger.h
+index 50760fd..f5bea1f 100644
+--- a/src/app/SessionLogger.h
++++ b/src/app/SessionLogger.h
+@@ -48,22 +48,24 @@ public:
+     // false: the directory could not be created or the file not opened; the
+     // logger stays inactive and log() is a no-op. Message thread.
+     bool start (const juce::File& directory, const juce::var& sessionHeader);
+ 
+     // Drains what is pending, writes session_end, closes the file, joins the
+     // thread. Idempotent. Message thread.
+     void stop();
+ 
+     bool isActive() const { return active_.load (std::memory_order_acquire); }
+ 
+-    // Any thread except audio. `event` must be a DynamicObject var; "t" is
+-    // stamped here. Inactive logger: no-op.
++    // Any thread except audio. `event` must be a DynamicObject var; a clone
++    // is stamped with "t" -- the caller's own object is never mutated, so
++    // the same var is safe to log again or read afterwards from any thread.
++    // Inactive logger: no-op.
+     void log (const juce::var& event);
+ 
+     juce::File    currentFile() const;
+     std::uint64_t droppedEvents() const { return dropped_.load (std::memory_order_relaxed); }
+ 
+ private:
+     void run() override;
+     void drainToFile();
+     void writeLineNow (const juce::String& line);   // writer thread, or start()/stop()
+     double elapsedMs() const;
+@@ -75,14 +77,22 @@ private:
+ 
+     // File state: touched by start()/stop() and the writer thread only, and
+     // the two never overlap (start() runs before startThread(), stop() after
+     // stopThread()).
+     juce::File directory_;
+     juce::File file_;
+     std::unique_ptr<juce::FileOutputStream> stream_;
+ 
+     mutable std::mutex queueMutex_;
+     std::deque<juce::String> pending_;
++    // Authoritative "still open for business" flag, read/written ONLY under
++    // queueMutex_. active_ (above) is a fast, unlocked pre-filter log() uses
++    // to skip work when the logger has obviously never started or has long
++    // since stopped; accepting_ is the actual gate a log() call re-checks
++    // once it holds the same lock stop() uses to close the session, so a
++    // call that raced stop() is always resolved -- pushed, or counted into
++    // dropped_ -- never silently lost (review round 1, Important 1).
++    bool accepting_ { false };
+     std::atomic<std::uint64_t> dropped_ { 0 };
+ 
+     JUCE_DECLARE_NON_COPYABLE (SessionLogger)
+ };
+diff --git a/tests/test_sessionlogger.cpp b/tests/test_sessionlogger.cpp
+index 2f9ce94..2dc7022 100644
+--- a/tests/test_sessionlogger.cpp
++++ b/tests/test_sessionlogger.cpp
+@@ -2,22 +2,25 @@
+ //
+ // A logger is a file plus a thread; every assertion here reads the FILE back
+ // through juce::JSON::parse, so what is checked is what a Python reader will
+ // see, not a member the logger could keep consistent with itself.
+ 
+ #include <gtest/gtest.h>
+ #include <juce_events/juce_events.h>
+ 
+ #include "app/SessionLogger.h"
+ 
++#include <atomic>
+ #include <chrono>
+ #include <cstdint>
++#include <thread>
++#include <vector>
+ 
+ namespace
+ {
+ juce::File freshTempDir (const juce::String& name)
+ {
+     auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile ("az-handsfree-sessionlogger")
+                    .getChildFile (name);
+     dir.deleteRecursively();
+     return dir;
+@@ -164,10 +167,184 @@ TEST (SessionLogger, UncreatableDirectoryMakesStartFalseAndLogANoOp)
+     ASSERT_TRUE (blocker.replaceWithText ("not a directory"));
+ 
+     SessionLogger logger;
+     EXPECT_FALSE (logger.start (blocker.getChildFile ("logs"), header()));
+     EXPECT_FALSE (logger.isActive());
+     EXPECT_FALSE (logger.currentFile().existsAsFile());
+     logger.log (SessionLogger::makeEvent ("mode"));   // must not throw
+     logger.stop();                                   // must not throw
+     EXPECT_EQ (logger.droppedEvents(), 0u);
+ }
++
++// ---------------------------------------------------------------------
++// Review round 1 fixes -- see task-1-review.md.
++// ---------------------------------------------------------------------
++
++// Regression for review Important 1. Red if stop() reads/clears state
++// without doing so as ONE transition under queueMutex_ together with the
++// final drain -- i.e. if a log() call that takes the lock right after
++// drainToFile() swapped the deque out is allowed to push into the abandoned
++// pending_ instead of being counted into dropped_. A deterministic repro is
++// hard (the review's own words): several producer threads hammer log() --
++// each gated on isActive() so "calls" only counts attempts log() itself
++// must resolve (write or drop), never silently lose -- while stop() runs
++// concurrently; more threads means more of them are genuinely queued on
++// queueMutex_ at the instant stop() takes it, which is what actually
++// exercises the race (a single producer thread almost never catches it).
++TEST (SessionLogger, LogRacingStopNeverLosesALine)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    constexpr int kProducers = 8;
++
++    for (int attempt = 0; attempt < 20; ++attempt)
++    {
++        const auto dir = freshTempDir ("race-" + juce::String (attempt));
++        SessionLogger logger;
++        ASSERT_TRUE (logger.start (dir, header()));
++
++        std::atomic<std::uint64_t> calls { 0 };
++        std::vector<std::thread> producers;
++        for (int p = 0; p < kProducers; ++p)
++        {
++            producers.emplace_back ([&]
++            {
++                while (logger.isActive())
++                {
++                    logger.log (SessionLogger::makeEvent ("tick"));
++                    calls.fetch_add (1, std::memory_order_relaxed);
++                }
++            });
++        }
++
++        logger.stop();
++        for (auto& t : producers)
++            t.join();
++
++        const auto lines = linesOf (logger.currentFile());
++        const auto dropped = logger.droppedEvents();
++        EXPECT_EQ ((std::uint64_t) lines.size() + dropped, calls.load() + 2)
++            << "attempt " << attempt;
++    }
++}
++
++// Regression for review Important 2. Red if log() stamps "t" onto the
++// caller's own DynamicObject instead of a clone -- the caller's var would
++// then carry a "t" it never set, and logging the same var twice would
++// silently reuse (or race on) the first call's timestamp storage.
++TEST (SessionLogger, LogDoesNotMutateTheCallersVar)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    const auto dir = freshTempDir ("no-mutate");
++
++    SessionLogger logger;
++    ASSERT_TRUE (logger.start (dir, header()));
++
++    auto ev = SessionLogger::makeEvent ("tick");
++    ASSERT_FALSE (ev.hasProperty ("t"));
++    logger.log (ev);
++    EXPECT_FALSE (ev.hasProperty ("t")) << "log() must stamp a clone, not the caller's var";
++
++    logger.log (ev);   // same var again -- must not throw or collide
++    logger.stop();
++
++    const auto lines = linesOf (logger.currentFile());
++    ASSERT_EQ (lines.size(), 4);   // session_start, tick, tick, session_end
++    EXPECT_TRUE (parsedLine (lines[1]).hasProperty ("t"));
++    EXPECT_TRUE (parsedLine (lines[2]).hasProperty ("t"));
++}
++
++// Minor 8. Red if a second stop() call re-drains, writes a second
++// session_end, or crashes joining an already-joined thread.
++TEST (SessionLogger, StopCalledTwiceIsIdempotent)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    const auto dir = freshTempDir ("stop-twice");
++
++    SessionLogger logger;
++    ASSERT_TRUE (logger.start (dir, header()));
++    logger.log (SessionLogger::makeEvent ("tick"));
++    logger.stop();
++    EXPECT_FALSE (logger.isActive());
++
++    const auto linesAfterFirstStop = linesOf (logger.currentFile());
++    logger.stop();   // must not throw, must not change the file
++    EXPECT_FALSE (logger.isActive());
++
++    const auto linesAfterSecondStop = linesOf (logger.currentFile());
++    EXPECT_EQ (linesAfterFirstStop.size(), linesAfterSecondStop.size());
++    ASSERT_EQ (linesAfterSecondStop.size(), 3);
++    EXPECT_EQ (parsedLine (linesAfterSecondStop[2])["ev"].toString(), "session_end");
++}
++
++// Minor 8. The brief's header says start() calls stop() first -- a second
++// start() closes the first session (writing ITS session_end) before opening
++// a new file. Red if start() does not close the previous session first, or
++// if Minor 7's collision guard is removed and the second file collides with
++// (overwrites) the first.
++TEST (SessionLogger, StartCalledTwiceClosesFirstSessionAndOpensASecondFile)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    const auto dir = freshTempDir ("start-twice");
++
++    SessionLogger logger;
++    ASSERT_TRUE (logger.start (dir, header()));
++    const auto firstFile = logger.currentFile();
++    logger.log (SessionLogger::makeEvent ("tick"));
++
++    ASSERT_TRUE (logger.start (dir, header()));
++    const auto secondFile = logger.currentFile();
++    EXPECT_NE (firstFile.getFullPathName(), secondFile.getFullPathName());
++    EXPECT_TRUE (logger.isActive());
++
++    logger.stop();
++
++    ASSERT_TRUE (firstFile.existsAsFile());
++    const auto firstLines = linesOf (firstFile);
++    ASSERT_EQ (firstLines.size(), 3);   // start, tick, end -- closed by the second start()
++    EXPECT_EQ (parsedLine (firstLines[2])["ev"].toString(), "session_end");
++
++    ASSERT_TRUE (secondFile.existsAsFile());
++    const auto secondLines = linesOf (secondFile);
++    ASSERT_EQ (secondLines.size(), 2);   // start, end -- no events logged in this session
++}
++
++// Minor 8. Red if log() after a clean, already-completed stop() counts
++// itself into droppedEvents() -- the logger is inactive at that point, so
++// nothing was "dropped"; it is simply a no-op.
++TEST (SessionLogger, LogAfterStopIsANoOpAndNotCounted)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    const auto dir = freshTempDir ("log-after-stop");
++
++    SessionLogger logger;
++    ASSERT_TRUE (logger.start (dir, header()));
++    logger.stop();
++
++    const auto droppedBefore = logger.droppedEvents();
++    const auto linesBefore = linesOf (logger.currentFile());
++
++    logger.log (SessionLogger::makeEvent ("tick"));   // must be a true no-op
++
++    EXPECT_EQ (logger.droppedEvents(), droppedBefore);
++    EXPECT_EQ (linesOf (logger.currentFile()).size(), linesBefore.size());
++}
++
++// Minor 8. Red if the destructor does not call stop() -- session_end would
++// never be written when a logger simply goes out of scope.
++TEST (SessionLogger, DestructionWithoutStopWritesSessionEnd)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    const auto dir = freshTempDir ("dtor");
++
++    juce::File file;
++    {
++        SessionLogger logger;
++        ASSERT_TRUE (logger.start (dir, header()));
++        file = logger.currentFile();
++        logger.log (SessionLogger::makeEvent ("tick"));
++        // no explicit stop() -- destructor must close the session.
++    }
++
++    const auto lines = linesOf (file);
++    ASSERT_EQ (lines.size(), 3);
++    EXPECT_EQ (parsedLine (lines[2])["ev"].toString(), "session_end");
++}

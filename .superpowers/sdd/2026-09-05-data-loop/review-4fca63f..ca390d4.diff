@@ -1,0 +1,269 @@
+# Review package: 4fca63f..HEAD
+
+## Commits
+ca390d4 feat(scorer): scoreCandidateDetailed exposes the axes and the reference frame
+
+## Files changed
+ src/dsp/CandidateScorer.cpp    | 22 +++++++++++--
+ src/dsp/CandidateScorer.h      | 18 +++++++++++
+ tests/test_candidatescorer.cpp | 72 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 110 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/dsp/CandidateScorer.cpp b/src/dsp/CandidateScorer.cpp
+index cf017da..2e726b3 100644
+--- a/src/dsp/CandidateScorer.cpp
++++ b/src/dsp/CandidateScorer.cpp
+@@ -28,31 +28,43 @@ void CandidateScorer::beginBlock (double sampleRate)
+     {
+         baselineEma_.fill (0.0);
+         buffersReady_ = true;
+     }
+ }
+ 
+ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candidate,
+                                        const float* magnitudes,
+                                        const LockedFrequencyView& lockedFrequencies)
+ {
++    return scoreCandidateDetailed (candidate, magnitudes, lockedFrequencies).score;
++}
++
++CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
++    const PeakinessAnalyzer::Candidate& candidate,
++    const float* magnitudes,
++    const LockedFrequencyView& lockedFrequencies)
++{
++    ScoreBreakdown out;
++    out.rawPeakiness = candidate.peakiness;
++
+     // The scorer never resurrects a bin the analyzer already rejected: without
+     // this gate, a candidate just under the threshold could still clear the
+     // confirm score through the other two axes.
+     if (candidate.peakiness <= PeakinessAnalyzer::kDefaultThreshold)
+-        return 0.0f;
++        return out;   // score 0, axes 0, penalty 1 -- product is 0 as before
+ 
+     // Axis 1 -- peakiness. Saturates at 10x threshold: beyond that the bin is
+     // peaky "enough" and extra sharpness must not substitute for novelty.
+     float pNorm = (candidate.peakiness / PeakinessAnalyzer::kDefaultThreshold - 1.0f)
+                   / 9.0f;
+     pNorm = std::min (std::max (pNorm, 0.0f), 1.0f);
++    out.pNorm = pNorm;
+ 
+     // Axis 2 -- rise rate against the frame closest to ~riseReferenceMs ago.
+     //
+     // History semantics (plan KD-2, amended by the 2026-08-24 tuning brief):
+     // a reference OLDER than 45% of the configured rise reference is real
+     // history and is compared normally; frames younger than that are not deep
+     // enough in time to claim a rise from. Three cases:
+     //   * no history at all  -> everything is "rising" by definition (rNorm 1),
+     //     otherwise a howl on the very first frames after startup would be
+     //     invisible for its first half second;
+@@ -70,44 +82,48 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
+     {
+         const double minAgeMs = 0.45 * riseReferenceMs_.load (std::memory_order_relaxed);
+         const float* reference = nullptr;
+         for (std::size_t i = 0; i < historyCount_; ++i)
+         {
+             const std::size_t idx = (historyHead_ + kMaxHistoryFrames - 1 - i)
+                                     % kMaxHistoryFrames;
+             if (clockMs_ - history_[idx].timeMs >= minAgeMs)
+             {
+                 reference = history_[idx].magnitudes.data();
++                out.refFrame = reference;
++                out.refAgeMs = clockMs_ - history_[idx].timeMs;
+                 break;
+             }
+         }
+ 
+         if (reference != nullptr)
+         {
+             // Floor the divisor: a silent reference bin would make the ratio
+             // inf (or NaN when both are zero), and NaN compares false against
+             // every clamp bound -- it would poison the whole product silently.
+             const float was  = std::max (reference[candidate.bin], 1e-12f);
+             const float rise = magnitudes[candidate.bin] / was;
+             rNorm = (rise - 1.0f) / 0.5f;
+             rNorm = std::min (std::max (rNorm, 0.0f), 1.0f);
+         }
+         // else: history too young -- rNorm stays 0 (see above).
+     }
++    out.rNorm = rNorm;
+ 
+     // Axis 3 -- novelty against the per-bin EMA baseline. A tone that has been
+     // there for seconds IS the new baseline and must stop scoring, even while
+     // still perfectly peaky.
+     const double mag      = static_cast<double> (magnitudes[candidate.bin]);
+     const double baseline = std::max (baselineEma_[candidate.bin], 1e-12);
+     double mNorm = std::log (std::max (mag, 1e-12) / baseline) / std::log (4.0);
+     mNorm = std::min (std::max (mNorm, 0.0), 1.0);
++    out.mNorm = static_cast<float> (mNorm);
+ 
+     // Harmonic penalty (KD-3): a candidate sitting at roughly an integer
+     // multiple (here 1.4x..4.1x) of a LOCKED notch frequency is likely a
+     // harmonic of the already-notched fundamental, i.e. a symptom, not a
+     // separate howl. Applied once regardless of how many fundamentals match.
+     float penalty = 1.0f;
+     if (lockedFrequencies.data != nullptr)
+     {
+         for (std::size_t i = 0; i < lockedFrequencies.count; ++i)
+         {
+@@ -115,25 +131,27 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
+             if (lockedHz <= 0.0)
+                 continue;
+             if (candidate.frequencyHz > 1.4 * lockedHz
+                 && candidate.frequencyHz < 4.1 * lockedHz)
+             {
+                 penalty = kHarmonicPenalty;
+                 break;
+             }
+         }
+     }
++    out.penalty = penalty;
+ 
+     // Product form (KD-4): all three axes must agree. Each axis alone has a
+     // known false-positive mode (steady tones are peaky; broadband bursts are
+     // novel); only a genuinely NEW narrow howl clears all three.
+-    return pNorm * rNorm * static_cast<float> (mNorm) * penalty;
++    out.score = out.pNorm * out.rNorm * out.mNorm * out.penalty;
++    return out;
+ }
+ 
+ void CandidateScorer::commitBlock (const float* magnitudes, double elapsedMs)
+ {
+     clockMs_ += elapsedMs;
+ 
+     // Per-bin EMA with the pinned ~3 s time constant. Updated ONLY here, so
+     // scoreCandidate() within a block reads state that is consistent for every
+     // candidate of that block.
+     if (elapsedMs > 0.0)
+diff --git a/src/dsp/CandidateScorer.h b/src/dsp/CandidateScorer.h
+index 2cf7de4..bc1deed 100644
+--- a/src/dsp/CandidateScorer.h
++++ b/src/dsp/CandidateScorer.h
+@@ -67,20 +67,38 @@ public:
+     // Call once per detector pump BEFORE scoring candidates. Sizes the
+     // internal buffers on the first call (allocation-free afterwards).
+     void beginBlock (double sampleRate);
+ 
+     // Pure read against committed state: scores ONE candidate. Does not
+     // mutate anything.
+     float scoreCandidate (const PeakinessAnalyzer::Candidate& candidate,
+                           const float* magnitudes,
+                           const LockedFrequencyView& lockedFrequencies);
+ 
++    // Lane D (data loop): the same computation, with every axis and the
++    // reference frame the rise axis compared against exposed, so a session
++    // log can record WHY a notch was placed. `refFrame` points into history_
++    // and dies at the next commitBlock(). scoreCandidate() returns .score of
++    // this and nothing else -- one arithmetic path, never two.
++    struct ScoreBreakdown
++    {
++        float rawPeakiness = 0.0f;
++        float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
++        float penalty = 1.0f;
++        float score = 0.0f;
++        const float* refFrame = nullptr;
++        double refAgeMs = 0.0;
++    };
++    ScoreBreakdown scoreCandidateDetailed (const PeakinessAnalyzer::Candidate& candidate,
++                                           const float* magnitudes,
++                                           const LockedFrequencyView& lockedFrequencies);
++
+     // Call once per detector pump AFTER all candidates are scored: advances
+     // the EMA baselines and pushes this frame into the rise-history ring.
+     void commitBlock (const float* magnitudes, double elapsedMs);
+ 
+ private:
+     struct HistoryFrame
+     {
+         double timeMs = 0.0;
+         std::array<float, kBins> magnitudes {};
+     };
+diff --git a/tests/test_candidatescorer.cpp b/tests/test_candidatescorer.cpp
+index 979f773..80feb9a 100644
+--- a/tests/test_candidatescorer.cpp
++++ b/tests/test_candidatescorer.cpp
+@@ -358,10 +358,82 @@ TEST (CandidateScorer, LowerRiseReferenceLetsYoungHistoryClaimARise)
+ TEST (CandidateScorer, RiseReferenceClamps)
+ {
+     Rig rig;
+     rig.scorer.setRiseReferenceMs (50.0);
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 100.0);
+     rig.scorer.setRiseReferenceMs (2000.0);
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 1000.0);
+     rig.scorer.setRiseReferenceMs (400.0);
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 400.0);
+ }
++
++//==============================================================================
++// Lane D (data loop): the score breakdown the session log records.
++
++// Spec test 5. Red if scoreCandidateDetailed() diverges from scoreCandidate()
++// by even one ULP, or if the recorded axes stop multiplying to the score.
++TEST (CandidateScorerBreakdown, DetailedScoreIsBitExactWithTheFloatOverloadAndItsAxesMultiplyToIt)
++{
++    Rig rig;
++    const auto signal = makeToneInNoise (1000.0, 0.5f, 0.01f, 4242u, (std::size_t) kHop * 80);
++
++    // Drive the real pipeline so the breakdown is taken against genuine
++    // history and baseline state, not a fresh scorer.
++    std::size_t offset = 0;
++    for (int i = 0; i < 60; ++i, offset += (std::size_t) kHop)
++        rig.cycle (signal, offset);
++
++    EXPECT_EQ (rig.tap.write (signal.data() + offset, (std::size_t) kHop), (std::size_t) kHop);
++    const auto spectrum = rig.detector.processLatestBlock (rig.tap);
++    ASSERT_NE (spectrum.magnitudes, nullptr);
++    rig.scorer.beginBlock (kSampleRate);
++    const auto result = rig.analyzer.analyse (spectrum);
++    ASSERT_GT (result.count, 0u);
++
++    const std::vector<double> locked { 300.0 };   // 1 kHz sits at 3.3x -> penalty applies
++    const CandidateScorer::LockedFrequencyView view { locked.data(), locked.size() };
++
++    for (std::size_t i = 0; i < result.count; ++i)
++    {
++        const auto& cand = result.candidates[i];
++        const float plain = rig.scorer.scoreCandidate (cand, spectrum.magnitudes, view);
++        const auto  b     = rig.scorer.scoreCandidateDetailed (cand, spectrum.magnitudes, view);
++        EXPECT_EQ (plain, b.score) << "bin " << cand.bin;
++        EXPECT_EQ (b.pNorm * b.rNorm * b.mNorm * b.penalty, b.score) << "bin " << cand.bin;
++        EXPECT_FLOAT_EQ (b.rawPeakiness, cand.peakiness);
++        if (cand.peakiness > PeakinessAnalyzer::kDefaultThreshold)
++            EXPECT_FLOAT_EQ (b.penalty, CandidateScorer::kHarmonicPenalty);
++    }
++}
++
++// Spec test 6. Red if refFrame/refAgeMs stop describing the frame the rise
++// axis actually used: with rise 250 ms and frames at 300/120/100 ms of age,
++// the scorer compares against the NEWEST frame at least 0.45 x 250 = 112.5 ms
++// old, which is the 120 ms one.
++TEST (CandidateScorerBreakdown, RefFrameIsTheNewestFrameAtLeastFortyFivePercentOfRiseReferenceOld)
++{
++    CandidateScorer scorer;
++    scorer.setRiseReferenceMs (250.0);
++    scorer.beginBlock (kSampleRate);
++
++    std::array<float, CandidateScorer::kBins> f300 {}, f120 {}, f100 {}, now {};
++    f300.fill (1.0f); f120.fill (2.0f); f100.fill (3.0f); now.fill (6.0f);
++
++    // commitBlock stamps clockMs_ AFTER adding elapsedMs: frames land at
++    // t = 0, 180, 200; the scoring instant is t = 300.
++    scorer.commitBlock (f300.data(), 0.0);
++    scorer.commitBlock (f120.data(), 180.0);
++    scorer.commitBlock (f100.data(), 20.0);
++    // Advance the clock to 300 with a block that must NOT become the reference
++    // (age 0): push it, then read the breakdown before anything else moves.
++    scorer.commitBlock (now.data(), 100.0);
++
++    PeakinessAnalyzer::Candidate cand;
++    cand.bin = 43; cand.frequencyHz = 1007.8125; cand.magnitude = 6.0f; cand.peakiness = 20.0f;
++
++    const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
++    ASSERT_NE (b.refFrame, nullptr);
++    EXPECT_DOUBLE_EQ (b.refAgeMs, 120.0);
++    EXPECT_FLOAT_EQ (b.refFrame[43], 2.0f);
++    // And the rise axis agrees with that frame: 6 / 2 = 3x -> saturates at 1.
++    EXPECT_FLOAT_EQ (b.rNorm, 1.0f);
++}

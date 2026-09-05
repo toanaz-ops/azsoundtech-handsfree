@@ -1,0 +1,664 @@
+# Review package: ae3cfa3..HEAD
+
+## Commits
+5fee378 feat(gui): GOOD / FALSE verdict buttons per notch row, keyed by identity
+
+## Files changed
+ src/gui/NotchListPanel.cpp    | 188 +++++++++++++++++++++++++++++++++++++-----
+ src/gui/NotchListPanel.h      |  44 ++++++++++
+ tests/test_notchlistpanel.cpp | 118 +++++++++++++++++++++++++-
+ 3 files changed, 326 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/src/gui/NotchListPanel.cpp b/src/gui/NotchListPanel.cpp
+index fbd4c84..ff9931d 100644
+--- a/src/gui/NotchListPanel.cpp
++++ b/src/gui/NotchListPanel.cpp
+@@ -63,97 +63,126 @@ void NotchListPanel::refreshFromSnapshot()
+     //    within kTrackingTimeoutMs (age keeps counting across brief drops).
+     for (std::uint32_t i = 0; i < count; ++i)
+     {
+         const auto& notch = snapshot_.notches[i];
+         const auto key = identityKey (notch.channel, notch.index, notch.frequency);
+         const auto [it, inserted] =
+             sightings_.try_emplace (key, Sighting { now, now });
+         if (inserted)
+             it->second.firstSeenMs = now;   // redundant with try_emplace, explicit for clarity
+         it->second.lastSeenMs = now;
++
++        // Lane D: a real child button, created once per identity and never
++        // rebuilt -- see ensureButtonsFor()'s header comment.
++        ensureButtonsFor (key, notch);
+     }
+ 
+     // 2. Rebuild the row strings (paint() never allocates).
+     rows_.clear();
+     for (std::uint32_t i = 0; i < count; ++i)
+     {
+         const auto& notch = snapshot_.notches[i];
+         const auto key = identityKey (notch.channel, notch.index, notch.frequency);
+ 
+         double ageMs = 0.0;
+         if (const auto it = sightings_.find (key); it != sightings_.end())
+             ageMs = now - it->second.firstSeenMs;
+ 
+-        rows_.push_back ({ juce::String (i + 1).paddedLeft ('0', 2),
+-                           notch.channel == 1 ? "R" : "L",
+-                           formatFrequency (notch.frequency),
+-                           formatDepthDb (notch.depthDB),
+-                           formatQ (notch.Q),
+-                           formatAgeMs (juce::jmax (0.0, ageMs)),
+-                           juce::jmax (0.0, ageMs) });
++        RowText row;
++        row.id     = juce::String (i + 1).paddedLeft ('0', 2);
++        row.lane   = notch.channel == 1 ? "R" : "L";
++        row.freq   = formatFrequency (notch.frequency);
++        row.depth  = formatDepthDb (notch.depthDB);
++        row.q      = formatQ (notch.Q);
++        row.status = formatAgeMs (juce::jmax (0.0, ageMs));
++        row.ageMs  = juce::jmax (0.0, ageMs);
++        row.key    = key;
++
++        if (const auto bIt = buttons_.find (key); bIt != buttons_.end())
++        {
++            row.verdict = bIt->second.state;
++            row.verdictText = row.verdict == Verdict::Good    ? "GOOD"
++                             : row.verdict == Verdict::False   ? "FALSE"
++                                                                : juce::String();
++        }
++
++        rows_.push_back (std::move (row));
+     }
+ 
+-    // 3. Expire identities not seen recently (documented timeout above).
++    // 3. Expire identities not seen recently (documented timeout above). The
++    //    identity's buttons leave with it -- see the RowButtons comment.
+     for (auto it = sightings_.begin(); it != sightings_.end();)
+     {
+         if (now - it->second.lastSeenMs > kTrackingTimeoutMs)
++        {
++            buttons_.erase (it->first);
+             it = sightings_.erase (it);
++        }
+         else
+             ++it;
+     }
+ 
++    layoutButtons();
+     repaint();
+ }
+ 
+ void NotchListPanel::setController (const NotchController& controller)
+ {
+     if (controller_ == &controller)
+         return;
+ 
+     controller_ = &controller;
+ 
+     sightings_.clear();
+     rows_.clear();
++    buttons_.clear();   // the old detector's identities do not exist here
+ 
+     refreshFromSnapshot();
+ }
+ 
+ void NotchListPanel::setSlotTabs (juce::Component* tabsOrNull)
+ {
+     slotTabs_ = tabsOrNull;
+ 
+     if (slotTabs_ != nullptr)
+         addAndMakeVisible (*slotTabs_);
+ 
+     resized();
+ }
+ 
+ void NotchListPanel::resized()
+ {
+-    if (slotTabs_ == nullptr)
+-        return;
++    if (slotTabs_ != nullptr)
++    {
++        // Right-aligned in the caption band, opposite the section name. The
++        // count chip moves left of it -- see paint().
++        auto caption = getLocalBounds().removeFromTop (kCaptionHeight);
+ 
+-    // Right-aligned in the caption band, opposite the section name. The count
+-    // chip moves left of it -- see paint().
+-    auto caption = getLocalBounds().removeFromTop (kCaptionHeight);
++        const int wanted = slotTabs_->getWidth() > 0
++                               ? slotTabs_->getWidth()
++                               : caption.getWidth() / 2;
+ 
+-    const int wanted = slotTabs_->getWidth() > 0
+-                           ? slotTabs_->getWidth()
+-                           : caption.getWidth() / 2;
++        slotTabs_->setBounds (caption.removeFromRight (juce::jmin (wanted, caption.getWidth()))
++                                     .withSizeKeepingCentre (juce::jmin (wanted, caption.getWidth()),
++                                                             az::theme::fieldHeight - 4));
++    }
+ 
+-    slotTabs_->setBounds (caption.removeFromRight (juce::jmin (wanted, caption.getWidth()))
+-                                 .withSizeKeepingCentre (juce::jmin (wanted, caption.getWidth()),
+-                                                         az::theme::fieldHeight - 4));
++    // Lane D: the VERDICT buttons' bounds depend on the panel's width (via
++    // statusWidthFor()) and height (the bottom-edge clip), so a resize must
++    // re-place them exactly as a refresh does.
++    layoutButtons();
+ }
+ 
+ void NotchListPanel::setDisplayedSlot (const int slotIndex)
+ {
++    displayedSlot_ = slotIndex;
++
+     // Named in the caption rather than shown as a separate field: the table
+     // has one subject, and "which slot" is part of what it is, not a property
+     // of it. The separator is a middle dot, not a colon -- these are two
+     // labels, not a label and a value.
+     // The separator is built from a CODE POINT, not written into the literal.
+     // MSVC reads a source literal through the execution charset, and a middle
+     // dot written inline comes back as "A-circumflex, middle dot" on screen --
+     // the same trap minusSign() above exists to dodge. Repo rule: UTF-8 has to
+     // survive every read-modify-write, and that includes the compiler's read.
+     const auto separator = juce::String ("  ")
+@@ -193,28 +222,134 @@ juce::String NotchListPanel::formatAgeMs (const double ageMs)
+     if (ageMs < 60000.0)
+         return juce::String ((int) (ageMs / 1000.0)) + "s";
+     return juce::String ((int) (ageMs / 60000.0)) + "m ago";
+ }
+ 
+ NotchListPanel::RowText NotchListPanel::rowForTest (const int index) const
+ {
+     return rows_[(std::size_t) index];
+ }
+ 
++juce::TextButton* NotchListPanel::goodButtonForTest (const int row)
++{
++    if (row < 0 || row >= (int) rows_.size())
++        return nullptr;
++    const auto it = buttons_.find (rows_[(std::size_t) row].key);
++    return it != buttons_.end() ? it->second.good.get() : nullptr;
++}
++
++juce::TextButton* NotchListPanel::falseButtonForTest (const int row)
++{
++    if (row < 0 || row >= (int) rows_.size())
++        return nullptr;
++    const auto it = buttons_.find (rows_[(std::size_t) row].key);
++    return it != buttons_.end() ? it->second.bad.get() : nullptr;
++}
++
++NotchListPanel::Verdict NotchListPanel::verdictForTest (const int row) const
++{
++    return rows_[(std::size_t) row].verdict;
++}
++
++void NotchListPanel::ensureButtonsFor (const std::uint64_t key,
++                                       const NotchController::SnapshotNotch& notch)
++{
++    if (buttons_.find (key) != buttons_.end())
++        return;
++
++    RowButtons rb;
++    rb.good = std::make_unique<juce::TextButton> ("GOOD");    // ONE argument (JUCE 9 trap)
++    rb.bad  = std::make_unique<juce::TextButton> ("FALSE");
++    for (auto* b : { rb.good.get(), rb.bad.get() })
++    {
++        b->getProperties().set (juce::Identifier ("azStyle"), "ghost");
++        b->setWantsKeyboardFocus (false);
++        addAndMakeVisible (*b);
++    }
++    rb.good->onClick = [this, key] { reportVerdict (key, true); };
++    rb.bad->onClick  = [this, key] { reportVerdict (key, false); };
++    juce::ignoreUnused (notch);
++    buttons_.emplace (key, std::move (rb));
++}
++
++void NotchListPanel::reportVerdict (const std::uint64_t key, const bool good)
++{
++    const auto it = buttons_.find (key);
++    if (it == buttons_.end() || it->second.state != Verdict::None)
++        return;
++    it->second.state = good ? Verdict::Good : Verdict::False;
++
++    // Find the row for the payload; the row strings are already built. Rows
++    // are pushed in snapshot order in refreshFromSnapshot()'s loop 2, so
++    // rows_[i] <-> snapshot_.notches[i] -- indexing snapshot_ by this row's
++    // position is safe.
++    for (auto& row : rows_)
++    {
++        if (row.key != key)
++            continue;
++        row.verdict     = it->second.state;
++        row.verdictText = good ? "GOOD" : "FALSE";
++        const auto& notch = snapshot_.notches[(std::size_t) (&row - rows_.data())];
++        if (onVerdict != nullptr)
++            onVerdict (displayedSlot_, (int) notch.channel, (int) notch.index, notch.frequency, good, row.ageMs);
++        break;
++    }
++    layoutButtons();
++    repaint();
++}
++
++void NotchListPanel::layoutButtons()
++{
++    for (auto& [key, rb] : buttons_)
++    {
++        juce::ignoreUnused (key);
++        if (rb.good != nullptr) rb.good->setVisible (false);
++        if (rb.bad  != nullptr) rb.bad->setVisible (false);
++    }
++
++    const float frameWidth  = (float) getWidth();
++    const float frameBottom = (float) getHeight();
++    const float x5 = kLeftPad + kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW
++                    + statusWidthFor (frameWidth);
++
++    for (std::size_t i = 0; i < rows_.size(); ++i)
++    {
++        const auto& row = rows_[i];
++        if (row.verdict != Verdict::None)
++            continue;
++
++        const float rowTop = (float) kCaptionHeight + (float) kHeaderHeight
++                            + (float) i * (float) kRowHeight;
++        if (rowTop + (float) kRowHeight > frameBottom)
++            continue;   // mirrors paint()'s bottom-edge clip
++
++        const auto it = buttons_.find (row.key);
++        if (it == buttons_.end())
++            continue;
++
++        const int y = (int) rowTop + (kRowHeight - kVerdictButtonH) / 2;
++        it->second.good->setBounds ((int) x5 + 2, y, kVerdictButtonW, kVerdictButtonH);
++        it->second.good->setVisible (true);
++        it->second.bad->setBounds ((int) x5 + 2 + kVerdictButtonW + kVerdictGap, y,
++                                   kVerdictButtonW, kVerdictButtonH);
++        it->second.bad->setVisible (true);
++    }
++}
++
+ float NotchListPanel::statusWidthFor (const float frameWidth)
+ {
+     // Mirrors the x4 derivation in paint() exactly (see the geometry
+     // comment on the column constants in the header): the fixed columns
+     // plus BOTH margins come off the frame, and STATUS/HELD gets whatever
+     // remains. Position-independent -- callers pass the panel's WIDTH, not
+     // its bounds, so paint() and the test share one formula.
+-    const float fixedColumnsWidth = kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW;
++    const float fixedColumnsWidth = kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW + kColVerdictW;
+     return juce::jmax (0.0f, frameWidth - (2.0f * kLeftPad) - fixedColumnsWidth);
+ }
+ 
+ void NotchListPanel::timerCallback()
+ {
+     // Ages change even when the sequence does not, so unlike SpectrumView
+     // this refresh is unconditional -- but only while anyone can see it.
+     if (isVisible())
+         refreshFromSnapshot();
+ }
+@@ -263,30 +398,32 @@ void NotchListPanel::paint (juce::Graphics& g)
+ 
+     //--------------------------------------------------------------------
+     // Column origins. FREQ carries the age dot, so its text starts inset.
+     const auto frame = area.toFloat();
+     const float x0 = frame.getX() + kLeftPad;
+     const float x1 = x0 + kColIdW + kColLaneW;
+     const float x2 = x1 + kColFreqW;
+     const float x3 = x2 + kColDepthW;
+     const float x4 = x3 + kColQW;
+     const float statusW = statusWidthFor (frame.getWidth());
++    const float x5 = x4 + statusW;
+ 
+     auto header = area.removeFromTop (kHeaderHeight);
+     g.setColour (dim);
+     g.setFont (legendFont (columnFontSize, true, trackingColumn));
+     g.drawText ("#",     (int) x0, header.getY(), (int) kColIdW,    header.getHeight(), juce::Justification::centredLeft);
+     g.drawText ("LANE",  (int) (x0 + kColIdW), header.getY(), (int) kColLaneW, header.getHeight(), juce::Justification::centredLeft);
+     g.drawText ("FREQ",  (int) x1, header.getY(), (int) kColFreqW,  header.getHeight(), juce::Justification::centredLeft);
+     g.drawText ("DEPTH", (int) x2, header.getY(), (int) kColDepthW, header.getHeight(), juce::Justification::centredLeft);
+     g.drawText ("Q",     (int) x3, header.getY(), (int) kColQW,     header.getHeight(), juce::Justification::centredLeft);
+     g.drawText ("HELD",  (int) x4, header.getY(), (int) statusW,    header.getHeight(), juce::Justification::centredLeft);
++    g.drawText ("VERDICT", (int) x5, header.getY(), (int) kColVerdictW, header.getHeight(), juce::Justification::centredLeft);
+ 
+     g.setColour (border);
+     g.fillRect (area.getX(), header.getBottom(), area.getWidth(), 1);
+ 
+     //--------------------------------------------------------------------
+     // Empty state: an invitation, not a void.
+     if (rows_.empty())
+     {
+         // The legend face, not the body face. This is a LABEL for an empty
+         // table, sitting among tracked uppercase legends and monospaced
+@@ -341,18 +478,29 @@ void NotchListPanel::paint (juce::Graphics& g)
+                     juce::Justification::centredLeft);
+         g.drawText (row.depth, x2, rowTop, kColDepthW - 4.0f, (float) kRowHeight,
+                     juce::Justification::centredLeft);
+ 
+         g.setColour (dim);
+         g.drawText (row.q, x3, rowTop, kColQW - 4.0f, (float) kRowHeight,
+                     juce::Justification::centredLeft);
+         g.drawText (row.status, x4, rowTop, statusW - 4.0f, (float) kRowHeight,
+                     juce::Justification::centredLeft);
+ 
++        // VERDICT: a word once a verdict has been given (the buttons that
++        // sat here are hidden by layoutButtons()); nothing to draw while the
++        // buttons are still live.
++        if (row.verdictText.isNotEmpty())
++        {
++            g.setColour (row.verdict == Verdict::Good ? accent : danger);
++            g.setFont (monoFont (chipFontSize));
++            g.drawText (row.verdictText, x5, rowTop, kColVerdictW - 4.0f, (float) kRowHeight,
++                        juce::Justification::centredLeft);
++        }
++
+         rowTop += (float) kRowHeight;
+ 
+         g.setColour (shade);
+         g.fillRect (frame.getX(), rowTop, frame.getWidth(), 1.0f);
+     }
+ }
+ 
+ } // namespace gui
+diff --git a/src/gui/NotchListPanel.h b/src/gui/NotchListPanel.h
+index a661d00..018786b 100644
+--- a/src/gui/NotchListPanel.h
++++ b/src/gui/NotchListPanel.h
+@@ -37,20 +37,21 @@
+ #pragma once
+ 
+ #include <juce_gui_basics/juce_gui_basics.h>
+ 
+ #include "app/NotchController.h"
+ 
+ #include <chrono>
+ #include <cstdint>
+ #include <functional>
+ #include <map>
++#include <memory>
+ #include <vector>
+ 
+ namespace gui
+ {
+ 
+ class NotchListPanel : public juce::Component,
+                        private juce::Timer
+ {
+ public:
+     // Returns "now" in milliseconds. Default: steady_clock (production).
+@@ -74,20 +75,38 @@ public:
+     // Which slot the caption names. Display only -- it does not change what is
+     // read; setController does that.
+     void setDisplayedSlot (int slotIndex);
+ 
+     // Hosts the slot selector in this panel's caption row (ownership stays
+     // with the caller; layout tolerates null). The selector is not owned here
+     // because selecting a slot re-points the ANALYSER as well, and this panel
+     // has no business knowing that.
+     void setSlotTabs (juce::Component* tabsOrNull);
+ 
++    // Lane D (data loop): the operator's verdict on a row. GOOD only reports;
++    // FALSE reports AND the owner clears the notch -- the panel still issues
++    // no command itself (display-only discipline, spec §3.4). slot is what
++    // setDisplayedSlot() named; lane is SnapshotNotch::channel.
++    enum class Verdict : std::uint8_t { None, Good, False };
++    std::function<void (int slot, int lane, int index, float hz, bool good, double ageMs)> onVerdict;
++
++    static constexpr float kColVerdictW    = 92.0f;   // two buttons + gap + inset, and "VERDICT"
++    static constexpr int   kVerdictButtonW = 40;
++    static constexpr int   kVerdictButtonH = 20;
++    static constexpr int   kVerdictGap     = 4;
++
++    // TEST ACCESSORS -- null when `row` has no buttons (out of range).
++    [[nodiscard]] juce::TextButton* goodButtonForTest (int row);
++    [[nodiscard]] juce::TextButton* falseButtonForTest (int row);
++    [[nodiscard]] Verdict verdictForTest (int row) const;
++    [[nodiscard]] int displayedSlotForTest() const { return displayedSlot_; }
++
+     // Shared formatting truth -- the panel paints these and the tests assert
+     // them, so there is exactly one definition of each format.
+     static juce::String formatFrequency (float hz);
+     static juce::String formatDepthDb (float depthDb);
+     static juce::String formatQ (float q);
+     static juce::String formatAgeMs (double ageMs);
+ 
+     // How long an UNSEEN notch identity stays tracked (see header comment).
+     static constexpr double kTrackingTimeoutMs = 60000.0;
+ 
+@@ -145,20 +164,28 @@ public:
+     // TEST ACCESSORS -- the model behind the painted table.
+     struct RowText
+     {
+         juce::String id, lane, freq, depth, q, status;
+ 
+         // How long this notch has been held, in milliseconds. Carried on the
+         // row (not recomputed in paint) because the age drives the row's
+         // COLOUR through az::theme::notchColour as well as its status text --
+         // and the two must never disagree about how old a notch is.
+         double ageMs = 0.0;
++
++        // Lane D: identity key (see identityKey()) so reportVerdict() and the
++        // test accessors can find this row's buttons; the verdict itself,
++        // mirrored from buttons_[key].state; and the pre-built word paint()
++        // draws once a verdict has been given.
++        std::uint64_t key = 0;
++        Verdict verdict = Verdict::None;
++        juce::String verdictText;
+     };
+ 
+     [[nodiscard]] int rowCountForTest() const { return (int) rows_.size(); }
+     [[nodiscard]] RowText rowForTest (int index) const;
+ 
+     void paint (juce::Graphics&) override;
+     void resized() override;
+ 
+ private:
+     void timerCallback() override;
+@@ -191,14 +218,31 @@ private:
+     juce::Font   tableFont_;              // mono: every cell holds numbers
+ 
+     // Rebuilt by setDisplayedSlot so paint() never formats a string.
+     juce::String caption_ { "Active notches" };
+ 
+     juce::Component* slotTabs_ = nullptr;   // NOT owned
+ 
+     // First-seen ledger keyed by identity (ruling R-2).
+     std::map<std::uint64_t, Sighting> sightings_;
+ 
++    // Lane D: the ONE deliberate exception to "paint draws prebuilt members
++    // only" -- a click needs a real child Component. Keyed by the same
++    // identity the sightings ledger uses, created when an identity is first
++    // seen, destroyed when it leaves tracking; NEVER rebuilt per refresh, so
++    // a click cannot land on a button that no longer exists.
++    struct RowButtons
++    {
++        std::unique_ptr<juce::TextButton> good, bad;
++        Verdict state = Verdict::None;
++    };
++    std::map<std::uint64_t, RowButtons> buttons_;
++    int displayedSlot_ = 0;
++
++    void ensureButtonsFor (std::uint64_t key, const NotchController::SnapshotNotch& notch);
++    void layoutButtons();
++    void reportVerdict (std::uint64_t key, bool good);
++
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NotchListPanel)
+ };
+ 
+ } // namespace gui
+diff --git a/tests/test_notchlistpanel.cpp b/tests/test_notchlistpanel.cpp
+index a8c3495..0586524 100644
+--- a/tests/test_notchlistpanel.cpp
++++ b/tests/test_notchlistpanel.cpp
+@@ -335,22 +335,27 @@ TEST (NotchListPanelWiring, TableIsTheFloorsLeftColumnAndNeverOverlapsTheAnalyse
+ 
+     // A second pass (the old toggle path used to re-run resized()) leaves the
+     // same geometry: there is no open/closed state left to change it.
+     app.resized();
+     EXPECT_EQ (app.notchListBoundsForTest(), strip);
+ }
+ 
+ //==============================================================================
+ // Column budget (review finding on Task 8): the header's guarantee that
+ // every column fits its widest realistic cell at the narrowest sensible
+-// panel (~360 px), measured against the REAL faces the panel paints with --
+-// not guessed, and not the 13 px the header comment used to (wrongly) claim.
++// panel, measured against the REAL faces the panel paints with -- not
++// guessed, and not the 13 px the header comment used to (wrongly) claim.
++//
++// 440 px is below the narrowest width the app ever gives this panel --
++// kNotchColumnFraction (0.44) of kMinimumWidth - 2*kEdgePad = 517 px -- and
++// the smallest frame at which the fixed columns plus a two-button VERDICT
++// cell leave HELD its widest cell.
+ //
+ // Red if any column constant is narrowed below its widest cell, or if a
+ // formatter starts producing a wider string, at the panel's real font.
+ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+ 
+     // Same call NotchListPanel's tableFont_ is built with -- one definition
+     // of "the real face", shared rather than re-derived here.
+     const auto tableFont = az::theme::monoFont();
+@@ -378,21 +383,21 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
+     auto headerWidthOf = [&] (const juce::String& s)
+     {
+         return juce::GlyphArrangement::getStringWidth (headerFont, s);
+     };
+ 
+     EXPECT_LE (headerWidthOf ("#"),     gui::NotchListPanel::kColIdW);
+     EXPECT_LE (headerWidthOf ("LANE"),  gui::NotchListPanel::kColLaneW);
+     EXPECT_LE (headerWidthOf ("FREQ"),  gui::NotchListPanel::kColFreqW);
+     EXPECT_LE (headerWidthOf ("DEPTH"), gui::NotchListPanel::kColDepthW);
+     EXPECT_LE (headerWidthOf ("Q"),     gui::NotchListPanel::kColQW);
+-    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (360.0f));
++    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (440.0f));
+ 
+     // FREQ: detection runs to Nyquist (24 kHz at 48 kHz sample rate, 48 kHz
+     // at 96 kHz), so a two-digit-kHz reading is reachable, not just the
+     // "2.4 kHz" design-plan example this test used to pin. Assert against
+     // the ACTUAL formatter output, not a literal, so a format change that
+     // widens the string fails this test too.
+     const auto widestFreq = gui::NotchListPanel::formatFrequency (23900.0f);
+     ASSERT_EQ (widestFreq.toStdString(), "23.9 kHz");   // sanity: this IS the 8-char case
+     const float freqPrefix = gui::NotchListPanel::kDotGap + gui::NotchListPanel::kDotSize;
+     EXPECT_LE (freqPrefix + widthOf (widestFreq) + kInset, gui::NotchListPanel::kColFreqW);
+@@ -409,13 +414,118 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
+     // this monospace face) so a format change is caught here too.
+     const auto widestQ = gui::NotchListPanel::formatQ (99.9f);
+     EXPECT_LE (widthOf (widestQ) + kInset, gui::NotchListPanel::kColQW);
+ 
+     // STATUS/HELD: formatAgeMs() is uncapped -- age keeps counting across
+     // re-sightings, so "127m ago" (8 chars) is reachable in a long show.
+     // Assert against the ACTUAL formatter output, not a literal, so a format
+     // change that widens the string fails this test too.
+     const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
+     ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
+-    const float statusW360 = gui::NotchListPanel::statusWidthFor (360.0f);
++    const float statusW360 = gui::NotchListPanel::statusWidthFor (440.0f);
+     EXPECT_LE (widthOf (widestAge) + kInset, statusW360);
+ }
++
++//==============================================================================
++// Lane D (data loop): the VERDICT column.
++
++// Spec test 12. Red if FALSE stops reporting good=false, GOOD stops reporting
++// good=true, or the row stops switching from buttons to a verdict word.
++TEST (NotchListPanelVerdict, ClickingFalseOrGoodReportsTheVerdictAndTheRowShowsIt)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    TwoNotchController fed;
++    FakeClock clock;
++    // Capture BY REFERENCE (see AgeIsComputedFromFirstSightingNotWallTime's
++    // comment above): ClockFn copies a callable passed by value, which would
++    // freeze the panel on a snapshot of nowMs.
++    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
++    panel.setDisplayedSlot (3);
++    panel.setSize (640, 200);
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 2);
++
++    struct Seen { int slot, lane, index; float hz; bool good; double ageMs; };
++    std::vector<Seen> seen;
++    panel.onVerdict = [&] (int slot, int lane, int index, float hz, bool good, double ageMs)
++    {
++        seen.push_back ({ slot, lane, index, hz, good, ageMs });
++    };
++
++    ASSERT_NE (panel.falseButtonForTest (0), nullptr);
++    panel.falseButtonForTest (0)->onClick();
++    ASSERT_EQ (seen.size(), 1u);
++    EXPECT_EQ (seen[0].slot, 3);
++    EXPECT_EQ (seen[0].lane, 0); EXPECT_EQ (seen[0].index, 0);
++    EXPECT_NEAR (seen[0].hz, 987.0f, 0.5f);
++    EXPECT_FALSE (seen[0].good);
++    EXPECT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::False);
++    EXPECT_EQ (panel.rowForTest (0).verdictText, "FALSE");
++    EXPECT_FALSE (panel.falseButtonForTest (0)->isVisible());
++    EXPECT_FALSE (panel.goodButtonForTest (0)->isVisible());
++
++    panel.goodButtonForTest (1)->onClick();
++    ASSERT_EQ (seen.size(), 2u);
++    EXPECT_EQ (seen[1].lane, 1); EXPECT_EQ (seen[1].index, 3);
++    EXPECT_TRUE (seen[1].good);
++    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
++
++    // GOOD does not touch the notch: the panel is display-only, the row stays.
++    panel.refreshFromSnapshot();
++    EXPECT_EQ (panel.rowCountForTest(), 2);
++    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
++    paintHeadless (panel, 640, 200);
++}
++
++// Spec test 13. Red if refreshFromSnapshot() rebuilds the buttons (a click
++// mid-rebuild would be swallowed), or if an identity that leaves tracking
++// keeps its buttons alive.
++TEST (NotchListPanelVerdict, ButtonsPersistAcrossRefreshesAndDieWithTheirIdentity)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    TwoNotchController fed;
++    FakeClock clock;
++    // Capture BY REFERENCE (see AgeIsComputedFromFirstSightingNotWallTime's
++    // comment above): ClockFn copies a callable passed by value, which would
++    // freeze the panel on a snapshot of nowMs -- fatal here since this test
++    // relies on the clock actually advancing past kTrackingTimeoutMs.
++    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
++    panel.setSize (640, 200);
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 2);
++
++    auto* good0  = panel.goodButtonForTest (0);
++    auto* false0 = panel.falseButtonForTest (0);
++    ASSERT_NE (good0, nullptr);
++    for (int i = 0; i < 10; ++i)
++    {
++        clock.nowMs += 250.0;
++        panel.refreshFromSnapshot();
++    }
++    EXPECT_EQ (panel.goodButtonForTest (0), good0);
++    EXPECT_EQ (panel.falseButtonForTest (0), false0);
++    EXPECT_EQ (panel.getNumChildComponents(), 4);   // two rows x two buttons
++
++    // Clear notch 0 in the model, republish, and age the identity past the
++    // tracking timeout: its buttons must be gone.
++    fed.controller.clearNotch (0, 0);
++    fed.republish();
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 1);
++    clock.nowMs += gui::NotchListPanel::kTrackingTimeoutMs + 1000.0;
++    panel.refreshFromSnapshot();
++    EXPECT_EQ (panel.getNumChildComponents(), 2);
++    EXPECT_NE (panel.goodButtonForTest (0), good0);   // the surviving row is the other identity
++}
++
++// Column budget: the VERDICT column fits two buttons and its own caption.
++// Red if kColVerdictW shrinks below the buttons, or the caption ellipsises.
++TEST (NotchListPanelVerdict, VerdictColumnFitsItsButtonsAndCaption)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    using P = gui::NotchListPanel;
++    EXPECT_GE (P::kColVerdictW, (float) (2 * P::kVerdictButtonW + P::kVerdictGap + 4));
++    const auto headerFont = az::theme::legendFont (az::theme::columnFontSize, true, az::theme::trackingColumn);
++    EXPECT_LE (juce::GlyphArrangement::getStringWidth (headerFont, "VERDICT"), P::kColVerdictW);
++    const auto buttonFont = az::theme::monoFont (az::theme::chipFontSize);
++    EXPECT_LE (juce::GlyphArrangement::getStringWidth (buttonFont, "FALSE") + 6.0f, (float) P::kVerdictButtonW);
++}

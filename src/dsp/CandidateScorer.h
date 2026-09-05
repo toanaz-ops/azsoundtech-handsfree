@@ -74,6 +74,24 @@ public:
                           const float* magnitudes,
                           const LockedFrequencyView& lockedFrequencies);
 
+    // Lane D (data loop): the same computation, with every axis and the
+    // reference frame the rise axis compared against exposed, so a session
+    // log can record WHY a notch was placed. `refFrame` points into history_
+    // and dies at the next commitBlock(). scoreCandidate() returns .score of
+    // this and nothing else -- one arithmetic path, never two.
+    struct ScoreBreakdown
+    {
+        float rawPeakiness = 0.0f;
+        float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+        float penalty = 1.0f;
+        float score = 0.0f;
+        const float* refFrame = nullptr;
+        double refAgeMs = 0.0;
+    };
+    ScoreBreakdown scoreCandidateDetailed (const PeakinessAnalyzer::Candidate& candidate,
+                                           const float* magnitudes,
+                                           const LockedFrequencyView& lockedFrequencies);
+
     // Call once per detector pump AFTER all candidates are scored: advances
     // the EMA baselines and pushes this frame into the rise-history ring.
     void commitBlock (const float* magnitudes, double elapsedMs);

@@ -42,6 +42,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -56,6 +58,14 @@ public:
     // KD-7: Soundcheck-origin notches are EXEMPT from auto-release -- they
     // clear only via an explicit clearNotch/clearAll.
     enum class Origin { Detector, Preset, Manual, Soundcheck };
+
+    // Lane D (data loop). Why a notch left the model -- the session log's
+    // training label depends on it, so the two internal unwind sites MUST say
+    // PartialApplyUnwind rather than hide behind the Manual default.
+    enum class ClearReason : std::uint8_t
+    {
+        Manual, ClearAll, AutoRelease, WidthChange, VerdictFalse, PartialApplyUnwind
+    };
 
     static constexpr int kChannels   = 2;
     static constexpr int kSlots      = 16;
@@ -103,6 +113,8 @@ public:
     // Lifecycle. start() launches the poll loop; stop(timeoutMs) joins the
     // thread. MainComponent MUST stop() this before any device restart can
     // clear the rings (bridge design §6.5 -- clear()'s precondition).
+    // Lane D: stop() ALSO flushes the event outbox after the join (or
+    // immediately, if the thread never ran) -- see flushEventOutbox().
     void start();
     void stop (int timeoutMs);
 
@@ -134,8 +146,8 @@ public:
     bool setNotch (int channel, int index,
                    double frequency, double Q, double depthDB,
                    Origin origin);
-    void clearNotch (int channel, int index);
-    void clearAll();
+    void clearNotch (int channel, int index, ClearReason reason = ClearReason::Manual);
+    void clearAll (ClearReason reason = ClearReason::ClearAll);
 
     // Owner decision D-05: a preset loaded mid-show is ADOPTED -- its notches
     // enter the model with Origin::Preset and auto-release treats them like
@@ -143,7 +155,59 @@ public:
     // installed on ALL width_ lanes of this slot (design §2 sizes the command
     // burst as lanes x 16). Returns how many preset notches were adopted; a
     // notch whose parameters fail validation on a lane is skipped entirely.
-    int adoptPreset (const std::vector<PresetNotch>& notches);
+    // `skippedOut` (optional) receives the count of notches naming a lane
+    // this slot does not have -- today only lane 1 on a mono slot. A notch
+    // that fails validation on every lane it targets is neither adopted nor
+    // counted here.
+    int adoptPreset (const std::vector<PresetNotch>& notches, int* skippedOut = nullptr);
+
+    // Lane D (data loop): one event per notch set / clear, delivered to the
+    // sink from the detector thread by flushEventOutbox(), or from the
+    // caller of stop() after the join; never concurrently. Never from the
+    // audio thread. Events queue in eventOutbox_ (cap kMaxPendingEvents, then
+    // drop + count) and go out at the end of every runOnce() and once more
+    // from stop(). With no sink the outbox is emptied, never grown.
+    // setEventSink() requires the thread to be STOPPED, like setWidth().
+    struct SpectralContext            // filled by Task 4 only
+    {
+        int    bins = Detector::kNumBins;
+        double binHz = 0.0;
+        double refAgeMs = 0.0;
+        bool   hasRef = false, hasOther = false;
+        std::array<float, Detector::kNumBins> now {}, ref {}, other {};
+    };
+
+    struct NotchEvent
+    {
+        enum class Kind : std::uint8_t { Set, Clear };
+        Kind  kind = Kind::Set;
+        int   slot = 0, lane = 0, index = 0;
+        float hz = 0.0f, q = 0.0f, depthDb = 0.0f;
+        Origin      origin = Origin::Detector;        // Set
+        ClearReason reason = ClearReason::Manual;     // Clear
+        double ageMs = 0.0;                           // Clear: liveMs_ - lockedAtMs
+        // Detector placements only (Task 4):
+        bool  hasScore = false;
+        int   confirmedLane = 0;
+        float score = 0.0f, peakiness = 0.0f, pNorm = 0.0f, rise = 0.0f, novelty = 0.0f,
+              penalty = 1.0f, asymmetry = 1.0f, thr = 0.0f;
+        int   persistNeeded = 0;
+        std::shared_ptr<const SpectralContext> ctx;   // null unless hasScore
+    };
+    using EventSink = std::function<void (const NotchEvent&)>;
+
+    static constexpr int kMaxPendingEvents = 64;
+    // Lifetime: the sink must outlive this controller's LAST stop() -- the
+    // destructor calls stop(2000) and may invoke the sink from it. An owner
+    // that captures `this` in the sink must call stop() on the controller
+    // before its own members are destroyed, or call setEventSink(nullptr)
+    // after that join.
+    void setEventSink (EventSink sink);              // detector thread STOPPED; nullptr = off
+    std::uint64_t droppedEvents() const;
+    // TEST ACCESSORS ONLY
+    int  pendingEventsForTest() const;
+    bool modelMutexIsFreeForTest();                  // try_lock + unlock
+    void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
 
     // KD-9: detection gating (Bypass must never place notches). Snapshot
     // publication is NOT affected by this flag.
@@ -248,7 +312,15 @@ private:
     static constexpr int slotOf (int channel, int index) { return channel * kSlots + index; }
 
     void flushOutbox();
-    void pushClearLocked (int channel, int index);
+    bool setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
+                       Origin origin, const NotchEvent* scored);
+    void pushClearLocked (int channel, int index, ClearReason reason);
+    void pushEventLocked (NotchEvent&& event);   // modelMutex_ HELD
+    // modelMutex_ NOT held when the sink runs. Returns true if it delivered
+    // (or attempted to deliver, with no sink) anything -- false when the
+    // outbox was already empty. stop() loops on this so a sink re-entering
+    // clearNotch()/setNotch() during the flush still gets drained.
+    bool flushEventOutbox();
 
     // `otherLaneMagnitudes` is the opposite lane's spectrum, at most one hop
     // apart from `block` (runOnce()'s per-lane drain invariant), or nullptr
@@ -265,7 +337,24 @@ private:
     // INDEP had placed, with no Clear to tell the chain about it.
     int  firstFreeIndexLocked (int lane) const;
     int  firstFreeIndexAllLanesLocked() const;
-    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow);
+
+    // Lane D (data loop): everything placeConfirmed needs to build the scored
+    // NotchEvent and its SpectralContext, gathered by the candidate loop
+    // while the frame it scored is still current (see the .cpp comment on
+    // refFrame's lifetime).
+    struct PlacementContext
+    {
+        const float* now = nullptr;
+        const float* other = nullptr;        // may be null
+        CandidateScorer::ScoreBreakdown breakdown;
+        float finalScore = 0.0f;             // after the asymmetry multiplier
+        float asymmetry = 1.0f;
+        int   persistNeeded = 0;
+        float thr = 0.0f;
+        double sampleRate = 0.0;
+    };
+    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
+                         const PlacementContext& pc);
 
     double remainingSoundcheckMs() const;
 
@@ -326,6 +415,18 @@ private:
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
+
+    // Lane D. eventOutbox_ under modelMutex_; eventScratch_ is detector-thread
+    // only (flushEventOutbox swaps them so the reserve() survives). eventSink_
+    // is read under modelMutex_ by producers (pushEventLocked) and again,
+    // unlocked, by flushEventOutbox() on the detector thread; it is written
+    // ONLY by setEventSink() with the thread stopped, so both reads are a
+    // benign same-value race and need no second mutex.
+    EventSink eventSink_;
+    std::vector<NotchEvent> eventOutbox_;
+    std::vector<NotchEvent> eventScratch_;
+    std::atomic<std::uint64_t> droppedEvents_ { 0 };
+    std::atomic<int> failSetNotchLaneForTest_ { -1 };
 
     std::atomic<std::uint64_t> retryCount_ { 0 };
 

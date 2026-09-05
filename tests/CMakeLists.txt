@@ -39,6 +39,7 @@ add_executable(HandsFreeTests
     test_notchcontroller.cpp
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
+    test_sessionlogger.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
@@ -104,3 +105,17 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(HandsFreeTests)
+
+# Lane D: the log summary tool runs against a checked-in fixture. Python is
+# optional on a build box; without it the test SKIPS rather than fails.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME logstats_fixture
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/session-sample.jsonl
+                --expect-notches 4 --expect-verdicts 3 --expect-false 1
+                --expect-recurrence-max 2)
+else()
+    add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+endif()

@@ -13,6 +13,8 @@ NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
 {
     taps_[0] = &tapLane0;
     taps_[1] = tapLane1;
+    eventOutbox_.reserve ((std::size_t) kMaxPendingEvents);
+    eventScratch_.reserve ((std::size_t) kMaxPendingEvents);
 }
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
@@ -36,9 +38,42 @@ void NotchController::start()
 
 void NotchController::stop (int timeoutMs)
 {
-    if (! isThreadRunning())
-        return;
-    stopThread (timeoutMs);
+    if (isThreadRunning())
+        stopThread (timeoutMs);
+    // Whatever queued since the last poll -- or ever, if the thread never
+    // ran -- reaches the sink before this returns (spec test 11). A sink
+    // that re-enters clearNotch()/setNotch() from THIS flush queues more
+    // events that nothing drains afterwards, so loop until the outbox is
+    // actually empty; capped so a sink that never stops re-entering cannot
+    // hang shutdown forever (review round 1).
+    for (int i = 0; i < 8 && flushEventOutbox(); ++i) {}
+}
+
+void NotchController::setEventSink (EventSink sink)
+{
+    // Precondition: thread STOPPED (see header). Same contract as setWidth().
+    eventSink_ = std::move (sink);
+}
+
+std::uint64_t NotchController::droppedEvents() const { return droppedEvents_.load (std::memory_order_relaxed); }
+
+int NotchController::pendingEventsForTest() const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return (int) eventOutbox_.size();
+}
+
+bool NotchController::modelMutexIsFreeForTest()
+{
+    if (! modelMutex_.try_lock())
+        return false;
+    modelMutex_.unlock();
+    return true;
+}
+
+void NotchController::failNextSetNotchOnLaneForTest (int lane)
+{
+    failSetNotchLaneForTest_.store (lane, std::memory_order_relaxed);
 }
 
 void NotchController::setWidth (int lanes)
@@ -54,8 +89,17 @@ void NotchController::setWidth (int lanes)
         const std::lock_guard<std::mutex> lock (modelMutex_);
         for (int c = newWidth; c < kChannels; ++c)
             for (int i = 0; i < kSlots; ++i)
-                pushClearLocked (c, i);
+                pushClearLocked (c, i, ClearReason::WidthChange);
     }
+    // No widening branch here (review round 1): resetting only the Detector
+    // leaves CandidateScorer's rise history and baseline EMA holding
+    // pre-mono audio, and once the zeroed frames age past
+    // 0.45 x riseReferenceMs they become the reference and saturate the
+    // rise/novelty axes (max(ref, 1e-12) floor) for ~100 ms -- a MORE
+    // permissive detection window than the shipped behaviour. Lane D may not
+    // change detection behaviour. Whether a re-entering lane should be gated
+    // for riseReferenceMs after a widen is an OPEN OWNER DECISION for lane S
+    // -- see SDD ledger 2026-09-05-data-loop, Task 3 ruling.
     width_ = newWidth;
 }
 
@@ -72,6 +116,12 @@ bool NotchController::setNotch (int channel, int index,
                                 double frequency, double Q, double depthDB,
                                 Origin origin)
 {
+    return setNotchImpl (channel, index, frequency, Q, depthDB, origin, nullptr);
+}
+
+bool NotchController::setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
+                                    Origin origin, const NotchEvent* scored)
+{
     // width gates the policy surface; internal fan-out loops never exceed it.
     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
         return false;
@@ -83,6 +133,12 @@ bool NotchController::setNotch (int channel, int index,
     if (! (frequency > 0.0 && frequency < sampleRate * 0.5))
                                                     return false;
     if (! (depthDB <= 0.0))                         return false;  // positive depth would BOOST
+
+    if (failSetNotchLaneForTest_.load (std::memory_order_relaxed) == channel)
+    {
+        failSetNotchLaneForTest_.store (-1, std::memory_order_relaxed);
+        return false;   // TEST ONLY: forces the partial-apply unwind path
+    }
 
     const NotchCommand cmd { NotchCommandType::Set,
                              (std::uint8_t) channel, (std::uint8_t) index,
@@ -100,11 +156,30 @@ bool NotchController::setNotch (int channel, int index,
         n.lockedAtMs     = liveMs_;
         n.lastDetectedMs = liveMs_;
         outbox_.push_back (cmd);
+
+        NotchEvent ev = scored != nullptr ? *scored : NotchEvent {};
+        ev.kind = NotchEvent::Kind::Set;
+        ev.slot = slotId_; ev.lane = channel; ev.index = index;
+        ev.hz = (float) frequency; ev.q = (float) Q; ev.depthDb = (float) depthDB;
+        ev.origin = origin;
+        pushEventLocked (std::move (ev));
     }
     return true;
 }
 
-void NotchController::pushClearLocked (int channel, int index)
+void NotchController::pushEventLocked (NotchEvent&& event)
+{
+    if (eventSink_ == nullptr)
+        return;   // no sink: nothing is ever queued (spec test 10)
+    if ((int) eventOutbox_.size() >= kMaxPendingEvents)
+    {
+        droppedEvents_.fetch_add (1, std::memory_order_relaxed);
+        return;
+    }
+    eventOutbox_.push_back (std::move (event));
+}
+
+void NotchController::pushClearLocked (int channel, int index, ClearReason reason)
 {
     auto& n = model_[slotOf (channel, index)];
     if (! n.active)
@@ -113,28 +188,36 @@ void NotchController::pushClearLocked (int channel, int index)
     outbox_.push_back ({ NotchCommandType::Clear,
                          (std::uint8_t) channel, (std::uint8_t) index,
                          0.0f, 0.0f, 0.0f, slotId_ });
+
+    NotchEvent ev;
+    ev.kind = NotchEvent::Kind::Clear;
+    ev.slot = slotId_; ev.lane = channel; ev.index = index;
+    ev.hz = (float) n.frequency; ev.q = (float) n.Q; ev.depthDb = (float) n.depthDB;
+    ev.origin = n.origin; ev.reason = reason;
+    ev.ageMs = liveMs_ - n.lockedAtMs;
+    pushEventLocked (std::move (ev));
 }
 
-void NotchController::clearNotch (int channel, int index)
+void NotchController::clearNotch (int channel, int index, ClearReason reason)
 {
     // width gates the policy surface; internal fan-out loops never exceed it.
     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
         return;
     const std::lock_guard<std::mutex> lock (modelMutex_);
-    pushClearLocked (channel, index);
+    pushClearLocked (channel, index, reason);
 }
 
-void NotchController::clearAll()
+void NotchController::clearAll (ClearReason reason)
 {
     const std::lock_guard<std::mutex> lock (modelMutex_);
     for (int c = 0; c < kChannels; ++c)
         for (int i = 0; i < kSlots; ++i)
-            pushClearLocked (c, i);
+            pushClearLocked (c, i, reason);
 }
 
-int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
+int NotchController::adoptPreset (const std::vector<PresetNotch>& notches, int* skippedOut)
 {
-    int adopted = 0;
+    int adopted = 0, skipped = 0;
     for (const auto& p : notches)
     {
         // S-8: the file's index, always. A named lane lands on that lane; an
@@ -144,7 +227,10 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
         const int firstLane = (p.lane < 0) ? 0 : p.lane;
         const int lastLane  = (p.lane < 0) ? width_ - 1 : p.lane;
         if (firstLane >= width_)
-            continue;   // lane 1 named on a mono slot: not adoptable here
+        {
+            ++skipped;   // lane 1 named on a mono slot: not adoptable here
+            continue;
+        }
 
         int applied = 0;
         for (int lane = firstLane; lane <= lastLane; ++lane)
@@ -155,8 +241,10 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches)
             ++adopted;
         else if (applied > 0)
             for (int lane = firstLane; lane <= lastLane; ++lane)
-                clearNotch (lane, p.index);
+                clearNotch (lane, p.index, ClearReason::PartialApplyUnwind);
     }
+    if (skippedOut != nullptr)
+        *skippedOut = skipped;
     return adopted;
 }
 
@@ -287,12 +375,13 @@ void NotchController::runOnce()
                 // KD-7: soundcheck notches never auto-release.
                 if (n.active && n.origin != Origin::Soundcheck
                     && (liveMs_ - n.lastDetectedMs) > kAutoReleaseMs)
-                    pushClearLocked (c, i);
+                    pushClearLocked (c, i, ClearReason::AutoRelease);
             }
     }
 
     // 4. Flush whatever the steps above queued.
     flushOutbox();
+    flushEventOutbox();
 }
 
 double NotchController::liveMsForTest() const
@@ -452,7 +541,8 @@ int NotchController::firstFreeIndexAllLanesLocked() const
 
 // The one place a confirmed candidate becomes notches. INDEP touches `lane`
 // alone; LINKED takes one index free on every driven lane and writes them all.
-void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow)
+void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
+                                      const PlacementContext& pc)
 {
     // soundcheckActive() takes modelMutex_ itself, so it is asked BEFORE the
     // lock below -- never underneath it.
@@ -469,9 +559,40 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     if (index < 0)
         return;   // chain full on the lanes concerned: same outcome as today
 
+    // Lane D (data loop): the one allocation per placed notch, on the
+    // detector thread (plan A-4). Shared by the lane-0 and lane-1 Set events
+    // of a LINKED placement -- never allocated twice for one confirm.
+    // pc.breakdown.refFrame points into the scorer's history_ and is only
+    // guaranteed valid until la.scorer.commitBlock() runs; that call happens
+    // AFTER the whole candidate loop in processSpectrumForDetection(), i.e.
+    // after this placeConfirmed() returns, so copying it here is safe.
+    auto ctx = std::make_shared<SpectralContext>();
+    ctx->binHz = pc.sampleRate / (double) Detector::kFftSize;
+    std::copy_n (pc.now, Detector::kNumBins, ctx->now.begin());
+    if (pc.breakdown.refFrame != nullptr)
+    {
+        ctx->hasRef = true;
+        ctx->refAgeMs = pc.breakdown.refAgeMs;
+        std::copy_n (pc.breakdown.refFrame, Detector::kNumBins, ctx->ref.begin());
+    }
+    if (pc.other != nullptr)
+    {
+        ctx->hasOther = true;
+        std::copy_n (pc.other, Detector::kNumBins, ctx->other.begin());
+    }
+
+    NotchEvent scored;
+    scored.hasScore = true;
+    scored.confirmedLane = lane;
+    scored.score = pc.finalScore; scored.peakiness = pc.breakdown.rawPeakiness;
+    scored.pNorm = pc.breakdown.pNorm; scored.rise = pc.breakdown.rNorm;
+    scored.novelty = pc.breakdown.mNorm; scored.penalty = pc.breakdown.penalty;
+    scored.asymmetry = pc.asymmetry; scored.persistNeeded = pc.persistNeeded; scored.thr = pc.thr;
+    scored.ctx = ctx;
+
     int applied = 0;
     for (int l = firstLane; l <= lastLane; ++l)
-        if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
+        if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
             ++applied;
 
     // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
@@ -529,7 +650,7 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     const int wanted = lastLane - firstLane + 1;
     if (applied != wanted && applied > 0)
         for (int l = firstLane; l <= lastLane; ++l)
-            clearNotch (l, index);
+            clearNotch (l, index, ClearReason::PartialApplyUnwind);
 
     // One light line per detection event -- per PLACED notch, not per frame.
     // Logged outside every lock: juce::Logger is not a place to hold one.
@@ -635,12 +756,13 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
             continue;
         }
 
-        float score = la.scorer.scoreCandidate (
+        const auto breakdown = la.scorer.scoreCandidateDetailed (
             cand, block.magnitudes,
             { locked.data(), locked.size() });
         // Design §4.4: neutral at the default bonus of 1.0.
-        score *= asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
-                                      laneAsymmetryBonus_.load (std::memory_order_relaxed));
+        const float asym = asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
+                                                laneAsymmetryBonus_.load (std::memory_order_relaxed));
+        const float score = breakdown.score * asym;
 
         if (score > CandidateScorer::kConfirmScore)
         {
@@ -655,7 +777,13 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                 // lands on is now the placement policy's business (§4.3);
                 // persistence is still counted per (lane, bin), so under LINK
                 // a confirm on either lane is enough for the pair.
-                placeConfirmed (lane, cand, linkedNow);
+                PlacementContext pc;
+                pc.now = block.magnitudes; pc.other = otherLaneMagnitudes;
+                pc.breakdown = breakdown; pc.finalScore = score; pc.asymmetry = asym;
+                pc.persistNeeded = (int) requiredBlocks;
+                pc.thr = la.analyzer.getThreshold();
+                pc.sampleRate = block.sampleRate;
+                placeConfirmed (lane, cand, linkedNow, pc);
             }
         }
         else
@@ -707,4 +835,23 @@ void NotchController::flushOutbox()
                         pending.end());
         retryCount_.fetch_add (pending.size() - written, std::memory_order_relaxed);
     }
+}
+
+bool NotchController::flushEventOutbox()
+{
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        if (eventOutbox_.empty())
+            return false;
+        eventScratch_.clear();
+        eventScratch_.swap (eventOutbox_);   // both keep their reserve()
+    }
+    // Lock released: the sink may take its own locks, log, or call straight
+    // back into clearNotch() (spec test 9). eventSink_ is only written with
+    // the thread stopped, so reading it here is race-free.
+    if (eventSink_ != nullptr)
+        for (const auto& e : eventScratch_)
+            eventSink_ (e);
+    eventScratch_.clear();
+    return true;
 }

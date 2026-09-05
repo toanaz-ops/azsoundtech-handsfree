@@ -30,6 +30,10 @@
 #include "gui/ModeBar.h"
 #include "test_gui_helpers.h"
 
+#include <cmath>
+#include <iostream>
+#include <random>
+#include <string>
 #include <vector>
 
 //==============================================================================
@@ -985,4 +989,259 @@ TEST (GuiWiring, SavePresetRoundTripsPerLaneNotchesAndTheLinkedFlag)
         << "lane 1's 2 kHz notch at index 2 did not survive the round trip";
     EXPECT_TRUE (reopened.isSlotLinked (1))
         << "the saved \"slots\" section did not carry `linked`";
+}
+
+//==============================================================================
+// Lane D (data loop): the session log through the real wiring.
+
+namespace
+{
+juce::File freshLogDir (const juce::String& name)
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                   .getChildFile ("az-handsfree-sessionlog").getChildFile (name);
+    dir.deleteRecursively();
+    return dir;
+}
+
+std::vector<juce::var> parsedLines (const juce::File& file)
+{
+    juce::StringArray lines;
+    lines.addLines (file.loadFileAsString());
+    lines.removeEmptyStrings();
+    std::vector<juce::var> out;
+    for (const auto& l : lines)
+    {
+        juce::var v;
+        EXPECT_TRUE (juce::JSON::parse (l, v).wasOk()) << l;
+        out.push_back (v);
+    }
+    return out;
+}
+
+const juce::var* firstEvent (const std::vector<juce::var>& events, const juce::String& name)
+{
+    for (const auto& e : events)
+        if (e["ev"].toString() == name)
+            return &e;
+    return nullptr;
+}
+} // namespace
+
+// Spec test 14. Red if FALSE stops clearing with VerdictFalse, or the logger
+// stops receiving verdict / notch_clear / session_start in order.
+TEST (GuiWiring, FalseVerdictLogsVerdictThenClearsWithVerdictFalse)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.setAppVersion ("9.9.9-test");
+    const auto dir = freshLogDir ("verdict");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1234.0, 30.0, -12.0, NotchController::Origin::Manual));
+    std::vector<float> hop (512, 0.1f);
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();   // publishes the snapshot AND flushes the Set event
+
+    auto& panel = app.getNotchListPanelForTest();
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 1);
+    panel.falseButtonForTest (0)->onClick();
+
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();   // flushes the Clear event; republishes without the notch
+    NotchController::SnapshotBuffer snap {};
+    c0->copySnapshot (snap);
+    EXPECT_EQ (snap.notchCount, 0u);
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    ASSERT_GE (events.size(), 5u);
+    EXPECT_EQ (events.front()["ev"].toString(), "session_start");
+    EXPECT_EQ (events.front()["app_version"].toString(), "9.9.9-test");
+    EXPECT_TRUE (events.front()["slots"].isArray());
+    EXPECT_EQ (events.back()["ev"].toString(), "session_end");
+
+    const auto* set = firstEvent (events, "notch_set");
+    ASSERT_NE (set, nullptr);
+    EXPECT_EQ ((*set)["origin"].toString(), "manual");
+    EXPECT_NEAR ((double) (*set)["hz"], 1234.0, 0.5);
+    EXPECT_FALSE (set->hasProperty ("ctx"));
+
+    const auto* verdict = firstEvent (events, "verdict");
+    ASSERT_NE (verdict, nullptr);
+    EXPECT_EQ ((*verdict)["verdict"].toString(), "false");
+    EXPECT_EQ ((int) (*verdict)["slot"], 0);
+    EXPECT_EQ ((int) (*verdict)["lane"], 0);
+    EXPECT_EQ ((int) (*verdict)["index"], 0);
+
+    const auto* clear = firstEvent (events, "notch_clear");
+    ASSERT_NE (clear, nullptr);
+    EXPECT_EQ ((*clear)["reason"].toString(), "verdict_false");
+
+    // Order: verdict is written before the clear it causes.
+    EXPECT_LT (verdict - events.data(), clear - events.data());
+}
+
+// Mode and tuning land in the log. Red if requestMode / onTuningChanged stop
+// logging, or the field names drift from the logstats contract.
+TEST (GuiWiring, ModeAndTuningChangesAreLogged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("mode");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    app.requestMode (AudioEngine::Mode::Auto);
+    gui::TuningPanel::Params p;
+    p.riseReferenceMs = 300; p.persistenceBlocks = 4; p.q = 25.0f; p.depthDb = -10.0f; p.peakinessThreshold = 12.0f;
+    app.getTuningPanel().onTuningChanged (p);   // MainComponent.h:151
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    // T6: the FIRST `mode` line is the one startSessionLog() writes -- the
+    // mode the session STARTED in, before anybody touched the rail. Red if
+    // that call disappears from startSessionLog(): a show that never switches
+    // mode would then carry no `mode` line at all and a reader could not tell
+    // Auto from Bypass.
+    const auto* mode = firstEvent (events, "mode");
+    ASSERT_NE (mode, nullptr);
+    EXPECT_EQ ((*mode)["mode"].toString(), "bypass");
+
+    // ...and requestMode() still logs its own, after it.
+    int modeLines = 0;
+    juce::String lastMode;
+    for (const auto& e : events)
+        if (e["ev"].toString() == "mode") { ++modeLines; lastMode = e["mode"].toString(); }
+    EXPECT_EQ (modeLines, 2);
+    EXPECT_EQ (lastMode, "auto");
+    const auto* tuning = firstEvent (events, "tuning");
+    ASSERT_NE (tuning, nullptr);
+    EXPECT_EQ ((int) (*tuning)["slot"], -1);
+    EXPECT_EQ ((int) (*tuning)["persist"], 4);
+    EXPECT_NEAR ((double) (*tuning)["depth_db"], -10.0, 1e-6);
+}
+
+// Spec test 15. Red if MainComponent's teardown order lets a detector thread
+// deliver an event into a logger that is already gone (or vice versa), or if
+// the destructor stops flushing the controllers before the logger closes.
+//
+// The feed is a REAL howl, not a steady tone: ~120 ms of quiet room noise
+// first, to lay down the scorer's rise history and warm its baseline EMA,
+// then a loud 1 kHz tone appears. A steady tone can NEVER confirm -- the rise
+// axis compares now against the newest frame at least 0.45 x riseReference
+// old, and a tone already at full level in that frame scores rNorm 0 -- which
+// is why the first version of this test tore the app down with nothing ever
+// placed, and so exercised none of the race it exists to cover (verifier V1).
+//
+// Both the scorer's clock and the reference age are WALL clock here (the
+// controller stamps blocks with JuceMonotonicClock), so the hops have to be
+// written in real time rather than burst in: the tap ring holds 8192 samples
+// (16 hops) and a burst is simply dropped.
+TEST (GuiWiring, DestroyingTheAppWhileADetectorIsPlacingNotchesDoesNotCrash)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    constexpr int kHop       = 512;
+    constexpr int kQuietHops = 40;   // ~120 ms of wall time at 3 ms per hop
+    constexpr int kHowlHops  = 45;   // ~135 ms more
+    constexpr int kRounds    = 20;
+
+    // Built once: regenerating this 20 times would dominate the runtime.
+    std::mt19937 rng (20260905u);
+    std::uniform_real_distribution<float> noise (-0.05f, 0.05f);
+    std::vector<float> quiet ((std::size_t) kQuietHops * kHop);
+    for (auto& s : quiet)
+        s = noise (rng);
+    std::vector<float> howl ((std::size_t) kHowlHops * kHop);
+    for (std::size_t i = 0; i < howl.size(); ++i)
+        howl[i] = (float) std::sin (2.0 * 3.14159265358979 * 1000.0
+                                    * (double) i / 48000.0)
+                + noise (rng);
+
+    int totalSets = 0, roundsWithASet = 0;
+    std::string perRound;
+
+    for (int run = 0; run < kRounds; ++run)
+    {
+        const auto dir = freshLogDir ("teardown-" + juce::String (run));
+        juce::File file;
+        {
+            MainComponent app;
+            ASSERT_TRUE (app.startSessionLog (dir));
+            file = app.sessionLogFileForTest();
+
+            auto* c0 = app.getNotchControllerForTest (0);
+            ASSERT_NE (c0, nullptr);
+            c0->setRiseReferenceMs (100.0);   // the reference must be >= 45 ms old
+            c0->setPersistenceBlocks (1);     // one confirming block is enough
+            c0->setDetectionActive (true);
+            c0->start();                      // real detector thread
+
+            auto feed = [&] (const std::vector<float>& src, int hops)
+            {
+                for (int h = 0; h < hops; ++h)
+                {
+                    const float* p = src.data() + (std::size_t) h * kHop;
+                    app.getAudioEngine().getTapBuffer (0, 0).write (p, (std::size_t) kHop);
+                    app.getAudioEngine().getTapBuffer (0, 1).write (p, (std::size_t) kHop);
+                    juce::Thread::sleep (3);
+                }
+            };
+            feed (quiet, kQuietHops);
+            feed (howl,  kHowlHops);
+            // `app` is destroyed here, mid-placement, with the thread running.
+        }
+
+        const auto events = parsedLines (file);
+        ASSERT_FALSE (events.empty()) << "round " << run;
+        EXPECT_EQ (events.front()["ev"].toString(), "session_start") << "round " << run;
+        // The teardown is only PROVEN if the logger was still alive when the
+        // controllers flushed their last events: session_end must be the last
+        // line of every file, after whatever the detector placed.
+        EXPECT_EQ (events.back()["ev"].toString(), "session_end") << "round " << run;
+
+        int sets = 0;
+        for (const auto& e : events)
+            if (e["ev"].toString() == "notch_set")
+                ++sets;
+        totalSets += sets;
+        roundsWithASet += (sets > 0 ? 1 : 0);
+        perRound += std::to_string (sets) + " ";
+    }
+
+    // A round that placed nothing never touched the race. The floor is set
+    // well below what the feed above actually produces (see the INFO line) so
+    // a slow machine does not turn this red, and well clear of zero so a
+    // regression that stops placement cannot pass unnoticed.
+    EXPECT_GE (totalSets, 10) << "notch_set per round: " << perRound;
+    EXPECT_GE (roundsWithASet, 1) << "notch_set per round: " << perRound;
+    std::cout << "[ INFO     ] notch_set per round: " << perRound
+              << "(total " << totalSets << ", rounds with >=1: "
+              << roundsWithASet << ")" << std::endl;
+}
+
+// Lane S loose end (A-9). Red if loadPreset stops counting a lane-1 notch a
+// mono slot cannot take.
+TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const juce::String json =
+        R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+        R"("slots":[{"index":0,"enabled":true,"width":1,"inputChannels":[0,1],"outputChannels":[0,1]}],)"
+        R"("notches":[{"slot":0,"lane":1,"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
+        R"({"slot":0,"lane":0,"index":1,"freq":982.0,"Q":30.0,"depth":-12.0}]})";
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("az-handsfree-d-skipped.json");
+    ASSERT_TRUE (presetFile.replaceWithText (json));
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+    EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
 }

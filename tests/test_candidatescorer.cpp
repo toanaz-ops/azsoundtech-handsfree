@@ -19,6 +19,7 @@
 #include "dsp/PeakinessAnalyzer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <random>
@@ -364,4 +365,193 @@ TEST (CandidateScorer, RiseReferenceClamps)
     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 1000.0);
     rig.scorer.setRiseReferenceMs (400.0);
     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 400.0);
+}
+
+//==============================================================================
+// Lane D (data loop): the score breakdown the session log records.
+
+// Spec test 5, part 1 -- the ANALYTIC golden vector. Every expected number
+// below is recomputed here from the formula documented in CandidateScorer.h,
+// against hand-built constant frames, so nothing is compared to the scorer's
+// own output. Red if ANY of the documented arithmetic moves: the pNorm slope
+// or its 10x saturation, the rise normaliser (rise - 1)/0.5, the log-4
+// novelty scale, the 3 s baseline time constant, the 1.4x..4.1x harmonic
+// window, kHarmonicPenalty, or the product form itself.
+TEST (CandidateScorerBreakdown, ScoreMatchesTheDocumentedFormulaOnHandBuiltFrames)
+{
+    // Three constant 2.0 frames. commitBlock() stamps clockMs_ AFTER adding
+    // elapsedMs and SKIPS the EMA on a zero dt, so:
+    //   A: 2.0, elapsed 0    -> lands at t = 0,    baseline untouched
+    //   B: 2.0, elapsed 3000 -> lands at t = 3000, alpha1 = 1 - exp(-3000/tau)
+    //   C: 2.0, elapsed 100  -> lands at t = 3100, alpha2 = 1 - exp(-100/tau)
+    // The scoring instant is therefore t = 3100 and, at the default 250 ms
+    // rise reference, the qualifying frame is the newest at least 112.5 ms
+    // old -- frame A, value 2.0, age 3100 ms.
+    constexpr double kTau = CandidateScorer::kBaselineTimeConstantMs;
+    const double alpha1 = 1.0 - std::exp (-3000.0 / kTau);
+    const double alpha2 = 1.0 - std::exp (-100.0  / kTau);
+    double baseline = 0.0;
+    baseline += alpha1 * (2.0 - baseline);
+    baseline += alpha2 * (2.0 - baseline);
+
+    auto prime = [] (CandidateScorer& s)
+    {
+        std::array<float, CandidateScorer::kBins> f {};
+        f.fill (2.0f);
+        s.beginBlock (kSampleRate);
+        s.commitBlock (f.data(), 0.0);
+        s.commitBlock (f.data(), 3000.0);
+        s.commitBlock (f.data(), 100.0);
+    };
+
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin         = 43;
+    cand.frequencyHz = 1007.8125;   // 3.36x of the 300 Hz locked below
+    cand.magnitude   = 8.0f;
+    cand.peakiness   = 55.0f;       // (55/10 - 1)/9 = 0.5 EXACTLY in float
+    const float pNorm = 0.5f;
+
+    const std::vector<double> locked { 300.0 };
+    const CandidateScorer::LockedFrequencyView lockedView { locked.data(), locked.size() };
+
+    // --- case 1: rise and novelty both saturate; the penalty is the mover.
+    {
+        constexpr float kNow = 8.0f;
+        std::array<float, CandidateScorer::kBins> now {};
+        now.fill (kNow);
+
+        const float rNorm = 1.0f;   // 8/2 = 4x -> (4-1)/0.5 = 6, clamped
+        const float mNorm = (float) std::min (1.0,
+            std::log ((double) kNow / baseline) / std::log (4.0));
+        ASSERT_FLOAT_EQ (mNorm, 1.0f) << "case 1 is meant to saturate novelty";
+
+        CandidateScorer scorer;
+        prime (scorer);
+
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
+        EXPECT_FLOAT_EQ (b.rawPeakiness, 55.0f);
+        EXPECT_FLOAT_EQ (b.pNorm, pNorm);
+        EXPECT_FLOAT_EQ (b.rNorm, rNorm);
+        EXPECT_FLOAT_EQ (b.mNorm, mNorm);
+        EXPECT_FLOAT_EQ (b.penalty, 1.0f);
+        EXPECT_DOUBLE_EQ (b.refAgeMs, 3100.0);
+        ASSERT_NE (b.refFrame, nullptr);
+        EXPECT_FLOAT_EQ (b.refFrame[cand.bin], 2.0f);
+        EXPECT_FLOAT_EQ (b.score, pNorm * rNorm * mNorm * 1.0f);
+        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), {}), b.score);
+
+        // Same candidate, now a harmonic of a LOCKED 300 Hz fundamental.
+        const auto h = scorer.scoreCandidateDetailed (cand, now.data(), lockedView);
+        EXPECT_FLOAT_EQ (h.penalty, CandidateScorer::kHarmonicPenalty);
+        EXPECT_FLOAT_EQ (h.score, pNorm * rNorm * mNorm * CandidateScorer::kHarmonicPenalty);
+        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), lockedView), h.score);
+    }
+
+    // --- case 2: NOTHING saturates, so all three axes are pinned by value.
+    {
+        constexpr float kNow = 2.6f;
+        std::array<float, CandidateScorer::kBins> now {};
+        now.fill (kNow);
+
+        const float rNorm = (kNow / 2.0f - 1.0f) / 0.5f;   // 1.3x -> 0.6
+        const float mNorm = (float) (std::log ((double) kNow / baseline) / std::log (4.0));
+        ASSERT_GT (rNorm, 0.0f); ASSERT_LT (rNorm, 1.0f);
+        ASSERT_GT (mNorm, 0.0f); ASSERT_LT (mNorm, 1.0f);
+
+        CandidateScorer scorer;
+        prime (scorer);
+
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
+        EXPECT_FLOAT_EQ (b.pNorm, pNorm);
+        EXPECT_FLOAT_EQ (b.rNorm, rNorm);
+        EXPECT_FLOAT_EQ (b.mNorm, mNorm);
+        EXPECT_FLOAT_EQ (b.penalty, 1.0f);
+        EXPECT_FLOAT_EQ (b.score, pNorm * rNorm * mNorm);
+        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), {}), b.score);
+    }
+}
+
+// Spec test 5, part 2. This test pins the DELEGATION, not the arithmetic:
+// scoreCandidate() is a one-line forward to scoreCandidateDetailed().score,
+// so `plain == b.score` cannot fail while that stays true, and it is here to
+// keep it true -- a future scoreCandidate() that recomputes the product on
+// its own would be caught. The arithmetic itself is pinned analytically by
+// ScoreMatchesTheDocumentedFormulaOnHandBuiltFrames above; this one also
+// checks the axes still multiply to the score on frames from the REAL
+// Detector + PeakinessAnalyzer pipeline (verifier V2).
+TEST (CandidateScorerBreakdown, DetailedScoreIsTheScalarOverloadsSourceOfTruth)
+{
+    Rig rig;
+    const auto signal = makeToneInNoise (1000.0, 0.5f, 0.01f, 4242u, (std::size_t) kHop * 80);
+
+    // Drive the real pipeline so the breakdown is taken against genuine
+    // history and baseline state, not a fresh scorer.
+    std::size_t offset = 0;
+    for (int i = 0; i < 60; ++i, offset += (std::size_t) kHop)
+        rig.cycle (signal, offset);
+
+    EXPECT_EQ (rig.tap.write (signal.data() + offset, (std::size_t) kHop), (std::size_t) kHop);
+    const auto spectrum = rig.detector.processLatestBlock (rig.tap);
+    ASSERT_NE (spectrum.magnitudes, nullptr);
+    rig.scorer.beginBlock (kSampleRate);
+    const auto result = rig.analyzer.analyse (spectrum);
+    ASSERT_GT (result.count, 0u);
+
+    const std::vector<double> locked { 300.0 };   // 1 kHz sits at 3.3x -> penalty applies
+    const CandidateScorer::LockedFrequencyView view { locked.data(), locked.size() };
+
+    for (std::size_t i = 0; i < result.count; ++i)
+    {
+        const auto& cand = result.candidates[i];
+        const float plain = rig.scorer.scoreCandidate (cand, spectrum.magnitudes, view);
+        const auto  b     = rig.scorer.scoreCandidateDetailed (cand, spectrum.magnitudes, view);
+        EXPECT_EQ (plain, b.score) << "bin " << cand.bin;
+        EXPECT_EQ (b.pNorm * b.rNorm * b.mNorm * b.penalty, b.score) << "bin " << cand.bin;
+        EXPECT_FLOAT_EQ (b.rawPeakiness, cand.peakiness);
+        // T2: the penalty is a function of the candidate's FREQUENCY against
+        // the locked list, never of its peakiness. Peakiness only decides
+        // whether the scorer ran the harmonic test at all (a rejected bin
+        // returns early with the neutral 1.0).
+        if (cand.peakiness > PeakinessAnalyzer::kDefaultThreshold)
+        {
+            const bool harmonicOfLocked = cand.frequencyHz > 1.4 * locked.front()
+                                       && cand.frequencyHz < 4.1 * locked.front();
+            EXPECT_FLOAT_EQ (b.penalty,
+                             harmonicOfLocked ? CandidateScorer::kHarmonicPenalty : 1.0f)
+                << "bin " << cand.bin << " at " << cand.frequencyHz << " Hz";
+        }
+    }
+}
+
+// Spec test 6. Red if refFrame/refAgeMs stop describing the frame the rise
+// axis actually used: with rise 250 ms and frames at 300/120/100 ms of age,
+// the scorer compares against the NEWEST frame at least 0.45 x 250 = 112.5 ms
+// old, which is the 120 ms one.
+TEST (CandidateScorerBreakdown, RefFrameIsTheNewestFrameAtLeastFortyFivePercentOfRiseReferenceOld)
+{
+    CandidateScorer scorer;
+    scorer.setRiseReferenceMs (250.0);
+    scorer.beginBlock (kSampleRate);
+
+    std::array<float, CandidateScorer::kBins> f300 {}, f120 {}, f100 {}, now {};
+    f300.fill (1.0f); f120.fill (2.0f); f100.fill (3.0f); now.fill (6.0f);
+
+    // commitBlock stamps clockMs_ AFTER adding elapsedMs: frames land at
+    // t = 0, 180, 200; the scoring instant is t = 300.
+    scorer.commitBlock (f300.data(), 0.0);
+    scorer.commitBlock (f120.data(), 180.0);
+    scorer.commitBlock (f100.data(), 20.0);
+    // Advance the clock to 300 with a block that must NOT become the reference
+    // (age 0): push it, then read the breakdown before anything else moves.
+    scorer.commitBlock (now.data(), 100.0);
+
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin = 43; cand.frequencyHz = 1007.8125; cand.magnitude = 6.0f; cand.peakiness = 20.0f;
+
+    const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
+    ASSERT_NE (b.refFrame, nullptr);
+    EXPECT_DOUBLE_EQ (b.refAgeMs, 120.0);
+    EXPECT_FLOAT_EQ (b.refFrame[43], 2.0f);
+    // And the rise axis agrees with that frame: 6 / 2 = 3x -> saturates at 1.
+    EXPECT_FLOAT_EQ (b.rNorm, 1.0f);
 }

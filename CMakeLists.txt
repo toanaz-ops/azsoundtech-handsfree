@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(HandsFree VERSION 1.1.1)
+project(HandsFree VERSION 1.1.2)
 
 # C++17 minimum standard
 set(CMAKE_CXX_STANDARD 17)
@@ -92,6 +92,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/PresetManager.h
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.cpp
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.h
+    ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp

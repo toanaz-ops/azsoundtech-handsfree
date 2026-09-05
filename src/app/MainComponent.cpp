@@ -4,6 +4,7 @@
 #include "app/PresetManager.h"
 #include "gui/DeviceViewModel.h"
 
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -28,6 +29,64 @@ constexpr float kMaxFloorShare = 0.55f;
 // Breathing room added to the height the floor needs, so "it fits" is visibly
 // true rather than true to the pixel. See heightThatFitsTheFloor().
 constexpr int kFloorSlack = 24;
+
+//==============================================================================
+// Lane D (data loop): session-log event shaping. roundSig3 is what keeps a
+// 1025-value spectrum array short in the JSONL file -- JSON::toString would
+// otherwise print every double to full precision.
+double roundSig3 (double v)
+{
+    if (v == 0.0 || ! std::isfinite (v)) return 0.0;
+    const double e = std::floor (std::log10 (std::abs (v)));
+    const double scale = std::pow (10.0, 2.0 - e);
+    return std::round (v * scale) / scale;
+}
+
+juce::var spectrumVar (const std::array<float, Detector::kNumBins>& bins)
+{
+    juce::Array<juce::var> out;
+    out.ensureStorageAllocated (Detector::kNumBins);
+    for (float b : bins)
+        out.add (roundSig3 ((double) b));
+    return out;
+}
+
+const char* originName (NotchController::Origin o)
+{
+    switch (o)
+    {
+        case NotchController::Origin::Detector:   return "detector";
+        case NotchController::Origin::Preset:     return "preset";
+        case NotchController::Origin::Manual:     return "manual";
+        case NotchController::Origin::Soundcheck: return "soundcheck";
+    }
+    return "unknown";
+}
+
+const char* reasonName (NotchController::ClearReason r)
+{
+    switch (r)
+    {
+        case NotchController::ClearReason::Manual:             return "manual";
+        case NotchController::ClearReason::ClearAll:           return "clear_all";
+        case NotchController::ClearReason::AutoRelease:        return "auto_release";
+        case NotchController::ClearReason::WidthChange:        return "width_change";
+        case NotchController::ClearReason::VerdictFalse:       return "verdict_false";
+        case NotchController::ClearReason::PartialApplyUnwind: return "partial_apply_unwind";
+    }
+    return "unknown";
+}
+
+const char* modeName (AudioEngine::Mode m)
+{
+    switch (m)
+    {
+        case AudioEngine::Mode::Bypass:     return "bypass";
+        case AudioEngine::Mode::Auto:       return "auto";
+        case AudioEngine::Mode::Soundcheck: return "soundcheck";
+    }
+    return "unknown";
+}
 } // namespace
 
 MainComponent::MainComponent()
@@ -52,6 +111,23 @@ MainComponent::MainComponent()
     // The Sodium Rack theme, applied once here and inherited by every child
     // through the Component::getLookAndFeel() chain.
     setLookAndFeel (&azLookAndFeel_);
+
+    // Lane D (data loop): every controller's Set/Clear events feed the
+    // session log. Wired here, with every detector thread still stopped, so
+    // setEventSink()'s precondition holds; see the destructor for the
+    // matching teardown order.
+    for (auto& controller : notchControllers_)
+        controller->setEventSink ([this] (const NotchController::NotchEvent& e)
+        {
+            // I-2: notchEventToVar() rounds and boxes up to three 1025-value
+            // spectra. 26 tests and the snapshot tool construct MainComponent
+            // with the logger never started, and log() would drop the var on
+            // arrival anyway -- so do not build it. isActive() is a relaxed
+            // atomic load; a stop() racing this line only costs the event the
+            // logger was about to drop regardless.
+            if (sessionLogger_.isActive())
+                sessionLogger_.log (notchEventToVar (e));
+        });
 
     // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
     // Source: <exe dir>/presets (the installer puts them there, P1). Running
@@ -91,6 +167,24 @@ MainComponent::MainComponent()
     // The notch list is a FIXED bottom strip -- always visible.
     addAndMakeVisible (notchListPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
+
+    // Lane D: a FALSE verdict is written to the log BEFORE the clear it
+    // causes -- the clear's own notch_clear event carries reason
+    // verdict_false, but the verdict itself (which lane/index/hz a human
+    // rejected) only exists here.
+    notchListPanel_.onVerdict = [this] (int slot, int lane, int index, float hz, bool good, double ageMs)
+    {
+        auto v = SessionLogger::makeEvent ("verdict");
+        auto* o = v.getDynamicObject();
+        o->setProperty ("slot", slot); o->setProperty ("lane", lane); o->setProperty ("index", index);
+        o->setProperty ("hz", (double) hz);
+        o->setProperty ("verdict", good ? "good" : "false");
+        o->setProperty ("age_ms", ageMs);
+        sessionLogger_.log (v);   // written BEFORE the clear it causes
+
+        if (! good && slot >= 0 && slot < kMaxSlots)
+            notchControllers_[(std::size_t) slot]->clearNotch (lane, index, NotchController::ClearReason::VerdictFalse);
+    };
 
     modeBar_.onModeRequested = [this] (AudioEngine::Mode mode) { requestMode (mode); };
 
@@ -302,6 +396,17 @@ MainComponent::MainComponent()
             controller.setNotchDefaults (t.q, t.depthDb);
             controller.setPeakinessThreshold ((float) t.thr);
         }
+
+        auto v = SessionLogger::makeEvent ("tuning");
+        auto* o = v.getDynamicObject();
+        o->setProperty ("slot", slotIndex);
+        o->setProperty ("uses_global", t.usesGlobal);
+        o->setProperty ("rise_ms", t.riseMs);
+        o->setProperty ("persist", t.persist);
+        o->setProperty ("q", t.q);
+        o->setProperty ("depth_db", t.depthDb);
+        o->setProperty ("thr", t.thr);
+        sessionLogger_.log (v);
     };
 
     // The editor seeds itself from the slot's controller plus its mode flag.
@@ -343,6 +448,19 @@ MainComponent::MainComponent()
             controller.setNotchDefaults ((double) p.q, (double) p.depthDb);
             controller.setPeakinessThreshold (p.peakinessThreshold);
         }
+
+        auto v = SessionLogger::makeEvent ("tuning");
+        auto* o = v.getDynamicObject();
+        o->setProperty ("slot", -1);
+        // M-8: TuningPanel::Params holds int/float where SlotPanel::SlotTuning
+        // holds double. Cast so BOTH tuning events carry the same JSON types
+        // for the same field -- logstats reads one column, not two.
+        o->setProperty ("rise_ms", (double) p.riseReferenceMs);
+        o->setProperty ("persist", p.persistenceBlocks);
+        o->setProperty ("q", (double) p.q);
+        o->setProperty ("depth_db", (double) p.depthDb);
+        o->setProperty ("thr", (double) p.peakinessThreshold);
+        sessionLogger_.log (v);
     };
     tuningPanel_.paramsProvider = [this]
     {
@@ -373,8 +491,15 @@ MainComponent::~MainComponent()
     // Component must not outlive the LookAndFeel it points at.
     setLookAndFeel (nullptr);
     // §6.5: every detector thread must be dead before the engine tears down.
+    // Lane D (amendment A-3): each stop() flushes its last events into the
+    // logger, which is still alive -- sessionLogger_ is declared before
+    // systemClock_ and the controllers, so it outlives every one of these
+    // joins.
     for (auto& controller : notchControllers_)
         controller->stop (1000);
+    sessionLogger_.stop();   // session_end, then the file closes
+    for (auto& controller : notchControllers_)
+        controller->setEventSink (nullptr);   // threads are joined: precondition holds
     engine_.stop();
 }
 
@@ -403,6 +528,140 @@ void MainComponent::setSlotLinked (int slotIndex, bool linked)
 bool MainComponent::isSlotLinked (int slotIndex) const
 {
     return slotIndex >= 0 && slotIndex < kMaxSlots && slotLinked_[(std::size_t) slotIndex];
+}
+
+//==============================================================================
+// Lane D (data loop): the session log.
+
+juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
+{
+    using Ev = NotchController::NotchEvent;
+    auto v = SessionLogger::makeEvent (e.kind == Ev::Kind::Set ? "notch_set" : "notch_clear");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("slot", e.slot);
+    o->setProperty ("lane", e.lane);
+    o->setProperty ("index", e.index);
+    o->setProperty ("hz", (double) e.hz);
+    o->setProperty ("q", (double) e.q);
+    o->setProperty ("depth_db", (double) e.depthDb);
+    o->setProperty ("origin", originName (e.origin));
+
+    if (e.kind == Ev::Kind::Clear)
+    {
+        o->setProperty ("reason", reasonName (e.reason));
+        o->setProperty ("age_ms", e.ageMs);
+        return v;
+    }
+
+    if (! e.hasScore)
+        return v;
+
+    o->setProperty ("confirmed_lane", e.confirmedLane);
+    o->setProperty ("score", (double) e.score);
+    o->setProperty ("peakiness", (double) e.peakiness);
+    o->setProperty ("p_norm", (double) e.pNorm);
+    o->setProperty ("rise", (double) e.rise);
+    o->setProperty ("novelty", (double) e.novelty);
+    o->setProperty ("penalty", (double) e.penalty);
+    o->setProperty ("asymmetry", (double) e.asymmetry);
+    o->setProperty ("persist_needed", e.persistNeeded);
+    o->setProperty ("thr", (double) e.thr);
+
+    if (e.ctx != nullptr)
+    {
+        auto* c = new juce::DynamicObject();
+        c->setProperty ("bins", e.ctx->bins);
+        c->setProperty ("bin_hz", e.ctx->binHz);
+        c->setProperty ("now", spectrumVar (e.ctx->now));
+        // M-3: refAgeMs describes the reference FRAME. With no reference
+        // frame it is 0.0, which reads as "compared against something 0 ms
+        // old" -- so it travels inside the same guard as "ref".
+        if (e.ctx->hasRef)
+        {
+            c->setProperty ("ref", spectrumVar (e.ctx->ref));
+            c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
+        }
+        if (e.ctx->hasOther) c->setProperty ("other_lane_now", spectrumVar (e.ctx->other));
+        o->setProperty ("ctx", juce::var (c));
+    }
+
+    return v;
+}
+
+juce::var MainComponent::sessionHeader() const
+{
+    auto v = SessionLogger::makeEvent ("session_start");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("app_version", appVersion_);
+    o->setProperty ("os", juce::SystemStats::getOperatingSystemName());
+    o->setProperty ("device", engine_.getCurrentDeviceName());
+    o->setProperty ("sample_rate", engine_.getCurrentSampleRateHz());
+    o->setProperty ("buffer_size", engine_.getCurrentBufferSize());
+
+    juce::Array<juce::var> slots;
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        const auto cfg = engine_.getSlotConfig (i);
+        auto* s = new juce::DynamicObject();
+        s->setProperty ("index", i);
+        s->setProperty ("enabled", cfg.enabled);
+        s->setProperty ("width", cfg.width);
+
+        juce::Array<juce::var> in, out;
+        for (int l = 0; l < cfg.width; ++l)
+        {
+            in.add (cfg.inputChannels[l]);
+            out.add (cfg.outputChannels[l]);
+        }
+        s->setProperty ("in", in);
+        s->setProperty ("out", out);
+        s->setProperty ("linked", slotLinked_[(std::size_t) i]);
+        slots.add (juce::var (s));
+    }
+    o->setProperty ("slots", slots);
+
+    return v;
+}
+
+void MainComponent::setAppVersion (const juce::String& version)
+{
+    appVersion_ = version;
+}
+
+void MainComponent::showMessage (const juce::String& message)
+{
+    panelMessage_ = message;
+    refreshStatus();
+}
+
+bool MainComponent::startSessionLog (const juce::File& directory)
+{
+    if (! sessionLogger_.start (directory, sessionHeader()))
+        return false;
+
+    // T6: the log must record the mode the session STARTED in. requestMode()
+    // is the only other producer of a `mode` event, so a session nobody ever
+    // switches would otherwise carry none at all and a reader could not tell
+    // Auto from Bypass.
+    auto v = SessionLogger::makeEvent ("mode");
+    v.getDynamicObject()->setProperty ("mode", modeName (engine_.getMode()));
+    sessionLogger_.log (v);
+    return true;
+}
+
+void MainComponent::stopSessionLog()
+{
+    sessionLogger_.stop();
+}
+
+juce::File MainComponent::sessionLogFileForTest() const
+{
+    return sessionLogger_.currentFile();
+}
+
+int MainComponent::lastLoadSkippedNotchesForTest() const
+{
+    return lastLoadSkipped_;
 }
 
 void MainComponent::startAudio()
@@ -447,6 +706,12 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
     // exist yet.
     engine_.setMode (mode);
     modeBar_.setDisplayedMode (engine_.getMode());
+
+    {
+        auto v = SessionLogger::makeEvent ("mode");
+        v.getDynamicObject()->setProperty ("mode", modeName (engine_.getMode()));
+        sessionLogger_.log (v);
+    }
 
     // KD-9 detection gating lives HERE because this is the one object that owns
     // both the mode controls and the controllers: Bypass must never place a
@@ -566,6 +831,13 @@ bool MainComponent::loadPreset (const juce::File& file)
             engine_.getSlotConfig (entry.index).width);
     }
 
+    // Lane D / lane S loose end (A-9): lastLoadSkipped_ starts from
+    // PresetManager's own out-of-range-slot count and adds every notch
+    // adoptPreset() itself skips (today: a lane-1 notch on a mono slot) --
+    // the two are different rejections and neither subsumes the other.
+    lastLoadSkipped_ = result.skippedNotchCount;
+    int adoptedTotal = 0;
+
     for (int s = 0; s < kMaxSlots; ++s)
     {
         std::vector<PresetNotch> notchesForSlot;
@@ -575,12 +847,38 @@ bool MainComponent::loadPreset (const juce::File& file)
                 notchesForSlot.push_back (notch);
 
         if (! notchesForSlot.empty())
-            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot);
+        {
+            int skipped = 0;
+            adoptedTotal += notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
+            if (skipped > 0)
+            {
+                lastLoadSkipped_ += skipped;
+                juce::Logger::writeToLog ("preset \"" + file.getFileName() + "\": slot "
+                    + juce::String (s + 1) + " is mono, skipped " + juce::String (skipped)
+                    + " lane-R notch(es)");
+            }
+        }
     }
 
     if (detectorsRunning)
         for (auto& controller : notchControllers_)
             controller->start();
+
+    // M-4: the mono-skip count had nowhere to go but a Logger line and a test
+    // accessor. It belongs in the session log next to the notches the load
+    // DID install -- a preset that silently loses half its notches on a mono
+    // rig is exactly the kind of thing a show log has to be able to explain.
+    // File NAME only: the full path can carry the operator's own name.
+    {
+        auto v = SessionLogger::makeEvent ("preset_load");
+        auto* o = v.getDynamicObject();
+        o->setProperty ("file", file.getFileName());
+        o->setProperty ("adopted", adoptedTotal);
+        o->setProperty ("skipped", lastLoadSkipped_);
+        sessionLogger_.log (v);
+    }
+
+    slotPanel_.refresh();   // the routing table shows what the file just changed (lane S loose end)
 
     return true;
 }
