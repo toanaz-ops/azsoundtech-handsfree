@@ -66,3 +66,4 @@ Task 9: parked — showMessage() is sticky for the session (log-failure text rep
 Task 9: parked — logstats.py does not surface write_failed — ruling: add in the next tools pass; the field is in the file.
 Task 9: parked — spec §3.2 opening still says "~12-18 KB"; superseded by the next sentence — ruling: nit, spec is historical.
 Task 9: complete — lane D READY; next: release-alpha.ps1 (1.1.1 -> 1.1.2), docs status flip, handoff.
+RELEASE: installer\release-alpha.ps1 -> 1.1.2 published to Z:\My Drive\RELEASE\ALPHA TEST (gate 432/432, binary reports 1.1.2, 1.0.5 pruned); SHA-256 51E28F8EDD6EB7EDEBE9C29945451A3723D0C2173F9FAD73D1BE9CC48964EE06. Docs status flipped; TESTER-NOTES.md in the drop updated. Branch feat/data-loop ready for owner PR/merge (not merged: no "merge" in this session).

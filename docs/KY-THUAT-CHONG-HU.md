@@ -1,7 +1,7 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
-> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.2 (chờ release). Số liệu lấy trực tiếp từ
+> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.2 (đã release alpha 05/09/2026). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
 
 ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
@@ -338,7 +338,7 @@ của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 
 LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
 với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
 
-## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — chờ release)
+## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — đã release alpha)
 
 Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
 `tools/logstats.py`.
