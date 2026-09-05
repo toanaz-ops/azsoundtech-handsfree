@@ -225,6 +225,12 @@ private:
     // First-seen ledger keyed by identity (ruling R-2).
     std::map<std::uint64_t, Sighting> sightings_;
 
+    // I-1: the clock reading of the PREVIOUS refreshFromSnapshot(), or -1
+    // before the first one. An identity whose lastSeenMs predates this was
+    // absent for at least one whole refresh, i.e. it was cleared and placed
+    // again -- and a re-placed notch must start unjudged.
+    double lastRefreshMs_ = -1.0;
+
     // Lane D: the ONE deliberate exception to "paint draws prebuilt members
     // only" -- a click needs a real child Component. Keyed by the same
     // identity the sightings ledger uses, created when an identity is first
@@ -238,7 +244,7 @@ private:
     std::map<std::uint64_t, RowButtons> buttons_;
     int displayedSlot_ = 0;
 
-    void ensureButtonsFor (std::uint64_t key, const NotchController::SnapshotNotch& notch);
+    void ensureButtonsFor (std::uint64_t key);
     void layoutButtons();
     void reportVerdict (std::uint64_t key, bool good);
 

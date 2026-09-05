@@ -76,6 +76,7 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
 
     t0_ = std::chrono::steady_clock::now();
     dropped_.store (0, std::memory_order_relaxed);
+    writeFailed_.store (false, std::memory_order_relaxed);
     {
         const std::lock_guard<std::mutex> lock (queueMutex_);
         pending_.clear();
@@ -144,6 +145,10 @@ void SessionLogger::stop()
     auto end = makeEvent ("session_end");
     end.getDynamicObject()->setProperty ("t", elapsedMs());
     end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) droppedAtClose);
+    // M-1: true if ANY write since start() was refused by the stream. The
+    // session_end line's own write is obviously not covered by its own field.
+    end.getDynamicObject()->setProperty ("write_failed",
+                                         writeFailed_.load (std::memory_order_relaxed));
     writeLineNow (juce::JSON::toString (end, true));
 
     if (stream_ != nullptr)
@@ -167,7 +172,11 @@ void SessionLogger::log (const juce::var& event)
     // is non-const even from a const juce::var, so setProperty("t") would
     // otherwise write into whatever DynamicObject the caller passed in --
     // visible to them afterwards, and a data race if they log the same var
-    // from two threads. Clone first, stamp the clone, serialise the clone.
+    // from two threads. Copy the DynamicObject ONE level first (its copy ctor
+    // copies the NamedValueSet), stamp the copy, serialise the copy. NOT
+    // var::clone(): that is a deep copy and would duplicate the three
+    // 1025-element ctx arrays for the sake of one added field. The arrays are
+    // shared and nobody writes to them after the event is built.
     juce::var stamped (new juce::DynamicObject (*obj));
     stamped.getDynamicObject()->setProperty ("t", elapsedMs());
     juce::String line = juce::JSON::toString (stamped, true);
@@ -223,8 +232,15 @@ void SessionLogger::writeLineNow (const juce::String& line)
 {
     if (stream_ == nullptr)
         return;
-    stream_->write (line.toRawUTF8(), line.getNumBytesAsUTF8());
-    stream_->write ("\n", 1);
+    // M-1: a full disk or a revoked handle makes write() return false and
+    // otherwise say nothing. Record it so session_end can tell a reader the
+    // file is truncated, rather than letting a short log read as a quiet
+    // session. Both writes are attempted -- no short-circuit -- so a failure
+    // on the payload does not also swallow the line terminator.
+    const bool wroteLine    = stream_->write (line.toRawUTF8(), line.getNumBytesAsUTF8());
+    const bool wroteNewline = stream_->write ("\n", 1);
+    if (! (wroteLine && wroteNewline))
+        writeFailed_.store (true, std::memory_order_relaxed);
 }
 
 void SessionLogger::pruneOldFiles()

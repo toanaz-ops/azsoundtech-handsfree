@@ -304,8 +304,21 @@ int main (int argc, char** argv)
                        << " falseRow=" << falseRow << ")" << std::endl;
             return 1;
         }
-        list.goodButtonForTest (goodRow)->onClick();     // 247 Hz  -> GOOD
-        list.falseButtonForTest (falseRow)->onClick();   // 1.9 kHz -> FALSE, clears the notch
+        // M-11: both accessors return nullptr for a row without buttons (an
+        // identity that left tracking, or a row index past the table). A
+        // snapshot that cannot stage the verdict state is a snapshot nobody
+        // should send to the owner -- say so and stop, do not dereference.
+        auto* goodButton  = list.goodButtonForTest (goodRow);
+        auto* falseButton = list.falseButtonForTest (falseRow);
+        if (goodButton == nullptr || falseButton == nullptr)
+        {
+            std::cerr << "no verdict buttons for rows " << goodRow << "/" << falseRow
+                      << " -- console-live.png would not show the VERDICT column"
+                      << std::endl;
+            return 1;
+        }
+        goodButton->onClick();     // 247 Hz  -> GOOD
+        falseButton->onClick();    // 1.9 kHz -> FALSE, clears the notch
     }
 
     return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;

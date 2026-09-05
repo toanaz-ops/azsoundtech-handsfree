@@ -110,6 +110,12 @@ public:
     // header names the device actually in use.
     void setAppVersion (const juce::String& version);
     bool startSessionLog (const juce::File& directory);
+
+    // Puts one line in the status bar and the masthead readout -- the SAME
+    // route devicePanel_.onMessage takes. Public because main.cpp is the one
+    // caller that has something to say the component itself cannot know: that
+    // startSessionLog() refused (I-3).
+    void showMessage (const juce::String& message);
     void stopSessionLog();
     [[nodiscard]] juce::File sessionLogFileForTest() const;
     [[nodiscard]] int lastLoadSkippedNotchesForTest() const;

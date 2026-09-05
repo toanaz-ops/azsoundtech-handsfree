@@ -72,7 +72,16 @@ private:
             // Lane D: the session log opens AFTER the device, so its header
             // names the device actually in use. A failed start (no %APPDATA%)
             // is not fatal -- the app runs without a log.
-            content->startSessionLog(SessionLogger::defaultDirectory());
+            // I-3: a refused start is not fatal, but it must not be silent --
+            // the operator would otherwise finish a show believing there is a
+            // log to look at. ASCII in the literal on purpose: MSVC's default
+            // execution charset mangles non-ASCII source literals.
+            if (! content->startSessionLog(SessionLogger::defaultDirectory()))
+            {
+                const auto where = SessionLogger::defaultDirectory().getFullPathName();
+                juce::Logger::writeToLog("session log: could not open " + where);
+                content->showMessage("LOG: khong ghi duoc " + where);
+            }
         }
 
         void closeButtonPressed() override

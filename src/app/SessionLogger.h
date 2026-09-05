@@ -4,10 +4,17 @@
 // Producers (detector threads, message thread) call log(); a writer thread
 // drains a bounded deque to the file once a second. log() NEVER touches the
 // file and NEVER blocks: over kMaxPendingLines the event is dropped and
-// counted (D-4). session_start and session_end are written directly by
-// start()/stop(), outside the deque, so the invariant
-//     lines in file + droppedEvents() == log() calls + 2
-// holds for every session.
+// counted (D-4). session_start and session_end BYPASS the deque -- start()
+// and stop() write them straight to the stream -- so a session's file holds
+// those two lines plus one line per log() call that was accepted:
+//     lines in file == log() calls - droppedEvents() + 2
+// droppedEvents() is the AUTHORITATIVE drop count, and it is final only once
+// every producer thread has been joined. The "dropped_events" number carried
+// in session_end is a best-effort snapshot taken while stop() runs and can
+// UNDER-count a producer that loses the close race -- see the long comment
+// at that read in SessionLogger.cpp. "write_failed" in the same line says
+// whether any write up to that point was refused (a full disk, a revoked
+// handle): true means the file is TRUNCATED, not that nothing happened.
 //
 // NOT for the audio thread: log() takes a mutex and allocates a String.
 //
@@ -55,10 +62,12 @@ public:
 
     bool isActive() const { return active_.load (std::memory_order_acquire); }
 
-    // Any thread except audio. `event` must be a DynamicObject var; a clone
-    // is stamped with "t" -- the caller's own object is never mutated, so
-    // the same var is safe to log again or read afterwards from any thread.
-    // Inactive logger: no-op.
+    // Any thread except audio. `event` must be a DynamicObject var. A
+    // ONE-LEVEL copy of its DynamicObject is what gets stamped with "t" --
+    // not var::clone(), which would deep-copy the three 1025-element ctx
+    // arrays just to add one field. The caller's own object is never
+    // mutated, so the same var is safe to log again or read afterwards from
+    // any thread. Inactive logger: no-op.
     void log (const juce::var& event);
 
     juce::File    currentFile() const;
@@ -93,6 +102,10 @@ private:
     // dropped_ -- never silently lost (review round 1, Important 1).
     bool accepting_ { false };
     std::atomic<std::uint64_t> dropped_ { 0 };
+    // M-1: sticky for the session, set by writeLineNow() when the stream
+    // refuses a write. Atomic because the writer thread sets it and stop()
+    // (message thread) reads it. Reported in session_end.
+    std::atomic<bool> writeFailed_ { false };
 
     JUCE_DECLARE_NON_COPYABLE (SessionLogger)
 };

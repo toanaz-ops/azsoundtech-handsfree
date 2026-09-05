@@ -69,11 +69,23 @@ void NotchListPanel::refreshFromSnapshot()
             sightings_.try_emplace (key, Sighting { now, now });
         if (inserted)
             it->second.firstSeenMs = now;   // redundant with try_emplace, explicit for clarity
+        else if (lastRefreshMs_ >= 0.0 && it->second.lastSeenMs < lastRefreshMs_)
+        {
+            // I-1: this identity was absent for at least one whole refresh and
+            // has now been placed AGAIN. The age carries over (R-2 keeps the
+            // sighting for kTrackingTimeoutMs, so a brief tap dropout does not
+            // reset the clock), but the verdict must not: the human judged the
+            // notch that was here before, not this one. Without the reset a
+            // re-placed howl comes up already marked GOOD or FALSE -- a verdict
+            // nobody gave, and one the panel then refuses to let anyone give.
+            if (const auto b = buttons_.find (key); b != buttons_.end())
+                b->second.state = Verdict::None;
+        }
         it->second.lastSeenMs = now;
 
         // Lane D: a real child button, created once per identity and never
         // rebuilt -- see ensureButtonsFor()'s header comment.
-        ensureButtonsFor (key, notch);
+        ensureButtonsFor (key);
     }
 
     // 2. Rebuild the row strings (paint() never allocates).
@@ -120,6 +132,8 @@ void NotchListPanel::refreshFromSnapshot()
         else
             ++it;
     }
+
+    lastRefreshMs_ = now;
 
     layoutButtons();
     repaint();
@@ -250,8 +264,7 @@ NotchListPanel::Verdict NotchListPanel::verdictForTest (const int row) const
     return rows_[(std::size_t) row].verdict;
 }
 
-void NotchListPanel::ensureButtonsFor (const std::uint64_t key,
-                                       const NotchController::SnapshotNotch& notch)
+void NotchListPanel::ensureButtonsFor (const std::uint64_t key)
 {
     if (buttons_.find (key) != buttons_.end())
         return;
@@ -267,7 +280,6 @@ void NotchListPanel::ensureButtonsFor (const std::uint64_t key,
     }
     rb.good->onClick = [this, key] { reportVerdict (key, true); };
     rb.bad->onClick  = [this, key] { reportVerdict (key, false); };
-    juce::ignoreUnused (notch);
     buttons_.emplace (key, std::move (rb));
 }
 

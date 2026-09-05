@@ -119,7 +119,14 @@ MainComponent::MainComponent()
     for (auto& controller : notchControllers_)
         controller->setEventSink ([this] (const NotchController::NotchEvent& e)
         {
-            sessionLogger_.log (notchEventToVar (e));
+            // I-2: notchEventToVar() rounds and boxes up to three 1025-value
+            // spectra. 26 tests and the snapshot tool construct MainComponent
+            // with the logger never started, and log() would drop the var on
+            // arrival anyway -- so do not build it. isActive() is a relaxed
+            // atomic load; a stop() racing this line only costs the event the
+            // logger was about to drop regardless.
+            if (sessionLogger_.isActive())
+                sessionLogger_.log (notchEventToVar (e));
         });
 
     // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
@@ -445,10 +452,13 @@ MainComponent::MainComponent()
         auto v = SessionLogger::makeEvent ("tuning");
         auto* o = v.getDynamicObject();
         o->setProperty ("slot", -1);
-        o->setProperty ("rise_ms", p.riseReferenceMs);
+        // M-8: TuningPanel::Params holds int/float where SlotPanel::SlotTuning
+        // holds double. Cast so BOTH tuning events carry the same JSON types
+        // for the same field -- logstats reads one column, not two.
+        o->setProperty ("rise_ms", (double) p.riseReferenceMs);
         o->setProperty ("persist", p.persistenceBlocks);
-        o->setProperty ("q", p.q);
-        o->setProperty ("depth_db", p.depthDb);
+        o->setProperty ("q", (double) p.q);
+        o->setProperty ("depth_db", (double) p.depthDb);
         o->setProperty ("thr", (double) p.peakinessThreshold);
         sessionLogger_.log (v);
     };
@@ -562,9 +572,15 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
         auto* c = new juce::DynamicObject();
         c->setProperty ("bins", e.ctx->bins);
         c->setProperty ("bin_hz", e.ctx->binHz);
-        c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
         c->setProperty ("now", spectrumVar (e.ctx->now));
-        if (e.ctx->hasRef)   c->setProperty ("ref", spectrumVar (e.ctx->ref));
+        // M-3: refAgeMs describes the reference FRAME. With no reference
+        // frame it is 0.0, which reads as "compared against something 0 ms
+        // old" -- so it travels inside the same guard as "ref".
+        if (e.ctx->hasRef)
+        {
+            c->setProperty ("ref", spectrumVar (e.ctx->ref));
+            c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
+        }
         if (e.ctx->hasOther) c->setProperty ("other_lane_now", spectrumVar (e.ctx->other));
         o->setProperty ("ctx", juce::var (c));
     }
@@ -612,9 +628,25 @@ void MainComponent::setAppVersion (const juce::String& version)
     appVersion_ = version;
 }
 
+void MainComponent::showMessage (const juce::String& message)
+{
+    panelMessage_ = message;
+    refreshStatus();
+}
+
 bool MainComponent::startSessionLog (const juce::File& directory)
 {
-    return sessionLogger_.start (directory, sessionHeader());
+    if (! sessionLogger_.start (directory, sessionHeader()))
+        return false;
+
+    // T6: the log must record the mode the session STARTED in. requestMode()
+    // is the only other producer of a `mode` event, so a session nobody ever
+    // switches would otherwise carry none at all and a reader could not tell
+    // Auto from Bypass.
+    auto v = SessionLogger::makeEvent ("mode");
+    v.getDynamicObject()->setProperty ("mode", modeName (engine_.getMode()));
+    sessionLogger_.log (v);
+    return true;
 }
 
 void MainComponent::stopSessionLog()
@@ -804,6 +836,7 @@ bool MainComponent::loadPreset (const juce::File& file)
     // adoptPreset() itself skips (today: a lane-1 notch on a mono slot) --
     // the two are different rejections and neither subsumes the other.
     lastLoadSkipped_ = result.skippedNotchCount;
+    int adoptedTotal = 0;
 
     for (int s = 0; s < kMaxSlots; ++s)
     {
@@ -816,7 +849,7 @@ bool MainComponent::loadPreset (const juce::File& file)
         if (! notchesForSlot.empty())
         {
             int skipped = 0;
-            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
+            adoptedTotal += notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
             if (skipped > 0)
             {
                 lastLoadSkipped_ += skipped;
@@ -830,6 +863,20 @@ bool MainComponent::loadPreset (const juce::File& file)
     if (detectorsRunning)
         for (auto& controller : notchControllers_)
             controller->start();
+
+    // M-4: the mono-skip count had nowhere to go but a Logger line and a test
+    // accessor. It belongs in the session log next to the notches the load
+    // DID install -- a preset that silently loses half its notches on a mono
+    // rig is exactly the kind of thing a show log has to be able to explain.
+    // File NAME only: the full path can carry the operator's own name.
+    {
+        auto v = SessionLogger::makeEvent ("preset_load");
+        auto* o = v.getDynamicObject();
+        o->setProperty ("file", file.getFileName());
+        o->setProperty ("adopted", adoptedTotal);
+        o->setProperty ("skipped", lastLoadSkipped_);
+        sessionLogger_.log (v);
+    }
 
     slotPanel_.refresh();   // the routing table shows what the file just changed (lane S loose end)
 
