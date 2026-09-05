@@ -9,6 +9,7 @@
 
 #include "app/SessionLogger.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -183,13 +184,18 @@ TEST (SessionLogger, UncreatableDirectoryMakesStartFalseAndLogANoOp)
 // without doing so as ONE transition under queueMutex_ together with the
 // final drain -- i.e. if a log() call that takes the lock right after
 // drainToFile() swapped the deque out is allowed to push into the abandoned
-// pending_ instead of being counted into dropped_. A deterministic repro is
-// hard (the review's own words): several producer threads hammer log() --
-// each gated on isActive() so "calls" only counts attempts log() itself
-// must resolve (write or drop), never silently lose -- while stop() runs
-// concurrently; more threads means more of them are genuinely queued on
-// queueMutex_ at the instant stop() takes it, which is what actually
-// exercises the race (a single producer thread almost never catches it).
+// pending_ instead of being counted into dropped_. Several producer threads
+// hammer log() while stop() runs concurrently, racing it for queueMutex_.
+//
+// Reshaped in review round 2 (task-1-review.md): the original version called
+// stop() immediately after spawning the producers, so on most runs every
+// thread was still unscheduled and stop() closed an empty queue -- the race
+// under test was rarely reached. It also asserted an exact equality that is
+// NOT sound against the fixed code: log()'s fast, unlocked pre-filter
+// (`if (!isActive()) return;`, SessionLogger.cpp) can itself swallow a call
+// silently once active_ flips false -- that is not a bug, just a call that
+// exits before doing anything countable -- so "lines + dropped == calls + 2"
+// is false on any run where the pre-filter actually catches a producer.
 TEST (SessionLogger, LogRacingStopNeverLosesALine)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
@@ -202,18 +208,34 @@ TEST (SessionLogger, LogRacingStopNeverLosesALine)
         ASSERT_TRUE (logger.start (dir, header()));
 
         std::atomic<std::uint64_t> calls { 0 };
+        std::array<std::atomic<bool>, (size_t) kProducers> loggedOnce {};
+        for (auto& flag : loggedOnce)
+            flag.store (false, std::memory_order_relaxed);
+
         std::vector<std::thread> producers;
         for (int p = 0; p < kProducers; ++p)
         {
-            producers.emplace_back ([&]
+            producers.emplace_back ([&, p]
             {
                 while (logger.isActive())
                 {
                     logger.log (SessionLogger::makeEvent ("tick"));
                     calls.fetch_add (1, std::memory_order_relaxed);
+                    loggedOnce[(size_t) p].store (true, std::memory_order_relaxed);
                 }
             });
         }
+
+        // Barrier: wait until every producer has actually completed at
+        // least one log() call before calling stop(). Without this, stop()
+        // routinely wins before any producer is even scheduled and the race
+        // this test exists for is never exercised (review round 2, finding
+        // 2). By the time all kProducers flags are set, every thread is
+        // spinning tightly on log(), which is what gives stop() a real
+        // chance to race one of them for queueMutex_.
+        for (auto& flag : loggedOnce)
+            while (! flag.load (std::memory_order_relaxed))
+                std::this_thread::yield();
 
         logger.stop();
         for (auto& t : producers)
@@ -221,8 +243,35 @@ TEST (SessionLogger, LogRacingStopNeverLosesALine)
 
         const auto lines = linesOf (logger.currentFile());
         const auto dropped = logger.droppedEvents();
-        EXPECT_EQ ((std::uint64_t) lines.size() + dropped, calls.load() + 2)
+        const auto linesPlusDropped = (std::uint64_t) lines.size() + dropped;
+        const auto callsPlusHeaders = calls.load() + 2;   // + session_start/session_end
+
+        // Sound accounting (review round 2, finding 1 -- NOT an equality).
+        // Upper bound: every line written and every dropped_ increment made
+        // by a producer happens under queueMutex_ and corresponds 1:1 to a
+        // log() call that got past the unlocked pre-filter, so producers can
+        // never account for MORE lines+drops than calls they actually made.
+        EXPECT_LE (linesPlusDropped, callsPlusHeaders) << "attempt " << attempt;
+
+        // Lower bound: log()'s fast, unlocked pre-filter
+        // (`if (! isActive()) return;`) can itself silently swallow a call
+        // -- neither a line nor a dropped_ increment -- when a producer's
+        // `while (logger.isActive())` reads true just before stop() flips
+        // active_ to false, and that SAME log() call then re-reads
+        // isActive() (now false) and returns early. active_ transitions
+        // true -> false exactly once per session, so this window can be hit
+        // AT MOST ONCE per producer thread: the very next while-condition
+        // check on that thread also observes false and the thread exits.
+        // So at most kProducers calls, total, can go unaccounted for.
+        ASSERT_GE (callsPlusHeaders, (std::uint64_t) kProducers);
+        EXPECT_GE (linesPlusDropped, callsPlusHeaders - (std::uint64_t) kProducers)
             << "attempt " << attempt;
+
+        // Non-empty scenario: the barrier above guarantees every producer
+        // got at least one call into log() before stop(), so at least one
+        // producer line must have reached the file -- otherwise the bounds
+        // above hold vacuously and this test would be asserting nothing.
+        EXPECT_GT (lines.size(), 2) << "attempt " << attempt;
     }
 }
 

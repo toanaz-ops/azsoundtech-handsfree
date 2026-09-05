@@ -128,9 +128,17 @@ void SessionLogger::stop()
     for (const auto& line : finalBatch)
         writeLineNow (line);
 
-    // Read dropped_ only now, after the final drain above: any log() call
-    // that lost the race for queueMutex_ has, by this point, already
-    // incremented it, so session_end reports the true final count.
+    // Best-effort count for session_end's "dropped_events" field, NOT the
+    // authoritative one. stop() only waits for the internal writer thread
+    // (stopThread() above) -- it never waits for external producer threads.
+    // A producer's log() call can be sitting between its (already-passed)
+    // unlocked isActive() pre-filter and acquiring queueMutex_ when this
+    // line runs; it resolves into dropped_ whenever it later takes the
+    // lock, with no ordering relative to this read -- possibly after this
+    // line, after session_end is written, even after the stream is closed
+    // below. So dropped_events recorded in the file can UNDER-count.
+    // droppedEvents(), read only once every producer thread has been
+    // joined, is the authoritative count (review round 2).
     const auto droppedAtClose = dropped_.load (std::memory_order_relaxed);
 
     auto end = makeEvent ("session_end");
