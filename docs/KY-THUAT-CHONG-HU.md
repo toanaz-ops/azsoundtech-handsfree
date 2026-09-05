@@ -1,7 +1,7 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
-> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.0 (chờ release). Số liệu lấy trực tiếp từ
+> đang chạy (`src/`) tại thời điểm 05/09/2026, v1.1.2 (chờ release). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
 
 ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free

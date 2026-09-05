@@ -1,3 +1,10 @@
+---
+name: data-loop-lessons
+description: lane D (data loop — SessionLogger, GOOD/FALSE verdicts, tools/logstats.py) pitfalls — JUCE double serialisation rounding, var const-mutation via getDynamicObject, logger start timing vs tests, headless onClick() vs triggerClick(), the withdrawn widen-reset (A-9), multi-agent lane ownership traps
+metadata:
+  type: project
+---
+
 # Bài học từ lane D (vòng dữ liệu: log session + nhãn GOOD/FALSE) — 2026-09-05
 
 **Bối cảnh:** lane D thêm `SessionLogger` (JSONL, thread riêng), nút GOOD/FALSE
