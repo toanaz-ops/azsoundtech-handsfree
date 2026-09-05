@@ -23,3 +23,13 @@ Task 1: minor (deferred): file_ read unsynchronised by currentFile(); stopThread
 Task 1: fix round 2/5 (1 addressed, 0 open; commits 418f11c..a3a24cb; re-review 20/20 repeat clean)
 Task 1: minor (deferred): SessionLogger.h:1-10 still states the strict "lines + dropped == calls + 2" invariant as fact; SessionLogger.cpp:131-140 documents the under-count — align the header comment in the final pass
 Task 1: complete (commits 5da3b2a..a3a24cb, review clean after 2 fix rounds)
+Task 2: dispatched (BASE 4fca63f, implementer sonnet, brief task-2-brief.md)
+Task 2: minor (deferred, plan-mandated): test_candidatescorer.cpp:402-403 asserts kHarmonicPenalty for every above-threshold candidate; only true because the synthetic signal has no peaky candidate outside 1.4x-4.1x of 300 Hz — key it off frequencyHz in the final pass
+Task 2: complete (commits 4fca63f..ca390d4, review clean)
+Task 3: dispatched (BASE ca390d4, implementer sonnet, brief task-3-brief.md)
+Task 3: review (opus) NEEDS FIXES — Important 1 (plan-mandated A-9 widen-reset): Detector::reset on setWidth 1->2 leaves CandidateScorer history/EMA stale then zero-saturates rNorm/mNorm for ~200 ms on the returning lane; Important 2: header says sink runs on the detector thread but stop() delivers on the caller's thread; Minors 3-6.
+Task 3: CONTROLLER RULING on Important 1 — REMOVE the widen-reset behaviour from lane D (revert the setWidth 1->2 block + WideningResetsLaneOneDetectorState). Reason: owner constraint "lane D does not touch the audio/detection path, 0 dB"; A-9 is a lane-S loose end outside spec D; the reset as written is MORE permissive than the shipped 1.1.1 behaviour. Open for the OWNER: whether lane S (or a follow-up) gates detection on a re-entering lane for riseReferenceMs after a widen. Reverted code is preserved in git at 4cad420.
+Task 3: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE 4cad420; findings: Important 1 (revert), Important 2, Minor 3, 4, 5, 6)
+Task 3: fix round 1/5 (6 addressed, 0 open; commits 4cad420..00d8792; re-review clean, 421/421 reproduced)
+Task 3: minor (deferred): stop()'s 8-pass drain can strand the last event of a sink that re-enters on EVERY delivery (not counted as dropped) — document in the final pass
+Task 3: complete (commits ca390d4..00d8792, review clean after 1 fix round; widen-reset REMOVED by controller ruling — owner decision pending)
