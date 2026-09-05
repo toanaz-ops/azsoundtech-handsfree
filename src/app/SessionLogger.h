@@ -55,8 +55,10 @@ public:
 
     bool isActive() const { return active_.load (std::memory_order_acquire); }
 
-    // Any thread except audio. `event` must be a DynamicObject var; "t" is
-    // stamped here. Inactive logger: no-op.
+    // Any thread except audio. `event` must be a DynamicObject var; a clone
+    // is stamped with "t" -- the caller's own object is never mutated, so
+    // the same var is safe to log again or read afterwards from any thread.
+    // Inactive logger: no-op.
     void log (const juce::var& event);
 
     juce::File    currentFile() const;
@@ -82,6 +84,14 @@ private:
 
     mutable std::mutex queueMutex_;
     std::deque<juce::String> pending_;
+    // Authoritative "still open for business" flag, read/written ONLY under
+    // queueMutex_. active_ (above) is a fast, unlocked pre-filter log() uses
+    // to skip work when the logger has obviously never started or has long
+    // since stopped; accepting_ is the actual gate a log() call re-checks
+    // once it holds the same lock stop() uses to close the session, so a
+    // call that raced stop() is always resolved -- pushed, or counted into
+    // dropped_ -- never silently lost (review round 1, Important 1).
+    bool accepting_ { false };
     std::atomic<std::uint64_t> dropped_ { 0 };
 
     JUCE_DECLARE_NON_COPYABLE (SessionLogger)

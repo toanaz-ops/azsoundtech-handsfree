@@ -38,23 +38,39 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
 {
     stop();
 
+    // Minor 3: a failed start() below must not leave currentFile()/
+    // directory_ reporting the PREVIOUS session -- clear both up front so
+    // every early-return branch already reflects "no active file".
+    file_      = {};
+    directory_ = {};
+
     if (directory.existsAsFile())
         return false;
     if (! directory.createDirectory().wasOk())
         return false;
 
     const auto now = juce::Time::getCurrentTime();
-    const auto name = "session-" + now.formatted ("%Y%m%d-%H%M%S")
-                      + "-" + juce::String (now.getMilliseconds()).paddedLeft ('0', 3)
-                      + ".jsonl";
+    const auto stamp = "session-" + now.formatted ("%Y%m%d-%H%M%S")
+                       + "-" + juce::String (now.getMilliseconds()).paddedLeft ('0', 3);
+
+    // Minor 7: the ms suffix alone can collide (two sessions started inside
+    // the same millisecond). Append _2, _3, ... before .jsonl on collision.
+    // "_" (0x5F) sorts after "." (0x2E), so a suffixed name still sorts
+    // lexically after its un-suffixed base -- pruneOldFiles()'s "lexical
+    // order == chronological order" assumption keeps holding.
+    juce::File candidate = directory.getChildFile (stamp + ".jsonl");
+    for (int suffix = 2; candidate.existsAsFile(); ++suffix)
+        candidate = directory.getChildFile (stamp + "_" + juce::String (suffix) + ".jsonl");
+
     directory_ = directory;
-    file_      = directory.getChildFile (name);
+    file_      = candidate;
 
     stream_ = std::make_unique<juce::FileOutputStream> (file_);
     if (! stream_->openedOk())
     {
         stream_.reset();
-        file_ = {};
+        file_      = {};
+        directory_ = {};
         return false;
     }
 
@@ -63,6 +79,7 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
     {
         const std::lock_guard<std::mutex> lock (queueMutex_);
         pending_.clear();
+        accepting_ = true;
     }
 
     juce::var header = sessionHeader;
@@ -95,11 +112,30 @@ void SessionLogger::stop()
 
     notify();
     stopThread (5000);
-    drainToFile();
+
+    // Important 1 fix: close is ONE state transition under queueMutex_ --
+    // clear accepting_ and take the final batch together, atomically. A
+    // log() call still in flight either wins the lock first (pushes
+    // successfully, picked up in finalBatch below) or loses it and finds
+    // accepting_ already false (counts itself into dropped_ instead of
+    // pushing into a queue nobody will ever drain again).
+    std::deque<juce::String> finalBatch;
+    {
+        const std::lock_guard<std::mutex> lock (queueMutex_);
+        accepting_ = false;
+        finalBatch.swap (pending_);
+    }
+    for (const auto& line : finalBatch)
+        writeLineNow (line);
+
+    // Read dropped_ only now, after the final drain above: any log() call
+    // that lost the race for queueMutex_ has, by this point, already
+    // incremented it, so session_end reports the true final count.
+    const auto droppedAtClose = dropped_.load (std::memory_order_relaxed);
 
     auto end = makeEvent ("session_end");
     end.getDynamicObject()->setProperty ("t", elapsedMs());
-    end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) dropped_.load (std::memory_order_relaxed));
+    end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) droppedAtClose);
     writeLineNow (juce::JSON::toString (end, true));
 
     if (stream_ != nullptr)
@@ -109,16 +145,36 @@ void SessionLogger::stop()
 
 void SessionLogger::log (const juce::var& event)
 {
+    // Fast, unlocked pre-filter: skip all work (clone, stamp, serialise) for
+    // the common inactive cases -- never started, or long since stopped.
+    // This is NOT the authoritative check; see the accepting_ recheck below.
     if (! isActive())
         return;
+
     auto* obj = event.getDynamicObject();
     if (obj == nullptr)
         return;
 
-    obj->setProperty ("t", elapsedMs());
-    juce::String line = juce::JSON::toString (event, true);
+    // Important 2 fix: never mutate the caller's object. getDynamicObject()
+    // is non-const even from a const juce::var, so setProperty("t") would
+    // otherwise write into whatever DynamicObject the caller passed in --
+    // visible to them afterwards, and a data race if they log the same var
+    // from two threads. Clone first, stamp the clone, serialise the clone.
+    juce::var stamped (new juce::DynamicObject (*obj));
+    stamped.getDynamicObject()->setProperty ("t", elapsedMs());
+    juce::String line = juce::JSON::toString (stamped, true);
 
     const std::lock_guard<std::mutex> lock (queueMutex_);
+
+    // Important 1 fix: the authoritative check, under the same lock stop()
+    // uses to close the session. A call that read isActive()==true above
+    // but loses the race for this lock to a concurrent stop() lands here
+    // instead of pushing into an already-abandoned queue.
+    if (! accepting_)
+    {
+        dropped_.fetch_add (1, std::memory_order_relaxed);
+        return;
+    }
     if ((int) pending_.size() >= kMaxPendingLines)
     {
         dropped_.fetch_add (1, std::memory_order_relaxed);
