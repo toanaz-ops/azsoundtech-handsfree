@@ -15,3 +15,11 @@ Task 1: minor (deferred): filename uniqueness relies on ms suffix; no collision 
 Task 1: minor (deferred): stop() twice / start() twice / log() after stop / dtor-without-stop untested
 
 2026-09-05 11:50 — MERGE (owner decision "gộp thành quả, dừng cái yếu hơn"): session A archived. Lane D continues in session B on branch feat/data-loop, worktree peakiness-sweep-tool-c81129, BASE = main 9735a78. Cherry-picked: plan 0889084+834701f → 7cf5b71+ebc961d; Task 1 34ed811 → 5da3b2a. Rebuilt here: 406/406. Task 1 review (task-1-review.md): NEEDS FIXES — 2 Important → fix round next. plan-session-B-draft.md kept for reference only.
+Task 1: fix round 1/5 dispatched (fresh implementer sonnet — original lived in archived session A; FIX_BASE = HEAD after merge commit; findings: Important 1 log()/stop() race, Important 2 const-var mutation, + Minor 3/7/8 per B-1)
+Task 1: fix round 1/5 (5 addressed, 1 open — NEW Important: tests/test_sessionlogger.cpp LogRacingStopNeverLosesALine flaky ~27% on a false invariant and never reaches the race; commits 7515085..418f11c)
+Task 1: minor (deferred): session_end.dropped_events can under-count a producer that loses the queueMutex_ race after stop()'s read — droppedEvents() is authoritative; document, no test under concurrency
+Task 1: minor (deferred): filename collision suffix _10+ breaks lexical order (needs 10 sessions in one ms)
+Task 1: minor (deferred): file_ read unsynchronised by currentFile(); stopThread timeout -> killThread inside drainToFile lock would deadlock (pre-existing); review Minors 4/5/6 still open
+Task 1: fix round 2/5 (1 addressed, 0 open; commits 418f11c..a3a24cb; re-review 20/20 repeat clean)
+Task 1: minor (deferred): SessionLogger.h:1-10 still states the strict "lines + dropped == calls + 2" invariant as fact; SessionLogger.cpp:131-140 documents the under-count — align the header comment in the final pass
+Task 1: complete (commits 5da3b2a..a3a24cb, review clean after 2 fix rounds)
