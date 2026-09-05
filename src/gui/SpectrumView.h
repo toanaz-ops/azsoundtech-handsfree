@@ -205,22 +205,93 @@ public:
     //==========================================================================
     // RING RISK -- how close the room is to ringing right now.
     //
-    // THE DATA SOURCE DOES NOT EXIST YET. NotchController::SnapshotBuffer
-    // publishes magnitudes and placed notches, and nothing that scores how
-    // close the room is to howling. Wiring this to something derived GUI-side
-    // would put a SECOND, different peakiness number on screen next to the
-    // detector's own, which is worse than showing nothing.
+    // The number comes from the DETECTOR, never from anything derived here:
+    // NotchController::SnapshotBuffer publishes ringRiskScore / ringRiskValid
+    // / ringRiskThreshold (task R1). A GUI-side peakiness of its own would put
+    // a SECOND, different number on screen next to the one the filters
+    // actually follow, and the operator would have no way to tell which.
     //
-    // So the control is built, laid out and painted, and `ringRiskProvider`
-    // is null until the DSP side publishes a score. Null renders as
-    // Unavailable -- an explicit "n/a", never a reassuring "low".
+    // This class turns that number into a state (riskForScore) and keeps the
+    // state from flickering (RingRiskHysteresis). It does NOT read the
+    // snapshot for it: `ringRiskProvider` is still null -- nothing assigns it
+    // yet -- and null renders as Unavailable, an explicit "n/a" and never a
+    // reassuring "low". Wiring it to the monitored slot is task R3.
     //
-    // Contract for whoever fills this in: docs/spec-ring-risk.md.
+    // Contract: docs/spec-ring-risk.md, as amended by the lane R amendment
+    // block in .superpowers/sdd/2026-08-27-next-wave/task-R2-brief.md.
     enum class RingRisk { Unavailable, Low, Rising, Critical };
 
     // Polled once per frame by the same timer that refreshes the plot. Null
     // means Unavailable. Must not block: it runs on the message thread.
     std::function<RingRisk()> ringRiskProvider;
+
+    // Where Rising starts, as a fraction of the threshold the DETECTOR
+    // published (snapshot.ringRiskThreshold). Nothing here hardcodes that
+    // threshold: it tracks the RESPONSE preset instead of being one more
+    // magic constant, and a GUI-side constant would silently disagree with
+    // the machine it describes the moment the DSP side moved.
+    static constexpr float kRingRiskRisingFraction = 0.55f;
+
+    // Score -> state, spec section 2 as amended by lane R ruling A-R3. PURE:
+    // it reads the three ring-risk fields of one snapshot and nothing else,
+    // which is what lets it be tested on a hand-filled buffer.
+    //
+    //   ! ringRiskValid                  -> Unavailable
+    //   score <  0.55 x ringRiskThreshold -> Low
+    //   score <         ringRiskThreshold -> Rising
+    //   score >=        ringRiskThreshold -> Critical
+    //
+    // Three ways the number cannot be banded at all, all reported as
+    // Unavailable rather than guessed at -- an indicator that reassures
+    // wrongly is worse than one that admits it has nothing:
+    //   - the detector did not score this frame (ringRiskValid false),
+    //   - the score is NaN (every comparison below would be false, which
+    //     would otherwise fall through to Critical and cry wolf),
+    //   - no usable band line was published (threshold non-finite, or <= 0,
+    //     against which EVERY score reads Critical).
+    [[nodiscard]] static RingRisk riskForScore (const NotchController::SnapshotBuffer&);
+
+    // Anti-flicker, spec section 3. Of the two offered shapes -- a hold time,
+    // or split rise/fall thresholds -- this is the HOLD (lane R ruling A-R5):
+    // after stepping UP, the readout may not step DOWN for kHoldMs.
+    //
+    // Why hold rather than split thresholds: the bands are already expressed
+    // as fractions of a live threshold, so a second set of fall fractions
+    // would be a second thing to keep in step with the DSP. A hold is one
+    // number, and it is the one that matches what the chip is FOR -- a
+    // soundman who glanced away for half a second still sees that the room
+    // just went Critical.
+    //
+    // Two things are deliberately immediate, both because a late warning is
+    // not a warning:
+    //   - a step UP (and it restarts the hold), and
+    //   - Unavailable, which overrides an in-flight hold outright: once the
+    //     detector stops scoring, continuing to show a stale Critical would
+    //     be inventing data.
+    //
+    // Time is a PARAMETER, not a clock this object owns -- the same shape
+    // ageMsOf() already uses in this class. The caller (timerCallback) passes
+    // juce::Time::getMillisecondCounterHiRes(); a test passes numbers, and so
+    // needs no wall-clock sleep to prove a 750 ms rule.
+    struct RingRiskHysteresis
+    {
+        // 750 ms: spec section 3's own figure. At 30 fps that is ~22 frames,
+        // long enough that a score dithering across a band edge produces one
+        // state change instead of twenty.
+        static constexpr double kHoldMs = 750.0;
+
+        // Feeds one raw band in, returns what the readout should show.
+        RingRisk apply (RingRisk raw, double nowMs);
+
+    private:
+        // Severity order for "is this a step up or a step down". Unavailable
+        // is not a severity, so it ranks below Low and is handled by apply()
+        // before any ranking happens.
+        [[nodiscard]] static int severity (RingRisk);
+
+        RingRisk state_    = RingRisk::Unavailable;
+        double   stepUpMs_ = 0.0;   // when the current hold started
+    };
 
     // What the readout currently shows. Exposed so a headless test can assert
     // the honest default without reaching into paint().
@@ -265,6 +336,10 @@ private:
     [[nodiscard]] static juce::Colour ringRiskColour (RingRisk);
 
     RingRisk ringRisk_ = RingRisk::Unavailable;
+
+    // What timerCallback() feeds the provider's raw band through before it
+    // reaches ringRisk_. Owns no clock; see RingRiskHysteresis.
+    RingRiskHysteresis ringRiskHold_;
 
     // Reserved at the toolbar's left, after the ANALYSER caption.
     static constexpr int kRiskLegendWidth = 74;
