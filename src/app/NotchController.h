@@ -398,6 +398,18 @@ private:
         CandidateScorer   scorer;
         std::array<std::uint32_t, Detector::kNumBins> persistence {};
         double previousBlockNowMs = 0.0;   // <= 0: no previous block yet
+        // Lane R (RING RISK validity, ruling A-R4): blocks this lane's scorer
+        // has committed SINCE THE LAST RESET. It lives here, not in
+        // CandidateScorer, precisely because the scorer must NOT be reset --
+        // lane D removed that, and resetting it would change where notches
+        // land. This counter is the readout's own memory: cleared by
+        // setSampleRate() and setWidth(), so after a device/SR change the
+        // chip reads N/A instead of publishing a number computed from rise
+        // history and baseline EMAs that belong to the old rate, at bin
+        // indices that now map to different frequencies. Saturating rather
+        // than wrapping: a wrap to 0 would blink the chip to N/A once every
+        // ~1.4 years of continuous running for no reason.
+        std::uint32_t blocksSinceReset = 0;
     };
     std::array<LockFreeRingBuffer<float>*, kChannels> taps_ {};   // [0] never null
     std::array<LaneAnalysis, kChannels> lanes_;

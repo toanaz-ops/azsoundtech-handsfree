@@ -1619,3 +1619,63 @@ TEST (NotchControllerRingRisk, ScoreIsMaxOverBothLanesOfTheSlot)
     }
     EXPECT_GT (peak, 0.0f);
 }
+
+// A-R4's reset boundaries. The scorer is deliberately NOT reset (lane D
+// removed that; resetting it would move notches), so after a device/SR change
+// its rise history and baseline EMAs still hold old-rate magnitudes at bin
+// indices that now map to different frequencies. The readout must say N/A
+// rather than publish a number computed from them -- "khong tran an sai".
+TEST (NotchControllerRingRisk, SampleRateChangeInvalidatesUntilTheNextBlock)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_TRUE (snap.ringRiskValid);
+
+    h.controller.setSampleRate (44100.0);
+
+    // First frame at the new rate: nothing has been committed since the reset,
+    // so the chip goes back to N/A.
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+
+    // One committed block later it is a measurement again.
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.ringRiskValid);
+}
+
+TEST (NotchControllerRingRisk, WidthChangeInvalidatesUntilTheNextBlock)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_TRUE (snap.ringRiskValid);
+
+    // Legal here: the detector thread was never started, these harnesses drive
+    // runOnce() by hand. This is also the call MainComponent's onAfterRestart
+    // hook makes for every slot after EVERY engine restart, so it is the path
+    // a real device or sample-rate change takes.
+    h.controller.setWidth (1);
+
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.ringRiskValid);
+    EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+
+    pump (h, quiet.hop());
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.ringRiskValid);
+}

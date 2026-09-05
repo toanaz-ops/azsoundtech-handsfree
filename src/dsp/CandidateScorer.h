@@ -96,13 +96,6 @@ public:
     // the EMA baselines and pushes this frame into the rise-history ring.
     void commitBlock (const float* magnitudes, double elapsedMs);
 
-    // Lane R (RING RISK readout, ruling A-R4): has this scorer committed at
-    // least one frame, i.e. is the rise axis comparing against something real?
-    // Before that, scoreCandidate() takes its "no history at all -> rNorm 1"
-    // branch, so the number it returns is not a measurement of the room and
-    // must not be published as one. Read-only; changes no behaviour.
-    bool hasHistory() const { return historyCount_ > 0; }
-
 private:
     struct HistoryFrame
     {

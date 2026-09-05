@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
                                   LockFreeRingBuffer<float>* tapLane1,
@@ -101,6 +102,18 @@ void NotchController::setWidth (int lanes)
     // for riseReferenceMs after a widen is an OPEN OWNER DECISION for lane S
     // -- see SDD ledger 2026-09-05-data-loop, Task 3 ruling.
     width_ = newWidth;
+
+    // A-R4 reset boundary, and the one that actually fires in the shipping
+    // app: MainComponent's onAfterRestart hook calls setWidth() on every slot
+    // after EVERY engine restart -- device change, sample-rate change, buffer
+    // change (DevicePanel::onBeforeRestart/onAfterRestart) -- so this covers
+    // the device/SR case even though nothing outside tests calls
+    // setSampleRate(). Unconditional for that reason: a restart that keeps
+    // the same width still invalidated the scorer's view of the room. A brief
+    // N/A on the chip is honest; a stale number is not. Readout only -- the
+    // scorer, the persistence streaks and the model are untouched here.
+    for (auto& l : lanes_)
+        l.blocksSinceReset = 0;
 }
 
 void NotchController::run()
@@ -707,10 +720,12 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
     la.scorer.beginBlock (block.sampleRate);
 
     // RING RISK validity (A-R4), taken BEFORE this frame is committed: a
-    // scorer with no committed frame takes the "no history at all -> rNorm 1"
-    // branch, so whatever it returns is not a measurement of the room. OR
-    // across the lanes analysed this iteration -- one readout per slot.
-    frameScoreValid_ = frameScoreValid_ || la.scorer.hasHistory();
+    // scorer with no committed frame SINCE THE LAST RESET takes the "no
+    // history at all -> rNorm 1" branch, or compares against magnitudes from
+    // a rate/width this lane no longer runs at, so whatever it returns is not
+    // a measurement of the room now. OR across the lanes analysed this
+    // iteration -- one readout per slot.
+    frameScoreValid_ = frameScoreValid_ || la.blocksSinceReset > 0;
 
     // Feed auto-release FIRST so a still-ringing locked notch stays fed by the
     // same frame the scorer looks at (spec 5.2 step 7).
@@ -829,6 +844,10 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
     }
 
     la.scorer.commitBlock (block.magnitudes, elapsedMs);
+    // Counted next to the commit it counts (A-R4). Saturates instead of
+    // wrapping -- see the member's comment.
+    if (la.blocksSinceReset < std::numeric_limits<std::uint32_t>::max())
+        ++la.blocksSinceReset;
 }
 
 void NotchController::copySnapshot (SnapshotBuffer& destOwnedByCaller) const
@@ -845,7 +864,16 @@ std::uint64_t NotchController::retryCount() const
 void NotchController::setSampleRate (double sampleRate)
 {
     for (auto& l : lanes_)
+    {
         l.detector.setSampleRate (sampleRate);
+        // A-R4 reset boundary. The scorer itself is deliberately NOT reset
+        // (that would move notches; lane D removed it), so its rise history
+        // and baseline EMAs still hold old-rate magnitudes at bin indices
+        // that now mean different frequencies. Zeroing the readout's counter
+        // is what stops the chip claiming a measurement it does not have --
+        // it reads N/A until this lane has committed a block at the new rate.
+        l.blocksSinceReset = 0;
+    }
 }
 
 void NotchController::flushOutbox()
