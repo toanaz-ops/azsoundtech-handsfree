@@ -708,3 +708,95 @@ TEST (SpectrumView, RingRiskStepUpRestartsTheHold)
     EXPECT_EQ (hold.apply (Risk::Low, 1449.0), Risk::Critical);
     EXPECT_EQ (hold.apply (Risk::Low, 1450.0), Risk::Low);        // 700 + 750
 }
+
+//==============================================================================
+// Fix round 1, review finding 1: the hold must run from the last time the
+// level was OBSERVED at or above the held state, not from the last time the
+// state CHANGED. The test above stops inside one hold window, so it cannot
+// see the difference; this one runs for seconds.
+//
+// Red against a hold that re-arms only on a strict step UP: the equal-severity
+// Critical frames leave stepUpMs_ where it was, so the hold expires ~750 ms
+// after the last change and the chip blinks down to Rising for one frame,
+// over and over, for as long as the score sits on the line.
+
+TEST (SpectrumView, RingRiskDoesNotFlickerAcrossManyHoldWindows)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Rising, 0.0), Risk::Rising);
+    ASSERT_EQ (hold.apply (Risk::Critical, 100.0), Risk::Critical);
+
+    // 3 seconds of 30 fps -- four hold windows, not one.
+    auto  shown  = Risk::Critical;
+    int   changes = 0;
+    double now   = 100.0;
+    for (int frame = 0; frame < 90; ++frame)
+    {
+        now += 1000.0 / 30.0;                       // ~33.3 ms per frame
+        const auto raw  = (frame % 2 == 0) ? Risk::Rising : Risk::Critical;
+        const auto next = hold.apply (raw, now);
+        if (next != shown)
+        {
+            ++changes;
+            shown = next;
+        }
+    }
+
+    EXPECT_EQ (changes, 0) << "the chip changed state while the score sat on the band edge";
+    EXPECT_EQ (shown, Risk::Critical);
+    // The run really did outlast several hold windows -- otherwise the zero
+    // above would be the old test's claim wearing a new name.
+    EXPECT_GT (now - 100.0, 4.0 * gui::SpectrumView::RingRiskHysteresis::kHoldMs);
+}
+
+// Fix round 1: the flip side of the rule above -- confirming the level must
+// not make the hold immortal. After the score GENUINELY drops and stays down,
+// the readout falls exactly 750 ms after the LAST Critical frame.
+
+TEST (SpectrumView, RingRiskFallsSevenFiftyAfterTheLastCriticalObservation)
+{
+    gui::SpectrumView::RingRiskHysteresis hold;
+
+    ASSERT_EQ (hold.apply (Risk::Critical, 1000.0), Risk::Critical);
+
+    // A second of the level being re-observed, each frame re-arming the hold.
+    for (double t = 1033.0; t <= 2000.0; t += 33.0)
+        ASSERT_EQ (hold.apply (Risk::Critical, t), Risk::Critical) << "t = " << t;
+    ASSERT_EQ (hold.apply (Risk::Critical, 2000.0), Risk::Critical);
+
+    // Now the room genuinely calms down and stays calm.
+    // 750 ms after the FIRST Critical (1750) is much too early to fall.
+    EXPECT_EQ (hold.apply (Risk::Rising, 2033.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Rising, 2500.0), Risk::Critical);
+    EXPECT_EQ (hold.apply (Risk::Rising, 2749.0), Risk::Critical);
+
+    // 750 ms after the LAST Critical observation, and not a frame earlier.
+    EXPECT_EQ (hold.apply (Risk::Rising, 2750.0), Risk::Rising);
+}
+
+// Fix round 1, review finding 2: the hold is per-slot state, exactly like
+// firstSeenMs_ / snapshot_ / displayLane_, and setController exists to drop
+// per-slot state. Red if it survives the switch: the new slot then shows the
+// old slot's Critical for up to 750 ms.
+
+TEST (SpectrumView, RingRiskHoldDoesNotSurviveASlotSwitch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController slotA (false, false);
+    FedController slotB (false, false);
+
+    gui::SpectrumView view (slotA.controller);
+    view.setSize (800, 400);
+
+    // Slot A goes Critical, then quiet -- and is correctly still holding.
+    ASSERT_EQ (view.ringRiskHoldForTest().apply (Risk::Critical, 1000.0), Risk::Critical);
+    ASSERT_EQ (view.ringRiskHoldForTest().apply (Risk::Low, 1100.0), Risk::Critical);
+
+    view.setController (slotB.controller);
+
+    // Slot B is a different room. Attributing slot A's alarm to it, even for
+    // one frame, is the readout lying about which slot it is describing.
+    EXPECT_EQ (view.ringRiskHoldForTest().apply (Risk::Low, 1101.0), Risk::Low);
+}

@@ -255,6 +255,14 @@ public:
     // or split rise/fall thresholds -- this is the HOLD (lane R ruling A-R5):
     // after stepping UP, the readout may not step DOWN for kHoldMs.
     //
+    // The hold runs from the last time the level was OBSERVED AT OR ABOVE the
+    // held state, not from the last time the state CHANGED. A frame whose raw
+    // band equals the held one changes nothing on screen, but it is still the
+    // level being confirmed, so it re-arms the hold. Arming only on a strict
+    // step up would let the hold expire under a score that is still sitting
+    // on the band edge: the chip would blink down for one frame roughly every
+    // kHoldMs, for as long as the condition lasted.
+    //
     // Why hold rather than split thresholds: the bands are already expressed
     // as fractions of a live threshold, so a second set of fall fractions
     // would be a second thing to keep in step with the DSP. A hold is one
@@ -296,6 +304,11 @@ public:
     // What the readout currently shows. Exposed so a headless test can assert
     // the honest default without reaching into paint().
     [[nodiscard]] RingRisk getRingRisk() const { return ringRisk_; }
+
+    // The live hold, so a test can drive the 750 ms rule through the SAME
+    // instance the component uses -- which is what makes the slot-switch
+    // reset observable at all.
+    [[nodiscard]] RingRiskHysteresis& ringRiskHoldForTest() { return ringRiskHold_; }
 
     void paint (juce::Graphics&) override;
     void resized() override;

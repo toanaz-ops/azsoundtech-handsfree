@@ -538,6 +538,11 @@ void SpectrumView::setController (const NotchController& controller)
     displayLane_ = 0;
     laneGroup_.setSelectedIndex (0);
 
+    // The anti-flicker hold is per-slot state by exactly the same argument: a
+    // Critical held from the slot we just left would otherwise be attributed
+    // to this one for up to 750 ms.
+    ringRiskHold_ = {};
+
     refreshFromSnapshot();
     repaint();
 }
@@ -702,8 +707,14 @@ SpectrumView::RingRiskHysteresis::apply (const RingRisk raw, const double nowMs)
     const int rawSeverity = severity (raw);
     const int heldSeverity = severity (state_);
 
-    // Step UP: immediate, and it restarts the hold.
-    if (rawSeverity > heldSeverity)
+    // Step UP, or the held level CONFIRMED again: both (re)start the hold. A
+    // step up is immediate; an equal-severity frame changes nothing on screen
+    // but IS the level being observed again, and the hold runs from the last
+    // OBSERVATION, not from the last change. Re-arming only on a strict step
+    // up lets the hold expire under a score still sitting on the band edge,
+    // and the chip blinks down for one frame every 750 ms -- the exact
+    // flicker spec section 3 / Acceptance 4 exists to forbid.
+    if (rawSeverity >= heldSeverity)
     {
         state_    = raw;
         stepUpMs_ = nowMs;
