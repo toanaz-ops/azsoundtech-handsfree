@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <vector>
 
 namespace gui
@@ -80,6 +81,24 @@ public:
     // because selecting a slot re-points the ANALYSER as well, and this panel
     // has no business knowing that.
     void setSlotTabs (juce::Component* tabsOrNull);
+
+    // Lane D (data loop): the operator's verdict on a row. GOOD only reports;
+    // FALSE reports AND the owner clears the notch -- the panel still issues
+    // no command itself (display-only discipline, spec §3.4). slot is what
+    // setDisplayedSlot() named; lane is SnapshotNotch::channel.
+    enum class Verdict : std::uint8_t { None, Good, False };
+    std::function<void (int slot, int lane, int index, float hz, bool good, double ageMs)> onVerdict;
+
+    static constexpr float kColVerdictW    = 92.0f;   // two buttons + gap + inset, and "VERDICT"
+    static constexpr int   kVerdictButtonW = 40;
+    static constexpr int   kVerdictButtonH = 20;
+    static constexpr int   kVerdictGap     = 4;
+
+    // TEST ACCESSORS -- null when `row` has no buttons (out of range).
+    [[nodiscard]] juce::TextButton* goodButtonForTest (int row);
+    [[nodiscard]] juce::TextButton* falseButtonForTest (int row);
+    [[nodiscard]] Verdict verdictForTest (int row) const;
+    [[nodiscard]] int displayedSlotForTest() const { return displayedSlot_; }
 
     // Shared formatting truth -- the panel paints these and the tests assert
     // them, so there is exactly one definition of each format.
@@ -152,6 +171,14 @@ public:
         // COLOUR through az::theme::notchColour as well as its status text --
         // and the two must never disagree about how old a notch is.
         double ageMs = 0.0;
+
+        // Lane D: identity key (see identityKey()) so reportVerdict() and the
+        // test accessors can find this row's buttons; the verdict itself,
+        // mirrored from buttons_[key].state; and the pre-built word paint()
+        // draws once a verdict has been given.
+        std::uint64_t key = 0;
+        Verdict verdict = Verdict::None;
+        juce::String verdictText;
     };
 
     [[nodiscard]] int rowCountForTest() const { return (int) rows_.size(); }
@@ -197,6 +224,23 @@ private:
 
     // First-seen ledger keyed by identity (ruling R-2).
     std::map<std::uint64_t, Sighting> sightings_;
+
+    // Lane D: the ONE deliberate exception to "paint draws prebuilt members
+    // only" -- a click needs a real child Component. Keyed by the same
+    // identity the sightings ledger uses, created when an identity is first
+    // seen, destroyed when it leaves tracking; NEVER rebuilt per refresh, so
+    // a click cannot land on a button that no longer exists.
+    struct RowButtons
+    {
+        std::unique_ptr<juce::TextButton> good, bad;
+        Verdict state = Verdict::None;
+    };
+    std::map<std::uint64_t, RowButtons> buttons_;
+    int displayedSlot_ = 0;
+
+    void ensureButtonsFor (std::uint64_t key, const NotchController::SnapshotNotch& notch);
+    void layoutButtons();
+    void reportVerdict (std::uint64_t key, bool good);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NotchListPanel)
 };

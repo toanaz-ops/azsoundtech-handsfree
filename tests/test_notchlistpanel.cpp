@@ -342,8 +342,13 @@ TEST (NotchListPanelWiring, TableIsTheFloorsLeftColumnAndNeverOverlapsTheAnalyse
 //==============================================================================
 // Column budget (review finding on Task 8): the header's guarantee that
 // every column fits its widest realistic cell at the narrowest sensible
-// panel (~360 px), measured against the REAL faces the panel paints with --
-// not guessed, and not the 13 px the header comment used to (wrongly) claim.
+// panel, measured against the REAL faces the panel paints with -- not
+// guessed, and not the 13 px the header comment used to (wrongly) claim.
+//
+// 440 px is below the narrowest width the app ever gives this panel --
+// kNotchColumnFraction (0.44) of kMinimumWidth - 2*kEdgePad = 517 px -- and
+// the smallest frame at which the fixed columns plus a two-button VERDICT
+// cell leave HELD its widest cell.
 //
 // Red if any column constant is narrowed below its widest cell, or if a
 // formatter starts producing a wider string, at the panel's real font.
@@ -385,7 +390,7 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     EXPECT_LE (headerWidthOf ("FREQ"),  gui::NotchListPanel::kColFreqW);
     EXPECT_LE (headerWidthOf ("DEPTH"), gui::NotchListPanel::kColDepthW);
     EXPECT_LE (headerWidthOf ("Q"),     gui::NotchListPanel::kColQW);
-    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (360.0f));
+    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (440.0f));
 
     // FREQ: detection runs to Nyquist (24 kHz at 48 kHz sample rate, 48 kHz
     // at 96 kHz), so a two-digit-kHz reading is reachable, not just the
@@ -416,6 +421,111 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     // change that widens the string fails this test too.
     const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
     ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
-    const float statusW360 = gui::NotchListPanel::statusWidthFor (360.0f);
+    const float statusW360 = gui::NotchListPanel::statusWidthFor (440.0f);
     EXPECT_LE (widthOf (widestAge) + kInset, statusW360);
+}
+
+//==============================================================================
+// Lane D (data loop): the VERDICT column.
+
+// Spec test 12. Red if FALSE stops reporting good=false, GOOD stops reporting
+// good=true, or the row stops switching from buttons to a verdict word.
+TEST (NotchListPanelVerdict, ClickingFalseOrGoodReportsTheVerdictAndTheRowShowsIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TwoNotchController fed;
+    FakeClock clock;
+    // Capture BY REFERENCE (see AgeIsComputedFromFirstSightingNotWallTime's
+    // comment above): ClockFn copies a callable passed by value, which would
+    // freeze the panel on a snapshot of nowMs.
+    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
+    panel.setDisplayedSlot (3);
+    panel.setSize (640, 200);
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 2);
+
+    struct Seen { int slot, lane, index; float hz; bool good; double ageMs; };
+    std::vector<Seen> seen;
+    panel.onVerdict = [&] (int slot, int lane, int index, float hz, bool good, double ageMs)
+    {
+        seen.push_back ({ slot, lane, index, hz, good, ageMs });
+    };
+
+    ASSERT_NE (panel.falseButtonForTest (0), nullptr);
+    panel.falseButtonForTest (0)->onClick();
+    ASSERT_EQ (seen.size(), 1u);
+    EXPECT_EQ (seen[0].slot, 3);
+    EXPECT_EQ (seen[0].lane, 0); EXPECT_EQ (seen[0].index, 0);
+    EXPECT_NEAR (seen[0].hz, 987.0f, 0.5f);
+    EXPECT_FALSE (seen[0].good);
+    EXPECT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::False);
+    EXPECT_EQ (panel.rowForTest (0).verdictText, "FALSE");
+    EXPECT_FALSE (panel.falseButtonForTest (0)->isVisible());
+    EXPECT_FALSE (panel.goodButtonForTest (0)->isVisible());
+
+    panel.goodButtonForTest (1)->onClick();
+    ASSERT_EQ (seen.size(), 2u);
+    EXPECT_EQ (seen[1].lane, 1); EXPECT_EQ (seen[1].index, 3);
+    EXPECT_TRUE (seen[1].good);
+    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
+
+    // GOOD does not touch the notch: the panel is display-only, the row stays.
+    panel.refreshFromSnapshot();
+    EXPECT_EQ (panel.rowCountForTest(), 2);
+    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
+    paintHeadless (panel, 640, 200);
+}
+
+// Spec test 13. Red if refreshFromSnapshot() rebuilds the buttons (a click
+// mid-rebuild would be swallowed), or if an identity that leaves tracking
+// keeps its buttons alive.
+TEST (NotchListPanelVerdict, ButtonsPersistAcrossRefreshesAndDieWithTheirIdentity)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TwoNotchController fed;
+    FakeClock clock;
+    // Capture BY REFERENCE (see AgeIsComputedFromFirstSightingNotWallTime's
+    // comment above): ClockFn copies a callable passed by value, which would
+    // freeze the panel on a snapshot of nowMs -- fatal here since this test
+    // relies on the clock actually advancing past kTrackingTimeoutMs.
+    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
+    panel.setSize (640, 200);
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 2);
+
+    auto* good0  = panel.goodButtonForTest (0);
+    auto* false0 = panel.falseButtonForTest (0);
+    ASSERT_NE (good0, nullptr);
+    for (int i = 0; i < 10; ++i)
+    {
+        clock.nowMs += 250.0;
+        panel.refreshFromSnapshot();
+    }
+    EXPECT_EQ (panel.goodButtonForTest (0), good0);
+    EXPECT_EQ (panel.falseButtonForTest (0), false0);
+    EXPECT_EQ (panel.getNumChildComponents(), 4);   // two rows x two buttons
+
+    // Clear notch 0 in the model, republish, and age the identity past the
+    // tracking timeout: its buttons must be gone.
+    fed.controller.clearNotch (0, 0);
+    fed.republish();
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 1);
+    clock.nowMs += gui::NotchListPanel::kTrackingTimeoutMs + 1000.0;
+    panel.refreshFromSnapshot();
+    EXPECT_EQ (panel.getNumChildComponents(), 2);
+    EXPECT_NE (panel.goodButtonForTest (0), good0);   // the surviving row is the other identity
+}
+
+// Column budget: the VERDICT column fits two buttons and its own caption.
+// Red if kColVerdictW shrinks below the buttons, or the caption ellipsises.
+TEST (NotchListPanelVerdict, VerdictColumnFitsItsButtonsAndCaption)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    using P = gui::NotchListPanel;
+    EXPECT_GE (P::kColVerdictW, (float) (2 * P::kVerdictButtonW + P::kVerdictGap + 4));
+    const auto headerFont = az::theme::legendFont (az::theme::columnFontSize, true, az::theme::trackingColumn);
+    EXPECT_LE (juce::GlyphArrangement::getStringWidth (headerFont, "VERDICT"), P::kColVerdictW);
+    const auto buttonFont = az::theme::monoFont (az::theme::chipFontSize);
+    EXPECT_LE (juce::GlyphArrangement::getStringWidth (buttonFont, "FALSE") + 6.0f, (float) P::kVerdictButtonW);
 }
