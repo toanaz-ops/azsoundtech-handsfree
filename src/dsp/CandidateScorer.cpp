@@ -35,17 +35,29 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
                                        const float* magnitudes,
                                        const LockedFrequencyView& lockedFrequencies)
 {
+    return scoreCandidateDetailed (candidate, magnitudes, lockedFrequencies).score;
+}
+
+CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
+    const PeakinessAnalyzer::Candidate& candidate,
+    const float* magnitudes,
+    const LockedFrequencyView& lockedFrequencies)
+{
+    ScoreBreakdown out;
+    out.rawPeakiness = candidate.peakiness;
+
     // The scorer never resurrects a bin the analyzer already rejected: without
     // this gate, a candidate just under the threshold could still clear the
     // confirm score through the other two axes.
     if (candidate.peakiness <= PeakinessAnalyzer::kDefaultThreshold)
-        return 0.0f;
+        return out;   // score 0, axes 0, penalty 1 -- product is 0 as before
 
     // Axis 1 -- peakiness. Saturates at 10x threshold: beyond that the bin is
     // peaky "enough" and extra sharpness must not substitute for novelty.
     float pNorm = (candidate.peakiness / PeakinessAnalyzer::kDefaultThreshold - 1.0f)
                   / 9.0f;
     pNorm = std::min (std::max (pNorm, 0.0f), 1.0f);
+    out.pNorm = pNorm;
 
     // Axis 2 -- rise rate against the frame closest to ~riseReferenceMs ago.
     //
@@ -77,6 +89,8 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
             if (clockMs_ - history_[idx].timeMs >= minAgeMs)
             {
                 reference = history_[idx].magnitudes.data();
+                out.refFrame = reference;
+                out.refAgeMs = clockMs_ - history_[idx].timeMs;
                 break;
             }
         }
@@ -93,6 +107,7 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
         }
         // else: history too young -- rNorm stays 0 (see above).
     }
+    out.rNorm = rNorm;
 
     // Axis 3 -- novelty against the per-bin EMA baseline. A tone that has been
     // there for seconds IS the new baseline and must stop scoring, even while
@@ -101,6 +116,7 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
     const double baseline = std::max (baselineEma_[candidate.bin], 1e-12);
     double mNorm = std::log (std::max (mag, 1e-12) / baseline) / std::log (4.0);
     mNorm = std::min (std::max (mNorm, 0.0), 1.0);
+    out.mNorm = static_cast<float> (mNorm);
 
     // Harmonic penalty (KD-3): a candidate sitting at roughly an integer
     // multiple (here 1.4x..4.1x) of a LOCKED notch frequency is likely a
@@ -122,11 +138,13 @@ float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candi
             }
         }
     }
+    out.penalty = penalty;
 
     // Product form (KD-4): all three axes must agree. Each axis alone has a
     // known false-positive mode (steady tones are peaky; broadband bursts are
     // novel); only a genuinely NEW narrow howl clears all three.
-    return pNorm * rNorm * static_cast<float> (mNorm) * penalty;
+    out.score = out.pNorm * out.rNorm * out.mNorm * out.penalty;
+    return out;
 }
 
 void CandidateScorer::commitBlock (const float* magnitudes, double elapsedMs)
