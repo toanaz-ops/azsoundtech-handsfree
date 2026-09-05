@@ -33,3 +33,8 @@ Task 3: fix round 1/5 dispatched (fresh implementer sonnet; FIX_BASE 4cad420; fi
 Task 3: fix round 1/5 (6 addressed, 0 open; commits 4cad420..00d8792; re-review clean, 421/421 reproduced)
 Task 3: minor (deferred): stop()'s 8-pass drain can strand the last event of a sink that re-enters on EVERY delivery (not counted as dropped) — document in the final pass
 Task 3: complete (commits ca390d4..00d8792, review clean after 1 fix round; widen-reset REMOVED by controller ruling — owner decision pending)
+Task 4: dispatched (BASE bea2d03, implementer sonnet, brief task-4-brief.md)
+Task 4: complete (commits bea2d03..ae3cfa3, review clean)
+Task 5: dispatched (BASE ae3cfa3, implementer sonnet, brief task-5-brief.md)
+Task 5: minor (deferred, plan-mandated): ensureButtonsFor(key, notch) ignores `notch` — drop the parameter in the final pass
+Task 5: complete (commits ae3cfa3..5fee378, review clean; controller read shots/console-live.png: VERDICT header + GOOD/FALSE legible on all rows, HELD intact)

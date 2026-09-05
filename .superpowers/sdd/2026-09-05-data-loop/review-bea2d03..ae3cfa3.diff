@@ -1,0 +1,253 @@
+# Review package: bea2d03..HEAD
+
+## Commits
+ae3cfa3 feat(controller): detector placements log score axes and the scored/reference frames
+
+## Files changed
+ src/app/NotchController.cpp    | 51 +++++++++++++++++++++++++++++++++++++-----
+ src/app/NotchController.h      | 19 +++++++++++++++-
+ tests/test_notchcontroller.cpp | 50 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 113 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index 791d01c..4644b46 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -534,40 +534,72 @@ int NotchController::firstFreeIndexAllLanesLocked() const
+         for (int c = 0; c < width_; ++c)
+             free = free && ! model_[slotOf (c, i)].active;
+         if (free)
+             return i;
+     }
+     return -1;
+ }
+ 
+ // The one place a confirmed candidate becomes notches. INDEP touches `lane`
+ // alone; LINKED takes one index free on every driven lane and writes them all.
+-void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow)
++void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
++                                      const PlacementContext& pc)
+ {
+     // soundcheckActive() takes modelMutex_ itself, so it is asked BEFORE the
+     // lock below -- never underneath it.
+     const Origin origin  = soundcheckActive() ? Origin::Soundcheck : Origin::Detector;
+     const double q       = notchQ_.load (std::memory_order_relaxed);
+     const double depthDb = notchDepthDb_.load (std::memory_order_relaxed);
+ 
+     int index = -1, firstLane = lane, lastLane = lane;
+     {
+         const std::lock_guard<std::mutex> lock (modelMutex_);
+         if (linkedNow) { index = firstFreeIndexAllLanesLocked(); firstLane = 0; lastLane = width_ - 1; }
+         else           { index = firstFreeIndexLocked (lane); }
+     }
+     if (index < 0)
+         return;   // chain full on the lanes concerned: same outcome as today
+ 
++    // Lane D (data loop): the one allocation per placed notch, on the
++    // detector thread (plan A-4). Shared by the lane-0 and lane-1 Set events
++    // of a LINKED placement -- never allocated twice for one confirm.
++    // pc.breakdown.refFrame points into the scorer's history_ and is only
++    // guaranteed valid until la.scorer.commitBlock() runs; that call happens
++    // AFTER the whole candidate loop in processSpectrumForDetection(), i.e.
++    // after this placeConfirmed() returns, so copying it here is safe.
++    auto ctx = std::make_shared<SpectralContext>();
++    ctx->binHz = pc.sampleRate / (double) Detector::kFftSize;
++    std::copy_n (pc.now, Detector::kNumBins, ctx->now.begin());
++    if (pc.breakdown.refFrame != nullptr)
++    {
++        ctx->hasRef = true;
++        ctx->refAgeMs = pc.breakdown.refAgeMs;
++        std::copy_n (pc.breakdown.refFrame, Detector::kNumBins, ctx->ref.begin());
++    }
++    if (pc.other != nullptr)
++    {
++        ctx->hasOther = true;
++        std::copy_n (pc.other, Detector::kNumBins, ctx->other.begin());
++    }
++
++    NotchEvent scored;
++    scored.hasScore = true;
++    scored.confirmedLane = lane;
++    scored.score = pc.finalScore; scored.peakiness = pc.breakdown.rawPeakiness;
++    scored.pNorm = pc.breakdown.pNorm; scored.rise = pc.breakdown.rNorm;
++    scored.novelty = pc.breakdown.mNorm; scored.penalty = pc.breakdown.penalty;
++    scored.asymmetry = pc.asymmetry; scored.persistNeeded = pc.persistNeeded; scored.thr = pc.thr;
++    scored.ctx = ctx;
++
+     int applied = 0;
+     for (int l = firstLane; l <= lastLane; ++l)
+-        if (setNotch (l, index, cand.frequencyHz, q, depthDb, origin))
++        if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
+             ++applied;
+ 
+     // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
+     // lane 1 keep independent persistence counters per bin (§4.3 --
+     // persistence is still counted per (lane, bin)). runOnce() drains lane 0
+     // then lane 1 within the SAME iteration, so if a howl sits on BOTH lanes
+     // their counters can both cross the confirm threshold before either
+     // placement lands: lane 0's call sets index i on both lanes, then lane
+     // 1's call -- unaware the pair is already placed -- sets index i+1 on
+     // both lanes too. That is two notches for one frequency, double the cut
+@@ -717,41 +749,48 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
+         // placeConfirmed's note). The streak dies with it: the bin has been
+         // answered, so what it accumulated is spent. Consulted only under
+         // LINK -- INDEP never places on a lane it did not confirm on, so it
+         // has no pair to double up on and its behaviour is untouched.
+         if (linkedNow && linkedPlacedAt_[(std::size_t) bin] == drainIteration_)
+         {
+             la.persistence[(std::size_t) bin] = 0;
+             continue;
+         }
+ 
+-        float score = la.scorer.scoreCandidate (
++        const auto breakdown = la.scorer.scoreCandidateDetailed (
+             cand, block.magnitudes,
+             { locked.data(), locked.size() });
+         // Design §4.4: neutral at the default bonus of 1.0.
+-        score *= asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
+-                                      laneAsymmetryBonus_.load (std::memory_order_relaxed));
++        const float asym = asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
++                                                laneAsymmetryBonus_.load (std::memory_order_relaxed));
++        const float score = breakdown.score * asym;
+ 
+         if (score > CandidateScorer::kConfirmScore)
+         {
+             const std::uint32_t requiredBlocks =
+                 (std::uint32_t) persistenceBlocks_.load (std::memory_order_relaxed);
+             if (++la.persistence[(std::size_t) bin] >= requiredBlocks)
+             {
+                 la.persistence[(std::size_t) bin] = 0;
+ 
+                 // KD-5: automatic notch params are runtime defaults set from
+                 // the DETECTION panel. Which LANES and which INDEX the notch
+                 // lands on is now the placement policy's business (§4.3);
+                 // persistence is still counted per (lane, bin), so under LINK
+                 // a confirm on either lane is enough for the pair.
+-                placeConfirmed (lane, cand, linkedNow);
++                PlacementContext pc;
++                pc.now = block.magnitudes; pc.other = otherLaneMagnitudes;
++                pc.breakdown = breakdown; pc.finalScore = score; pc.asymmetry = asym;
++                pc.persistNeeded = (int) requiredBlocks;
++                pc.thr = la.analyzer.getThreshold();
++                pc.sampleRate = block.sampleRate;
++                placeConfirmed (lane, cand, linkedNow, pc);
+             }
+         }
+         else
+         {
+             // Any non-confirming block resets that bin's streak.
+             la.persistence[(std::size_t) bin] = 0;
+         }
+     }
+ 
+     la.scorer.commitBlock (block.magnitudes, elapsedMs);
+diff --git a/src/app/NotchController.h b/src/app/NotchController.h
+index 89f7079..cf5d840 100644
+--- a/src/app/NotchController.h
++++ b/src/app/NotchController.h
+@@ -330,21 +330,38 @@ private:
+ 
+     static float asymmetryMultiplier (const float* mine, const float* other, int bin, float bonus);
+ 
+     // Index search, both under modelMutex_ (the suffix is a promise, not a
+     // decoration). INDEP asks only about the lane it is placing on; LINKED
+     // must find an index free on EVERY driven lane (S-7) -- the pre-1.0.5
+     // "look at lane 0 only" rule would silently overwrite a lane-1 notch that
+     // INDEP had placed, with no Clear to tell the chain about it.
+     int  firstFreeIndexLocked (int lane) const;
+     int  firstFreeIndexAllLanesLocked() const;
+-    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow);
++
++    // Lane D (data loop): everything placeConfirmed needs to build the scored
++    // NotchEvent and its SpectralContext, gathered by the candidate loop
++    // while the frame it scored is still current (see the .cpp comment on
++    // refFrame's lifetime).
++    struct PlacementContext
++    {
++        const float* now = nullptr;
++        const float* other = nullptr;        // may be null
++        CandidateScorer::ScoreBreakdown breakdown;
++        float finalScore = 0.0f;             // after the asymmetry multiplier
++        float asymmetry = 1.0f;
++        int   persistNeeded = 0;
++        float thr = 0.0f;
++        double sampleRate = 0.0;
++    };
++    void placeConfirmed (int lane, const PeakinessAnalyzer::Candidate& cand, bool linkedNow,
++                         const PlacementContext& pc);
+ 
+     double remainingSoundcheckMs() const;
+ 
+     LockFreeRingBuffer<NotchCommand>& commands_;
+     ClockSource&                    clock_;
+ 
+     // Routing slot this controller owns; stamped onto EVERY NotchCommand it
+     // emits so the engine routes it to the right chain.
+     const int slotId_;
+     // Lanes driven by this controller (1 or 2). Written only via setWidth()
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index c3351ef..4fafa9c 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -1438,10 +1438,60 @@ TEST (NotchControllerEvents, StopDrainsEventsQueuedByAReentrantSinkDuringItsOwnF
+ TEST (NotchControllerPreset, AdoptPresetCountsLaneOneNotchesSkippedOnAMonoSlot)
+ {
+     StereoHarness h;
+     h.controller.setWidth (1);
+     PresetNotch onLaneOne; onLaneOne.index = 0; onLaneOne.freq = 1000.0; onLaneOne.Q = 30.0; onLaneOne.depthDB = -12.0; onLaneOne.lane = 1;
+     PresetNotch onLaneZero = onLaneOne; onLaneZero.index = 1; onLaneZero.lane = 0;
+     int skipped = -1;
+     EXPECT_EQ (h.controller.adoptPreset ({ onLaneOne, onLaneZero }, &skipped), 1);
+     EXPECT_EQ (skipped, 1);
+ }
++
++// Spec test 7. Red if the detector's Set event stops carrying the frame it
++// scored (ctx.now), the frame the rise axis compared against (ctx.ref, with
++// its age), or the other lane's frame; or if the recorded axes stop
++// multiplying to the recorded score.
++TEST (NotchControllerEvents, DetectorPlacementCarriesTheScoredFrameAndTheScorersReference)
++{
++    StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
++    h.controller.setDetectionActive (true);
++    NoiseSource quietL; SineSource toneR;
++    const auto cmds = warmThenDrive (h, quietL, toneR);
++    ASSERT_FALSE (cmds.empty());
++
++    const Ev* set = nullptr;
++    for (const auto& e : r.events)
++        if (e.kind == Ev::Kind::Set && e.hasScore) { set = &e; break; }
++    ASSERT_NE (set, nullptr) << "no scored Set event reached the sink";
++
++    EXPECT_EQ (set->lane, 1);
++    EXPECT_EQ (set->confirmedLane, 1);
++    EXPECT_EQ (set->origin, NotchController::Origin::Detector);
++    EXPECT_GT (set->score, CandidateScorer::kConfirmScore);
++    EXPECT_FLOAT_EQ (set->pNorm * set->rise * set->novelty * set->penalty * set->asymmetry, set->score);
++    EXPECT_EQ (set->persistNeeded, NotchController::kPersistenceBlocks);
++    EXPECT_FLOAT_EQ (set->thr, PeakinessAnalyzer::kDefaultThreshold);
++
++    ASSERT_NE (set->ctx, nullptr);
++    const auto& ctx = *set->ctx;
++    EXPECT_EQ (ctx.bins, Detector::kNumBins);
++    EXPECT_NEAR (ctx.binHz, kTestSr / Detector::kFftSize, 1e-9);
++
++    // ctx.now IS the scored frame: its peak bin is the howl.
++    const int bin = (int) std::lround (set->hz / ctx.binHz);
++    int argmax = 0;
++    for (int b = 1; b < Detector::kNumBins; ++b)
++        if (ctx.now[(std::size_t) b] > ctx.now[(std::size_t) argmax]) argmax = b;
++    EXPECT_EQ (argmax, bin);
++
++    // ctx.ref is the frame the rise axis used (D-7): at least 0.45 x rise old,
++    // and the rise it implies is the rise the score encodes (rNorm >= 0.7
++    // means now/was >= 1.35).
++    ASSERT_TRUE (ctx.hasRef);
++    EXPECT_GE (ctx.refAgeMs, 0.45 * CandidateScorer::kDefaultRiseReferenceMs - 1e-6);
++    EXPECT_LE (ctx.refAgeMs, CandidateScorer::kRiseHistoryWindowMs);
++    EXPECT_GE (ctx.now[(std::size_t) bin], 1.35f * ctx.ref[(std::size_t) bin]);
++
++    // The other lane was quiet: its frame is there and small at the howl bin.
++    ASSERT_TRUE (ctx.hasOther);
++    EXPECT_LT (ctx.other[(std::size_t) bin], 0.1f * ctx.now[(std::size_t) bin]);
++}
