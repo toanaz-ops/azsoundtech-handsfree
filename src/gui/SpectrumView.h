@@ -213,12 +213,18 @@ public:
     //
     // This class turns that number into a state (riskForScore) and keeps the
     // state from flickering (RingRiskHysteresis). It does NOT read the
-    // snapshot for it: `ringRiskProvider` is still null -- nothing assigns it
-    // yet -- and null renders as Unavailable, an explicit "n/a" and never a
-    // reassuring "low". Wiring it to the monitored slot is task R3.
+    // snapshot itself: `ringRiskProvider` supplies the band, and MainComponent
+    // assigns it in its constructor to the slot the console is MONITORING --
+    // the lambda copies that slot's snapshot and returns riskForScore() RAW.
+    // The 750 ms anti-flicker hold is applied HERE, in timerCallback(), so a
+    // provider must never hold as well or the chip holds twice.
     //
-    // Contract: docs/spec-ring-risk.md, as amended by the lane R amendment
-    // block in .superpowers/sdd/2026-08-27-next-wave/task-R2-brief.md.
+    // A null provider still renders Unavailable -- an explicit "n/a" and never
+    // a reassuring "low" -- which is the resting state the spec pins.
+    //
+    // Contract: docs/spec-ring-risk.md sections 2-4, as amended by the
+    // "Amendment lane R -- 2026-09-06" block in
+    // docs/superpowers/plans/2026-08-27-next-wave.md.
     enum class RingRisk { Unavailable, Low, Rising, Critical };
 
     // Polled once per frame by the same timer that refreshes the plot. Null
