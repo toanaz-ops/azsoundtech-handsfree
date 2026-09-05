@@ -251,3 +251,141 @@ run again after the self-review cleanups below: still **447/447**, 100.09 s.
    says "do not hardcode 10.0" and still leaves the hysteresis choice open.
    Per the amendment block, **R3** updates the spec — noting it here so it is
    not lost.
+
+---
+
+## Fix round 1 — both reviewer findings implemented
+
+**Commit:** `3b8a4d4` fix(gui): re-arm the ring-risk hold on every confirming
+frame, and drop it on a slot switch (on top of `f17a46b`).
+**Level change:** still 0 dB — three files, all GUI/test
+(`git show --numstat 3b8a4d4`: `src/gui/SpectrumView.h` +13,
+`src/gui/SpectrumView.cpp` +13/−2, `tests/test_spectrumview.cpp` +92).
+
+### What changed
+
+**Finding 1 — the hold re-armed only on a strict step UP.**
+`SpectrumView.cpp` `RingRiskHysteresis::apply` now takes the branch on
+`rawSeverity >= heldSeverity` instead of `>`. An equal-severity frame changes
+nothing on screen, but it *is* the level being observed again, so it refreshes
+`stepUpMs_`. The hold therefore runs from the last **observation at or above**
+the held state rather than from the last **change**, which is what the
+reviewer's failure scenario turned on. Every A-R5 rule survives unchanged:
+step up immediate, step down blocked for 750 ms, `Unavailable` overriding.
+The comment at the branch spells out the failure mode it prevents.
+
+**Finding 2 — the hold survived a slot switch.** `setController` now clears
+`ringRiskHold_ = {}` alongside `firstSeenMs_` / `snapshot_` / the sequence
+counters / `displayLane_`, with a comment saying why it belongs in that list.
+
+**Comment at the `RingRiskHysteresis` definition** (`SpectrumView.h`) gained a
+paragraph stating the rule in the controller's words: the hold runs from the
+last time the level was *observed at or above* the held state, not from the
+last time the state changed, and why arming on a strict step up would blink.
+
+**One test hook added:** `ringRiskHoldForTest()` returns a reference to the
+live `ringRiskHold_`, so the slot-switch reset is observable through the same
+instance the component uses. Same `...ForTest` pattern as
+`spectrumPointForTest` / `getLaneGroupForTest` / `snapshotNotchCountForTest`.
+
+### Covering tests (3 new, `tests/test_spectrumview.cpp:718-802`)
+
+| Test | Claim |
+|---|---|
+| `RingRiskDoesNotFlickerAcrossManyHoldWindows` `:731` | 90 frames (3 s at 30 fps) of a score alternating Rising/Critical on the band edge → **zero** state changes, final state Critical, plus `EXPECT_GT (now - 100.0, 4 × kHoldMs)` so the zero cannot be the old test's claim renamed. |
+| `RingRiskFallsSevenFiftyAfterTheLastCriticalObservation` `:757` | The flip side: confirming the level does not make the hold immortal. Critical re-observed 1000→2000 ms, then a genuine sustained Rising — still Critical at 2500 and 2749 (750 ms after the *first* Critical, 1750, is much too early), falls at exactly 2750. |
+| `RingRiskHoldDoesNotSurviveASlotSwitch` `:788` | Slot A holds Critical (raw Low at +100 still reads Critical), `view.setController (slotB.controller)`, next raw Low reads **Low** immediately. Uses the existing `FedController` harness. |
+
+### Mutation check — all three RED against the pre-fix code
+
+Built with the tests added but `apply` still on `>` and `setController` not
+clearing the hold:
+
+```
+$ ./build/tests/Release/HandsFreeTests.exe --gtest_filter=*RingRiskDoesNotFlickerAcrossManyHoldWindows*
+[ RUN      ] SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows
+tests\test_spectrumview.cpp(746): error: Expected equality of these values:
+  changes
+    Which is: 6
+  0
+the chip changed state while the score sat on the band edge
+[  FAILED  ] SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows (0 ms)
+```
+
+Six changes over three seconds = three blinks down-and-back, one per expired
+hold window — precisely the reviewer's predicted failure, measured.
+
+```
+[ RUN      ] SpectrumView.RingRiskFallsSevenFiftyAfterTheLastCriticalObservation
+tests\test_spectrumview.cpp(770): error: Expected equality of these values:
+  hold.apply (Risk::Rising, 2033.0)
+    Which is: 4-byte object <02-00 00-00>     (Rising)
+  Risk::Critical
+    Which is: 4-byte object <03-00 00-00>
+  ... same at 2500.0 and 2749.0
+[  FAILED  ] SpectrumView.RingRiskFallsSevenFiftyAfterTheLastCriticalObservation (0 ms)
+
+[ RUN      ] SpectrumView.RingRiskHoldDoesNotSurviveASlotSwitch
+tests\test_spectrumview.cpp(801): error: Expected equality of these values:
+  view.ringRiskHoldForTest().apply (Risk::Low, 1101.0)
+    Which is: 4-byte object <03-00 00-00>     (Critical — slot A's alarm)
+  Risk::Low
+    Which is: 4-byte object <01-00 00-00>
+[  FAILED  ] SpectrumView.RingRiskHoldDoesNotSurviveASlotSwitch (30 ms)
+
+[  FAILED  ] 3 tests, listed below:
+[  FAILED  ] SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows
+[  FAILED  ] SpectrumView.RingRiskFallsSevenFiftyAfterTheLastCriticalObservation
+[  FAILED  ] SpectrumView.RingRiskHoldDoesNotSurviveASlotSwitch
+```
+
+### GREEN — focused run after the fix
+
+```
+$ cmake --build build --config Release
+$ ./build/tests/Release/HandsFreeTests.exe --gtest_filter=*RingRisk*
+[----------] 10 tests from SpectrumView
+[       OK ] SpectrumView.RingRiskBandsAgainstThePublishedThresholdNotAHardcodedOne (0 ms)
+[       OK ] SpectrumView.RingRiskIsUnavailableWheneverTheNumberCannotBeTrusted (0 ms)
+[       OK ] SpectrumView.RingRiskStepsUpImmediately (0 ms)
+[       OK ] SpectrumView.RingRiskHoldsAStepDownForTheHoldTimeThenFalls (0 ms)
+[       OK ] SpectrumView.RingRiskDoesNotFlickerWhileAScoreOscillatesAcrossABoundary (0 ms)
+[       OK ] SpectrumView.RingRiskUnavailableOverridesTheHold (0 ms)
+[       OK ] SpectrumView.RingRiskStepUpRestartsTheHold (0 ms)
+[       OK ] SpectrumView.RingRiskDoesNotFlickerAcrossManyHoldWindows (0 ms)
+[       OK ] SpectrumView.RingRiskFallsSevenFiftyAfterTheLastCriticalObservation (0 ms)
+[       OK ] SpectrumView.RingRiskHoldDoesNotSurviveASlotSwitch (11 ms)
+[----------] 8 tests from NotchControllerRingRisk  (task R1, all OK)
+[  PASSED  ] 19 tests.
+```
+
+The seven round-0 tests still pass unmodified — including
+`MainComponent.RingRiskReadsUnavailableUntilSomethingProvidesIt`
+(`tests/test_gui_wiring.cpp:771`), which was not edited.
+
+### Full suite
+
+```
+$ cd build && ctest -C Release
+450/450 Test #450: logstats_fixture .............................  Passed  0.12 sec
+
+100% tests passed, 0 tests failed out of 450
+
+Total Test time (real) =  32.97 sec
+```
+
+447 (round-0 baseline) + 3 new = 450. Build produced no new warnings for the
+touched files (the one C4996 in `MainComponent.cpp:1265` predates this lane).
+
+### Notes for the next reviewer
+
+- **`Unavailable` still resets `stepUpMs_` to `nowMs`.** That is unchanged
+  from round 0 and harmless: `state_` becomes `Unavailable` (severity 0), so
+  the next real band is a step UP and re-arms anyway.
+- **The `>=` branch assigns `state_ = raw` on an equal-severity frame.**
+  `severity` is a bijection over the three banded states, so equal severity
+  means `raw == state_`; the assignment is a no-op kept for symmetry with the
+  step-up path.
+- **Concerns 1–5 of the round-0 report still stand as written** — in
+  particular no screenshot is owed until R3 wires the provider and the chip
+  first renders a live state.
