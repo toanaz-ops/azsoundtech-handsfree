@@ -1,0 +1,1652 @@
+# Review package: 48f3db7..HEAD
+
+## Commits
+ae6ddbe docs(lane-D): release status, the two age_ms clocks, real log sizes, A-11
+9b59a1f test(lane-D): make the teardown test place notches, pin the scorer analytically
+e468e76 fix(lane-D): verdict reset on re-place, silent-failure paths, log gaps
+
+## Files changed
+ docs/GIOI-THIEU.md                                 |   8 +-
+ docs/KY-THUAT-CHONG-HU.md                          |  20 +++-
+ docs/superpowers/plans/2026-09-05-data-loop.md     |   1 +
+ .../specs/2026-09-04-anti-feedback-v2-roadmap.md   |   2 +-
+ .../specs/2026-09-05-data-loop-design.md           |   8 +-
+ memory/data-loop-lessons-2026-09-05.md             |  41 +++++--
+ src/app/MainComponent.cpp                          |  63 +++++++++--
+ src/app/MainComponent.h                            |   6 +
+ src/app/SessionLogger.cpp                          |  22 +++-
+ src/app/SessionLogger.h                            |  29 +++--
+ src/gui/NotchListPanel.cpp                         |  20 +++-
+ src/gui/NotchListPanel.h                           |   8 +-
+ src/main.cpp                                       |  11 +-
+ tests/test_candidatescorer.cpp                     | 126 ++++++++++++++++++++-
+ tests/test_gui_wiring.cpp                          | 126 +++++++++++++++++----
+ tests/test_notchcontroller.cpp                     |  21 ++--
+ tests/test_notchlistpanel.cpp                      |  55 ++++++++-
+ tests/test_sessionlogger.cpp                       |   6 +
+ tools/snapshot.cpp                                 |  17 ++-
+ 19 files changed, 509 insertions(+), 81 deletions(-)
+
+## Diff
+diff --git a/docs/GIOI-THIEU.md b/docs/GIOI-THIEU.md
+index 172e8cb..6bebe0a 100644
+--- a/docs/GIOI-THIEU.md
++++ b/docs/GIOI-THIEU.md
+@@ -75,22 +75,26 @@ thực. Màn hình phổ (RTA) có averaging Off/0.1/0.3/0.5/1/3/5/10 s, peak ho
+ độ phân giải 1/1–1/3 octave; tab per-slot theo dõi từng slot riêng. Với slot
+ stereo, bộ chọn **L/R** trên thanh analyser đổi làn đang vẽ, notch của làn phải
+ vẽ bằng nét đứt kèm nhãn "R", và bảng **ACTIVE NOTCHES** có cột **LANE** cho
+ biết mỗi notch nằm ở làn nào. Chip **RING RISK** hiện luôn hiển thị "N/A" —
+ nguồn dữ liệu sẽ được nối ở bản sau.
+ 
+ ## Chấm notch để app học
+ 
+ Thấy app cắt oan một nốt nhạc: bấm **FALSE** trên dòng đó — notch nhả ngay và app ghi
+ lại "đây là cắt oan". Thấy nó cắt đúng tiếng hú: bấm **GOOD**. Không bắt buộc, nhưng mỗi
+-lần bấm là một mẫu huấn luyện. Log nằm ở `%APPDATA%\AZSoundtech\HandsFree\logs\`, một
+-file mỗi lần mở app, không chứa audio; gửi file khi được hỏi.
++lần bấm là một mẫu huấn luyện. Nếu một tiếng hú **quay lại đúng tần số cũ**, dòng đó
++hiện lại hai nút trắng: đó là một notch MỚI và nó chờ đánh giá mới, không mang theo
++GOOD/FALSE của lần trước. Log nằm ở `%APPDATA%\AZSoundtech\HandsFree\logs\`, một
++file mỗi lần mở app, không chứa audio; gửi file khi được hỏi. Nếu app **không ghi được
++log** (thư mục bị chặn), dòng trạng thái dưới đáy báo `LOG: khong ghi duoc ...` — app vẫn
++chạy bình thường, chỉ là không có file để gửi.
+ 
+ ## Freeware
+ 
+ Theo quyết định chủ sở hữu **D-07** (23/08/2026): bản phát hành đầu là
+ **freeware**, không kích hoạt license. Phần mã license vẫn nằm trong source
+ (đã test đầy đủ 45 test) nhưng cố tình chưa được nối vào app — sẽ bật lại khi
+ có thông báo. Xem `.superpowers/sdd/2026-08-19-az-soundtech-hands-free/owner-decisions.md`.
+ 
+ ## Muốn hiểu bên trong?
+ 
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index 5dbf0a0..300b954 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -300,44 +300,58 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
+   hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
+ 
+ ## 7. Log session và nhãn (lane D, v1.1.2)
+ 
+ App ghi một file mỗi lần chạy vào `%APPDATA%\AZSoundtech\HandsFree\logs\session-YYYYMMDD-HHMMSS-mmm.jsonl`,
+ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30 file mới nhất.
+ 
+ | `ev` | Khi nào | Mang gì |
+ |---|---|---|
+ | `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
+-| `mode` | bấm Bypass / Auto / Soundcheck | `mode` |
++| `mode` | ngay sau `session_start` (mode lúc mở phiên), rồi mỗi lần bấm Bypass / Auto / Soundcheck | `mode` |
+ | `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
+ | `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
+ | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
+ | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
++| `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono) |
++| `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
+ 
+ Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
+ người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
+ thread; hàng đợi 4096 dòng, quá thì bỏ và đếm vào `dropped_events` ở dòng `session_end`.
+ Sự kiện của `NotchController` đi qua một outbox 64 phần tử và chỉ được đẩy ra **ngoài**
+ `modelMutex_` trên detector thread (spec D-6), nên nút CLEAR ALL không bao giờ chờ I/O.
+ 
++**Hai `age_ms` không cùng đồng hồ.** `verdict.age_ms` là tuổi theo **đồng hồ tường** của
++GUI tính từ lần đầu bảng ACTIVE NOTCHES nhìn thấy notch đó; `notch_clear.age_ms` là tuổi
++theo **đồng hồ sống của detector** — đồng hồ này *đứng lại* khi tap chết (D-06). Mất tín
++hiệu 10 giây thì `verdict.age_ms` vẫn cộng đủ 10 giây còn `notch_clear.age_ms` thì không:
++hai số lệch nhau đúng bằng thời gian tap chết, và đó là hành vi đúng của cả hai.
++
+ `FALSE` vừa ghi nhãn vừa xóa notch (đó là điều người vận hành muốn — D-2); `GOOD` chỉ ghi
+ nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
+ frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
+ Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
+ 
++**Kích thước.** Một dòng `notch_set` có `ctx` là dòng nặng nhất: trên slot stereo nó mang
++ba mảng 1025 bin (`now`, `ref`, `other_lane_now`) → **đo được 19,5–19,7 KB/dòng** (log thật
++của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 3 chữ số có nghĩa). Ở chế độ
++LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
++với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
++
+ ## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — chờ release)
+ 
+ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
+ `tools/logstats.py`.
+ 
+-- Suite: **430/430 test pass** (ctest Release, MSVC, CI GitHub
+-  Actions xanh) — +28 test so với 1.1.1 (402): `SessionLogger` (start/stop,
++- Suite: **432/432 test pass** (ctest Release, MSVC, CI GitHub
++  Actions xanh) — +30 test so với 1.1.1 (402): `SessionLogger` (start/stop,
+   cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
+   mục là no-op), sự kiện `notch_set`/`notch_clear`/`verdict` qua outbox ngoài
+   `modelMutex_`, nút GOOD/FALSE trên `NotchListPanel`, và `logstats_fixture`
+   chạy `tools/logstats.py` dưới ctest.
+ - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
+   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
+ - DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
+   GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
+   SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel),
+   **chuỗi preset trọn vẹn** (installer ship presets → seed first-run → nút
+diff --git a/docs/superpowers/plans/2026-09-05-data-loop.md b/docs/superpowers/plans/2026-09-05-data-loop.md
+index 7d597e2..427206d 100644
+--- a/docs/superpowers/plans/2026-09-05-data-loop.md
++++ b/docs/superpowers/plans/2026-09-05-data-loop.md
+@@ -53,20 +53,21 @@ These override the spec where they differ. Each one was checked against the real
+ | A-1 | §3.3 "`setWidth` has new logic: push Clear for lanes leaving the slot" | Already done by lane S (`NotchController.cpp:44-60`). Only the `WidthChange` reason is added. |
+ | A-2 | §3.3 names the event flush `flushOutbox()` | That name already exists for the **command** outbox (`NotchController.cpp:688`). The event flush is `flushEventOutbox()`. |
+ | A-3 | §3.1 "`~MainComponent` calls `setEventSink(nullptr)` before everything else" | That would drop the events `stop()` flushes (spec test 11). Order is: stop every controller (flushes to the sink → logger) → `sessionLogger_.stop()` (writes `session_end`) → detach sinks → `engine_.stop()`. |
+ | A-4 | §3.3 `NotchEvent` carries `ctx` as fixed arrays, "memcpy, no alloc" | 3 × 1025 floats × 64 slots × 2 vectors × 8 controllers ≈ 12 MB resident. The detector thread already allocates per block (`std::vector<double> locked` in `processSpectrumForDetection`), so `ctx` is a `std::shared_ptr<const SpectralContext>` allocated only when a detector placement happens. The outbox cap (64) and drop counter stay. |
+ | A-5 | §3.1 `SessionLogger::Config { directory, keepFiles }` in the constructor | The directory is chosen at `start()` (tests use a temp dir, the app uses `%APPDATA%`), so `start (directory, header)`; `keepFiles` stays a constructor argument. File name gets a millisecond suffix so five sessions started within one second never collide. |
+ | A-6 | D-8 "`main.cpp` calls `setAppVersion (JUCE_APPLICATION_VERSION_STRING)`" | Nothing of the sort exists; `main.cpp:16` returns the hardcoded `"1.0.0"`. Task 6 adds `setAppVersion` AND fixes `getApplicationVersion()` to use the macro. |
+ | A-7 | §4 test 8 "force the partial-apply unwind through a lane-1 sample-rate failure" | `setNotch` validates against `lanes_[0]`'s sample rate for every lane, so no input can make lane 1 alone fail. A TEST-ONLY hook `failNextSetNotchOnLaneForTest (int lane)` forces it. |
+ | A-8 | §3.4 VERDICT column after STATUS, STATUS shrinks; existing column test pins 360 px | With a 92 px VERDICT column, HELD has 4 px at 360. The narrowest width the app ever gives the panel is 0.44 × (1200 − 24) ≈ 517 px. The column-budget test moves to 440 px (still below the real floor) — see Task 5. |
+ | A-9 | Lane S loose ends: `loadPreset` never calls `slotPanel_.refresh()`; `adoptPreset` drops a lane-1 notch on a mono slot without counting it; `Detector` of lane 1 keeps a stale analysis window when a slot widens 1 → 2 | All three touch files this lane edits, so they are folded in (Tasks 3 and 6). The "restart-drain lane 1" test from that list is delivered as the widen-reset test in Task 3 — the ring residue itself is cleared by the engine's restart cycle (§6.5), the detector window was not. |
+ | A-10 | §3.2 `notch_set` fields `rise`, `novelty` | Mapped to the scorer's `rNorm` and `mNorm` (both 0..1). `p_norm`, `asymmetry` and `confirmed_lane` are added so the score can be rebuilt from the log. |
++| A-11 | §3.4 shows `onVerdict` with FIVE parameters (`slot, lane, index, hz, good`) | It carries a SIXTH, `double ageMs` — the row's age at the moment the human clicked, which becomes the `verdict` event's `age_ms`. Only the panel knows it: `verdict.age_ms` is the GUI's wall-clock age since first sighting, and `MainComponent` has no way to recompute it (the detector's own age is a different, tap-gated clock — see `KY-THUAT-CHONG-HU.md` §7). Shipped this way from Task 5; recorded here after the whole-branch review. |
+ 
+ ## Global Constraints
+ 
+ - Audio thread: zero allocation, zero locks, zero logging. **This lane adds no audio-thread code.** If a task finds itself editing `AudioEngine::audioDeviceIOCallbackWithContext` or `NotchChain`, stop.
+ - `SessionLogger::log()` and every `EventSink` call may allocate; they run on the detector thread or the message thread, never the audio thread. Neither may ever block on file I/O.
+ - The sink is called **only** from `flushEventOutbox()` and **never** while `modelMutex_` is held (D-6).
+ - No raw audio, no tester name, no network. Spectra are magnitudes only (D-5).
+ - `ctx.ref` is the frame the scorer compared against (`ScoreBreakdown::refFrame`), never a frame looked up by `rise_ms` (D-7).
+ - `MainComponent.cpp` must not reference `JUCE_APPLICATION_VERSION_STRING` — it is compiled into `HandsFreeTests` and `HandsFreeSnapshot` without that macro (D-8).
+ - Button labels are the ASCII words `GOOD` / `FALSE`; no ✓ ✗ glyphs (memory: mojibake middle dot, 2026-08-25). JUCE 9 trap: `juce::TextButton { "GOOD" }` one argument, never two (memory `juce9-api-traps-2026-08-25`).
+diff --git a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+index 796b55c..f13b704 100644
+--- a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
++++ b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+@@ -59,21 +59,21 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
+ 5. `docs/GIOI-THIEU.md` + `docs/KY-THUAT-CHONG-HU.md` cập nhật cùng
+    commit khi hành vi user-visible đổi.
+ 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
+    gửi tester nêu rõ lane vừa đổi gì.
+ 
+ ## Trạng thái
+ 
+ | Lane | Trạng thái | Ngày |
+ |---|---|---|
+ | S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
+-| D | **đã làm xong** trên nhánh `feat/data-loop` (8 task, suite 430/430, review từng task + verifier độc lập toàn nhánh đang chờ); release 1.1.2 alpha; chờ owner PR vào main | 2026-09-05 |
++| D | **đã làm xong** trên nhánh `feat/data-loop` (8 task + fix wave sau verifier độc lập & review toàn nhánh, suite 432/432); release 1.1.2 alpha **chạy sau (chưa bump)** — `CMakeLists.txt` vẫn 1.1.1; chờ owner PR vào main | 2026-09-05 |
+ | G | chờ S, D | |
+ | M | chờ S | |
+ | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
+ | L | chờ D | |
+ | A | chờ M, G | |
+ 
+ **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
+ plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
+ khỏi lane D khi review**. Reset chỉ Detector mà không đụng lịch sử của
+ `CandidateScorer` để lại history cũ, khiến hai trục rise/novelty bị bão hòa về
+diff --git a/docs/superpowers/specs/2026-09-05-data-loop-design.md b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+index c7f4e2e..c941db9 100644
+--- a/docs/superpowers/specs/2026-09-05-data-loop-design.md
++++ b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+@@ -1,15 +1,15 @@
+ # Lane D — Vòng dữ liệu: nhãn oan/đúng và log session có cấu trúc
+ 
+ **Ngày:** 2026-09-05. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md).
+ **Trạng thái:** đã thực thi trên nhánh `feat/data-loop` (2026-09-05, 8 task,
+-suite 430/430); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
++suite 432/432 sau fix wave 2026-09-05); các chỗ lệch khỏi bản spec này — kể cả việc hợp nhất với
+ lane S đã merge trước — nằm trong
+ [`../plans/2026-09-05-data-loop.md`](../plans/2026-09-05-data-loop.md):
+ mục "Hợp nhất hai phiên" (đầu file) và bảng "Amendments to the spec" (A-1..A-10).
+ **Đụng audio path:** không.
+ **Mức thay đổi level dự kiến:** 0 dB. Lane này chỉ quan sát và ghi.
+ 
+ ## 1. Vì sao lane này đi trước mọi thứ "AI"
+ 
+ Lane C (classifier), lane L (LLM copilot) và lane T (threshold sweep)
+ đều cần hai thứ mà app chưa sinh ra:
+@@ -114,22 +114,24 @@ rồi `sessionLogger_.stop()`.
+ 
+ ```json
+ "ctx": {
+   "bins": 1025, "bin_hz": 23.4375,
+   "now":  [ ...1025 float, 3 chữ số có nghĩa... ],
+   "ref":  [ ...frame gần nhất ≥ rise_ms trước, cùng định dạng... ],
+   "other_lane_now": [ ... ]        // chỉ khi slot stereo và làn kia có phổ cùng vòng
+ }
+ ```
+ 
+-~6 KB mỗi mảng; một sự kiện `notch_set` ~12–18 KB. Một show tệ nhất vài
+-trăm notch → vài MB. Chấp nhận được; `keepFiles = 30` chặn tích lũy.
++~6 KB mỗi mảng; một sự kiện `notch_set` ~12–18 KB. **Đo lại 2026-09-05
++(fix wave lane D): 19,5–19,7 KB/dòng** cho slot stereo có đủ `now` + `ref` +
++`other_lane_now`; ở chế độ LINK một lần xác nhận phát hai Set (~40 KB). Một
++show 3 giờ với ~300 lần đặt notch → ~6–14 MB. Chấp nhận được; `keepFiles = 30` chặn tích lũy.
+ 
+ Để có các thành phần điểm tách riêng, `CandidateScorer::scoreCandidate`
+ thêm một overload trả:
+ 
+ ```cpp
+ struct ScoreBreakdown {
+     float rawPeakiness;   // Candidate::peakiness, tỉ số thô không chặn trên
+     float pNorm, rNorm, mNorm;   // ĐÚNG ba biến chuẩn hóa 0..1 hiện có trong scoreCandidate
+     float penalty;        // 1.0 hoặc kHarmonicPenalty
+     float score;          // pNorm × rNorm × mNorm × penalty, bit-exact với overload cũ
+diff --git a/memory/data-loop-lessons-2026-09-05.md b/memory/data-loop-lessons-2026-09-05.md
+index 7147603..bd0327d 100644
+--- a/memory/data-loop-lessons-2026-09-05.md
++++ b/memory/data-loop-lessons-2026-09-05.md
+@@ -1,46 +1,65 @@
+ ---
+ name: data-loop-lessons
+ description: lane D (data loop — SessionLogger, GOOD/FALSE verdicts, tools/logstats.py) pitfalls — JUCE double serialisation rounding, var const-mutation via getDynamicObject, logger start timing vs tests, headless onClick() vs triggerClick(), the withdrawn widen-reset (A-9), multi-agent lane ownership traps
+ metadata:
+   type: project
+ ---
+ 
+ # Bài học từ lane D (vòng dữ liệu: log session + nhãn GOOD/FALSE) — 2026-09-05
+ 
+ **Bối cảnh:** lane D thêm `SessionLogger` (JSONL, thread riêng), nút GOOD/FALSE
+-trên `NotchListPanel`, và `tools/logstats.py`. 8 task, suite 402 → 430, không
++trên `NotchListPanel`, và `tools/logstats.py`. 8 task + một fix wave sau verifier, suite 402 → 432, không
+ đụng audio path (0 dB). Spec: `docs/superpowers/specs/2026-09-05-data-loop-design.md`.
+ Plan + amendments A-1..A-10: `docs/superpowers/plans/2026-09-05-data-loop.md`.
+ 
+-## 1. `juce::JSON::toString` in double tới 18 chữ số — làm tròn TRƯỚC khi vào `var`
++## 1. `juce::JSON::toString` in double đủ dài để round-trip — làm tròn TRƯỚC khi vào `var`
+ 
+-`serialiseDouble` của JUCE không giới hạn số chữ số: một magnitude 0.00123 có
+-thể in ra `0.001229999999999999`. Không sửa được ở bước serialise vì lúc đó
+-giá trị đã là double thật trong `var`. Phải làm tròn về 3 chữ số có nghĩa
+-(`roundSig3`) **trước khi** nhét vào `var`, không phải format lại chuỗi sau.
++Cạm bẫy KHÔNG phải là một double "tròn" như `0.0123`: cái đó in ra đúng
++`0.0123`. Cạm bẫy là một magnitude **float chưa làm tròn** bị nới lên double.
++`(double) 0.0123456789f` là `0.012345679104328156` — 20 ký tự cho MỘT bin, và
++`serialiseDouble` của JUCE phải in đủ chừng đó để round-trip lại đúng giá trị.
++Nhân với 1025 bin × 3 mảng thì một dòng `notch_set` phình ra vài chục KB thừa.
++Không sửa được ở bước serialise vì lúc đó giá trị đã là double thật trong
++`var`. Phải làm tròn về 3 chữ số có nghĩa (`roundSig3`) **trước khi** nhét vào
++`var`, không phải format lại chuỗi sau.
++(Kiểm chứng lại 2026-09-05: dòng `notch_set` stereo thật đo được 19,5–19,7 KB
++sau khi đã `roundSig3`.)
+ 
+-## 2. `SessionLogger::log(const var&)` phải clone trước khi stamp `t` — sửa `var` const vẫn mutate được caller
++## 2. `SessionLogger::log(const var&)` phải COPY object trước khi stamp `t` — sửa `var` const vẫn mutate được caller
+ 
+ `getDynamicObject()` trên một `var` là non-const về mặt kỹ thuật của kiểu trả
+ về (con trỏ tới `DynamicObject` dùng chung), nên gọi nó trên một tham số
+ `const var&` rồi set thêm property `"t"` **sửa luôn object của caller** — dù
+-chữ ký hàm là const-correct trên giấy. Phải `var::clone()` (deep copy) trước
+-khi thêm `t`, nếu không caller giữ một `var` đã bị logger tự ý thêm field.
++chữ ký hàm là const-correct trên giấy.
++
++Cách sửa thực tế trong code là một bản sao **một tầng**:
++
++```cpp
++juce::var stamped (new juce::DynamicObject (*obj));
++```
++
++`DynamicObject`'s copy ctor sao chép `NamedValueSet` của nó, đủ để `setProperty
++("t", ...)` không chạm vào object của caller. Đây **không** phải `var::clone()`:
++`clone()` là deep copy, nó sẽ nhân bản cả ba mảng 1025 phần tử trong `ctx` chỉ
++để thêm một field — tốn kém vô ích. Các mảng con được chia sẻ, và không ai sửa
++chúng sau khi dựng.
+ 
+ ## 3. Không bao giờ start logger trong ctor của `MainComponent`
+ 
+ 26 test hiện có cộng `HandsFreeSnapshot` đều dựng `MainComponent` để test
+ layout/logic, không phải để chạy một phiên thật. Nếu logger start trong ctor,
+ mỗi lần chạy test suite sẽ ghi — và **prune** — thư mục log thật ở
+-`%APPDATA%`. Logger chỉ start từ `startAudio()` (production) hoặc
+-`startSessionLog(dir)` test-only, không bao giờ từ constructor.
++`%APPDATA%`. Logger chỉ start qua `MainComponent::startSessionLog(dir)`, và
++lời gọi production duy nhất nằm trong **`main.cpp`**, ngay SAU `startAudio()`
++(để header ghi đúng device đang mở) — không phải bên trong `startAudio()`, và
++không bao giờ từ constructor. Test gọi cùng hàm đó với một thư mục temp.
+ 
+ ## 4. Test headless phải gọi `button->onClick()`, không phải `triggerClick()`
+ 
+ `triggerClick()` post một message async qua `MessageManager` để mô phỏng
+ tương tác chuột thật; test suite headless không bơm message loop đó nên
+ message không bao giờ chạy — test tưởng nút không làm gì. Gọi thẳng
+ `onClick()` (lambda) là cách duy nhất thấy hiệu ứng ngay trong cùng frame,
+ và cũng là lý do `tools/snapshot.cpp` dùng `goodButtonForTest(...)->onClick()`
+ thay vì mô phỏng click chuột.
+ 
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index 7143ac8..a0060fe 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -112,21 +112,28 @@ MainComponent::MainComponent()
+     // through the Component::getLookAndFeel() chain.
+     setLookAndFeel (&azLookAndFeel_);
+ 
+     // Lane D (data loop): every controller's Set/Clear events feed the
+     // session log. Wired here, with every detector thread still stopped, so
+     // setEventSink()'s precondition holds; see the destructor for the
+     // matching teardown order.
+     for (auto& controller : notchControllers_)
+         controller->setEventSink ([this] (const NotchController::NotchEvent& e)
+         {
+-            sessionLogger_.log (notchEventToVar (e));
++            // I-2: notchEventToVar() rounds and boxes up to three 1025-value
++            // spectra. 26 tests and the snapshot tool construct MainComponent
++            // with the logger never started, and log() would drop the var on
++            // arrival anyway -- so do not build it. isActive() is a relaxed
++            // atomic load; a stop() racing this line only costs the event the
++            // logger was about to drop regardless.
++            if (sessionLogger_.isActive())
++                sessionLogger_.log (notchEventToVar (e));
+         });
+ 
+     // Seed the shipped presets exe-adjacent -> user dir, never overwriting.
+     // Source: <exe dir>/presets (the installer puts them there, P1). Running
+     // from the repo, or from a test/snapshot exe with no presets/ beside it,
+     // the source dir is simply absent -- seedDefaultPresets reports that in
+     // SeedResult::errors and the app carries on. Message thread, runs once,
+     // touches no audio state.
+     {
+         const auto exeDir = juce::File::getSpecialLocation (
+@@ -438,24 +445,27 @@ MainComponent::MainComponent()
+             auto& controller = *notchControllers_[(std::size_t) i];
+             controller.setRiseReferenceMs ((double) p.riseReferenceMs);
+             controller.setPersistenceBlocks (p.persistenceBlocks);
+             controller.setNotchDefaults ((double) p.q, (double) p.depthDb);
+             controller.setPeakinessThreshold (p.peakinessThreshold);
+         }
+ 
+         auto v = SessionLogger::makeEvent ("tuning");
+         auto* o = v.getDynamicObject();
+         o->setProperty ("slot", -1);
+-        o->setProperty ("rise_ms", p.riseReferenceMs);
++        // M-8: TuningPanel::Params holds int/float where SlotPanel::SlotTuning
++        // holds double. Cast so BOTH tuning events carry the same JSON types
++        // for the same field -- logstats reads one column, not two.
++        o->setProperty ("rise_ms", (double) p.riseReferenceMs);
+         o->setProperty ("persist", p.persistenceBlocks);
+-        o->setProperty ("q", p.q);
+-        o->setProperty ("depth_db", p.depthDb);
++        o->setProperty ("q", (double) p.q);
++        o->setProperty ("depth_db", (double) p.depthDb);
+         o->setProperty ("thr", (double) p.peakinessThreshold);
+         sessionLogger_.log (v);
+     };
+     tuningPanel_.paramsProvider = [this]
+     {
+         const auto& c = *notchControllers_[0];
+         return gui::TuningPanel::Params { (int) c.getRiseReferenceMs(),
+                                           c.getPersistenceBlocks(),
+                                           (int) c.getNotchDepthDb(),
+                                           (int) c.getNotchQ(),
+@@ -555,23 +565,29 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
+     o->setProperty ("penalty", (double) e.penalty);
+     o->setProperty ("asymmetry", (double) e.asymmetry);
+     o->setProperty ("persist_needed", e.persistNeeded);
+     o->setProperty ("thr", (double) e.thr);
+ 
+     if (e.ctx != nullptr)
+     {
+         auto* c = new juce::DynamicObject();
+         c->setProperty ("bins", e.ctx->bins);
+         c->setProperty ("bin_hz", e.ctx->binHz);
+-        c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
+         c->setProperty ("now", spectrumVar (e.ctx->now));
+-        if (e.ctx->hasRef)   c->setProperty ("ref", spectrumVar (e.ctx->ref));
++        // M-3: refAgeMs describes the reference FRAME. With no reference
++        // frame it is 0.0, which reads as "compared against something 0 ms
++        // old" -- so it travels inside the same guard as "ref".
++        if (e.ctx->hasRef)
++        {
++            c->setProperty ("ref", spectrumVar (e.ctx->ref));
++            c->setProperty ("ref_age_ms", e.ctx->refAgeMs);
++        }
+         if (e.ctx->hasOther) c->setProperty ("other_lane_now", spectrumVar (e.ctx->other));
+         o->setProperty ("ctx", juce::var (c));
+     }
+ 
+     return v;
+ }
+ 
+ juce::var MainComponent::sessionHeader() const
+ {
+     auto v = SessionLogger::makeEvent ("session_start");
+@@ -605,23 +621,39 @@ juce::var MainComponent::sessionHeader() const
+     o->setProperty ("slots", slots);
+ 
+     return v;
+ }
+ 
+ void MainComponent::setAppVersion (const juce::String& version)
+ {
+     appVersion_ = version;
+ }
+ 
++void MainComponent::showMessage (const juce::String& message)
++{
++    panelMessage_ = message;
++    refreshStatus();
++}
++
+ bool MainComponent::startSessionLog (const juce::File& directory)
+ {
+-    return sessionLogger_.start (directory, sessionHeader());
++    if (! sessionLogger_.start (directory, sessionHeader()))
++        return false;
++
++    // T6: the log must record the mode the session STARTED in. requestMode()
++    // is the only other producer of a `mode` event, so a session nobody ever
++    // switches would otherwise carry none at all and a reader could not tell
++    // Auto from Bypass.
++    auto v = SessionLogger::makeEvent ("mode");
++    v.getDynamicObject()->setProperty ("mode", modeName (engine_.getMode()));
++    sessionLogger_.log (v);
++    return true;
+ }
+ 
+ void MainComponent::stopSessionLog()
+ {
+     sessionLogger_.stop();
+ }
+ 
+ juce::File MainComponent::sessionLogFileForTest() const
+ {
+     return sessionLogger_.currentFile();
+@@ -797,47 +829,62 @@ bool MainComponent::loadPreset (const juce::File& file)
+ 
+         notchControllers_[(std::size_t) entry.index]->setWidth (
+             engine_.getSlotConfig (entry.index).width);
+     }
+ 
+     // Lane D / lane S loose end (A-9): lastLoadSkipped_ starts from
+     // PresetManager's own out-of-range-slot count and adds every notch
+     // adoptPreset() itself skips (today: a lane-1 notch on a mono slot) --
+     // the two are different rejections and neither subsumes the other.
+     lastLoadSkipped_ = result.skippedNotchCount;
++    int adoptedTotal = 0;
+ 
+     for (int s = 0; s < kMaxSlots; ++s)
+     {
+         std::vector<PresetNotch> notchesForSlot;
+ 
+         for (const auto& notch : result.preset.notches)
+             if (notch.slot == s)
+                 notchesForSlot.push_back (notch);
+ 
+         if (! notchesForSlot.empty())
+         {
+             int skipped = 0;
+-            notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
++            adoptedTotal += notchControllers_[(std::size_t) s]->adoptPreset (notchesForSlot, &skipped);
+             if (skipped > 0)
+             {
+                 lastLoadSkipped_ += skipped;
+                 juce::Logger::writeToLog ("preset \"" + file.getFileName() + "\": slot "
+                     + juce::String (s + 1) + " is mono, skipped " + juce::String (skipped)
+                     + " lane-R notch(es)");
+             }
+         }
+     }
+ 
+     if (detectorsRunning)
+         for (auto& controller : notchControllers_)
+             controller->start();
+ 
++    // M-4: the mono-skip count had nowhere to go but a Logger line and a test
++    // accessor. It belongs in the session log next to the notches the load
++    // DID install -- a preset that silently loses half its notches on a mono
++    // rig is exactly the kind of thing a show log has to be able to explain.
++    // File NAME only: the full path can carry the operator's own name.
++    {
++        auto v = SessionLogger::makeEvent ("preset_load");
++        auto* o = v.getDynamicObject();
++        o->setProperty ("file", file.getFileName());
++        o->setProperty ("adopted", adoptedTotal);
++        o->setProperty ("skipped", lastLoadSkipped_);
++        sessionLogger_.log (v);
++    }
++
+     slotPanel_.refresh();   // the routing table shows what the file just changed (lane S loose end)
+ 
+     return true;
+ }
+ 
+ bool MainComponent::savePreset (const juce::File& file)
+ {
+     Preset preset;
+     preset.device     = engine_.getCurrentDeviceName();
+     preset.bufferSize = engine_.getCurrentBufferSize();
+diff --git a/src/app/MainComponent.h b/src/app/MainComponent.h
+index dd6188b..2996e5b 100644
+--- a/src/app/MainComponent.h
++++ b/src/app/MainComponent.h
+@@ -103,20 +103,26 @@ public:
+     bool savePreset (const juce::File& file);
+ 
+     // Lane D (data loop): the session log. Never started in the constructor --
+     // 26 tests and the snapshot tool construct MainComponent, and a ctor start
+     // would write to (and prune) the developer's real %APPDATA% logs. main.cpp
+     // calls setAppVersion() once at startup (the CMake project() version is the
+     // one true source, D-8) and startSessionLog() AFTER startAudio() so the
+     // header names the device actually in use.
+     void setAppVersion (const juce::String& version);
+     bool startSessionLog (const juce::File& directory);
++
++    // Puts one line in the status bar and the masthead readout -- the SAME
++    // route devicePanel_.onMessage takes. Public because main.cpp is the one
++    // caller that has something to say the component itself cannot know: that
++    // startSessionLog() refused (I-3).
++    void showMessage (const juce::String& message);
+     void stopSessionLog();
+     [[nodiscard]] juce::File sessionLogFileForTest() const;
+     [[nodiscard]] int lastLoadSkippedNotchesForTest() const;
+ 
+     // Injectable for tests: the default opens a native async FileChooser and
+     // invokes onPicked with the file the user picked (a cancel is a no-op). A
+     // headless test replaces these with a fake that hands onPicked a known temp
+     // file. Mirrors ModeRail::confirmHook -- the only way to exercise the
+     // button->chooser->load/save route with JUCE_MODAL_LOOPS_PERMITTED off.
+     std::function<void (std::function<void (const juce::File&)> onPicked)> presetLoadChooser;
+diff --git a/src/app/SessionLogger.cpp b/src/app/SessionLogger.cpp
+index 8df38dd..d5811ae 100644
+--- a/src/app/SessionLogger.cpp
++++ b/src/app/SessionLogger.cpp
+@@ -69,20 +69,21 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
+     if (! stream_->openedOk())
+     {
+         stream_.reset();
+         file_      = {};
+         directory_ = {};
+         return false;
+     }
+ 
+     t0_ = std::chrono::steady_clock::now();
+     dropped_.store (0, std::memory_order_relaxed);
++    writeFailed_.store (false, std::memory_order_relaxed);
+     {
+         const std::lock_guard<std::mutex> lock (queueMutex_);
+         pending_.clear();
+         accepting_ = true;
+     }
+ 
+     juce::var header = sessionHeader;
+     if (header.getDynamicObject() == nullptr)
+         header = makeEvent ("session_start");
+     header.getDynamicObject()->setProperty ("ev", "session_start");
+@@ -137,20 +138,24 @@ void SessionLogger::stop()
+     // lock, with no ordering relative to this read -- possibly after this
+     // line, after session_end is written, even after the stream is closed
+     // below. So dropped_events recorded in the file can UNDER-count.
+     // droppedEvents(), read only once every producer thread has been
+     // joined, is the authoritative count (review round 2).
+     const auto droppedAtClose = dropped_.load (std::memory_order_relaxed);
+ 
+     auto end = makeEvent ("session_end");
+     end.getDynamicObject()->setProperty ("t", elapsedMs());
+     end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) droppedAtClose);
++    // M-1: true if ANY write since start() was refused by the stream. The
++    // session_end line's own write is obviously not covered by its own field.
++    end.getDynamicObject()->setProperty ("write_failed",
++                                         writeFailed_.load (std::memory_order_relaxed));
+     writeLineNow (juce::JSON::toString (end, true));
+ 
+     if (stream_ != nullptr)
+         stream_->flush();
+     stream_.reset();
+ }
+ 
+ void SessionLogger::log (const juce::var& event)
+ {
+     // Fast, unlocked pre-filter: skip all work (clone, stamp, serialise) for
+@@ -160,21 +165,25 @@ void SessionLogger::log (const juce::var& event)
+         return;
+ 
+     auto* obj = event.getDynamicObject();
+     if (obj == nullptr)
+         return;
+ 
+     // Important 2 fix: never mutate the caller's object. getDynamicObject()
+     // is non-const even from a const juce::var, so setProperty("t") would
+     // otherwise write into whatever DynamicObject the caller passed in --
+     // visible to them afterwards, and a data race if they log the same var
+-    // from two threads. Clone first, stamp the clone, serialise the clone.
++    // from two threads. Copy the DynamicObject ONE level first (its copy ctor
++    // copies the NamedValueSet), stamp the copy, serialise the copy. NOT
++    // var::clone(): that is a deep copy and would duplicate the three
++    // 1025-element ctx arrays for the sake of one added field. The arrays are
++    // shared and nobody writes to them after the event is built.
+     juce::var stamped (new juce::DynamicObject (*obj));
+     stamped.getDynamicObject()->setProperty ("t", elapsedMs());
+     juce::String line = juce::JSON::toString (stamped, true);
+ 
+     const std::lock_guard<std::mutex> lock (queueMutex_);
+ 
+     // Important 1 fix: the authoritative check, under the same lock stop()
+     // uses to close the session. A call that read isActive()==true above
+     // but loses the race for this lock to a concurrent stop() lands here
+     // instead of pushing into an already-abandoned queue.
+@@ -216,22 +225,29 @@ void SessionLogger::drainToFile()
+         return;
+     for (const auto& line : batch)
+         writeLineNow (line);
+     stream_->flush();
+ }
+ 
+ void SessionLogger::writeLineNow (const juce::String& line)
+ {
+     if (stream_ == nullptr)
+         return;
+-    stream_->write (line.toRawUTF8(), line.getNumBytesAsUTF8());
+-    stream_->write ("\n", 1);
++    // M-1: a full disk or a revoked handle makes write() return false and
++    // otherwise say nothing. Record it so session_end can tell a reader the
++    // file is truncated, rather than letting a short log read as a quiet
++    // session. Both writes are attempted -- no short-circuit -- so a failure
++    // on the payload does not also swallow the line terminator.
++    const bool wroteLine    = stream_->write (line.toRawUTF8(), line.getNumBytesAsUTF8());
++    const bool wroteNewline = stream_->write ("\n", 1);
++    if (! (wroteLine && wroteNewline))
++        writeFailed_.store (true, std::memory_order_relaxed);
+ }
+ 
+ void SessionLogger::pruneOldFiles()
+ {
+     juce::Array<juce::File> files;
+     directory_.findChildFiles (files, juce::File::findFiles, false, "session-*.jsonl");
+     // Names embed the timestamp, so lexical order IS chronological order.
+     std::sort (files.begin(), files.end(),
+                [] (const juce::File& a, const juce::File& b) { return a.getFileName() > b.getFileName(); });
+ 
+diff --git a/src/app/SessionLogger.h b/src/app/SessionLogger.h
+index f5bea1f..ac8c1fc 100644
+--- a/src/app/SessionLogger.h
++++ b/src/app/SessionLogger.h
+@@ -1,20 +1,27 @@
+ // SessionLogger -- one JSONL file per app run (lane D, data-loop design §3.1).
+ //
+ // Every line is one JSON object: {"t": <ms since start>, "ev": "<name>", ...}.
+ // Producers (detector threads, message thread) call log(); a writer thread
+ // drains a bounded deque to the file once a second. log() NEVER touches the
+ // file and NEVER blocks: over kMaxPendingLines the event is dropped and
+-// counted (D-4). session_start and session_end are written directly by
+-// start()/stop(), outside the deque, so the invariant
+-//     lines in file + droppedEvents() == log() calls + 2
+-// holds for every session.
++// counted (D-4). session_start and session_end BYPASS the deque -- start()
++// and stop() write them straight to the stream -- so a session's file holds
++// those two lines plus one line per log() call that was accepted:
++//     lines in file == log() calls - droppedEvents() + 2
++// droppedEvents() is the AUTHORITATIVE drop count, and it is final only once
++// every producer thread has been joined. The "dropped_events" number carried
++// in session_end is a best-effort snapshot taken while stop() runs and can
++// UNDER-count a producer that loses the close race -- see the long comment
++// at that read in SessionLogger.cpp. "write_failed" in the same line says
++// whether any write up to that point was refused (a full disk, a revoked
++// handle): true means the file is TRUNCATED, not that nothing happened.
+ //
+ // NOT for the audio thread: log() takes a mutex and allocates a String.
+ //
+ // Encoding: UTF-8, no BOM (repo rule 6). The file is opened for APPEND; a
+ // crash mid-session leaves every completed line readable.
+ 
+ #pragma once
+ 
+ #include <juce_core/juce_core.h>
+ 
+@@ -48,24 +55,26 @@ public:
+     // false: the directory could not be created or the file not opened; the
+     // logger stays inactive and log() is a no-op. Message thread.
+     bool start (const juce::File& directory, const juce::var& sessionHeader);
+ 
+     // Drains what is pending, writes session_end, closes the file, joins the
+     // thread. Idempotent. Message thread.
+     void stop();
+ 
+     bool isActive() const { return active_.load (std::memory_order_acquire); }
+ 
+-    // Any thread except audio. `event` must be a DynamicObject var; a clone
+-    // is stamped with "t" -- the caller's own object is never mutated, so
+-    // the same var is safe to log again or read afterwards from any thread.
+-    // Inactive logger: no-op.
++    // Any thread except audio. `event` must be a DynamicObject var. A
++    // ONE-LEVEL copy of its DynamicObject is what gets stamped with "t" --
++    // not var::clone(), which would deep-copy the three 1025-element ctx
++    // arrays just to add one field. The caller's own object is never
++    // mutated, so the same var is safe to log again or read afterwards from
++    // any thread. Inactive logger: no-op.
+     void log (const juce::var& event);
+ 
+     juce::File    currentFile() const;
+     std::uint64_t droppedEvents() const { return dropped_.load (std::memory_order_relaxed); }
+ 
+ private:
+     void run() override;
+     void drainToFile();
+     void writeLineNow (const juce::String& line);   // writer thread, or start()/stop()
+     double elapsedMs() const;
+@@ -86,13 +95,17 @@ private:
+     std::deque<juce::String> pending_;
+     // Authoritative "still open for business" flag, read/written ONLY under
+     // queueMutex_. active_ (above) is a fast, unlocked pre-filter log() uses
+     // to skip work when the logger has obviously never started or has long
+     // since stopped; accepting_ is the actual gate a log() call re-checks
+     // once it holds the same lock stop() uses to close the session, so a
+     // call that raced stop() is always resolved -- pushed, or counted into
+     // dropped_ -- never silently lost (review round 1, Important 1).
+     bool accepting_ { false };
+     std::atomic<std::uint64_t> dropped_ { 0 };
++    // M-1: sticky for the session, set by writeLineNow() when the stream
++    // refuses a write. Atomic because the writer thread sets it and stop()
++    // (message thread) reads it. Reported in session_end.
++    std::atomic<bool> writeFailed_ { false };
+ 
+     JUCE_DECLARE_NON_COPYABLE (SessionLogger)
+ };
+diff --git a/src/gui/NotchListPanel.cpp b/src/gui/NotchListPanel.cpp
+index ff9931d..24c536a 100644
+--- a/src/gui/NotchListPanel.cpp
++++ b/src/gui/NotchListPanel.cpp
+@@ -62,25 +62,37 @@ void NotchListPanel::refreshFromSnapshot()
+     // 1. Record sightings: first-seen is kept for an identity seen again
+     //    within kTrackingTimeoutMs (age keeps counting across brief drops).
+     for (std::uint32_t i = 0; i < count; ++i)
+     {
+         const auto& notch = snapshot_.notches[i];
+         const auto key = identityKey (notch.channel, notch.index, notch.frequency);
+         const auto [it, inserted] =
+             sightings_.try_emplace (key, Sighting { now, now });
+         if (inserted)
+             it->second.firstSeenMs = now;   // redundant with try_emplace, explicit for clarity
++        else if (lastRefreshMs_ >= 0.0 && it->second.lastSeenMs < lastRefreshMs_)
++        {
++            // I-1: this identity was absent for at least one whole refresh and
++            // has now been placed AGAIN. The age carries over (R-2 keeps the
++            // sighting for kTrackingTimeoutMs, so a brief tap dropout does not
++            // reset the clock), but the verdict must not: the human judged the
++            // notch that was here before, not this one. Without the reset a
++            // re-placed howl comes up already marked GOOD or FALSE -- a verdict
++            // nobody gave, and one the panel then refuses to let anyone give.
++            if (const auto b = buttons_.find (key); b != buttons_.end())
++                b->second.state = Verdict::None;
++        }
+         it->second.lastSeenMs = now;
+ 
+         // Lane D: a real child button, created once per identity and never
+         // rebuilt -- see ensureButtonsFor()'s header comment.
+-        ensureButtonsFor (key, notch);
++        ensureButtonsFor (key);
+     }
+ 
+     // 2. Rebuild the row strings (paint() never allocates).
+     rows_.clear();
+     for (std::uint32_t i = 0; i < count; ++i)
+     {
+         const auto& notch = snapshot_.notches[i];
+         const auto key = identityKey (notch.channel, notch.index, notch.frequency);
+ 
+         double ageMs = 0.0;
+@@ -114,20 +126,22 @@ void NotchListPanel::refreshFromSnapshot()
+     {
+         if (now - it->second.lastSeenMs > kTrackingTimeoutMs)
+         {
+             buttons_.erase (it->first);
+             it = sightings_.erase (it);
+         }
+         else
+             ++it;
+     }
+ 
++    lastRefreshMs_ = now;
++
+     layoutButtons();
+     repaint();
+ }
+ 
+ void NotchListPanel::setController (const NotchController& controller)
+ {
+     if (controller_ == &controller)
+         return;
+ 
+     controller_ = &controller;
+@@ -243,38 +257,36 @@ juce::TextButton* NotchListPanel::falseButtonForTest (const int row)
+         return nullptr;
+     const auto it = buttons_.find (rows_[(std::size_t) row].key);
+     return it != buttons_.end() ? it->second.bad.get() : nullptr;
+ }
+ 
+ NotchListPanel::Verdict NotchListPanel::verdictForTest (const int row) const
+ {
+     return rows_[(std::size_t) row].verdict;
+ }
+ 
+-void NotchListPanel::ensureButtonsFor (const std::uint64_t key,
+-                                       const NotchController::SnapshotNotch& notch)
++void NotchListPanel::ensureButtonsFor (const std::uint64_t key)
+ {
+     if (buttons_.find (key) != buttons_.end())
+         return;
+ 
+     RowButtons rb;
+     rb.good = std::make_unique<juce::TextButton> ("GOOD");    // ONE argument (JUCE 9 trap)
+     rb.bad  = std::make_unique<juce::TextButton> ("FALSE");
+     for (auto* b : { rb.good.get(), rb.bad.get() })
+     {
+         b->getProperties().set (juce::Identifier ("azStyle"), "ghost");
+         b->setWantsKeyboardFocus (false);
+         addAndMakeVisible (*b);
+     }
+     rb.good->onClick = [this, key] { reportVerdict (key, true); };
+     rb.bad->onClick  = [this, key] { reportVerdict (key, false); };
+-    juce::ignoreUnused (notch);
+     buttons_.emplace (key, std::move (rb));
+ }
+ 
+ void NotchListPanel::reportVerdict (const std::uint64_t key, const bool good)
+ {
+     const auto it = buttons_.find (key);
+     if (it == buttons_.end() || it->second.state != Verdict::None)
+         return;
+     it->second.state = good ? Verdict::Good : Verdict::False;
+ 
+diff --git a/src/gui/NotchListPanel.h b/src/gui/NotchListPanel.h
+index 018786b..cb4cb7a 100644
+--- a/src/gui/NotchListPanel.h
++++ b/src/gui/NotchListPanel.h
+@@ -218,31 +218,37 @@ private:
+     juce::Font   tableFont_;              // mono: every cell holds numbers
+ 
+     // Rebuilt by setDisplayedSlot so paint() never formats a string.
+     juce::String caption_ { "Active notches" };
+ 
+     juce::Component* slotTabs_ = nullptr;   // NOT owned
+ 
+     // First-seen ledger keyed by identity (ruling R-2).
+     std::map<std::uint64_t, Sighting> sightings_;
+ 
++    // I-1: the clock reading of the PREVIOUS refreshFromSnapshot(), or -1
++    // before the first one. An identity whose lastSeenMs predates this was
++    // absent for at least one whole refresh, i.e. it was cleared and placed
++    // again -- and a re-placed notch must start unjudged.
++    double lastRefreshMs_ = -1.0;
++
+     // Lane D: the ONE deliberate exception to "paint draws prebuilt members
+     // only" -- a click needs a real child Component. Keyed by the same
+     // identity the sightings ledger uses, created when an identity is first
+     // seen, destroyed when it leaves tracking; NEVER rebuilt per refresh, so
+     // a click cannot land on a button that no longer exists.
+     struct RowButtons
+     {
+         std::unique_ptr<juce::TextButton> good, bad;
+         Verdict state = Verdict::None;
+     };
+     std::map<std::uint64_t, RowButtons> buttons_;
+     int displayedSlot_ = 0;
+ 
+-    void ensureButtonsFor (std::uint64_t key, const NotchController::SnapshotNotch& notch);
++    void ensureButtonsFor (std::uint64_t key);
+     void layoutButtons();
+     void reportVerdict (std::uint64_t key, bool good);
+ 
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NotchListPanel)
+ };
+ 
+ } // namespace gui
+diff --git a/src/main.cpp b/src/main.cpp
+index abe7683..60455ae 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -65,21 +65,30 @@ private:
+ 
+             // Opening the audio device is an explicit call, not a MainComponent
+             // constructor side effect -- that is what keeps the whole component
+             // constructible in a test on a machine with no audio hardware.
+             // Done AFTER setVisible so a device that refuses to open leaves a
+             // visible window showing why, rather than nothing at all.
+             content->startAudio();
+             // Lane D: the session log opens AFTER the device, so its header
+             // names the device actually in use. A failed start (no %APPDATA%)
+             // is not fatal -- the app runs without a log.
+-            content->startSessionLog(SessionLogger::defaultDirectory());
++            // I-3: a refused start is not fatal, but it must not be silent --
++            // the operator would otherwise finish a show believing there is a
++            // log to look at. ASCII in the literal on purpose: MSVC's default
++            // execution charset mangles non-ASCII source literals.
++            if (! content->startSessionLog(SessionLogger::defaultDirectory()))
++            {
++                const auto where = SessionLogger::defaultDirectory().getFullPathName();
++                juce::Logger::writeToLog("session log: could not open " + where);
++                content->showMessage("LOG: khong ghi duoc " + where);
++            }
+         }
+ 
+         void closeButtonPressed() override
+         {
+             juce::JUCEApplication::getInstance()->systemRequestedQuit();
+         }
+ 
+     private:
+         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
+     };
+diff --git a/tests/test_candidatescorer.cpp b/tests/test_candidatescorer.cpp
+index 80feb9a..7eec543 100644
+--- a/tests/test_candidatescorer.cpp
++++ b/tests/test_candidatescorer.cpp
+@@ -12,20 +12,21 @@
+ //   1 kHz -> bin 43 (1007.8125 Hz), 2 kHz -> bin 85 (1992.1875 Hz).
+ 
+ #include <gtest/gtest.h>
+ 
+ #include "dsp/CandidateScorer.h"
+ #include "dsp/Detector.h"
+ #include "dsp/LockFreeRingBuffer.h"
+ #include "dsp/PeakinessAnalyzer.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <cstddef>
+ #include <random>
+ #include <vector>
+ 
+ namespace
+ {
+ constexpr double kPi         = 3.14159265358979323846;
+ constexpr double kSampleRate = 48000.0;
+ constexpr std::size_t kTapCapacity = 8192;
+@@ -362,23 +363,130 @@ TEST (CandidateScorer, RiseReferenceClamps)
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 100.0);
+     rig.scorer.setRiseReferenceMs (2000.0);
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 1000.0);
+     rig.scorer.setRiseReferenceMs (400.0);
+     EXPECT_DOUBLE_EQ (rig.scorer.getRiseReferenceMs(), 400.0);
+ }
+ 
+ //==============================================================================
+ // Lane D (data loop): the score breakdown the session log records.
+ 
+-// Spec test 5. Red if scoreCandidateDetailed() diverges from scoreCandidate()
+-// by even one ULP, or if the recorded axes stop multiplying to the score.
+-TEST (CandidateScorerBreakdown, DetailedScoreIsBitExactWithTheFloatOverloadAndItsAxesMultiplyToIt)
++// Spec test 5, part 1 -- the ANALYTIC golden vector. Every expected number
++// below is recomputed here from the formula documented in CandidateScorer.h,
++// against hand-built constant frames, so nothing is compared to the scorer's
++// own output. Red if ANY of the documented arithmetic moves: the pNorm slope
++// or its 10x saturation, the rise normaliser (rise - 1)/0.5, the log-4
++// novelty scale, the 3 s baseline time constant, the 1.4x..4.1x harmonic
++// window, kHarmonicPenalty, or the product form itself.
++TEST (CandidateScorerBreakdown, ScoreMatchesTheDocumentedFormulaOnHandBuiltFrames)
++{
++    // Three constant 2.0 frames. commitBlock() stamps clockMs_ AFTER adding
++    // elapsedMs and SKIPS the EMA on a zero dt, so:
++    //   A: 2.0, elapsed 0    -> lands at t = 0,    baseline untouched
++    //   B: 2.0, elapsed 3000 -> lands at t = 3000, alpha1 = 1 - exp(-3000/tau)
++    //   C: 2.0, elapsed 100  -> lands at t = 3100, alpha2 = 1 - exp(-100/tau)
++    // The scoring instant is therefore t = 3100 and, at the default 250 ms
++    // rise reference, the qualifying frame is the newest at least 112.5 ms
++    // old -- frame A, value 2.0, age 3100 ms.
++    constexpr double kTau = CandidateScorer::kBaselineTimeConstantMs;
++    const double alpha1 = 1.0 - std::exp (-3000.0 / kTau);
++    const double alpha2 = 1.0 - std::exp (-100.0  / kTau);
++    double baseline = 0.0;
++    baseline += alpha1 * (2.0 - baseline);
++    baseline += alpha2 * (2.0 - baseline);
++
++    auto prime = [] (CandidateScorer& s)
++    {
++        std::array<float, CandidateScorer::kBins> f {};
++        f.fill (2.0f);
++        s.beginBlock (kSampleRate);
++        s.commitBlock (f.data(), 0.0);
++        s.commitBlock (f.data(), 3000.0);
++        s.commitBlock (f.data(), 100.0);
++    };
++
++    PeakinessAnalyzer::Candidate cand;
++    cand.bin         = 43;
++    cand.frequencyHz = 1007.8125;   // 3.36x of the 300 Hz locked below
++    cand.magnitude   = 8.0f;
++    cand.peakiness   = 55.0f;       // (55/10 - 1)/9 = 0.5 EXACTLY in float
++    const float pNorm = 0.5f;
++
++    const std::vector<double> locked { 300.0 };
++    const CandidateScorer::LockedFrequencyView lockedView { locked.data(), locked.size() };
++
++    // --- case 1: rise and novelty both saturate; the penalty is the mover.
++    {
++        constexpr float kNow = 8.0f;
++        std::array<float, CandidateScorer::kBins> now {};
++        now.fill (kNow);
++
++        const float rNorm = 1.0f;   // 8/2 = 4x -> (4-1)/0.5 = 6, clamped
++        const float mNorm = (float) std::min (1.0,
++            std::log ((double) kNow / baseline) / std::log (4.0));
++        ASSERT_FLOAT_EQ (mNorm, 1.0f) << "case 1 is meant to saturate novelty";
++
++        CandidateScorer scorer;
++        prime (scorer);
++
++        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
++        EXPECT_FLOAT_EQ (b.rawPeakiness, 55.0f);
++        EXPECT_FLOAT_EQ (b.pNorm, pNorm);
++        EXPECT_FLOAT_EQ (b.rNorm, rNorm);
++        EXPECT_FLOAT_EQ (b.mNorm, mNorm);
++        EXPECT_FLOAT_EQ (b.penalty, 1.0f);
++        EXPECT_DOUBLE_EQ (b.refAgeMs, 3100.0);
++        ASSERT_NE (b.refFrame, nullptr);
++        EXPECT_FLOAT_EQ (b.refFrame[cand.bin], 2.0f);
++        EXPECT_FLOAT_EQ (b.score, pNorm * rNorm * mNorm * 1.0f);
++        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), {}), b.score);
++
++        // Same candidate, now a harmonic of a LOCKED 300 Hz fundamental.
++        const auto h = scorer.scoreCandidateDetailed (cand, now.data(), lockedView);
++        EXPECT_FLOAT_EQ (h.penalty, CandidateScorer::kHarmonicPenalty);
++        EXPECT_FLOAT_EQ (h.score, pNorm * rNorm * mNorm * CandidateScorer::kHarmonicPenalty);
++        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), lockedView), h.score);
++    }
++
++    // --- case 2: NOTHING saturates, so all three axes are pinned by value.
++    {
++        constexpr float kNow = 2.6f;
++        std::array<float, CandidateScorer::kBins> now {};
++        now.fill (kNow);
++
++        const float rNorm = (kNow / 2.0f - 1.0f) / 0.5f;   // 1.3x -> 0.6
++        const float mNorm = (float) (std::log ((double) kNow / baseline) / std::log (4.0));
++        ASSERT_GT (rNorm, 0.0f); ASSERT_LT (rNorm, 1.0f);
++        ASSERT_GT (mNorm, 0.0f); ASSERT_LT (mNorm, 1.0f);
++
++        CandidateScorer scorer;
++        prime (scorer);
++
++        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
++        EXPECT_FLOAT_EQ (b.pNorm, pNorm);
++        EXPECT_FLOAT_EQ (b.rNorm, rNorm);
++        EXPECT_FLOAT_EQ (b.mNorm, mNorm);
++        EXPECT_FLOAT_EQ (b.penalty, 1.0f);
++        EXPECT_FLOAT_EQ (b.score, pNorm * rNorm * mNorm);
++        EXPECT_EQ (scorer.scoreCandidate (cand, now.data(), {}), b.score);
++    }
++}
++
++// Spec test 5, part 2. This test pins the DELEGATION, not the arithmetic:
++// scoreCandidate() is a one-line forward to scoreCandidateDetailed().score,
++// so `plain == b.score` cannot fail while that stays true, and it is here to
++// keep it true -- a future scoreCandidate() that recomputes the product on
++// its own would be caught. The arithmetic itself is pinned analytically by
++// ScoreMatchesTheDocumentedFormulaOnHandBuiltFrames above; this one also
++// checks the axes still multiply to the score on frames from the REAL
++// Detector + PeakinessAnalyzer pipeline (verifier V2).
++TEST (CandidateScorerBreakdown, DetailedScoreIsTheScalarOverloadsSourceOfTruth)
+ {
+     Rig rig;
+     const auto signal = makeToneInNoise (1000.0, 0.5f, 0.01f, 4242u, (std::size_t) kHop * 80);
+ 
+     // Drive the real pipeline so the breakdown is taken against genuine
+     // history and baseline state, not a fresh scorer.
+     std::size_t offset = 0;
+     for (int i = 0; i < 60; ++i, offset += (std::size_t) kHop)
+         rig.cycle (signal, offset);
+ 
+@@ -393,22 +501,32 @@ TEST (CandidateScorerBreakdown, DetailedScoreIsBitExactWithTheFloatOverloadAndIt
+     const CandidateScorer::LockedFrequencyView view { locked.data(), locked.size() };
+ 
+     for (std::size_t i = 0; i < result.count; ++i)
+     {
+         const auto& cand = result.candidates[i];
+         const float plain = rig.scorer.scoreCandidate (cand, spectrum.magnitudes, view);
+         const auto  b     = rig.scorer.scoreCandidateDetailed (cand, spectrum.magnitudes, view);
+         EXPECT_EQ (plain, b.score) << "bin " << cand.bin;
+         EXPECT_EQ (b.pNorm * b.rNorm * b.mNorm * b.penalty, b.score) << "bin " << cand.bin;
+         EXPECT_FLOAT_EQ (b.rawPeakiness, cand.peakiness);
++        // T2: the penalty is a function of the candidate's FREQUENCY against
++        // the locked list, never of its peakiness. Peakiness only decides
++        // whether the scorer ran the harmonic test at all (a rejected bin
++        // returns early with the neutral 1.0).
+         if (cand.peakiness > PeakinessAnalyzer::kDefaultThreshold)
+-            EXPECT_FLOAT_EQ (b.penalty, CandidateScorer::kHarmonicPenalty);
++        {
++            const bool harmonicOfLocked = cand.frequencyHz > 1.4 * locked.front()
++                                       && cand.frequencyHz < 4.1 * locked.front();
++            EXPECT_FLOAT_EQ (b.penalty,
++                             harmonicOfLocked ? CandidateScorer::kHarmonicPenalty : 1.0f)
++                << "bin " << cand.bin << " at " << cand.frequencyHz << " Hz";
++        }
+     }
+ }
+ 
+ // Spec test 6. Red if refFrame/refAgeMs stop describing the frame the rise
+ // axis actually used: with rise 250 ms and frames at 300/120/100 ms of age,
+ // the scorer compares against the NEWEST frame at least 0.45 x 250 = 112.5 ms
+ // old, which is the 120 ms one.
+ TEST (CandidateScorerBreakdown, RefFrameIsTheNewestFrameAtLeastFortyFivePercentOfRiseReferenceOld)
+ {
+     CandidateScorer scorer;
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index 314a8b4..1f8d649 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -24,20 +24,23 @@
+ #include "app/MainComponent.h"
+ #include "app/NotchController.h"
+ #include "app/PresetManager.h"
+ #include "gui/DeviceDrawer.h"
+ #include "gui/theme/AzTheme.h"
+ #include "gui/DevicePanel.h"
+ #include "gui/ModeBar.h"
+ #include "test_gui_helpers.h"
+ 
+ #include <cmath>
++#include <iostream>
++#include <random>
++#include <string>
+ #include <vector>
+ 
+ //==============================================================================
+ // Task 23 -- mode buttons. Auto and Bypass in full; Soundcheck sets the mode
+ // but deliberately runs no countdown (owner decision D-06 -- see ModeBar.cpp).
+ 
+ TEST (ModeBar, ClickingAutoRequestsAutoMode)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+ 
+@@ -1095,58 +1098,141 @@ TEST (GuiWiring, ModeAndTuningChangesAreLogged)
+     ASSERT_TRUE (app.startSessionLog (dir));
+     const auto file = app.sessionLogFileForTest();
+ 
+     app.requestMode (AudioEngine::Mode::Auto);
+     gui::TuningPanel::Params p;
+     p.riseReferenceMs = 300; p.persistenceBlocks = 4; p.q = 25.0f; p.depthDb = -10.0f; p.peakinessThreshold = 12.0f;
+     app.getTuningPanel().onTuningChanged (p);   // MainComponent.h:151
+ 
+     app.stopSessionLog();
+     const auto events = parsedLines (file);
++
++    // T6: the FIRST `mode` line is the one startSessionLog() writes -- the
++    // mode the session STARTED in, before anybody touched the rail. Red if
++    // that call disappears from startSessionLog(): a show that never switches
++    // mode would then carry no `mode` line at all and a reader could not tell
++    // Auto from Bypass.
+     const auto* mode = firstEvent (events, "mode");
+     ASSERT_NE (mode, nullptr);
+-    EXPECT_EQ ((*mode)["mode"].toString(), "auto");
++    EXPECT_EQ ((*mode)["mode"].toString(), "bypass");
++
++    // ...and requestMode() still logs its own, after it.
++    int modeLines = 0;
++    juce::String lastMode;
++    for (const auto& e : events)
++        if (e["ev"].toString() == "mode") { ++modeLines; lastMode = e["mode"].toString(); }
++    EXPECT_EQ (modeLines, 2);
++    EXPECT_EQ (lastMode, "auto");
+     const auto* tuning = firstEvent (events, "tuning");
+     ASSERT_NE (tuning, nullptr);
+     EXPECT_EQ ((int) (*tuning)["slot"], -1);
+     EXPECT_EQ ((int) (*tuning)["persist"], 4);
+     EXPECT_NEAR ((double) (*tuning)["depth_db"], -10.0, 1e-6);
+ }
+ 
+ // Spec test 15. Red if MainComponent's teardown order lets a detector thread
+-// deliver an event into a logger that is already gone (or vice versa).
++// deliver an event into a logger that is already gone (or vice versa), or if
++// the destructor stops flushing the controllers before the logger closes.
++//
++// The feed is a REAL howl, not a steady tone: ~120 ms of quiet room noise
++// first, to lay down the scorer's rise history and warm its baseline EMA,
++// then a loud 1 kHz tone appears. A steady tone can NEVER confirm -- the rise
++// axis compares now against the newest frame at least 0.45 x riseReference
++// old, and a tone already at full level in that frame scores rNorm 0 -- which
++// is why the first version of this test tore the app down with nothing ever
++// placed, and so exercised none of the race it exists to cover (verifier V1).
++//
++// Both the scorer's clock and the reference age are WALL clock here (the
++// controller stamps blocks with JuceMonotonicClock), so the hops have to be
++// written in real time rather than burst in: the tap ring holds 8192 samples
++// (16 hops) and a burst is simply dropped.
+ TEST (GuiWiring, DestroyingTheAppWhileADetectorIsPlacingNotchesDoesNotCrash)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+-    for (int run = 0; run < 20; ++run)
++
++    constexpr int kHop       = 512;
++    constexpr int kQuietHops = 40;   // ~120 ms of wall time at 3 ms per hop
++    constexpr int kHowlHops  = 45;   // ~135 ms more
++    constexpr int kRounds    = 20;
++
++    // Built once: regenerating this 20 times would dominate the runtime.
++    std::mt19937 rng (20260905u);
++    std::uniform_real_distribution<float> noise (-0.05f, 0.05f);
++    std::vector<float> quiet ((std::size_t) kQuietHops * kHop);
++    for (auto& s : quiet)
++        s = noise (rng);
++    std::vector<float> howl ((std::size_t) kHowlHops * kHop);
++    for (std::size_t i = 0; i < howl.size(); ++i)
++        howl[i] = (float) std::sin (2.0 * 3.14159265358979 * 1000.0
++                                    * (double) i / 48000.0)
++                + noise (rng);
++
++    int totalSets = 0, roundsWithASet = 0;
++    std::string perRound;
++
++    for (int run = 0; run < kRounds; ++run)
+     {
+         const auto dir = freshLogDir ("teardown-" + juce::String (run));
+-        MainComponent app;
+-        ASSERT_TRUE (app.startSessionLog (dir));
+-        auto* c0 = app.getNotchControllerForTest (0);
+-        ASSERT_NE (c0, nullptr);
+-        c0->setDetectionActive (true);
+-        c0->start();   // real detector thread
+-
+-        // A loud 1 kHz tone into both lanes for ~1 s of audio, then die.
+-        std::vector<float> hop (512);
+-        double n = 0.0;
+-        for (int block = 0; block < 90; ++block)
++        juce::File file;
+         {
+-            for (auto& s : hop) { s = std::sin (2.0 * 3.14159265358979 * 1000.0 * n / 48000.0); n += 1.0; }
+-            app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+-            app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+-            if (block % 8 == 7) juce::Thread::sleep (1);
++            MainComponent app;
++            ASSERT_TRUE (app.startSessionLog (dir));
++            file = app.sessionLogFileForTest();
++
++            auto* c0 = app.getNotchControllerForTest (0);
++            ASSERT_NE (c0, nullptr);
++            c0->setRiseReferenceMs (100.0);   // the reference must be >= 45 ms old
++            c0->setPersistenceBlocks (1);     // one confirming block is enough
++            c0->setDetectionActive (true);
++            c0->start();                      // real detector thread
++
++            auto feed = [&] (const std::vector<float>& src, int hops)
++            {
++                for (int h = 0; h < hops; ++h)
++                {
++                    const float* p = src.data() + (std::size_t) h * kHop;
++                    app.getAudioEngine().getTapBuffer (0, 0).write (p, (std::size_t) kHop);
++                    app.getAudioEngine().getTapBuffer (0, 1).write (p, (std::size_t) kHop);
++                    juce::Thread::sleep (3);
++                }
++            };
++            feed (quiet, kQuietHops);
++            feed (howl,  kHowlHops);
++            // `app` is destroyed here, mid-placement, with the thread running.
+         }
+-        // `app` is destroyed here, mid-placement, with the thread running.
++
++        const auto events = parsedLines (file);
++        ASSERT_FALSE (events.empty()) << "round " << run;
++        EXPECT_EQ (events.front()["ev"].toString(), "session_start") << "round " << run;
++        // The teardown is only PROVEN if the logger was still alive when the
++        // controllers flushed their last events: session_end must be the last
++        // line of every file, after whatever the detector placed.
++        EXPECT_EQ (events.back()["ev"].toString(), "session_end") << "round " << run;
++
++        int sets = 0;
++        for (const auto& e : events)
++            if (e["ev"].toString() == "notch_set")
++                ++sets;
++        totalSets += sets;
++        roundsWithASet += (sets > 0 ? 1 : 0);
++        perRound += std::to_string (sets) + " ";
+     }
+-    SUCCEED();
++
++    // A round that placed nothing never touched the race. The floor is set
++    // well below what the feed above actually produces (see the INFO line) so
++    // a slow machine does not turn this red, and well clear of zero so a
++    // regression that stops placement cannot pass unnoticed.
++    EXPECT_GE (totalSets, 10) << "notch_set per round: " << perRound;
++    EXPECT_GE (roundsWithASet, 1) << "notch_set per round: " << perRound;
++    std::cout << "[ INFO     ] notch_set per round: " << perRound
++              << "(total " << totalSets << ", rounds with >=1: "
++              << roundsWithASet << ")" << std::endl;
+ }
+ 
+ // Lane S loose end (A-9). Red if loadPreset stops counting a lane-1 notch a
+ // mono slot cannot take.
+ TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     MainComponent app;
+     const juce::String json =
+         R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index 4fafa9c..dae8c40 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -1262,20 +1262,25 @@ TEST (NotchControllerStereo, AdoptPresetHonoursLaneAndKeepsTheFilesIndex)
+     EXPECT_EQ (cmds[1].channel, 1); EXPECT_EQ (cmds[1].index, 5);
+     EXPECT_EQ (cmds[2].channel, 1); EXPECT_EQ (cmds[2].index, 7);
+ }
+ 
+ // ===========================================================================
+ // Lane D (data loop): ClearReason on every clear path, NotchEvent sink.
+ // ===========================================================================
+ namespace {
+ using Ev = NotchController::NotchEvent;
+ 
++// M-5: DECLARE A Recorder BEFORE THE HARNESS IT IS WIRED TO. The controller's
++// destructor runs stop(), which flushes its remaining events through the sink
++// -- into this object. Declaration order is the reverse of destruction order,
++// so a Recorder declared after its Harness is already gone by then and the
++// flush writes into a destroyed vector.
+ struct Recorder
+ {
+     std::vector<Ev> events;
+     NotchController::EventSink sink()
+     {
+         return [this] (const Ev& e) { events.push_back (e); };
+     }
+     std::vector<Ev> clears() const
+     {
+         std::vector<Ev> out;
+@@ -1285,66 +1290,66 @@ struct Recorder
+         return out;
+     }
+ };
+ } // namespace
+ 
+ // Spec test 8, six reasons. Red if any clear path stops carrying its reason.
+ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
+ {
+     // Manual (default), VerdictFalse, ClearAll -- one Harness.
+     {
+-        Harness h; Recorder r; h.controller.setEventSink (r.sink());
++        Recorder r; Harness h; h.controller.setEventSink (r.sink());
+         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+         ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -12.0, NotchController::Origin::Manual));
+         ASSERT_TRUE (h.controller.setNotch (0, 2, 3000.0, 30.0, -12.0, NotchController::Origin::Manual));
+         h.controller.clearNotch (0, 0);
+         h.controller.clearNotch (0, 1, NotchController::ClearReason::VerdictFalse);
+         h.controller.clearAll();
+         h.controller.runOnce();
+         const auto c = r.clears();
+         ASSERT_EQ (c.size(), 3u);
+         EXPECT_EQ (c[0].reason, NotchController::ClearReason::Manual);       EXPECT_EQ (c[0].index, 0);
+         EXPECT_EQ (c[1].reason, NotchController::ClearReason::VerdictFalse); EXPECT_EQ (c[1].index, 1);
+         EXPECT_EQ (c[2].reason, NotchController::ClearReason::ClearAll);     EXPECT_EQ (c[2].index, 2);
+         EXPECT_FLOAT_EQ (c[2].hz, 3000.0f);
+         // Set events preceded them, one per setNotch, no score (manual origin).
+         int sets = 0;
+         for (const auto& e : r.events) if (e.kind == Ev::Kind::Set) { ++sets; EXPECT_FALSE (e.hasScore); EXPECT_EQ (e.origin, NotchController::Origin::Manual); }
+         EXPECT_EQ (sets, 3);
+     }
+     // AutoRelease: mirror LiveTapReleasesAfter30s (this file, ~line 151).
+     {
+-        Harness h; Recorder r; h.controller.setEventSink (r.sink());
++        Recorder r; Harness h; h.controller.setEventSink (r.sink());
+         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+         NoiseSource quiet;
+         const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 10;
+         for (int i = 0; i < blocks; ++i)
+             pump (h, quiet.hop());
+         const auto c = r.clears();
+         ASSERT_EQ (c.size(), 1u);
+         EXPECT_EQ (c[0].reason, NotchController::ClearReason::AutoRelease);
+         EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs);
+     }
+     // WidthChange: lane-1 notch, narrow to mono.
+     {
+-        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
++        Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
+         ASSERT_TRUE (h.controller.setNotch (1, 2, 800.0, 30.0, -12.0, NotchController::Origin::Manual));
+         h.controller.setWidth (1);
+         h.controller.runOnce();
+         const auto c = r.clears();
+         ASSERT_EQ (c.size(), 1u);
+         EXPECT_EQ (c[0].reason, NotchController::ClearReason::WidthChange);
+         EXPECT_EQ (c[0].lane, 1); EXPECT_EQ (c[0].index, 2);
+     }
+     // PartialApplyUnwind: adoptPreset with lane -1 on a stereo slot, lane 1 forced to fail.
+     {
+-        StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
++        Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
+         h.controller.failNextSetNotchOnLaneForTest (1);
+         EXPECT_EQ (h.controller.adoptPreset (onePresetNotch (4, 1000.0)), 0);
+         h.controller.runOnce();
+         const auto c = r.clears();
+         ASSERT_EQ (c.size(), 1u);
+         EXPECT_EQ (c[0].reason, NotchController::ClearReason::PartialApplyUnwind);
+         EXPECT_EQ (c[0].lane, 0); EXPECT_EQ (c[0].index, 4);
+         NotchController::SnapshotBuffer snap; h.controller.copySnapshot (snap);
+         EXPECT_EQ (snap.notchCount, 0u);
+     }
+@@ -1385,48 +1390,48 @@ TEST (NotchControllerEvents, NoSinkMeansNoAccumulation)
+     }
+     h.controller.runOnce();
+     EXPECT_EQ (h.controller.pendingEventsForTest(), 0);
+     EXPECT_EQ (h.controller.droppedEvents(), 0u);
+ }
+ 
+ // Cap. Red if the outbox grows past kMaxPendingEvents instead of dropping
+ // and counting.
+ TEST (NotchControllerEvents, OutboxDropsAndCountsPastTheCap)
+ {
+-    Harness h; Recorder r; h.controller.setEventSink (r.sink());
++    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+     for (int i = 0; i < 100; ++i)
+     {
+         ASSERT_TRUE (h.controller.setNotch (0, i % 16, 1000.0 + i, 30.0, -12.0, NotchController::Origin::Manual));
+         h.controller.clearNotch (0, i % 16);
+     }
+     EXPECT_EQ (h.controller.pendingEventsForTest(), NotchController::kMaxPendingEvents);
+     EXPECT_EQ (h.controller.droppedEvents(), 200u - (std::uint64_t) NotchController::kMaxPendingEvents);
+     h.controller.runOnce();
+     EXPECT_EQ (r.events.size(), (std::size_t) NotchController::kMaxPendingEvents);
+ }
+ 
+ // Spec test 11. Red if stop() stops flushing what is still queued.
+ TEST (NotchControllerEvents, StopFlushesPendingEventsEvenWhenTheThreadNeverRan)
+ {
+-    Harness h; Recorder r; h.controller.setEventSink (r.sink());
++    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+     h.controller.stop (1000);
+     ASSERT_EQ (r.events.size(), 1u);
+     EXPECT_EQ (r.events[0].kind, Ev::Kind::Set);
+ }
+ 
+ // Review round 1, finding 5. Red if stop()'s flush stops at one pass: the
+ // sink re-enters clearNotch() while handling the Set, queuing a Clear that
+ // nothing would drain once the thread is already joined and gone.
+ TEST (NotchControllerEvents, StopDrainsEventsQueuedByAReentrantSinkDuringItsOwnFlush)
+ {
+-    Harness h; Recorder r;
++    Recorder r; Harness h;
+     h.controller.setEventSink ([&] (const Ev& e)
+     {
+         r.events.push_back (e);
+         if (e.kind == Ev::Kind::Set)
+             h.controller.clearNotch (0, e.index);   // re-entrant, from inside stop()'s flush
+     });
+     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+     h.controller.stop (1000);   // thread never started; flush must still drain the re-entrant Clear
+     const auto c = r.clears();
+     ASSERT_EQ (c.size(), 1u);
+@@ -1445,21 +1450,21 @@ TEST (NotchControllerPreset, AdoptPresetCountsLaneOneNotchesSkippedOnAMonoSlot)
+     EXPECT_EQ (h.controller.adoptPreset ({ onLaneOne, onLaneZero }, &skipped), 1);
+     EXPECT_EQ (skipped, 1);
+ }
+ 
+ // Spec test 7. Red if the detector's Set event stops carrying the frame it
+ // scored (ctx.now), the frame the rise axis compared against (ctx.ref, with
+ // its age), or the other lane's frame; or if the recorded axes stop
+ // multiplying to the recorded score.
+ TEST (NotchControllerEvents, DetectorPlacementCarriesTheScoredFrameAndTheScorersReference)
+ {
+-    StereoHarness h; Recorder r; h.controller.setEventSink (r.sink());
++    Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
+     h.controller.setDetectionActive (true);
+     NoiseSource quietL; SineSource toneR;
+     const auto cmds = warmThenDrive (h, quietL, toneR);
+     ASSERT_FALSE (cmds.empty());
+ 
+     const Ev* set = nullptr;
+     for (const auto& e : r.events)
+         if (e.kind == Ev::Kind::Set && e.hasScore) { set = &e; break; }
+     ASSERT_NE (set, nullptr) << "no scored Set event reached the sink";
+ 
+diff --git a/tests/test_notchlistpanel.cpp b/tests/test_notchlistpanel.cpp
+index 0586524..fb2f4f0 100644
+--- a/tests/test_notchlistpanel.cpp
++++ b/tests/test_notchlistpanel.cpp
+@@ -414,22 +414,22 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
+     // this monospace face) so a format change is caught here too.
+     const auto widestQ = gui::NotchListPanel::formatQ (99.9f);
+     EXPECT_LE (widthOf (widestQ) + kInset, gui::NotchListPanel::kColQW);
+ 
+     // STATUS/HELD: formatAgeMs() is uncapped -- age keeps counting across
+     // re-sightings, so "127m ago" (8 chars) is reachable in a long show.
+     // Assert against the ACTUAL formatter output, not a literal, so a format
+     // change that widens the string fails this test too.
+     const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
+     ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
+-    const float statusW360 = gui::NotchListPanel::statusWidthFor (440.0f);
+-    EXPECT_LE (widthOf (widestAge) + kInset, statusW360);
++    const float statusWNarrowest = gui::NotchListPanel::statusWidthFor (440.0f);
++    EXPECT_LE (widthOf (widestAge) + kInset, statusWNarrowest);
+ }
+ 
+ //==============================================================================
+ // Lane D (data loop): the VERDICT column.
+ 
+ // Spec test 12. Red if FALSE stops reporting good=false, GOOD stops reporting
+ // good=true, or the row stops switching from buttons to a verdict word.
+ TEST (NotchListPanelVerdict, ClickingFalseOrGoodReportsTheVerdictAndTheRowShowsIt)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+@@ -510,20 +510,71 @@ TEST (NotchListPanelVerdict, ButtonsPersistAcrossRefreshesAndDieWithTheirIdentit
+     fed.controller.clearNotch (0, 0);
+     fed.republish();
+     panel.refreshFromSnapshot();
+     ASSERT_EQ (panel.rowCountForTest(), 1);
+     clock.nowMs += gui::NotchListPanel::kTrackingTimeoutMs + 1000.0;
+     panel.refreshFromSnapshot();
+     EXPECT_EQ (panel.getNumChildComponents(), 2);
+     EXPECT_NE (panel.goodButtonForTest (0), good0);   // the surviving row is the other identity
+ }
+ 
++// I-1. Red without NotchListPanel's lastRefreshMs_ reset: buttons_ is keyed by
++// identity and lives for kTrackingTimeoutMs (60 s), so a howl cleared and then
++// re-placed at the same lane/index/Hz came back already carrying the verdict a
++// human gave the PREVIOUS notch -- and reportVerdict() refuses to overwrite a
++// verdict, so nobody could correct it either.
++TEST (NotchListPanelVerdict, ReplacedNotchAtTheSameIdentityStartsUnjudged)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    TwoNotchController fed;
++    FakeClock clock;
++    // By reference -- the identity has to be seen ABSENT at a later clock
++    // reading than its last sighting for the reset to fire.
++    gui::NotchListPanel panel (fed.controller, [&clock] { return clock.nowMs; });
++    panel.setSize (640, 200);
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 2);
++
++    ASSERT_NE (panel.goodButtonForTest (0), nullptr);
++    panel.goodButtonForTest (0)->onClick();          // 987 Hz judged GOOD
++    ASSERT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::Good);
++
++    // The notch goes away for one whole refresh...
++    fed.controller.clearNotch (0, 0);
++    fed.republish();
++    clock.nowMs += 250.0;
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 1);
++
++    // ...and a NEW howl is placed at exactly the same identity.
++    ASSERT_TRUE (fed.controller.setNotch (0, 0, 987.0, 4.0, -12.0,
++                                          NotchController::Origin::Manual));
++    fed.republish();
++    clock.nowMs += 250.0;
++    panel.refreshFromSnapshot();
++    ASSERT_EQ (panel.rowCountForTest(), 2);
++    EXPECT_NEAR (panel.rowForTest (0).ageMs, 500.0, 1.0);   // age still carries over (R-2)
++    EXPECT_EQ (panel.verdictForTest (0), gui::NotchListPanel::Verdict::None);
++    EXPECT_EQ (panel.rowForTest (0).verdictText, juce::String());
++    ASSERT_NE (panel.goodButtonForTest (0), nullptr);
++    EXPECT_TRUE (panel.goodButtonForTest (0)->isVisible());
++    EXPECT_TRUE (panel.falseButtonForTest (0)->isVisible());
++
++    // A row that never left keeps whatever it had: the reset is about absence,
++    // not about time passing.
++    panel.goodButtonForTest (1)->onClick();
++    clock.nowMs += 250.0;
++    fed.republish();
++    panel.refreshFromSnapshot();
++    EXPECT_EQ (panel.verdictForTest (1), gui::NotchListPanel::Verdict::Good);
++}
++
+ // Column budget: the VERDICT column fits two buttons and its own caption.
+ // Red if kColVerdictW shrinks below the buttons, or the caption ellipsises.
+ TEST (NotchListPanelVerdict, VerdictColumnFitsItsButtonsAndCaption)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     using P = gui::NotchListPanel;
+     EXPECT_GE (P::kColVerdictW, (float) (2 * P::kVerdictButtonW + P::kVerdictGap + 4));
+     const auto headerFont = az::theme::legendFont (az::theme::columnFontSize, true, az::theme::trackingColumn);
+     EXPECT_LE (juce::GlyphArrangement::getStringWidth (headerFont, "VERDICT"), P::kColVerdictW);
+     const auto buttonFont = az::theme::monoFont (az::theme::chipFontSize);
+diff --git a/tests/test_sessionlogger.cpp b/tests/test_sessionlogger.cpp
+index c0dd9dc..7065c51 100644
+--- a/tests/test_sessionlogger.cpp
++++ b/tests/test_sessionlogger.cpp
+@@ -75,20 +75,26 @@ TEST (SessionLogger, StartWritesHeaderFirstStopWritesEndLastEveryLineParses)
+     const auto first = parsedLine (lines[0]);
+     const auto mid   = parsedLine (lines[1]);
+     const auto last  = parsedLine (lines[2]);
+     EXPECT_EQ (first["ev"].toString(), "session_start");
+     EXPECT_EQ (first["app_version"].toString(), "test");
+     EXPECT_EQ ((int) first["t"], 0);
+     EXPECT_EQ (mid["ev"].toString(), "mode");
+     EXPECT_TRUE (mid.hasProperty ("t"));
+     EXPECT_EQ (last["ev"].toString(), "session_end");
+     EXPECT_EQ ((int) last["dropped_events"], 0);
++    // M-1. Red if writeLineNow() stops recording refused writes, or the field
++    // stops being emitted -- a reader could then no longer tell a truncated
++    // log from a quiet one. A real disk-full is not simulated here; what is
++    // pinned is that the field EXISTS and reads false on a healthy session.
++    ASSERT_TRUE (last.hasProperty ("write_failed"));
++    EXPECT_FALSE ((bool) last["write_failed"]);
+ }
+ 
+ // Spec test 2. Red if log() ever blocks on the file, or if the deque stops
+ // being capped (dropped stays 0) or the accounting invariant breaks:
+ // lines in file + dropped == log() calls + 2.
+ TEST (SessionLogger, FiveThousandLogsNeverBlockAndTheAccountingBalances)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     const auto dir = freshTempDir ("burst");
+ 
+diff --git a/tools/snapshot.cpp b/tools/snapshot.cpp
+index 5cab0f2..a1adf80 100644
+--- a/tools/snapshot.cpp
++++ b/tools/snapshot.cpp
+@@ -297,16 +297,29 @@ int main (int argc, char** argv)
+             else if (freq == "1.9 kHz")
+                 falseRow = i;
+         }
+         if (goodRow < 0 || falseRow < 0)
+         {
+             std::cerr << "snapshot: could not find 247 Hz / 1.9 kHz rows to "
+                           "click verdicts on (goodRow=" << goodRow
+                        << " falseRow=" << falseRow << ")" << std::endl;
+             return 1;
+         }
+-        list.goodButtonForTest (goodRow)->onClick();     // 247 Hz  -> GOOD
+-        list.falseButtonForTest (falseRow)->onClick();   // 1.9 kHz -> FALSE, clears the notch
++        // M-11: both accessors return nullptr for a row without buttons (an
++        // identity that left tracking, or a row index past the table). A
++        // snapshot that cannot stage the verdict state is a snapshot nobody
++        // should send to the owner -- say so and stop, do not dereference.
++        auto* goodButton  = list.goodButtonForTest (goodRow);
++        auto* falseButton = list.falseButtonForTest (falseRow);
++        if (goodButton == nullptr || falseButton == nullptr)
++        {
++            std::cerr << "no verdict buttons for rows " << goodRow << "/" << falseRow
++                      << " -- console-live.png would not show the VERDICT column"
++                      << std::endl;
++            return 1;
++        }
++        goodButton->onClick();     // 247 Hz  -> GOOD
++        falseButton->onClick();    // 1.9 kHz -> FALSE, clears the notch
+     }
+ 
+     return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
+ }
