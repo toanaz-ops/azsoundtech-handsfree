@@ -540,8 +540,12 @@ void SpectrumView::setController (const NotchController& controller)
 
     // The anti-flicker hold is per-slot state by exactly the same argument: a
     // Critical held from the slot we just left would otherwise be attributed
-    // to this one for up to 750 ms.
+    // to this one for up to 750 ms. ringRisk_ is the DISPLAYED field paint()
+    // actually reads -- resetting the hold alone left the old slot's chip on
+    // screen for up to one 30 fps frame, since the unconditional repaint()
+    // below fires before the next timerCallback() can correct it.
     ringRiskHold_ = {};
+    ringRisk_     = RingRisk::Unavailable;
 
     refreshFromSnapshot();
     repaint();

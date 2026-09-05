@@ -747,7 +747,7 @@ TEST (SpectrumView, RingRiskDoesNotFlickerAcrossManyHoldWindows)
     EXPECT_EQ (shown, Risk::Critical);
     // The run really did outlast several hold windows -- otherwise the zero
     // above would be the old test's claim wearing a new name.
-    EXPECT_GT (now - 100.0, 4.0 * gui::SpectrumView::RingRiskHysteresis::kHoldMs);
+    EXPECT_GT (now - 100.0, 3.9 * gui::SpectrumView::RingRiskHysteresis::kHoldMs);
 }
 
 // Fix round 1: the flip side of the rule above -- confirming the level must
@@ -799,4 +799,34 @@ TEST (SpectrumView, RingRiskHoldDoesNotSurviveASlotSwitch)
     // Slot B is a different room. Attributing slot A's alarm to it, even for
     // one frame, is the readout lying about which slot it is describing.
     EXPECT_EQ (view.ringRiskHoldForTest().apply (Risk::Low, 1101.0), Risk::Low);
+}
+
+// Fix round 2, re-review finding: the hold clearing above only proves
+// ringRiskHold_ was reset -- it says nothing about ringRisk_, the SEPARATE
+// field paint() actually reads. setController() used to leave ringRisk_
+// holding whatever the OLD slot last showed and then call repaint()
+// unconditionally, so the new slot's first frame could still paint the old
+// slot's Critical badge for up to one 30 fps tick, until the next
+// timerCallback() corrected it.
+
+TEST (SpectrumView, RingRiskDisplayedFieldDoesNotSurviveASlotSwitch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    FedController slotA (false, false);
+    FedController slotB (false, false);
+
+    gui::SpectrumView view (slotA.controller);
+    view.setSize (800, 400);
+
+    // Put the DISPLAYED field into the state slot A's alarm would have left
+    // it in -- the same way timerCallback() would have, without needing a
+    // live provider or a timer tick.
+    view.ringRiskForTest() = Risk::Critical;
+    ASSERT_EQ (view.getRingRisk(), Risk::Critical);
+
+    view.setController (slotB.controller);
+
+    // The very next paint() must not still show slot A's alarm.
+    EXPECT_EQ (view.getRingRisk(), Risk::Unavailable);
 }

@@ -310,6 +310,13 @@ public:
     // reset observable at all.
     [[nodiscard]] RingRiskHysteresis& ringRiskHoldForTest() { return ringRiskHold_; }
 
+    // Read/write access to the field paint() actually reads, so a test can
+    // put the component into a known on-screen state (e.g. Critical) before
+    // an action and then observe what setController() left showing --
+    // ringRiskHoldForTest() alone only proves the HOLD was cleared, not that
+    // the DISPLAYED chip was.
+    [[nodiscard]] RingRisk& ringRiskForTest() { return ringRisk_; }
+
     void paint (juce::Graphics&) override;
     void resized() override;
 
