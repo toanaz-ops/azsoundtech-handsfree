@@ -1,5 +1,7 @@
 # PROJECT005 — AZ Soundtech Hands-free (ASIO feedback elimination)
 
+@memory/MEMORY.md
+
 Global rules load automatically from
 `D:\DEV CAVE EP3\shared\harness\RULES.md`. This file holds ONLY what is true
 here. Tier 2.
