@@ -30,6 +30,7 @@
 #include "gui/ModeBar.h"
 #include "test_gui_helpers.h"
 
+#include <cmath>
 #include <vector>
 
 //==============================================================================
@@ -985,4 +986,176 @@ TEST (GuiWiring, SavePresetRoundTripsPerLaneNotchesAndTheLinkedFlag)
         << "lane 1's 2 kHz notch at index 2 did not survive the round trip";
     EXPECT_TRUE (reopened.isSlotLinked (1))
         << "the saved \"slots\" section did not carry `linked`";
+}
+
+//==============================================================================
+// Lane D (data loop): the session log through the real wiring.
+
+namespace
+{
+juce::File freshLogDir (const juce::String& name)
+{
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                   .getChildFile ("az-handsfree-sessionlog").getChildFile (name);
+    dir.deleteRecursively();
+    return dir;
+}
+
+std::vector<juce::var> parsedLines (const juce::File& file)
+{
+    juce::StringArray lines;
+    lines.addLines (file.loadFileAsString());
+    lines.removeEmptyStrings();
+    std::vector<juce::var> out;
+    for (const auto& l : lines)
+    {
+        juce::var v;
+        EXPECT_TRUE (juce::JSON::parse (l, v).wasOk()) << l;
+        out.push_back (v);
+    }
+    return out;
+}
+
+const juce::var* firstEvent (const std::vector<juce::var>& events, const juce::String& name)
+{
+    for (const auto& e : events)
+        if (e["ev"].toString() == name)
+            return &e;
+    return nullptr;
+}
+} // namespace
+
+// Spec test 14. Red if FALSE stops clearing with VerdictFalse, or the logger
+// stops receiving verdict / notch_clear / session_start in order.
+TEST (GuiWiring, FalseVerdictLogsVerdictThenClearsWithVerdictFalse)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.setAppVersion ("9.9.9-test");
+    const auto dir = freshLogDir ("verdict");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1234.0, 30.0, -12.0, NotchController::Origin::Manual));
+    std::vector<float> hop (512, 0.1f);
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();   // publishes the snapshot AND flushes the Set event
+
+    auto& panel = app.getNotchListPanelForTest();
+    panel.refreshFromSnapshot();
+    ASSERT_EQ (panel.rowCountForTest(), 1);
+    panel.falseButtonForTest (0)->onClick();
+
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();   // flushes the Clear event; republishes without the notch
+    NotchController::SnapshotBuffer snap {};
+    c0->copySnapshot (snap);
+    EXPECT_EQ (snap.notchCount, 0u);
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    ASSERT_GE (events.size(), 5u);
+    EXPECT_EQ (events.front()["ev"].toString(), "session_start");
+    EXPECT_EQ (events.front()["app_version"].toString(), "9.9.9-test");
+    EXPECT_TRUE (events.front()["slots"].isArray());
+    EXPECT_EQ (events.back()["ev"].toString(), "session_end");
+
+    const auto* set = firstEvent (events, "notch_set");
+    ASSERT_NE (set, nullptr);
+    EXPECT_EQ ((*set)["origin"].toString(), "manual");
+    EXPECT_NEAR ((double) (*set)["hz"], 1234.0, 0.5);
+    EXPECT_FALSE (set->hasProperty ("ctx"));
+
+    const auto* verdict = firstEvent (events, "verdict");
+    ASSERT_NE (verdict, nullptr);
+    EXPECT_EQ ((*verdict)["verdict"].toString(), "false");
+    EXPECT_EQ ((int) (*verdict)["slot"], 0);
+    EXPECT_EQ ((int) (*verdict)["lane"], 0);
+    EXPECT_EQ ((int) (*verdict)["index"], 0);
+
+    const auto* clear = firstEvent (events, "notch_clear");
+    ASSERT_NE (clear, nullptr);
+    EXPECT_EQ ((*clear)["reason"].toString(), "verdict_false");
+
+    // Order: verdict is written before the clear it causes.
+    EXPECT_LT (verdict - events.data(), clear - events.data());
+}
+
+// Mode and tuning land in the log. Red if requestMode / onTuningChanged stop
+// logging, or the field names drift from the logstats contract.
+TEST (GuiWiring, ModeAndTuningChangesAreLogged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("mode");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    app.requestMode (AudioEngine::Mode::Auto);
+    gui::TuningPanel::Params p;
+    p.riseReferenceMs = 300; p.persistenceBlocks = 4; p.q = 25.0f; p.depthDb = -10.0f; p.peakinessThreshold = 12.0f;
+    app.getTuningPanel().onTuningChanged (p);   // MainComponent.h:151
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    const auto* mode = firstEvent (events, "mode");
+    ASSERT_NE (mode, nullptr);
+    EXPECT_EQ ((*mode)["mode"].toString(), "auto");
+    const auto* tuning = firstEvent (events, "tuning");
+    ASSERT_NE (tuning, nullptr);
+    EXPECT_EQ ((int) (*tuning)["slot"], -1);
+    EXPECT_EQ ((int) (*tuning)["persist"], 4);
+    EXPECT_NEAR ((double) (*tuning)["depth_db"], -10.0, 1e-6);
+}
+
+// Spec test 15. Red if MainComponent's teardown order lets a detector thread
+// deliver an event into a logger that is already gone (or vice versa).
+TEST (GuiWiring, DestroyingTheAppWhileADetectorIsPlacingNotchesDoesNotCrash)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    for (int run = 0; run < 20; ++run)
+    {
+        const auto dir = freshLogDir ("teardown-" + juce::String (run));
+        MainComponent app;
+        ASSERT_TRUE (app.startSessionLog (dir));
+        auto* c0 = app.getNotchControllerForTest (0);
+        ASSERT_NE (c0, nullptr);
+        c0->setDetectionActive (true);
+        c0->start();   // real detector thread
+
+        // A loud 1 kHz tone into both lanes for ~1 s of audio, then die.
+        std::vector<float> hop (512);
+        double n = 0.0;
+        for (int block = 0; block < 90; ++block)
+        {
+            for (auto& s : hop) { s = std::sin (2.0 * 3.14159265358979 * 1000.0 * n / 48000.0); n += 1.0; }
+            app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+            app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+            if (block % 8 == 7) juce::Thread::sleep (1);
+        }
+        // `app` is destroyed here, mid-placement, with the thread running.
+    }
+    SUCCEED();
+}
+
+// Lane S loose end (A-9). Red if loadPreset stops counting a lane-1 notch a
+// mono slot cannot take.
+TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const juce::String json =
+        R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+        R"("slots":[{"index":0,"enabled":true,"width":1,"inputChannels":[0,1],"outputChannels":[0,1]}],)"
+        R"("notches":[{"slot":0,"lane":1,"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
+        R"({"slot":0,"lane":0,"index":1,"freq":982.0,"Q":30.0,"depth":-12.0}]})";
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("az-handsfree-d-skipped.json");
+    ASSERT_TRUE (presetFile.replaceWithText (json));
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+    EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
 }

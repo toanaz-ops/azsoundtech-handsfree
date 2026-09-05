@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "app/MainComponent.h"
+#include "app/SessionLogger.h"
 
 class HandsFreeApplication : public juce::JUCEApplication
 {
@@ -13,7 +14,7 @@ public:
 
     const juce::String getApplicationVersion() override
     {
-        return "1.0.0";
+        return JUCE_APPLICATION_VERSION_STRING;   // the one place the number lives: CMakeLists project()
     }
 
     bool moreThanOneInstanceAllowed() override
@@ -49,6 +50,7 @@ private:
             setUsingNativeTitleBar(true);
 
             auto* content = new MainComponent();
+            content->setAppVersion(JUCE_APPLICATION_VERSION_STRING);
             setContentOwned(content, true);
 
             setResizable(true, true);
@@ -67,6 +69,10 @@ private:
             // Done AFTER setVisible so a device that refuses to open leaves a
             // visible window showing why, rather than nothing at all.
             content->startAudio();
+            // Lane D: the session log opens AFTER the device, so its header
+            // names the device actually in use. A failed start (no %APPDATA%)
+            // is not fatal -- the app runs without a log.
+            content->startSessionLog(SessionLogger::defaultDirectory());
         }
 
         void closeButtonPressed() override

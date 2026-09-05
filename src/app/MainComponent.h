@@ -21,6 +21,7 @@
 
 #include "app/AudioEngine.h"
 #include "app/NotchController.h"
+#include "app/SessionLogger.h"
 #include "app/SlotConfig.h"
 #include "dsp/ClockSource.h"
 #include "gui/DeviceDrawer.h"
@@ -96,9 +97,22 @@ public:
     // The sample rate written is the one the notches were PUBLISHED at
     // (SnapshotBuffer::sampleRate), never 0: saveToFile checks each notch's freq
     // against that rate's Nyquist, and a notch detected at rate R is valid at R
-    // by construction. Notches mirrored across both lanes are deduped to one per
-    // (slot, index).
+    // by construction. One PresetNotch per (slot, lane, index) -- lane S ended
+    // the old "one entry per slot, lanes deduped" shape; each lane of a
+    // stereo slot now detects and places its own notches independently.
     bool savePreset (const juce::File& file);
+
+    // Lane D (data loop): the session log. Never started in the constructor --
+    // 26 tests and the snapshot tool construct MainComponent, and a ctor start
+    // would write to (and prune) the developer's real %APPDATA% logs. main.cpp
+    // calls setAppVersion() once at startup (the CMake project() version is the
+    // one true source, D-8) and startSessionLog() AFTER startAudio() so the
+    // header names the device actually in use.
+    void setAppVersion (const juce::String& version);
+    bool startSessionLog (const juce::File& directory);
+    void stopSessionLog();
+    [[nodiscard]] juce::File sessionLogFileForTest() const;
+    [[nodiscard]] int lastLoadSkippedNotchesForTest() const;
 
     // Injectable for tests: the default opens a native async FileChooser and
     // invokes onPicked with the file the user picked (a cancel is a no-op). A
@@ -224,6 +238,16 @@ private:
     az::theme::AzLookAndFeel azLookAndFeel_;
 
     AudioEngine engine_;
+
+    // Lane D (data loop). Declared before systemClock_ and the controllers:
+    // declaration order is destruction order, so the logger outlives every
+    // detector thread that can still hand it an event while it joins.
+    SessionLogger sessionLogger_;
+    juce::String  appVersion_ { "0.0.0-unset" };   // main.cpp sets the real one (D-8)
+    int           lastLoadSkipped_ = 0;
+
+    juce::var sessionHeader() const;
+    static juce::var notchEventToVar (const NotchController::NotchEvent& e);
 
     // Clock first, controllers second: each controller holds a reference to
     // the clock. Declaration order = destruction order: the controllers'
