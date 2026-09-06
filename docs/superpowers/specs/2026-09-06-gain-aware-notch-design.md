@@ -1,8 +1,8 @@
 # Lane G — Gain-aware notch: depth theo nhu cầu, nhả dần, nối ring-risk
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
-**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q6, đừng hỏi lại).
-**Trạng thái:** spec, chờ phản biện read-only rồi owner duyệt. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q12, đừng hỏi lại).
+**Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12, chờ owner duyệt trước khi viết plan. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
 
@@ -100,7 +100,6 @@ Thêm:
 | `deepestDb` | bậc sâu nhất từng đứng kể từ khi đặt (cũng là đích của kẹp lại) |
 | `stageChangedAtMs` | `liveMs_` lần đổi depth gần nhất (đào, nhả, kẹp, trần) |
 | `quietMs` | thời gian **tích lũy** bin yên (không reinforce) kể từ lần đổi depth/reinforce gần nhất; đóng băng được |
-
 | `releasedSteps` | số bậc đã nhả kể từ `deepestDb` (0 = chưa nhả bậc nào); thay cho so sánh bằng double (m-3) |
 | `ceilingDb` | trần riêng: Preset/Manual = depth được cho; Detector = NaN ("theo slider") (Q8) |
 
@@ -111,7 +110,7 @@ nữa mà đọc `quietMs`.
 mọi trường khác (`NotchController.cpp:200`), nên slot tái dùng mang
 `deepestDb` cũ. Vì vậy **`setNotchImpl`** — điểm duy nhất làm slot
 `active = true`, cho MỌI Origin và mọi đường (`placeConfirmed`,
-`adoptPreset`, `setNotch` từ GUI, unwind) — khởi tạo lại cả bốn trường:
+`adoptPreset`, `setNotch` từ GUI, unwind) — khởi tạo lại cả năm trường:
 `deepestDb = depthDB`, `stageChangedAtMs = liveMs_`, `quietMs = 0`,
 `releasedSteps = 0`, `ceilingDb = (origin == Detector ? NaN : depthDB)`.
 `placeConfirmed` chỉ chọn `depthDB` khởi điểm rồi gọi `setNotchImpl` như
@@ -422,8 +421,7 @@ thêm `RampSineSource` vào fixture.
 - Đóng băng: snapshot `ringRiskValid=true, score ≥ 0.55×thr` ⇒ `quietMs`
   không tăng; `valid=false` ⇒ tăng bình thường.
 - Phòng nhớ: Clear ở f, đặt lại cùng bin trong 5 phút ⇒ khởi điểm =
-  deepest cũ (kẹp trần); lệch đúng 1 bin ⇒ −6;
-  deepest cũ (kẹp trần); 5 phút + 1 ms ⇒ −6; `setWidth`/`clearAll` xóa nhớ;
+  deepest cũ (kẹp trần); lệch đúng 1 bin ⇒ −6; 5 phút + 1 ms ⇒ −6; `setWidth`/`clearAll` xóa nhớ;
   mục đã dùng không dùng lần hai.
 - Preset: `adoptPreset` depth −12 ⇒ không đào; nhả thang; kẹp lại về −12.
 - Soundcheck: không có Set/Clear nào ngoài hôm nay.
