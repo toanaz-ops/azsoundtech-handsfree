@@ -123,7 +123,11 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 
 1. `memory/MEMORY.md` — index of lessons. Search before re-deriving.
 2. `docs/` — design notes.
-3. `docs/superpowers/specs/` — design docs. (`openspec/` holds only
+3. `docs/superpowers/specs/` — design docs.
+4. `docs/superpowers/decisions/` — sổ quyết định: mỗi ngả rẽ brainstorm
+   (câu hỏi, các phương án đã đề xuất, lựa chọn của owner) ghi NGAY khi hỏi,
+   một file mỗi lane. Owner's standing instruction, 2026-09-06. Skill:
+   `.claude/skills/recording-design-decisions/SKILL.md`. (`openspec/` holds only
    `config.yaml`; unused from Claude Code's side, but `.opencode/skills/openspec-*`
    wires OpenCode's `/opsx-*` commands to it — do not delete it. Verified
    2026-09-04, see `memory/docs-drift-audit-2026-08-27.md`.)
