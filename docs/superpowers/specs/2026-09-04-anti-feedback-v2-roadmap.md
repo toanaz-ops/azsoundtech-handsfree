@@ -25,6 +25,7 @@ Thứ tự đi theo **cái gì nuôi cái gì**, không theo độ hấp dẫn t
 | C | **Classifier nhỏ** trên detector thread (RTNeural), phân loại hú vs nốt nhạc, feature L/R từ S | Không (chỉ quyết định, không xử lý) | D (nhãn), S (feature) | viết khi D có ≥ vài trăm nhãn từ alpha |
 | L | **LLM copilot**: đọc telemetry qua tool call, gợi ý cho soundman | Không | D (telemetry) | viết khi D hạ cánh; chạy song song C |
 | A | **AFC**: NLMS + PEM, watchdog + fallback notch | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
+| U | **Hai chế độ giao diện**: Dumb mode (≤ 3 nút) ⇄ Geek mode (console đầy đủ hiện tại) — quyết định owner 06/09/2026 | Không | G (G định nghĩa 3 nút là gì) | brainstorm trước; xem [`../../research/2026-09-06-cedar-realtime-plugins.md`](../../research/2026-09-06-cedar-realtime-plugins.md) §6 |
 
 Tùy chọn không xếp lane riêng, gắn vào lane gần nhất khi có nhu cầu:
 frequency shift 3–5 Hz cho mode Speech (gắn G), delay modulation (gắn A).
@@ -72,6 +73,7 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
 | L | chờ D | |
 | A | chờ M, G | |
+| U | chờ G; chưa brainstorm | 2026-09-06 |
 
 **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
 plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
