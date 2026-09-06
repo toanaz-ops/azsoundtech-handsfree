@@ -73,9 +73,72 @@ Người hỏi: Fable (điều phối). Người quyết: owner (ToanAZ).
 
 - Rise dốc để nhảy thẳng −12: **`riseRatio ≥ 2.0`** (tăng ≥ 6 dB trong cửa
   sổ rise). Ghi chú: `rNorm` bão hòa ở 1.5 nên phải lộ tỉ số thô.
-- TTL "phòng nhớ" sau Clear: **5 phút**, khớp ±1 bin, mục dùng một lần.
+- TTL "phòng nhớ" sau Clear: **5 phút**, khớp ±1 bin (dung sai bin bị Q10
+  lật thành ±0), mục dùng một lần.
 
 **Chọn: giữ cả hai** (owner: "ok, tiếp phần 2").
+
+---
+
+**Q7–Q12 — từ phản biện read-only vòng 1 (opus, 2026-09-06). Owner trả lời 2026-09-07, tất cả đã có `Chọn`.**
+
+## Q7 — Thang kẹt ở bậc nông (M-9): khi −6 hoặc −12 đã đủ làm bin hết vượt ngưỡng, notch dừng ở đó và không bao giờ tới trần. Chấp nhận, hay ép về trần?
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Để nguyên ở điểm cân bằng.** Đó chính là "depth theo nhu cầu": −12 đủ thì −18 chỉ là mất tone. Hú bùng lại thì reinforce → đào tiếp theo cổng 300 ms | khuyên dùng |
+| 2 | Ép về trần theo đồng hồ: nếu ring-risk còn ≥ RISING sau 2 s dù bin đã yên → sâu thêm một bậc | |
+| 3 | Bỏ thang lúc đặt, chỉ giữ nhả dần (quay về Q2 phương án 3) | |
+
+**Chọn: 1.**
+
+## Q8 — Kéo slider depth (trần) xuống giữa show có retune notch Preset/Manual không, hay chỉ notch Detector? (M-2)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Chỉ Detector.** Preset/Manual có trần riêng = depth người dùng đã ghi rõ; slider không chạm | khuyên dùng |
+| 2 | Slider kéo tất cả trừ Soundcheck | |
+
+**Chọn: 1.**
+
+## Q9 — Đóng băng nhả khi RING RISK ≥ RISING: có trần thời gian không, và có báo cho người vận hành khi slot không hiển thị đang đóng băng? (M-8)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Không trần thời gian; publish cờ `releaseFrozen` per-slot vào `SnapshotBuffer`** để GUI/log dùng sau. 1.2.0 không thêm widget | khuyên dùng |
+| 2 | Trần 60 s: sau 60 s đóng băng liên tục, đồng hồ chạy lại | |
+| 3 | Trần 60 s + cờ | |
+
+**Chọn: 1.**
+
+## Q10 — Dung sai tần số của "phòng nhớ": ±1 bin là ±21.5 Hz @44.1k/2048, một partial nhạc cụ cạnh bên có thể kế thừa depth sâu cũ ngay block đầu. (M-11)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Cùng bin (±0).** Hú quay lại cùng bin là chuyện thường; lệch một bin coi như hú mới, bắt đầu −6 | khuyên dùng |
+| 2 | ±1 bin như spec ban đầu | |
+| 3 | Bỏ phòng nhớ khỏi 1.2.0 | |
+
+**Chọn: 1.**
+
+## Q11 — `savePreset` giữa show hiện lưu bậc ĐANG ĐỨNG (có thể −6 lúc yên) và không lưu trần (`notchDefaults`). Lưu gì? (M-10)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Lưu `deepestDb`** (phòng đã cần bao nhiêu) **và** round-trip trần vào `notchDefaults.depthDB` | khuyên dùng |
+| 2 | Lưu bậc đang đứng như hôm nay, thêm round-trip trần | |
+| 3 | Lưu trần cho mọi notch | |
+
+**Chọn: 1.**
+
+## Q12 — Preset ghi depth vượt −24 (ví dụ −40) hôm nay được adopt nguyên xi. (M-1)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Kẹp về −24 lúc adopt**, ghi log; invariant "không Set nào < −24" giữ cho mọi Origin | khuyên dùng |
+| 2 | Thu hẹp invariant về Origin::Detector, preset giữ nguyên hành vi | |
+
+**Chọn: 1.**
 
 ## Chỉ thị quy trình (owner, cùng phiên)
 
