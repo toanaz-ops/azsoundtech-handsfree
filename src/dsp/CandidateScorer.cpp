@@ -77,6 +77,7 @@ CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
     if (historyCount_ == 0)
     {
         rNorm = 1.0f;
+        out.riseRatio = 1.0f;   // lane G: nothing to compare against yet
     }
     else
     {
@@ -102,6 +103,7 @@ CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
             // every clamp bound -- it would poison the whole product silently.
             const float was  = std::max (reference[candidate.bin], 1e-12f);
             const float rise = magnitudes[candidate.bin] / was;
+            out.riseRatio = rise;   // lane G: the raw ratio, unsaturated
             rNorm = (rise - 1.0f) / 0.5f;
             rNorm = std::min (std::max (rNorm, 0.0f), 1.0f);
         }

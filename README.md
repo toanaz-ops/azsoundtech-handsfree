@@ -7,7 +7,8 @@ Windows standalone audio application for ASIO feedback elimination in live sound
 Automatic feedback elimination: FFT-2048 detection places ultra-narrow notch
 filters (16 per lane) on ringing frequencies before they howl. Three modes —
 Soundcheck, Auto, Bypass. Audio flows through 8 routing slots, each mono or
-stereo with free channel mapping (cross-routing). Current version: 1.0.3.
+stereo with free channel mapping (cross-routing). Current version: 1.1.3
+(1.2.0 in alpha gate).
 Full product description: `docs/GIOI-THIEU.md`; the anti-feedback technique:
 `docs/KY-THUAT-CHONG-HU.md`.
 
@@ -74,7 +75,9 @@ capture, using `juce::Component::createComponentSnapshot()`:
 build/tools/Release/HandsFreeSnapshot.exe shots 1440 920 --fast
 ```
 
-It writes `console-idle.png` and `console-live.png` into `shots/`. Drop
+It writes `console-idle.png`, `console-live.png` and
+`console-preset-music.png` (the live frame with `presets/Music.json`'s off-list
+Q 25 / −10 dB ceiling in the tuning strip) into `shots/`. Drop
 `--fast` when the notch age ramp has to be visible — the full run takes about
 23 seconds, because a notch cools from sodium to ice over ~22 seconds of wall
 time and there is no way to show that without spending it.

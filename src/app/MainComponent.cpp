@@ -77,6 +77,25 @@ const char* reasonName (NotchController::ClearReason r)
     return "unknown";
 }
 
+// Lane G. A FREE function, in the same anonymous namespace as originName and
+// reasonName above -- notchEventToVar calls it unqualified from this same
+// translation unit, and a `MainComponent::` member would need a header
+// declaration it deliberately does not have.
+const char* retuneReasonName (NotchController::RetuneReason r)
+{
+    switch (r)
+    {
+        case NotchController::RetuneReason::Deepen:  return "deepen";
+        case NotchController::RetuneReason::Release: return "release";
+        case NotchController::RetuneReason::Reclamp: return "reclamp";
+        case NotchController::RetuneReason::Ceiling: return "ceiling";
+    }
+    // Same fallthrough as originName and reasonName: an enumerator added
+    // without a name here reads as "unknown" in the log rather than
+    // masquerading as a deepening that never happened.
+    return "unknown";
+}
+
 const char* modeName (AudioEngine::Mode m)
 {
     switch (m)
@@ -559,7 +578,14 @@ bool MainComponent::isSlotLinked (int slotIndex) const
 juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
 {
     using Ev = NotchController::NotchEvent;
-    auto v = SessionLogger::makeEvent (e.kind == Ev::Kind::Set ? "notch_set" : "notch_clear");
+    // B-3: `ev` is the key tools/logstats.py dispatches on, and the ternary
+    // this replaced would have written every Retune as a notch_clear -- which
+    // closes the notch's record at its first 300 ms deepening and makes every
+    // deepened notch look like a 300 ms false positive.
+    const char* evName = e.kind == Ev::Kind::Set    ? "notch_set"
+                       : e.kind == Ev::Kind::Retune ? "notch_retune"
+                                                    : "notch_clear";
+    auto v = SessionLogger::makeEvent (evName);
     auto* o = v.getDynamicObject();
     o->setProperty ("slot", e.slot);
     o->setProperty ("lane", e.lane);
@@ -568,6 +594,14 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("q", (double) e.q);
     o->setProperty ("depth_db", (double) e.depthDb);
     o->setProperty ("origin", originName (e.origin));
+
+    if (e.kind == Ev::Kind::Retune)
+    {
+        o->setProperty ("reason", retuneReasonName (e.retuneReason));
+        o->setProperty ("from_db", (double) e.fromDepthDb);
+        o->setProperty ("age_ms", e.ageMs);
+        return v;   // no score, no ctx: a retune is not a placement decision
+    }
 
     if (e.kind == Ev::Kind::Clear)
     {
@@ -887,6 +921,78 @@ bool MainComponent::loadPreset (const juce::File& file)
         for (auto& controller : notchControllers_)
             controller->start();
 
+    // Q11, the READ side: the file's CEILING lands on the live controllers.
+    //
+    // savePreset writes notchDefaults from slot 0; without this nothing ever
+    // read it back, so reopening a show tuned at -18 dB left the ceiling
+    // wherever the tuning strip happened to be standing and capped every
+    // detector notch placed after the load at that value instead.
+    //
+    // ONLY when the file actually carried the block. `hasNotchDefaults` is
+    // false for a v1 preset and for anything written before the ceiling was
+    // saved at all, and PresetNotchDefaults' -12 dB fallback must not be
+    // mistaken for an operator's choice -- applying it would walk a rig tuned
+    // at -18 back two rungs every time an old file was opened.
+    //
+    // Routing mirrors the TuningPanel handler above (the Global strip): every
+    // slot on Global tuning follows, a slot switched to Custom keeps its own
+    // values until its Tune combo goes back to G. The preset format carries
+    // ONE global pair, so there is nothing per-slot to restore.
+    //
+    // EXPECTED LEVEL CHANGE -- this is NOT 0 dB, and the round-1 note that
+    // said it was has been corrected here.
+    //
+    // A Detector notch carries no ceiling of its own (ModelNotch::ceilingDb is
+    // NaN, so ceilingDbFor() reads the LIVE value this line writes). The
+    // detection pass re-tunes any such notch standing DEEPER than the new
+    // ceiling up to it on the very next tick -- NotchController.cpp, the
+    // `n.depthDB < ceiling` branch -- as one ramped step of 10 ms. Loading a
+    // shallower ceiling over a live -24 dB notch under Music.json's -10 dB is
+    // therefore +14 dB at a bin that was ringing. Loading a DEEPER ceiling is
+    // 0 dB now and only allows deeper rungs later. Preset, Manual and
+    // Soundcheck notches carry their own ceiling (Q8) and are untouched either
+    // way, as are the notches this load just adopted at their file depth.
+    //
+    // The pull itself is by design (Q1/Q8) and is not changed here; what is
+    // added is that the load now SAYS it moved the ceiling, in the
+    // `preset_load` event below.
+    bool   ceilingApplied = false;
+    double appliedQ       = 0.0;
+    double appliedDepthDb = 0.0;
+
+    if (result.preset.hasNotchDefaults)
+    {
+        for (int i = 0; i < kMaxSlots; ++i)
+        {
+            if (! slotUsesGlobalTuning_[(std::size_t) i])
+                continue;
+
+            // setNotchDefaults clamps to Q 8..50 / -24..-6 dB, so a file
+            // carrying a legal-but-extreme pair cannot push the controller
+            // outside the range the panels can reach.
+            auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setNotchDefaults (result.preset.notchDefaults.Q,
+                                         result.preset.notchDefaults.depthDB);
+
+            // Read BACK, so the log carries the ceiling that is actually
+            // standing rather than the number the file asked for. They differ
+            // whenever the clamp above bit. Also: with every slot on Custom
+            // this loop never runs, and the load really did apply nothing.
+            if (! ceilingApplied)
+            {
+                ceilingApplied = true;
+                appliedQ       = controller.getNotchQ();
+                appliedDepthDb = controller.getNotchDepthDb();
+            }
+        }
+
+        // The strip re-reads slot 0 through paramsProvider, so the Q and depth
+        // combos show what the file just installed rather than the value the
+        // operator left them on. A ceiling need not sit on a combo rung (Q13);
+        // TuningPanel::refresh shows such a value as text.
+        tuningPanel_.refresh();
+    }
+
     // M-4: the mono-skip count had nowhere to go but a Logger line and a test
     // accessor. It belongs in the session log next to the notches the load
     // DID install -- a preset that silently loses half its notches on a mono
@@ -898,6 +1004,29 @@ bool MainComponent::loadPreset (const juce::File& file)
         o->setProperty ("file", file.getFileName());
         o->setProperty ("adopted", adoptedTotal);
         o->setProperty ("skipped", lastLoadSkipped_);
+
+        // The ceiling this load moved, if it moved one (fix round 2).
+        //
+        // A load that LOWERS the ceiling is NOT level-neutral: the controller
+        // re-tunes every live detector notch deeper than the new ceiling up to
+        // it on the next tick, which is a real level rise at a bin that was
+        // ringing (a -24 dB notch under Music.json's -10 dB ceiling comes up
+        // 14 dB, ramped over 10 ms). That has to be readable afterwards, so
+        // the log says whether a ceiling was applied and which one.
+        //
+        // `ceiling_applied` is always written -- a reader must be able to tell
+        // "this load moved nothing" from "the field is new" -- but q /
+        // depth_db only when there is a ceiling to report. The names and the
+        // double type match the `tuning` event's, so logstats reads one column
+        // for both.
+        o->setProperty ("ceiling_applied", ceilingApplied);
+
+        if (ceilingApplied)
+        {
+            o->setProperty ("q",        appliedQ);
+            o->setProperty ("depth_db", appliedDepthDb);
+        }
+
         sessionLogger_.log (v);
     }
 
@@ -955,7 +1084,11 @@ bool MainComponent::savePreset (const juce::File& file)
             pn.index   = sn.index;
             pn.freq    = sn.frequency;
             pn.Q       = sn.Q;
-            pn.depthDB = sn.depthDB;
+            // Q11: the depth the room NEEDED, not the rung the release ladder
+            // happens to be resting on when SAVE was pressed. A preset saved
+            // during a quiet stretch would otherwise reload two rungs too
+            // shallow and let the same howl come back.
+            pn.depthDB = sn.deepestDb;
             pn.slot    = s;
             pn.lane    = sn.channel;
             preset.notches.push_back (pn);
@@ -983,6 +1116,21 @@ bool MainComponent::savePreset (const juce::File& file)
     }
 
     preset.sampleRate = presetRate;
+
+    // Q11: the CEILING is written here and read back by loadPreset(), which
+    // applies it to every slot on Global tuning. Both halves are needed: a
+    // preset whose ceiling is only WRITTEN reloads onto whatever the tuning
+    // strip was left on, and one that is neither written nor read falls back
+    // to PresetNotchDefaults' -12 dB (PresetManager.h), capping every detector
+    // notch two rungs shallower than the show was tuned at.
+    //
+    // Slot 0 is the source because notchDefaults is a single global pair in
+    // the format and every Global slot carries the same values. A slot on
+    // Custom tuning is not represented in the file at all -- see
+    // docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md 4.8 / Q11
+    // if per-slot ceilings ever arrive.
+    preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
+    preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
 
     juce::StringArray errors;
     const bool ok = PresetManager::saveToFile (preset, file, errors);

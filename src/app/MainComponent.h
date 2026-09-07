@@ -187,6 +187,13 @@ public:
     // slot; never null for [0, kMaxSlots).
     NotchController* getNotchControllerForTest (int slot);
 
+    // TEST ACCESSOR ONLY -- the serialiser is otherwise reachable only through
+    // a live detector thread and a real log file. Public here, next to the
+    // controller accessor, because notchEventToVar itself is private (below)
+    // and stays that way.
+    static juce::var notchEventToVarForTest (const NotchController::NotchEvent& e)
+        { return notchEventToVar (e); }
+
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is
     // slotLinked_, not the controller's own atomic, so a query never has to

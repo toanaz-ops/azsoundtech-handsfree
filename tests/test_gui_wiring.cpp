@@ -1169,6 +1169,223 @@ TEST (GuiWiring, SavePresetRoundTripsPerLaneNotchesAndTheLinkedFlag)
 }
 
 //==============================================================================
+// Lane G (gain-aware notch) -- what a saved preset has to carry.
+
+// RED IF savePreset writes the RUNNING depth instead of deepestDb (Q11).
+// A preset saved during a quiet moment must record what the room needed, not
+// the rung the release ladder had wound back to.
+TEST (GuiWiring, SavePresetRecordsTheDeepestDepthNotTheRestingOne)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+
+    // A notch placed deep, then wound back the way the release ladder does.
+    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_TRUE (controller0->retuneForTest (0, 0, -6.0,
+                                             NotchController::RetuneReason::Release));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();          // publish a snapshot carrying deepestDb
+
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-deepest.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (outFile));
+
+    const auto result = PresetManager::loadFromFile (outFile);
+    outFile.deleteFile();
+
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    // One entry per (slot, lane, index) since lane S, and setNotch named lane
+    // 0 only -- so exactly one notch comes back.
+    ASSERT_EQ (result.preset.notches.size(), 1u);
+    EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -18.0);
+}
+
+// RED IF notchDefaults stops round-tripping (Q11). Without it a reloaded
+// preset caps every detector notch at PresetNotchDefaults' -12 dB, silently
+// undoing the ceiling the show was tuned at.
+TEST (GuiWiring, SavePresetRoundTripsTheCeilingThroughNotchDefaults)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+    controller0->setNotchDefaults (44.0, -24.0);
+    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 44.0, -24.0,
+                                        NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();
+
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-ceiling.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (outFile));
+
+    const auto result = PresetManager::loadFromFile (outFile);
+    outFile.deleteFile();
+
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       44.0);
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+}
+
+// RED IF loadPreset ignores the ceiling the file carries (fix round 1, the
+// READ side of Q11). savePreset has written notchDefaults since af5201e but
+// nothing ever read it back: reopening a show tuned at -18 dB left the live
+// ceiling wherever the slider happened to be standing, and every detector
+// notch placed after the load was capped there instead of at the tuned value.
+//
+// Expected level change: 0 dB at load time. The ceiling caps FUTURE deepening
+// only; the notches in the file are still adopted at their own file depth.
+TEST (GuiWiring, LoadPresetAppliesTheCeilingTheFileCarries)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+
+    // The show is tuned at Q 30 / -18 dB and saved there.
+    controller0->setNotchDefaults (30.0, -18.0);
+    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();
+
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-ceiling-load.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (outFile));
+
+    // The operator then drags both controls somewhere else, the way the
+    // tuning strip does between two shows.
+    controller0->setNotchDefaults (8.0, -6.0);
+    ASSERT_DOUBLE_EQ (controller0->getNotchDepthDb(), -6.0);
+
+    ASSERT_TRUE (app.loadPreset (outFile));
+    outFile.deleteFile();
+
+    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
+    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
+
+    // Every OTHER slot follows too, because they all sit on Global tuning --
+    // the same routing the TuningPanel handler uses.
+    auto* controller1 = app.getNotchControllerForTest (1);
+    ASSERT_NE (controller1, nullptr);
+    EXPECT_DOUBLE_EQ (controller1->getNotchDepthDb(), -18.0);
+}
+
+// RED IF a preset WITHOUT a notchDefaults block resets the live ceiling to
+// PresetNotchDefaults' -12 dB (M-3). Every file written before af5201e is such
+// a file, and a rig tuned at -18 must not be quietly walked back two rungs by
+// opening one of them.
+TEST (GuiWiring, LoadPresetLeavesTheCeilingAloneWhenTheFileCarriesNone)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+    controller0->setNotchDefaults (30.0, -18.0);
+
+    // Hand-written because savePreset ALWAYS writes the block now; this is the
+    // shape of a v1 file (and of the plan Task 25 sample).
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-no-defaults.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (outFile.replaceWithText (
+        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
+        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
+
+    ASSERT_TRUE (app.loadPreset (outFile));
+    outFile.deleteFile();
+
+    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
+    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
+}
+
+// RED IF a Retune event is serialised as notch_clear (B-3 of the spec's own
+// critique list). The `ev` key is what logstats.py dispatches on, and a
+// mislabelled retune closes the notch's record at the first 300 ms deepening.
+// No MainComponent is needed: the serialiser is static.
+TEST (GuiWiring, RetuneEventsAreLoggedUnderTheirOwnEventName)
+{
+    NotchController::NotchEvent e;
+    e.kind = NotchController::NotchEvent::Kind::Retune;
+    e.slot = 0; e.lane = 1; e.index = 3;
+    e.hz = 1007.8f; e.q = 30.0f;
+    e.fromDepthDb = -12.0f; e.depthDb = -18.0f;
+    e.origin = NotchController::Origin::Detector;
+    e.retuneReason = NotchController::RetuneReason::Deepen;
+    e.ageMs = 612.5;
+
+    const juce::var v = MainComponent::notchEventToVarForTest (e);
+    EXPECT_EQ (v["ev"].toString(), "notch_retune");
+    EXPECT_EQ (v["reason"].toString(), "deepen");
+    EXPECT_EQ (v["origin"].toString(), "detector");
+    EXPECT_DOUBLE_EQ ((double) v["from_db"], -12.0);
+    EXPECT_DOUBLE_EQ ((double) v["depth_db"], -18.0);
+    EXPECT_DOUBLE_EQ ((double) v["age_ms"], 612.5);
+    EXPECT_EQ ((int) v["slot"], 0);
+    EXPECT_EQ ((int) v["lane"], 1);
+    EXPECT_EQ ((int) v["index"], 3);
+    EXPECT_NEAR ((double) v["hz"], 1007.8, 0.01);
+    EXPECT_DOUBLE_EQ ((double) v["q"], 30.0);
+    // A retune is not a placement decision: no score block travels with it.
+    EXPECT_FALSE (v.getDynamicObject()->hasProperty ("score"));
+    EXPECT_FALSE (v.getDynamicObject()->hasProperty ("ctx"));
+}
+
+// RED IF a Set or a Clear picks up the retune name. `notch_clear` must stay
+// the name of exactly one Kind, or logstats closes records it should not.
+TEST (GuiWiring, SetAndClearKeepTheirOwnEventNames)
+{
+    NotchController::NotchEvent set;
+    set.kind = NotchController::NotchEvent::Kind::Set;
+    EXPECT_EQ (MainComponent::notchEventToVarForTest (set)["ev"].toString(), "notch_set");
+
+    NotchController::NotchEvent clear;
+    clear.kind = NotchController::NotchEvent::Kind::Clear;
+    clear.reason = NotchController::ClearReason::AutoRelease;
+    const juce::var cv = MainComponent::notchEventToVarForTest (clear);
+    EXPECT_EQ (cv["ev"].toString(), "notch_clear");
+    EXPECT_EQ (cv["reason"].toString(), "auto_release");
+    EXPECT_FALSE (cv.getDynamicObject()->hasProperty ("from_db"));
+}
+
+// RED IF a reason name is dropped or renamed -- logstats.py and the tester
+// notes both read these four strings.
+TEST (GuiWiring, EveryRetuneReasonHasItsOwnName)
+{
+    using RR = NotchController::RetuneReason;
+    const RR reasons[] = { RR::Deepen, RR::Release, RR::Reclamp, RR::Ceiling };
+    const char* names[] = { "deepen", "release", "reclamp", "ceiling" };
+    for (int i = 0; i < 4; ++i)
+    {
+        NotchController::NotchEvent e;
+        e.kind = NotchController::NotchEvent::Kind::Retune;
+        e.retuneReason = reasons[i];
+        EXPECT_EQ (MainComponent::notchEventToVarForTest (e)["reason"].toString(),
+                   juce::String (names[i]));
+    }
+}
+
+//==============================================================================
 // Lane D (data loop): the session log through the real wiring.
 
 namespace
@@ -1263,6 +1480,55 @@ TEST (GuiWiring, FalseVerdictLogsVerdictThenClearsWithVerdictFalse)
 
     // Order: verdict is written before the clear it causes.
     EXPECT_LT (verdict - events.data(), clear - events.data());
+}
+
+// Lane G / B-3 end to end: a depth change on a LIVE notch reaches the real
+// session log as its own line. RED IF notchEventToVar labels it notch_clear
+// -- the file would then show the notch closing 300 ms after placement, and
+// every deepened howl in a show log would read as a false positive.
+TEST (GuiWiring, ARetuneOnALiveNotchIsWrittenToTheSessionLog)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("retune");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    c0->setSampleRate (48000.0);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1007.8, 30.0, -6.0,
+                               NotchController::Origin::Detector));
+    // The deepen the reinforce loop would push once the howl held on.
+    ASSERT_TRUE (c0->retuneForTest (0, 0, -12.0,
+                                    NotchController::RetuneReason::Deepen));
+
+    std::vector<float> hop (512, 0.1f);
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();   // flushes both events into the logger
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    const auto* retune = firstEvent (events, "notch_retune");
+    ASSERT_NE (retune, nullptr) << "no notch_retune line in the session log";
+    EXPECT_EQ ((*retune)["reason"].toString(), "deepen");
+    EXPECT_EQ ((*retune)["origin"].toString(), "detector");
+    EXPECT_EQ ((int) (*retune)["slot"], 0);
+    EXPECT_EQ ((int) (*retune)["lane"], 0);
+    EXPECT_EQ ((int) (*retune)["index"], 0);
+    EXPECT_NEAR ((double) (*retune)["hz"], 1007.8, 0.5);
+    EXPECT_NEAR ((double) (*retune)["from_db"], -6.0, 1e-4);
+    EXPECT_NEAR ((double) (*retune)["depth_db"], -12.0, 1e-4);
+    EXPECT_TRUE (retune->getDynamicObject()->hasProperty ("age_ms"));
+
+    // The notch is still OPEN: nothing closed it.
+    EXPECT_EQ (firstEvent (events, "notch_clear"), nullptr);
+
+    const auto* set = firstEvent (events, "notch_set");
+    ASSERT_NE (set, nullptr);
+    EXPECT_LT (set - events.data(), retune - events.data());
 }
 
 // Mode and tuning land in the log. Red if requestMode / onTuningChanged stop
@@ -1421,4 +1687,82 @@ TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
     ASSERT_TRUE (app.loadPreset (presetFile));
     presetFile.deleteFile();
     EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
+}
+
+// Fix round 2 of task 9. The ceiling a preset installs is NOT level-neutral:
+// NotchController re-tunes any LIVE detector notch deeper than the new ceiling
+// up to it on the next tick (NotchController.cpp, the ceiling clamp), so
+// loading a shallower ceiling over a -24 dB notch is a real +14 dB at that bin.
+// A load that moves the ceiling therefore has to say so in the session log.
+//
+// Red if `preset_load` stops carrying ceiling_applied / q / depth_db.
+TEST (GuiWiring, PresetLoadLogsTheCeilingItApplied)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    c0->setSampleRate (48000.0);
+    c0->setNotchDefaults (30.0, -18.0);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1000.0, 30.0, -18.0,
+                               NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    c0->runOnce();
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-r2-ceiling-log.json");
+    presetFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (presetFile));
+
+    const auto dir = freshLogDir ("ceiling-load");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    const auto* load = firstEvent (events, "preset_load");
+    ASSERT_NE (load, nullptr) << "no preset_load line in the session log";
+    EXPECT_TRUE ((bool) (*load)["ceiling_applied"]);
+    EXPECT_NEAR ((double) (*load)["q"],        30.0,  1e-9);
+    EXPECT_NEAR ((double) (*load)["depth_db"], -18.0, 1e-9);
+}
+
+// The other half: a file with no notchDefaults block moves no ceiling, and the
+// log must not claim it did. Red if ceiling_applied is written unconditionally
+// or the q / depth_db pair is emitted for a load that applied nothing.
+TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-r2-no-ceiling-log.json");
+    presetFile.deleteFile();
+    ASSERT_TRUE (presetFile.replaceWithText (
+        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
+        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
+
+    const auto dir = freshLogDir ("no-ceiling-load");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    const auto* load = firstEvent (events, "preset_load");
+    ASSERT_NE (load, nullptr);
+    EXPECT_FALSE ((bool) (*load)["ceiling_applied"]);
+    EXPECT_TRUE (load->getDynamicObject()->hasProperty ("ceiling_applied"));
+    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
+    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
 }

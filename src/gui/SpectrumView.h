@@ -236,7 +236,14 @@ public:
     // threshold: it tracks the RESPONSE preset instead of being one more
     // magic constant, and a GUI-side constant would silently disagree with
     // the machine it describes the moment the DSP side moved.
-    static constexpr float kRingRiskRisingFraction = 0.55f;
+    //
+    // Lane G (m-D): it is now literally the same constant. NotchController's
+    // release-clock freeze uses this same band line (spec 4.5, Q4), so the
+    // value is DEFINED there and aliased here. Two 0.55f literals with one
+    // meaning is exactly the drift the comment above warns about, and a test
+    // asserting they are equal would only be checking that nobody edited one
+    // of them -- this makes the question unaskable instead.
+    static constexpr float kRingRiskRisingFraction = NotchController::kRiskFreezeFraction;
 
     // Score -> state, spec section 2 as amended by lane R ruling A-R3. PURE:
     // it reads the three ring-risk fields of one snapshot and nothing else,

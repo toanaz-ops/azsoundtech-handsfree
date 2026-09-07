@@ -1,0 +1,87 @@
+# Review package: 7a279f6..HEAD
+
+## Commits
+d892b3c docs(dsp): riseRatio -- name every default-1.0 path; say what the one-path test proves
+
+## Files changed
+ src/dsp/CandidateScorer.h      | 11 ++++++++---
+ tests/test_candidatescorer.cpp | 15 +++++++++++++--
+ 2 files changed, 21 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/src/dsp/CandidateScorer.h b/src/dsp/CandidateScorer.h
+index 0d346ec..7a39e64 100644
+--- a/src/dsp/CandidateScorer.h
++++ b/src/dsp/CandidateScorer.h
+@@ -81,23 +81,28 @@ public:
+     // this and nothing else -- one arithmetic path, never two.
+     struct ScoreBreakdown
+     {
+         float rawPeakiness = 0.0f;
+         float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+         // Lane G (spec 4.2): the RAW rise ratio mag_now / mag_ref, before any
+         // normalisation. rNorm above saturates at rise 1.5, so it cannot
+         // distinguish a howl creeping up from one that jumped 12 dB in a
+         // quarter second -- and that distinction is what decides whether a
+         // notch starts at -6 or -12 dB. The neutral value is 1.0, meaning "no
+-        // measurable rise": BOTH the no-history branch and the
+-        // history-too-young branch report it, so an unknown rise can never buy
+-        // a deeper starting notch.
++        // measurable rise": the no-history branch, the history-too-young
++        // branch, AND the sub-threshold early return (peakiness at or below
++        // the analyzer threshold, CandidateScorer.cpp:52-53) all leave it at
++        // this default, so an unknown rise can never buy a deeper starting
++        // notch.
++        // Unbounded above: against a near-silent reference the divisor floors
++        // at 1e-12, so this can legitimately read ~1e12. Compare it against a
++        // threshold; never scale anything by it.
+         float riseRatio = 1.0f;
+         float penalty = 1.0f;
+         float score = 0.0f;
+         const float* refFrame = nullptr;
+         double refAgeMs = 0.0;
+     };
+     ScoreBreakdown scoreCandidateDetailed (const PeakinessAnalyzer::Candidate& candidate,
+                                            const float* magnitudes,
+                                            const LockedFrequencyView& lockedFrequencies);
+ 
+diff --git a/tests/test_candidatescorer.cpp b/tests/test_candidatescorer.cpp
+index 2f65823..408a9e8 100644
+--- a/tests/test_candidatescorer.cpp
++++ b/tests/test_candidatescorer.cpp
+@@ -628,22 +628,33 @@ TEST (CandidateScorer, RiseRatioIsNeutralWithoutUsableHistory)
+     }
+     ASSERT_NE (spectrum.magnitudes, nullptr);
+ 
+     const auto detected = rig.analyzer.analyse (spectrum);
+     ASSERT_GT (detected.count, 0u);
+     const auto b = rig.scorer.scoreCandidateDetailed (detected.candidates[0],
+                                                       spectrum.magnitudes, {});
+     EXPECT_FLOAT_EQ (b.riseRatio, 1.0f);
+ }
+ 
+-// RED IF the new field changes the arithmetic. The product identity is the
+-// whole contract: lane G reads one more intermediate number and moves nothing.
++// This test proves that scoreCandidate() and scoreCandidateDetailed() share
++// ONE arithmetic path -- the product at CandidateScorer.cpp:148 -- and that
++// riseRatio rides alongside it as a read-only extra output, never a fifth
++// multiplied factor. It does NOT prove "score is byte-identical to before
++// this diff": the identity checked here (score == pNorm*rNorm*mNorm*penalty)
++// holds by construction on either side of the change, so it cannot detect a
++// numeric drift in any one factor. That evidence is the pre-existing
++// 470-test regression suite with hand-computed expectations, which this
++// task leaves untouched.
++//
++// RED IF scoreCandidate() and scoreCandidateDetailed() ever diverge on the
++// same inputs, or if a later edit turns riseRatio into a fifth multiplied
++// factor instead of a read-only output.
+ TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
+ {
+     Rig rig;
+     const auto quiet = makeToneInNoise (1000.0, 0.001f, 0.01f, 11u,
+                                         static_cast<std::size_t> (kHop) * 70);
+     rig.feedHops (quiet, 66);
+     const auto loud = makeToneInNoise (1000.0, 1.0f, 0.01f, 12u,
+                                        static_cast<std::size_t> (kHop) * 4);
+     // Four hops to fill the analysis window (one hop per processLatestBlock).
+     Detector::Spectrum spectrum {};

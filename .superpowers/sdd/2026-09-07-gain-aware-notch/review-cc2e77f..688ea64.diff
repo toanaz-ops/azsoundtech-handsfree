@@ -1,0 +1,340 @@
+# Review package: cc2e77f..HEAD
+
+## Commits
+688ea64 test(app): ladder — ceilingDb accessors and Q8 test; full re-init assertion; nextDeeperRungDb contract past the ceiling
+
+## Files changed
+ src/app/NotchController.cpp    | 50 +++++++++++++++++++++++++++--
+ src/app/NotchController.h      | 24 +++++++++++++-
+ tests/test_notchcontroller.cpp | 71 ++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 139 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index f908bb8..9c541f4 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -115,35 +115,44 @@ void NotchController::setWidth (int lanes)
+     // N/A on the chip is honest; a stale number is not. Readout only -- the
+     // scorer, the persistence streaks and the model are untouched here.
+     for (auto& l : lanes_)
+         l.blocksSinceReset = 0;
+ }
+ 
+ // --- Lane G ladder arithmetic (spec 4.1, Q13). Pure: no state, no locks. ---
+ 
+ double NotchController::nextDeeperRungDb (double currentDb, double ceilingDb)
+ {
++    // A NaN ceiling means "unresolved" -- callers must pass ceilingDbFor()'s
++    // result, never a raw ModelNotch::ceilingDb (which is NaN for Detector).
++    jassert (! std::isnan (ceilingDb));
++
+     // The shallowest FIXED rung strictly deeper than `currentDb` ...
+     double next = kDepthLadderDb[kDepthLadderSize - 1];
+     for (int i = 0; i < kDepthLadderSize; ++i)
+         if (kDepthLadderDb[i] < currentDb)
+         {
+             next = kDepthLadderDb[i];
+             break;
+         }
+     // ... capped at the ceiling, which is the effective ladder's LAST rung
+     // (Q13). std::max picks the SHALLOWER of the two, because deeper is more
+     // negative: ceiling -10 turns "-6 -> -12" into "-6 -> -10".
+     //
+-    // A caller must already have established `currentDb > ceilingDb` -- at or
+-    // past the ceiling this returns `currentDb` unchanged, which every caller
+-    // treats as "nothing to do" rather than as a step.
++    // Fix-round 1 (review finding "Important 2"): the true contract, past
++    // what the comment used to say. AT the ceiling (currentDb == ceilingDb)
++    // this returns currentDb unchanged. DEEPER than the ceiling (currentDb <
++    // ceilingDb -- e.g. the slider moved after a Detector notch already stood
++    // past the new ceiling) this returns the ceiling itself, which is
++    // SHALLOWER than currentDb -- a step in the wrong direction for a caller
++    // that only ever deepens. Such a caller MUST compare the result against
++    // currentDb before sending it as a command.
+     return std::max (next, ceilingDb);
+ }
+ 
+ double NotchController::nextShallowerRungDb (double currentDb)
+ {
+     // The deepest rung strictly shallower than `currentDb`, saturating at the
+     // ladder top. An odd Preset/Manual depth resolves upward.
+     for (int i = kDepthLadderSize - 1; i >= 0; --i)
+         if (kDepthLadderDb[i] > currentDb)
+             return kDepthLadderDb[i];
+@@ -265,20 +274,25 @@ void NotchController::pushClearLocked (int channel, int index, ClearReason reaso
+     ev.slot = slotId_; ev.lane = channel; ev.index = index;
+     ev.hz = (float) n.frequency; ev.q = (float) n.Q; ev.depthDb = (float) n.depthDB;
+     ev.origin = n.origin; ev.reason = reason;
+     ev.ageMs = liveMs_ - n.lockedAtMs;
+     pushEventLocked (std::move (ev));
+ }
+ 
+ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthDb,
+                                         RetuneReason reason)
+ {
++    // modelMutex_ HELD (the caller's contract, see the header). Documents the
++    // precondition every caller already relies on -- slotOf() below would
++    // otherwise index out of `model_` silently in a Release build.
++    jassert (channel >= 0 && channel < kChannels && index >= 0 && index < kSlots);
++
+     auto& n = model_[slotOf (channel, index)];
+     if (! n.active)
+         return false;
+ 
+     // Validate-before-send: the same five predicates as setNotchImpl plus the
+     // ladder floor (spec 4.4). Nothing is touched when any of them fails -- a
+     // refused retune leaves the model AND the chain on the depth they already
+     // agreed on, which is the only state where they cannot disagree.
+     const double sampleRate = lanes_[0].detector.getSampleRate();
+     if (! (sampleRate > 0.0))                                    return false;
+@@ -583,20 +597,50 @@ bool NotchController::activeForTest (int channel, int index) const
+ 
+ bool NotchController::retuneForTest (int channel, int index, double newDepthDb,
+                                      RetuneReason reason)
+ {
+     if (channel < 0 || channel >= kChannels || index < 0 || index >= kSlots)
+         return false;
+     const std::lock_guard<std::mutex> lock (modelMutex_);
+     return pushRetuneLocked (channel, index, newDepthDb, reason);
+ }
+ 
++// Fix-round 1 (review finding "Important 1"): ceilingDbFor and the rest of
++// ModelNotch's ladder state had no accessor and no test.
++double NotchController::ceilingDbForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return ceilingDbFor (model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                                        std::clamp (index, 0, kSlots - 1))]);
++}
++
++double NotchController::rawCeilingDbForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].ceilingDb;
++}
++
++int NotchController::releasedStepsForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].releasedSteps;
++}
++
++double NotchController::stageChangedAtMsForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].stageChangedAtMs;
++}
++
+ void NotchController::setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override)
+ {
+     // Detector-thread state, written from the test thread with the detector
+     // STOPPED -- same precondition as setWidth() and setEventSink().
+     ringRiskOverrideForTest_ = override;
+ }
+ 
+ void NotchController::setDetectionActive (bool active)
+ {
+     detectionActive_.store (active, std::memory_order_relaxed);
+diff --git a/src/app/NotchController.h b/src/app/NotchController.h
+index f406793..7b10440 100644
+--- a/src/app/NotchController.h
++++ b/src/app/NotchController.h
+@@ -144,21 +144,28 @@ public:
+     // Q13: the EFFECTIVE ladder is the fixed rungs SHALLOWER than the ceiling,
+     // plus the ceiling itself as the last rung -- so ceiling -10 (the shipped
+     // presets/Music.json) gives -6 -> -10, and ceiling -6 gives a one-rung
+     // ladder that never deepens. The `ceilingRung` IS the ceiling value and
+     // may be an odd number: it is the ONLY place a Detector notch stands off a
+     // fixed rung. There is deliberately no quantisation helper -- v2 had one
+     // (`ceilingRungDb`), and quantising -10 down to -6 made Music 4 dB
+     // shallower than 1.1.3 with nothing saying so.
+     //
+     // nextDeeperRungDb: the shallowest fixed rung strictly deeper than
+-    //   `currentDb`, capped at `ceilingDb`. Saturates at the ceiling.
++    //   `currentDb`, capped at `ceilingDb`. Fix-round 1 (review finding
++    //   "Important 2"): AT the ceiling this returns `currentDb` unchanged;
++    //   DEEPER than the ceiling (currentDb < ceilingDb -- a lowered slider
++    //   left an existing notch past its new ceiling) this returns the
++    //   ceiling itself, which is SHALLOWER than currentDb. A caller that only
++    //   ever deepens must compare the result against currentDb before
++    //   sending a command, or it will re-send a shallower depth as if it were
++    //   a step down.
+     // nextShallowerRungDb: the deepest fixed rung strictly shallower than
+     //   `currentDb`, saturating at -6. Needs no ceiling -- a release always
+     //   moves toward a fixed rung.
+     static double nextDeeperRungDb (double currentDb, double ceilingDb);
+     static double nextShallowerRungDb (double currentDb);
+ 
+     NotchController (LockFreeRingBuffer<float>& tapLane0,
+                      LockFreeRingBuffer<float>* tapLane1,
+                      LockFreeRingBuffer<NotchCommand>& commands,
+                      ClockSource& clock,
+@@ -295,20 +302,35 @@ public:
+     // B-3: ModelNotch::active, NOT "depthDB < 0". pushClearLocked lowers only
+     // `active` and leaves depthDB alone on purpose (the Clear event reads it),
+     // so a depth-based liveness probe matches every slot that has ever held a
+     // notch. Tasks 5-8 use this accessor for every "is a notch there?" check.
+     bool   activeForTest    (int channel, int index) const;
+     // Drives pushRetuneLocked the way the detector thread does, taking
+     // modelMutex_ exactly once. Tasks 5-7 call the locked helper from loops
+     // that already hold it; this seam is what lets the command path be tested
+     // before those callers exist.
+     bool   retuneForTest (int channel, int index, double newDepthDb, RetuneReason reason);
++    // Fix-round 1 (review finding "Important 1"): ceilingDbFor and the rest of
++    // ModelNotch's ladder state had no accessor at all, so nothing asserted
++    // "Detector follows the live slider, everything else keeps its own depth"
++    // (Q8), nor that a reused slot's stageChangedAtMs/releasedSteps/ceilingDb
++    // are actually re-initialised alongside deepestDb/quietMs.
++    //
++    // ceilingDbForTest: the RESOLVED ceiling -- what ceilingDbFor(n) returns
++    // (the live slider for a Detector notch, n.ceilingDb for everything else).
++    double ceilingDbForTest       (int channel, int index) const;
++    // rawCeilingDbForTest: the STORED field itself -- NaN for a Detector
++    // notch, the caller's own depth otherwise. Distinct from ceilingDbForTest
++    // so a test can tell "resolves to the slider" from "IS the slider".
++    double rawCeilingDbForTest    (int channel, int index) const;
++    int    releasedStepsForTest   (int channel, int index) const;
++    double stageChangedAtMsForTest (int channel, int index) const;
+     // Forces the pair the release freeze reads (spec 4.5 seam, M-6):
+     // {valid, score}. nullopt restores the real frameScoreValid_/frameMaxScore_.
+     // A static tone cannot hold score >= 0.385 for 30 s -- mNorm is a
+     // log-ratio against a 3 s EMA and decays to 0 within seconds -- so the
+     // freeze is untestable through audio alone.
+     void   setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override);
+ 
+     // KD-9: detection gating (Bypass must never place notches). Snapshot
+     // publication is NOT affected by this flag.
+     void setDetectionActive (bool active);
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index e4dd1b2..3775492 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -1713,20 +1713,27 @@ TEST (NotchControllerLadder, TheEffectiveLadderEndsOnTheCeilingItself)
+     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -18.0), -18.0);
+     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-18.0, -18.0), -18.0);
+ 
+     // Ceiling -6: there is no rung shallower than -6, so the ladder is one
+     // rung long and a notch there NEVER deepens.
+     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0,  -6.0),  -6.0);
+ 
+     // An odd Manual depth resolves in the direction of travel, still capped.
+     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -3.0, -24.0),  -6.0);
+     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -9.0, -24.0), -12.0);
++
++    // Fix-round 1 (review finding "Important 2"): DEEPER than the ceiling --
++    // e.g. the slider dropped after a notch already stood past its new
++    // ceiling -- steps the notch back UP to the ceiling, not further down.
++    // This is a step in the SHALLOWER direction; the stale header comment
++    // claimed the function was a no-op here.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-24.0, -10.0), -10.0);
+ }
+ 
+ // RED IF a release step can jump more than one rung, or past -6. Q13 needs no
+ // ceiling here: releasing is always toward a FIXED rung, and the two off-rung
+ // depths the ladder can hold -- an odd ceiling, an odd Preset/Manual depth --
+ // both resolve to the nearest fixed rung above them.
+ TEST (NotchControllerLadder, NextShallowerIsExactlyOneRungAndStopsAtMinus6)
+ {
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-24.0), -18.0);
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-18.0), -12.0);
+@@ -1734,34 +1741,94 @@ TEST (NotchControllerLadder, NextShallowerIsExactlyOneRungAndStopsAtMinus6)
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-6.0),   -6.0);
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-13.7), -12.0);
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-10.0),  -6.0);  // Music's ceiling
+     EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-9.0),   -6.0);  // odd preset depth
+ }
+ 
+ // RED IF setNotchImpl stops re-initialising the ladder fields when a slot is
+ // REUSED (B-2). pushClearLocked only lowers `active`, so without this a manual
+ // -6 dB notch inherits the -24 dB deepestDb of the previous tenant and gets
+ // reclamped to -24 on its first reinforce.
++// Fix-round 1 (review finding "Important 1"): the original test covered only
++// deepestDb/quietMs of the five ladder fields setNotchImpl re-initialises.
++// Extended to cover all five, and to place the FIRST tenant as Manual with a
++// non-NaN raw ceiling and non-zero live time, so a stale ceilingDb or a stale
++// stageChangedAtMs would be PROVABLY stale rather than accidentally still
++// matching the reused slot's own values.
+ TEST (NotchControllerLadder, ReusingASlotResetsEveryLadderField)
+ {
+     Harness h;
+     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -24.0,
+-                                        NotchController::Origin::Detector));
++                                        NotchController::Origin::Manual));
+     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
++    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 0), -24.0);
++    EXPECT_EQ (h.controller.releasedStepsForTest (0, 0), 0);
++    const double firstStageChangedAtMs = h.controller.stageChangedAtMsForTest (0, 0);
++
++    // Move live time forward so the second placement's stageChangedAtMs is
++    // measurably different from the first, if it were left stale.
++    std::vector<float> hop (512, 0.1f);
++    for (int i = 0; i < 50; ++i) {          // 50 * 5 ms = 250 ms of live time
++        h.tap.write (hop.data(), hop.size());
++        h.clock.advance (5.0);
++        h.controller.runOnce();
++    }
+ 
+     h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
+     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
+-                                        NotchController::Origin::Manual));
++                                        NotchController::Origin::Detector));
+ 
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
+     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -6.0);
+     EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0),    0.0);
++    EXPECT_EQ (h.controller.releasedStepsForTest (0, 0), 0);
++    EXPECT_TRUE (std::isnan (h.controller.rawCeilingDbForTest (0, 0)))
++        << "Manual's -24 ceiling must not survive into a reused Detector slot";
++    EXPECT_GT (h.controller.stageChangedAtMsForTest (0, 0), firstStageChangedAtMs)
++        << "stageChangedAtMs must be re-stamped to the CURRENT live time, not left stale";
++}
++
++// RED IF ceilingDbFor stops resolving to the LIVE slider for a Detector
++// notch, or starts doing the same for anything else (Q8). ceilingDbForTest is
++// the RESOLVED ceiling ceilingDbFor(n) returns; rawCeilingDbForTest is the
++// stored field itself -- NaN for Detector, the notch's own depth otherwise.
++TEST (NotchControllerLadder, CeilingIsTheSliderForDetectorAndOwnDepthForPresetAndManual)
++{
++    Harness h;
++
++    // Detector: raw field is the NaN sentinel, and the resolved ceiling
++    // tracks the LIVE slider -- including a change made AFTER placement.
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++    EXPECT_TRUE (std::isnan (h.controller.rawCeilingDbForTest (0, 0)));
++    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 0), h.controller.getNotchDepthDb());
++
++    h.controller.setNotchDefaults (30.0, -12.0);
++    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 0), -12.0)
++        << "a Detector notch's ceiling must follow the slider even after placement";
++
++    // Manual: raw and resolved are both the caller's own depth; moving the
++    // slider afterward changes NOTHING for it.
++    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -9.0,
++                                        NotchController::Origin::Manual));
++    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 1), -9.0);
++    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 1), -9.0);
++    h.controller.setNotchDefaults (30.0, -6.0);
++    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 1), -9.0)
++        << "a Manual notch's ceiling must NOT drag with the slider";
++
++    // Preset (adopted): same as Manual -- its own depth, slider-independent.
++    PresetNotch p;
++    p.index = 2; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -15.0;
++    ASSERT_EQ (h.controller.adoptPreset ({ p }), 1);
++    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 2), -15.0);
++    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 2), -15.0);
+ }
+ 
+ // RED IF `activeForTest` is implemented as "depthDB < 0" (B-3). It must read
+ // ModelNotch::active, because pushClearLocked lowers ONLY `active` -- the
+ // Clear event reads n.depthDB, so the depth is deliberately retained on a
+ // cleared slot. Every liveness probe in Tasks 5-8 is built on this accessor;
+ // a depth-based one would report every slot that has ever held a notch as
+ // still active, and the room-memory and ceiling tests would pass while
+ // asserting nothing.
+ //

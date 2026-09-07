@@ -1,0 +1,298 @@
+# Review package: 5638555..HEAD
+
+## Commits
+89b7dc3 test(app): releaseFrozen false on a dead tap; reclamp-over-ceiling guarantee named at its real site; slack in re-timed tests
+
+## Files changed
+ src/app/NotchController.cpp    | 28 ++++++++++++--
+ tests/test_notchcontroller.cpp | 85 ++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 99 insertions(+), 14 deletions(-)
+
+## Diff
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index dda51c0..ba24c5a 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -620,23 +620,36 @@ void NotchController::runOnce()
+                     // (deepestDb -24) -> go quiet, release all the way to -6
+                     // (deepestDb untouched, that is the point of it) ->
+                     // operator drops the slider to -12. The test below reads
+                     // `-6 < -12` = FALSE, so without this line nothing happens
+                     // and deepestDb stays -24 -- and the next returning howl
+                     // reclamps to -24, 12 dB past the ceiling. That violates
+                     // Q1 and spec 4.10 invariant 2, and it is a LOUDER-than-
+                     // asked-for outcome on a live PA, which is the one
+                     // direction this codebase does not get to be sloppy in.
+                     //
+-                    // It runs BEFORE the Set below so the reclamp branch in
+-                    // processSpectrumForDetection can never see a deepestDb
+-                    // the ceiling has already outlawed.
++                    // Fix round 1 (Important 2): this clamp does NOT by
++                    // itself stop a same-tick reclamp from seeing a stale
++                    // deepestDb. Within one runOnce, step 1 (detection, which
++                    // contains the reclamp branch) runs BEFORE this step 3,
++                    // so on the exact tick the slider moves, the reclamp
++                    // still sees whatever deepestDb held before this line
++                    // ran this tick. What this line guarantees is that
++                    // deepestDb is honest for every LATER tick, and for
++                    // anything that reads it directly between now and the
++                    // next reclamp -- savePreset, the snapshot. The actual
++                    // PA-safety guarantee that a reclamp can never land past
++                    // the ceiling is the independent
++                    // std::max (n.deepestDb, ceilingDbFor (n)) at the
++                    // reclamp site itself (below, in the detection pass) --
++                    // it must not be removed even if this line's ordering
++                    // ever changes.
+                     //
+                     // max() picks the SHALLOWER of the two (deeper is more
+                     // negative). It never deepens deepestDb: a RAISED ceiling
+                     // leaves max(deepestDb, ceiling) == deepestDb.
+                     n.deepestDb = std::max (n.deepestDb, ceiling);
+ 
+                     if (n.depthDB < ceiling)
+                     {
+                         // One ramped step, possibly more than 6 dB, and
+                         // possibly landing off-rung (Q13: the ceiling IS the
+@@ -1158,20 +1171,29 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
+                         // releasing -- the ceiling branch of the release
+                         // ladder cannot have caught that, because a notch
+                         // sitting SHALLOWER than the new ceiling never enters
+                         // it. Without the max() a notch that climbed to -24,
+                         // released to -6 under a slider then dropped to -12
+                         // would reclamp to -24: 12 dB past the ceiling,
+                         // violating Q1 and spec 4.10 invariant 2. max() picks
+                         // the SHALLOWER value. For Preset/Manual,
+                         // ceilingDbFor(n) IS their own depth, which equals
+                         // deepestDb, so this is identity.
++                        //
++                        // Fix round 1 (Important 2, mirror of the step-3
++                        // comment at the ceiling clamp above): THIS max() is
++                        // the actual PA-safety guarantee, not the step-3
++                        // clamp. Step 1 (here) runs before step 3 within one
++                        // runOnce, so on the tick the slider moves, deepestDb
++                        // may still be stale when this line reads it -- this
++                        // independent clamp is what keeps the reclamp target
++                        // from ever landing past the live ceiling regardless.
+                         const double target = std::max (n.deepestDb, ceilingDbFor (n));
+                         // Task 7 review, edge (a): the operator may have set
+                         // the slider to EXACTLY the rung the ladder wound this
+                         // notch back to. The release ladder's per-tick ceiling
+                         // clamp then pulled deepestDb down to that same value,
+                         // so `target` is the depth ALREADY RUNNING. Sending it
+                         // would restart Biquad's 10 ms ramp on a live PA for a
+                         // depth change of zero. Short-circuit: the push is
+                         // skipped, the bookkeeping below is NOT -- the notch is
+                         // reclamped, it simply had nowhere to go, and leaving
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index 71ce558..fc1133e 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -1216,24 +1216,30 @@ TEST (NotchControllerStereo, IndepAutoReleaseIsPerLane)
+ 
+     // Detection stays ARMED for the whole test. Reinforcement of a still-
+     // ringing notch sits behind the detectionActive_ gate, so disarming to
+     // "freeze placement" would freeze reinforcement too and release both
+     // lanes whatever the policy -- which would measure the gate, not the
+     // per-lane rule. The armed detector may keep emitting Sets on the lane
+     // that still rings; only Clear commands are asserted on below.
+     //
+     // Left goes quiet, right keeps ringing, for > 30 s of live time.
+     NoiseSource quietL;
+-    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
+-    // slack the 1.1.3 version carried are kept.
++    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. Fix round 1, Minor
++    // 1: +20 was thin -- integer truncation of each term costs almost a full
++    // block, and 4707 (this line, before the fix) left only 18 blocks over
++    // the 4689 actually needed:
++    //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) + ceil(10000 / kBlockMs)
++    //   = 2813 + 938 + 938 = 4689
++    // +60 restores a real margin without depending on how the division
++    // truncates for the rung this notch stands on.
+     const int blocks = (int) ((NotchController::kReleaseFirstMs
+-                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
++                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 60;
+     for (int i = 0; i < blocks; ++i)
+         pumpStereo (h, quietL.hop(), toneR.hop());
+ 
+     const auto cmds = drain (h.commands);
+     bool clearedL = false, clearedR = false;
+     for (const auto& c : cmds)
+         if (c.type == NotchCommandType::Clear) { clearedL |= (c.channel == 0); clearedR |= (c.channel == 1); }
+     EXPECT_TRUE (clearedL);
+     EXPECT_FALSE (clearedR);
+ }
+@@ -1246,24 +1252,30 @@ TEST (NotchControllerStereo, LinkedAutoReleaseWaitsForBothLanes)
+     h.controller.setDetectionActive (true);
+     SineSource toneL; NoiseSource quietR;
+     (void) warmThenDrive (h, toneL, quietR);
+ 
+     // Detection stays ARMED for the same reason as IndepAutoReleaseIsPerLane:
+     // reinforcement lives behind the gate. Sets the armed detector keeps
+     // emitting are ignored; the claim under test is that NO Clear appears.
+     //
+     // Left goes quiet, RIGHT now rings the same frequency: the pair stays.
+     NoiseSource quietL; SineSource toneR;
+-    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
+-    // slack the 1.1.3 version carried are kept.
++    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. Fix round 1, Minor
++    // 1: +20 was thin -- integer truncation of each term costs almost a full
++    // block, and 4707 (this line, before the fix) left only 18 blocks over
++    // the 4689 actually needed:
++    //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) + ceil(10000 / kBlockMs)
++    //   = 2813 + 938 + 938 = 4689
++    // +60 restores a real margin without depending on how the division
++    // truncates for the rung this notch stands on.
+     const int blocks = (int) ((NotchController::kReleaseFirstMs
+-                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
++                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 60;
+     for (int i = 0; i < blocks; ++i)
+         pumpStereo (h, quietL.hop(), toneR.hop());
+ 
+     for (const auto& c : drain (h.commands))
+         EXPECT_NE (c.type, NotchCommandType::Clear);
+ }
+ 
+ // Spec test 12. Red if the bonus multiplies when the other lane is NOT quiet,
+ // or fails to multiply when it is. Uses the public score hook below.
+ TEST (NotchControllerStereo, AsymmetryBonusAppliesOnlyWhenOtherLaneIsQuiet)
+@@ -1442,23 +1454,26 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
+         int sets = 0;
+         for (const auto& e : r.events) if (e.kind == Ev::Kind::Set) { ++sets; EXPECT_FALSE (e.hasScore); EXPECT_EQ (e.origin, NotchController::Origin::Manual); }
+         EXPECT_EQ (sets, 3);
+     }
+     // AutoRelease: mirror LiveTapReleasesThroughTheLadderAfter40s (above).
+     {
+         Recorder r; Harness h; h.controller.setEventSink (r.sink());
+         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+         NoiseSource quiet;
+         // Manual -12: its own depth is its ceiling, so -6 at 30 s and the
+-        // Clear at 40 s.
++        // Clear at 40 s. Fix round 1, Minor 1: +10 was thin -- 3760 (before
++        // the fix) left only 9 blocks over the 3751 actually needed:
++        //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) = 2813 + 938 = 3751
++        // +60 restores a real margin.
+         const int blocks = (int) ((NotchController::kReleaseFirstMs
+-                                  + NotchController::kReleaseStepMs) / kBlockMs) + 10;
++                                  + NotchController::kReleaseStepMs) / kBlockMs) + 60;
+         for (int i = 0; i < blocks; ++i)
+             pump (h, quiet.hop());
+         const auto c = r.clears();
+         ASSERT_EQ (c.size(), 1u);
+         EXPECT_EQ (c[0].reason, NotchController::ClearReason::AutoRelease);
+         EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs);
+     }
+     // WidthChange: lane-1 notch, narrow to mono.
+     {
+         Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
+@@ -2662,20 +2677,61 @@ TEST (NotchControllerLadder, RingRiskAtRisingFreezesTheReleaseClock)
+     NotchController::SnapshotBuffer snap;
+     h.controller.copySnapshot (snap);
+     EXPECT_TRUE (snap.releaseFrozen) << "the frozen flag was never published (Q9)";
+ 
+     // Room calms: the clock starts again from where it was, which is 0.
+     h.controller.setRingRiskOverrideForTest (std::nullopt);
+     pumpQuietFor (h, quiet, 31000.0);
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+ }
+ 
++// Fix round 1, Important 1. RED IF the frozen flag survives a dead tap
++// (M-6). A dead tap is not a frozen clock; it is no clock at all -- a GUI or
++// a log reader must never be told "frozen" about a slot with no audio.
++TEST (NotchControllerLadder, ReleaseFrozenGoesFalseWhenTheTapDies)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++    h.controller.setRingRiskOverrideForTest (
++        std::make_pair (true, NotchController::kRiskFreezeFraction
++                              * CandidateScorer::kConfirmScore));
++
++    // One live block: the tap is alive and RING RISK reads RISING, so the
++    // clock freezes immediately (same shape as RingRiskAtRisingFreezesThe
++    // ReleaseClock).
++    NoiseSource quiet;
++    pump (h, quiet.hop());
++
++    NotchController::SnapshotBuffer snap;
++    h.controller.copySnapshot (snap);
++    ASSERT_TRUE (snap.releaseFrozen) << "expected the live tap to freeze first";
++    const double quietBefore = h.controller.quietMsForTest (0, 0);
++
++    // The tap stops delivering data entirely -- no tap.write, no pump().
++    // Advance the FakeClock past kTapSilenceTimeoutMs (250 ms) and call
++    // runOnce() directly. The override still reports RISING; only tap
++    // liveness may change here.
++    //
++    // RED IF the publish were moved back inside `if (tapAlive)`: the stale
++    // `true` from the block above would persist forever, because nothing
++    // would ever write `false` to a dead slot's snapshot again.
++    h.clock.advance (NotchController::kTapSilenceTimeoutMs + 10.0);
++    h.controller.runOnce();
++
++    h.controller.copySnapshot (snap);
++    EXPECT_FALSE (snap.releaseFrozen)
++        << "a dead tap must never be reported as a frozen release clock";
++    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0), quietBefore)
++        << "a dead tap must not advance the quiet clock either";
++}
++
+ // RED IF an INVALID ring-risk reading is treated as a freeze (spec 4.5,
+ // invariant 7). Detection off must release exactly as 1.1.3 did.
+ TEST (NotchControllerLadder, InvalidRingRiskDoesNotFreezeTheClock)
+ {
+     Harness h;
+     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                         NotchController::Origin::Detector));
+     h.controller.setRingRiskOverrideForTest (std::make_pair (false, 1.0f));
+ 
+     NoiseSource quiet;
+@@ -2856,39 +2912,46 @@ TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
+     NoiseSource quiet;
+     pumpQuietFor (h, quiet, 42000.0);
+     ASSERT_TRUE (h.controller.activeForTest (0, slot));
+     ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -12.0);
+     ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0)
+         << "releasing must not forget the rung the room needed";
+     ASSERT_EQ (h.controller.releasedStepsForTest (0, slot), 2);
+ 
+     NotchCommand drained {};
+     while (h.commands.read (&drained, 1) == 1) {}
+-    const double before = h.controller.liveMsForTest();
+ 
+     // The howl comes back. The analysis window is four hops long and tapered,
+     // so a single hop of tone sitting at its very end is not yet a peak the
+     // reinforce loop can see -- that is a property of the FFT window, not of
+     // the reclamp, and it is why this is a short loop rather than one pump.
+     // What is pinned is what the reclamp OWES: once the bin does ring, the
+     // depth is back at deepestDb without waiting out the 300 ms deepen gate.
+     int blocks = 0;
+     while (h.controller.depthDbForTest (0, slot) > -24.0 && blocks < 8)
+     {
+         pump (h, tone.hop());
+         ++blocks;
+     }
+ 
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
+         << "the reclamp never fired";
+-    EXPECT_LT (h.controller.liveMsForTest() - before, NotchController::kDeepenAfterMs)
+-        << "the reclamp waited for the deepen gate instead of firing on the frame";
++    // Fix round 1, Minor 2: EXPECT_LT (liveMs delta, kDeepenAfterMs) was
++    // tautological here -- the loop above caps at 8 blocks (~85 ms of live
++    // time), which is under kDeepenAfterMs (300 ms) no matter what the
++    // reclamp branch does, so it could never catch a reclamp that actually
++    // waited out the deepen gate. Assert on the block count instead: the
++    // analysis window is four hops long and tapered (see the comment above),
++    // so a reclamp that is firing on the frame -- not waiting for the gate --
++    // should land within one window's worth of hops.
++    EXPECT_LE (blocks, 4)
++        << "the reclamp took longer than one analysis window to fire";
+     // The banked quiet time is SPENT, not merely paused. It cannot be pinned
+     // at exactly 0: step 3 of the SAME runOnce adds this tick's dt back on
+     // whenever the frame was not also frozen, so one block's worth is the
+     // ceiling of what may legitimately be standing here.
+     EXPECT_LE (h.controller.quietMsForTest (0, slot), kBlockMs);
+     // After a reclamp the notch must be back on the 30 s FIRST-rung threshold.
+     EXPECT_EQ (h.controller.releasedStepsForTest (0, slot), 0);
+ 
+     pumpQuietFor (h, quiet, 29000.0);
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)

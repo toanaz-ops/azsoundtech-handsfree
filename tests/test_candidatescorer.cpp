@@ -555,3 +555,124 @@ TEST (CandidateScorerBreakdown, RefFrameIsTheNewestFrameAtLeastFortyFivePercentO
     // And the rise axis agrees with that frame: 6 / 2 = 3x -> saturates at 1.
     EXPECT_FLOAT_EQ (b.rNorm, 1.0f);
 }
+
+// ---------------------------------------------------------------------------
+// Lane G (spec 4.2, Q6): ScoreBreakdown::riseRatio -- the RAW mag_now/mag_ref
+// beside the saturating rNorm. Nothing reads it yet; the point of these three
+// is that it says something rNorm cannot, and that adding it moved no number.
+// ---------------------------------------------------------------------------
+
+// RED IF riseRatio stops being the RAW mag_now/mag_ref. rNorm saturates at
+// rise 1.5 (CandidateScorer.cpp: (rise - 1)/0.5, clamped to 1), so it cannot
+// tell "just rising" from "up 12 dB in 250 ms" -- and that distinction is
+// exactly what lane G's jump to -12 dB needs (spec 4.2, Q6).
+TEST (CandidateScorer, RiseRatioIsTheRawRatioWhileRNormStaysSaturated)
+{
+    Rig rig;
+
+    // ~700 ms of quiet first, so the rise history holds frames older than the
+    // 0.45 x 250 ms minimum age; then a loud tone switched on hard.
+    const auto quiet = makeToneInNoise (1000.0, 0.001f, 0.01f, 4242u,
+                                        static_cast<std::size_t> (kHop) * 70);
+    rig.feedHops (quiet, 66);
+
+    const auto loud = makeToneInNoise (1000.0, 1.0f, 0.01f, 4243u,
+                                       static_cast<std::size_t> (kHop) * 8);
+    CandidateScorer::ScoreBreakdown seen {};
+    bool got = false;
+    for (std::size_t h = 0; h < 4 && ! got; ++h)
+    {
+        ASSERT_EQ (rig.tap.write (loud.data() + h * static_cast<std::size_t> (kHop),
+                                  static_cast<std::size_t> (kHop)),
+                   static_cast<std::size_t> (kHop));
+        const auto spectrum = rig.detector.processLatestBlock (rig.tap);
+        rig.scorer.beginBlock (kSampleRate);
+        if (spectrum.magnitudes == nullptr)
+            continue;
+
+        const auto detected = rig.analyzer.analyse (spectrum);
+        for (std::size_t i = 0; i < detected.count; ++i)
+        {
+            const auto b = rig.scorer.scoreCandidateDetailed (detected.candidates[i],
+                                                              spectrum.magnitudes, {});
+            if (b.refFrame != nullptr && b.rNorm >= 1.0f) { seen = b; got = true; break; }
+        }
+        rig.scorer.commitBlock (spectrum.magnitudes, kFrameMs);
+    }
+
+    ASSERT_TRUE (got) << "no saturated-rise candidate to inspect";
+    EXPECT_FLOAT_EQ (seen.rNorm, 1.0f);
+    EXPECT_GT (seen.riseRatio, 2.0f) << "a hard tone start must read past the steep-rise line";
+}
+
+// RED IF the no-history branch stops reporting a neutral 1.0. 1.0 means "no
+// measurable rise", which is the CONSERVATIVE answer for lane G's gate
+// (riseRatio >= 2.0 starts a notch at -12): an unknown rise must never buy
+// extra depth.
+TEST (CandidateScorer, RiseRatioIsNeutralWithoutUsableHistory)
+{
+    Rig rig;
+    // processLatestBlock consumes ONE hop per call, so four calls are what it
+    // takes to fill the 2048-point window with tone; commitBlock is never
+    // called, which is the point -- historyCount_ stays 0.
+    const auto tone = makeToneInNoise (1000.0, 1.0f, 0.01f, 77u,
+                                       static_cast<std::size_t> (kHop) * 4);
+    Detector::Spectrum spectrum {};
+    for (std::size_t h = 0; h < 4; ++h)
+    {
+        ASSERT_EQ (rig.tap.write (tone.data() + h * static_cast<std::size_t> (kHop),
+                                  static_cast<std::size_t> (kHop)),
+                   static_cast<std::size_t> (kHop));
+        spectrum = rig.detector.processLatestBlock (rig.tap);
+        rig.scorer.beginBlock (kSampleRate);
+    }
+    ASSERT_NE (spectrum.magnitudes, nullptr);
+
+    const auto detected = rig.analyzer.analyse (spectrum);
+    ASSERT_GT (detected.count, 0u);
+    const auto b = rig.scorer.scoreCandidateDetailed (detected.candidates[0],
+                                                      spectrum.magnitudes, {});
+    EXPECT_FLOAT_EQ (b.riseRatio, 1.0f);
+}
+
+// This test proves that scoreCandidate() and scoreCandidateDetailed() share
+// ONE arithmetic path -- the product at CandidateScorer.cpp:148 -- and that
+// riseRatio rides alongside it as a read-only extra output, never a fifth
+// multiplied factor. It does NOT prove "score is byte-identical to before
+// this diff": the identity checked here (score == pNorm*rNorm*mNorm*penalty)
+// holds by construction on either side of the change, so it cannot detect a
+// numeric drift in any one factor. That evidence is the pre-existing
+// 470-test regression suite with hand-computed expectations, which this
+// task leaves untouched.
+//
+// RED IF scoreCandidate() and scoreCandidateDetailed() ever diverge on the
+// same inputs, or if a later edit turns riseRatio into a fifth multiplied
+// factor instead of a read-only output.
+TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
+{
+    Rig rig;
+    const auto quiet = makeToneInNoise (1000.0, 0.001f, 0.01f, 11u,
+                                        static_cast<std::size_t> (kHop) * 70);
+    rig.feedHops (quiet, 66);
+    const auto loud = makeToneInNoise (1000.0, 1.0f, 0.01f, 12u,
+                                       static_cast<std::size_t> (kHop) * 4);
+    // Four hops to fill the analysis window (one hop per processLatestBlock).
+    Detector::Spectrum spectrum {};
+    for (std::size_t h = 0; h < 4; ++h)
+    {
+        ASSERT_EQ (rig.tap.write (loud.data() + h * static_cast<std::size_t> (kHop),
+                                  static_cast<std::size_t> (kHop)),
+                   static_cast<std::size_t> (kHop));
+        spectrum = rig.detector.processLatestBlock (rig.tap);
+        rig.scorer.beginBlock (kSampleRate);
+    }
+    ASSERT_NE (spectrum.magnitudes, nullptr);
+
+    const auto detected = rig.analyzer.analyse (spectrum);
+    ASSERT_GT (detected.count, 0u);
+    const auto b = rig.scorer.scoreCandidateDetailed (detected.candidates[0],
+                                                      spectrum.magnitudes, {});
+    EXPECT_FLOAT_EQ (b.score, b.pNorm * b.rNorm * b.mNorm * b.penalty);
+    EXPECT_FLOAT_EQ (rig.scorer.scoreCandidate (detected.candidates[0],
+                                                spectrum.magnitudes, {}), b.score);
+}

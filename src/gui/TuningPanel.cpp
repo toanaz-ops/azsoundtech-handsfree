@@ -36,6 +36,26 @@ T valueForId (const T (&choices)[N], int id)
     return choices[0];   // no selection -> first item
 }
 
+// Select `value`'s item, or -- when it is not on the list -- SHOW it as text.
+//
+// setSelectedId(0) empties the combo, which is what an off-list value used to
+// produce: a strip that could not say what the notch ceiling was. Off-list
+// values are reachable since loadPreset started installing a file's ceiling
+// (Q13 keeps the exact number; presets/Music.json carries Q 25 / -10 dB).
+// ComboBox::setText matches an existing item by text first, so a value that
+// IS on the list can never end up as a text-only label by this route.
+template <typename T, std::size_t N>
+void selectOrShow (juce::ComboBox& box, const T (&choices)[N], const T& value,
+                   const juce::String& text)
+{
+    const int id = idForValue (choices, value);
+
+    if (id != 0)
+        box.setSelectedId (id, juce::dontSendNotification);
+    else
+        box.setText (text, juce::dontSendNotification);
+}
+
 // RESPONSE preset table (brief 2026-08-24): item id == array position + 1.
 constexpr TuningPanel::Params kPresets[] = {
     { 500, 4, -12, 40, 12.0f },   // 1 SAFE
@@ -185,6 +205,10 @@ void TuningPanel::applyPreset (const int presetId)
 {
     const Params p = kPresets[(std::size_t) (presetId - 1)];
 
+    // A curated preset is entirely on-list, so it also becomes what the panel
+    // was last handed -- keeping provided_ from outliving the values on screen.
+    provided_ = p;
+
     // Applied silently: the segment click is the user gesture, the five combos
     // just follow it -- otherwise each would loop back through the manual-edit
     // handler and knock the panel straight back to CUSTOM.
@@ -210,12 +234,25 @@ void TuningPanel::refresh()
 {
     const Params p = paramsProvider != nullptr ? paramsProvider() : Params();
 
-    rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
-    persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
-    depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
-    q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
-    thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
-                            juce::dontSendNotification);
+    // Remember the whole snapshot: currentParams() reports these values back
+    // for any combo an off-list value left without a list selection.
+    provided_ = p;
+
+    selectOrShow (rise_,  kRiseChoices,  p.riseReferenceMs,
+                  juce::String (p.riseReferenceMs) + " ms");
+    selectOrShow (depth_, kDepthChoices, p.depthDb,
+                  juce::String (p.depthDb) + " dB");
+    selectOrShow (q_,     kQChoices,     p.q,
+                  juce::String (p.q));
+    selectOrShow (thr_,   kThrChoices,   p.peakinessThreshold,
+                  juce::String (p.peakinessThreshold, 1));
+
+    // HOLD's item id IS its value (1..6), so it has no choices array to look
+    // through -- the same off-list guard, written out.
+    if (p.persistenceBlocks >= 1 && p.persistenceBlocks <= 6)
+        persist_.setSelectedId (p.persistenceBlocks, juce::dontSendNotification);
+    else
+        persist_.setText (juce::String (p.persistenceBlocks), juce::dontSendNotification);
 
     updatePresetFor (p);
 }
@@ -236,12 +273,27 @@ void TuningPanel::updatePresetFor (const Params& p)
 
 TuningPanel::Params TuningPanel::currentParams() const
 {
-    Params p;
-    p.riseReferenceMs    = riseMsForId (rise_.getSelectedId());
-    p.persistenceBlocks  = persist_.getSelectedId();
-    p.depthDb            = depthDbForId (depth_.getSelectedId());
-    p.q                  = qForId (q_.getSelectedId());
-    p.peakinessThreshold = thresholdForId (thr_.getSelectedId());
+    // Start from what the panel was last HANDED, not from the choice lists.
+    //
+    // A combo with no list selection is showing an off-list value as text (see
+    // refresh()), and valueForId would turn that id 0 into choices[0]. Every
+    // combo reports the complete snapshot, so a touch on RISE would then push
+    // Q 10 / -6 dB onto every Global slot -- a ceiling change nobody asked
+    // for, on a live rig. Re-report the value instead; a combo that DOES have
+    // a selection still wins below.
+    Params p = provided_;
+
+    if (const int id = rise_.getSelectedId(); id != 0)
+        p.riseReferenceMs = riseMsForId (id);
+    if (const int id = persist_.getSelectedId(); id != 0)
+        p.persistenceBlocks = id;
+    if (const int id = depth_.getSelectedId(); id != 0)
+        p.depthDb = depthDbForId (id);
+    if (const int id = q_.getSelectedId(); id != 0)
+        p.q = qForId (id);
+    if (const int id = thr_.getSelectedId(); id != 0)
+        p.peakinessThreshold = thresholdForId (id);
+
     return p;
 }
 
