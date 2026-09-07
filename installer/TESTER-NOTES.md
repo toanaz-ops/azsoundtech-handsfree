@@ -1,10 +1,10 @@
 # Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
 
-Ngày build: 2026-09-07 · suite test 547/547 xanh (`63c1759`) · installer: kích
-thước điền sau khi đóng gói
+Ngày build: 2026-09-07 · suite test 547/547 xanh (`63c1759`) · installer:
+26 848 726 byte (25,6 MB), đóng gói 2026-09-07 21:46, gate 547/547
 
 SHA-256 của Setup 1.2.0:
-`<điền sau khi installer\release-alpha.ps1 -Part minor chạy xong>`
+`F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
 Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
 nhờ test bản cũ.
