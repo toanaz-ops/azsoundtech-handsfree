@@ -83,6 +83,15 @@ public:
     {
         float rawPeakiness = 0.0f;
         float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+        // Lane G (spec 4.2): the RAW rise ratio mag_now / mag_ref, before any
+        // normalisation. rNorm above saturates at rise 1.5, so it cannot
+        // distinguish a howl creeping up from one that jumped 12 dB in a
+        // quarter second -- and that distinction is what decides whether a
+        // notch starts at -6 or -12 dB. The neutral value is 1.0, meaning "no
+        // measurable rise": BOTH the no-history branch and the
+        // history-too-young branch report it, so an unknown rise can never buy
+        // a deeper starting notch.
+        float riseRatio = 1.0f;
         float penalty = 1.0f;
         float score = 0.0f;
         const float* refFrame = nullptr;
