@@ -77,7 +77,12 @@
 // frequency -- the ramp cannot boost anything, including the frequency it is
 // pointed at. The pole radius is sqrt((1 - alpha/A_d)/(1 + alpha/A_d)) < 1, so
 // it cannot diverge either. A ramp restarted mid-flight is the three-point
-// case of the same argument. Measured 2026-09-06: max gain 1.9e-15 dB over
+// case of the same argument, and so is a ramp started from a never-configured
+// identity biquad (b0=1, all else 0 -- A == 1, i.e. depth == 0): the stability
+// triangle these designs live in is convex and contains that origin point, so
+// interpolating from it is still a valid convex combination (measured: worst
+// case -3.5e-11 dB, i.e. still non-boosting to within floating-point noise).
+// Measured 2026-09-06: max gain 1.9e-15 dB over
 // 3 rates x 5 frequencies x 3 Qs x 7 depth pairs x 101 probes, and over 20 000
 // random convex combinations x 400 frequencies. Coefficient deltas are ~1e-6
 // per sample -- nowhere near the subnormal range.
@@ -91,6 +96,19 @@
 // takes the reset path, which cancels it. And a ramp cut short by a device
 // stop leaves the filter at an intermediate depth while NotchInfo.depthDB
 // already reads the target -- 10 ms of disagreement, accepted (spec 4.7, m-5).
+//
+// reset() also fires by accident, per sample: AudioEngine.cpp:617 calls
+// chain.reset() from inside the per-sample audio loop as a NaN self-heal
+// whenever the chain's output goes non-finite, and NotchChain::reset() loops
+// every filter, so one bad sample cancels every in-flight ramp in that
+// chain -- not just the one that produced it. Unlike a device-restart reset,
+// this path is NOT followed by setSampleRate()'s coefficient replay
+// (NotchChain.cpp:110), so the filter is left frozen at whatever intermediate
+// depth the ramp had reached, indefinitely, while NotchInfo.depthDB keeps
+// reading the target the ramp never finished walking to. This class does not
+// re-arm the ramp on its own; whether a NaN heal should re-apply the target
+// is a decision for the caller that wires the ramp (NotchChain::setNotch),
+// not for Biquad.
 
 #pragma once
 

@@ -559,23 +559,54 @@ TEST(Biquad, RampNotchDepthPreservesFilterStateExactly)
     EXPECT_EQ(f.rampRemainingForTest(), 441);
 }
 
-// RED IF the ramp jumps coefficients in one step (a click) rather than
-// interpolating. 0.08 is the hard bound: a 0.5-amplitude 1 kHz sine at
-// 44.1 kHz steps by at most 2*pi*1000/44100*0.5 = 0.0712 per sample, so any
-// step past 0.08 is the filter's doing, not the signal's.
+// RED IF the ramp resets state (a click) instead of walking linearly.
+// The 0.08 step bound below catches the click a reset() would cause: a
+// 0.5-amplitude 1 kHz sine at 44.1 kHz steps by at most
+// 2*pi*1000/44100*0.5 = 0.0712 per sample, so any step past 0.08 is the
+// filter's doing, not the signal's. That bound is loose, though -- an
+// INSTANT coefficient swap on a preserved state is not a click either (see
+// Concern 1, task-1-report.md), so it alone cannot tell "interpolated" from
+// "snapped". The mid-ramp assertion below closes that gap: it reads the
+// live coefficient set partway through the ramp and checks it sits exactly
+// on the straight line between the start and target designs, which an
+// instant swap, a wrong divisor, or a non-linear walk would all miss.
 TEST(Biquad, RampNotchDepthDoesNotClick)
 {
     Biquad f;
     ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 44100.0, -6.0));
 
+    // The two designs the ramp below walks between, read independently of
+    // the biquad under test so this assertion cannot be fooled by a bug in
+    // rampNotchDepth's own bookkeeping.
+    Biquad startDesign, targetDesign;
+    ASSERT_TRUE(startDesign.setNotchFilter(1000.0, 30.0, 44100.0, -6.0));
+    ASSERT_TRUE(targetDesign.setNotchFilter(1000.0, 30.0, 44100.0, -12.0));
+    const double startB0  = startDesign.coeffsForTest().b0;
+    const double targetB0 = targetDesign.coeffsForTest().b0;
+
     const auto tone = sineWave(1000.0, 44100.0, 12000);
     std::vector<double> y(12000);
+    double midRampB0 = 0.0;
     for (int i = 0; i < 12000; ++i)
     {
         if (i == 10000)
             ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 44100.0, -12.0, 441));
         y[static_cast<std::size_t>(i)] = f.processSample(0.5 * tone[static_cast<std::size_t>(i)]);
+
+        // The ramp's first delta is applied INSIDE the processSample call at
+        // i == 10000 (rampNotchDepth only arms it), so sample i == 10000 + k - 1
+        // is where the k-th of 441 deltas has just been applied. i == 10219 is
+        // therefore the 220th delta, i.e. the coefficient set halfway (220/441)
+        // between the two designs.
+        if (i == 10219)
+            midRampB0 = f.coeffsForTest().b0;
     }
+
+    const double expectedMidB0 = startB0 + 220.0 * (targetB0 - startB0) / 441.0;
+    EXPECT_NEAR(midRampB0, expectedMidB0, 1e-12)
+        << "mid-ramp b0 is not on the straight line between the two designs";
+    EXPECT_GT(midRampB0, std::min(startB0, targetB0));
+    EXPECT_LT(midRampB0, std::max(startB0, targetB0));
 
     auto maxStep = [&y](int from, int to) {
         double worst = 0.0;

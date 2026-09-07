@@ -158,7 +158,8 @@ bool Biquad::rampNotchDepth(double freq, double Q, double sampleRate, double dep
 double Biquad::processSample(double input)
 {
     // The ONLY new work on the audio thread: one comparison, and while a ramp
-    // is live five additions. No allocation, no logging, no second branch.
+    // is live either five additions or (on the last sample) five assignments.
+    // No allocation, no logging.
     if (rampRemaining_ > 0)
     {
         if (--rampRemaining_ == 0)
