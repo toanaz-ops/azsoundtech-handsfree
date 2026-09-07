@@ -2,8 +2,8 @@
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
 > đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
-> ctest, **547/547** tại `63c1759`; **chưa đóng gói** — `release-alpha.ps1` sẽ
-> chạy sau final review, SHA-256/kích thước cập nhật khi đó; 1.2.0 = lane G,
+> ctest, **547/547** tại `63c1759`; **đã đóng gói** 2026-09-07 21:46 qua
+> `release-alpha.ps1 -Part minor`, SHA-256 `F701FFFCF563…`, 26 848 726 byte (25,6 MB); 1.2.0 = lane G,
 > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
 
@@ -525,7 +525,7 @@ của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 
 LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
 với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
 
-## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest, chưa đóng gói)
+## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
 
 Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
