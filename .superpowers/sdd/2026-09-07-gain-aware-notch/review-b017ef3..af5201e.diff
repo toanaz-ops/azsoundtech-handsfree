@@ -1,0 +1,669 @@
+# Review package: b017ef3..HEAD
+
+## Commits
+af5201e feat(app,tools): notch_retune in the session log and logstats; savePreset stores deepestDb and round-trips the ceiling
+
+## Files changed
+ src/app/MainComponent.cpp           |  46 ++++++++-
+ src/app/MainComponent.h             |   7 ++
+ tests/CMakeLists.txt                |   2 +-
+ tests/fixtures/session-sample.jsonl |   6 +-
+ tests/test_gui_wiring.cpp           | 187 ++++++++++++++++++++++++++++++++++++
+ tests/test_presetmanager.cpp        |  22 +++++
+ tools/logstats.py                   |  37 ++++++-
+ 7 files changed, 297 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index 53d9600..6cb9ab0 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -70,20 +70,36 @@ const char* reasonName (NotchController::ClearReason r)
+         case NotchController::ClearReason::Manual:             return "manual";
+         case NotchController::ClearReason::ClearAll:           return "clear_all";
+         case NotchController::ClearReason::AutoRelease:        return "auto_release";
+         case NotchController::ClearReason::WidthChange:        return "width_change";
+         case NotchController::ClearReason::VerdictFalse:       return "verdict_false";
+         case NotchController::ClearReason::PartialApplyUnwind: return "partial_apply_unwind";
+     }
+     return "unknown";
+ }
+ 
++// Lane G. A FREE function, in the same anonymous namespace as originName and
++// reasonName above -- notchEventToVar calls it unqualified from this same
++// translation unit, and a `MainComponent::` member would need a header
++// declaration it deliberately does not have.
++const char* retuneReasonName (NotchController::RetuneReason r)
++{
++    switch (r)
++    {
++        case NotchController::RetuneReason::Deepen:  return "deepen";
++        case NotchController::RetuneReason::Release: return "release";
++        case NotchController::RetuneReason::Reclamp: return "reclamp";
++        case NotchController::RetuneReason::Ceiling: return "ceiling";
++    }
++    return "deepen";
++}
++
+ const char* modeName (AudioEngine::Mode m)
+ {
+     switch (m)
+     {
+         case AudioEngine::Mode::Bypass:     return "bypass";
+         case AudioEngine::Mode::Auto:       return "auto";
+         case AudioEngine::Mode::Soundcheck: return "soundcheck";
+     }
+     return "unknown";
+ }
+@@ -552,30 +568,45 @@ bool MainComponent::isSlotLinked (int slotIndex) const
+ {
+     return slotIndex >= 0 && slotIndex < kMaxSlots && slotLinked_[(std::size_t) slotIndex];
+ }
+ 
+ //==============================================================================
+ // Lane D (data loop): the session log.
+ 
+ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
+ {
+     using Ev = NotchController::NotchEvent;
+-    auto v = SessionLogger::makeEvent (e.kind == Ev::Kind::Set ? "notch_set" : "notch_clear");
++    // B-3: `ev` is the key tools/logstats.py dispatches on, and the ternary
++    // this replaced would have written every Retune as a notch_clear -- which
++    // closes the notch's record at its first 300 ms deepening and makes every
++    // deepened notch look like a 300 ms false positive.
++    const char* evName = e.kind == Ev::Kind::Set    ? "notch_set"
++                       : e.kind == Ev::Kind::Retune ? "notch_retune"
++                                                    : "notch_clear";
++    auto v = SessionLogger::makeEvent (evName);
+     auto* o = v.getDynamicObject();
+     o->setProperty ("slot", e.slot);
+     o->setProperty ("lane", e.lane);
+     o->setProperty ("index", e.index);
+     o->setProperty ("hz", (double) e.hz);
+     o->setProperty ("q", (double) e.q);
+     o->setProperty ("depth_db", (double) e.depthDb);
+     o->setProperty ("origin", originName (e.origin));
+ 
++    if (e.kind == Ev::Kind::Retune)
++    {
++        o->setProperty ("reason", retuneReasonName (e.retuneReason));
++        o->setProperty ("from_db", (double) e.fromDepthDb);
++        o->setProperty ("age_ms", e.ageMs);
++        return v;   // no score, no ctx: a retune is not a placement decision
++    }
++
+     if (e.kind == Ev::Kind::Clear)
+     {
+         o->setProperty ("reason", reasonName (e.reason));
+         o->setProperty ("age_ms", e.ageMs);
+         return v;
+     }
+ 
+     if (! e.hasScore)
+         return v;
+ 
+@@ -948,21 +979,25 @@ bool MainComponent::savePreset (const juce::File& file)
+         // decision [S] -- so two notches sharing an index on different lanes
+         // are a legal file, which is exactly what INDEP produces.
+         for (std::uint32_t n = 0; n < snap.notchCount; ++n)
+         {
+             const auto& sn = snap.notches[n];
+ 
+             PresetNotch pn;
+             pn.index   = sn.index;
+             pn.freq    = sn.frequency;
+             pn.Q       = sn.Q;
+-            pn.depthDB = sn.depthDB;
++            // Q11: the depth the room NEEDED, not the rung the release ladder
++            // happens to be resting on when SAVE was pressed. A preset saved
++            // during a quiet stretch would otherwise reload two rungs too
++            // shallow and let the same howl come back.
++            pn.depthDB = sn.deepestDb;
+             pn.slot    = s;
+             pn.lane    = sn.channel;
+             preset.notches.push_back (pn);
+         }
+     }
+ 
+     // The "slots" section: routing AND the per-slot LINK flag, for every slot
+     // the engine reports enabled. Without it a saved preset restores notches
+     // onto default stereo routing and with LINK cleared -- i.e. it loses the
+     // half of the tuning that is not a notch. loadPreset() applies each
+@@ -977,20 +1012,27 @@ bool MainComponent::savePreset (const juce::File& file)
+ 
+         PresetSlot entry;
+         entry.index  = s;
+         entry.config = config;
+         entry.linked = isSlotLinked (s);
+         preset.slots.push_back (entry);
+     }
+ 
+     preset.sampleRate = presetRate;
+ 
++    // Q11: the CEILING round-trips too. Without this a reloaded preset falls
++    // back to PresetNotchDefaults' -12 dB (PresetManager.h) and caps every
++    // detector notch two rungs shallower than the show was tuned at -- a bug
++    // that predates lane G and that lane G's ladder makes load-bearing.
++    preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
++    preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
++
+     juce::StringArray errors;
+     const bool ok = PresetManager::saveToFile (preset, file, errors);
+ 
+     if (! ok)
+         juce::Logger::writeToLog (
+             "savePreset \"" + file.getFileName() + "\" refused: " + errors.joinIntoString ("; "));
+ 
+     return ok;
+ }
+ 
+diff --git a/src/app/MainComponent.h b/src/app/MainComponent.h
+index 2996e5b..1e2d021 100644
+--- a/src/app/MainComponent.h
++++ b/src/app/MainComponent.h
+@@ -180,20 +180,27 @@ public:
+     // so it has to drive refreshFromSnapshot() itself. tools/snapshot.cpp uses
+     // these to render the console with real detector output in it.
+     [[nodiscard]] gui::SpectrumView&   getSpectrumViewForTest()   { return spectrumView_; }
+     [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
+ 
+     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
+     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
+     // slot; never null for [0, kMaxSlots).
+     NotchController* getNotchControllerForTest (int slot);
+ 
++    // TEST ACCESSOR ONLY -- the serialiser is otherwise reachable only through
++    // a live detector thread and a real log file. Public here, next to the
++    // controller accessor, because notchEventToVar itself is private (below)
++    // and stays that way.
++    static juce::var notchEventToVarForTest (const NotchController::NotchEvent& e)
++        { return notchEventToVar (e); }
++
+     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
+     // (Task 7) calls setSlotLinked; the runtime source of truth is
+     // slotLinked_, not the controller's own atomic, so a query never has to
+     // reach into notchControllers_ just to read a flag the UI already knows.
+     void setSlotLinked (int slotIndex, bool linked);
+     [[nodiscard]] bool isSlotLinked (int slotIndex) const;
+     [[nodiscard]] const NotchController& getControllerForTest (int slotIndex) const
+         { return *notchControllers_[(std::size_t) slotIndex]; }
+ 
+     void paint (juce::Graphics& g) override;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 7432b4a..7b3b447 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -107,15 +107,15 @@ include(GoogleTest)
+ gtest_discover_tests(HandsFreeTests)
+ 
+ # Lane D: the log summary tool runs against a checked-in fixture. Python is
+ # optional on a build box; without it the test SKIPS rather than fails.
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+ if(Python3_Interpreter_FOUND)
+     add_test(NAME logstats_fixture
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-sample.jsonl
+                 --expect-notches 4 --expect-verdicts 3 --expect-false 1
+-                --expect-recurrence-max 2)
++                --expect-recurrence-max 2 --expect-retunes 2)
+ else()
+     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+ endif()
+\ No newline at end of file
+diff --git a/tests/fixtures/session-sample.jsonl b/tests/fixtures/session-sample.jsonl
+index 7bf5dc0..dbd6f92 100644
+--- a/tests/fixtures/session-sample.jsonl
++++ b/tests/fixtures/session-sample.jsonl
+@@ -1,13 +1,15 @@
+ {"ev":"session_start","t":0,"app_version":"1.1.2","os":"Windows 11","device":"Fake ASIO","sample_rate":48000,"buffer_size":256,"slots":[{"index":0,"enabled":true,"width":2,"in":[0,1],"out":[0,1],"linked":false}]}
+ {"ev":"mode","t":12.5,"mode":"auto"}
+ {"ev":"tuning","t":13.0,"slot":-1,"rise_ms":250,"persist":3,"q":30,"depth_db":-18,"thr":10}
+-{"ev":"notch_set","t":5001.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":1,"score":0.91,"peakiness":22.1,"p_norm":0.13,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":117.3,"now":[0.01,0.5,0.02,0.01],"ref":[0.01,0.1,0.02,0.01],"other_lane_now":[0.01,0.02,0.02,0.01]}}
++{"ev":"notch_set","t":5001.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"origin":"detector","confirmed_lane":1,"score":0.91,"peakiness":22.1,"p_norm":0.13,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":117.3,"now":[0.01,0.5,0.02,0.01],"ref":[0.01,0.1,0.02,0.01],"other_lane_now":[0.01,0.02,0.02,0.01]}}
++{"ev":"notch_retune","t":5301.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-12,"from_db":-6,"origin":"detector","reason":"deepen","age_ms":300.0}
+ {"ev":"notch_set","t":9020.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":0,"score":0.75,"peakiness":15.0,"p_norm":0.06,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":128.0,"now":[0.01,0.02,0.4,0.01],"ref":[0.01,0.02,0.1,0.01]}}
+ {"ev":"verdict","t":11000.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"verdict":"false","age_ms":1980.0}
+ {"ev":"notch_clear","t":11000.5,"slot":0,"lane":0,"index":0,"hz":2437.5,"origin":"detector","reason":"verdict_false","age_ms":1980.5}
+ {"ev":"notch_set","t":20000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":1,"score":0.88,"peakiness":20.0,"p_norm":0.11,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":120.0,"now":[0.01,0.45,0.02,0.01],"ref":[0.01,0.1,0.02,0.01]}}
+ {"ev":"verdict","t":21000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_set","t":30000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"q":30,"depth_db":-12,"origin":"preset"}
+ {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
+-{"ev":"notch_clear","t":41000.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":36000.0}
++{"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
++{"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
+ {"ev":"session_end","t":60000.0,"dropped_events":0}
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index fc09d1b..1ea7eaf 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -1161,20 +1161,158 @@ TEST (GuiWiring, SavePresetRoundTripsPerLaneNotchesAndTheLinkedFlag)
+     }
+ 
+     EXPECT_TRUE (leftFound)
+         << "lane 0's 1 kHz notch at index 2 did not survive the round trip";
+     EXPECT_TRUE (rightFound)
+         << "lane 1's 2 kHz notch at index 2 did not survive the round trip";
+     EXPECT_TRUE (reopened.isSlotLinked (1))
+         << "the saved \"slots\" section did not carry `linked`";
+ }
+ 
++//==============================================================================
++// Lane G (gain-aware notch) -- what a saved preset has to carry.
++
++// RED IF savePreset writes the RUNNING depth instead of deepestDb (Q11).
++// A preset saved during a quiet moment must record what the room needed, not
++// the rung the release ladder had wound back to.
++TEST (GuiWiring, SavePresetRecordsTheDeepestDepthNotTheRestingOne)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    MainComponent app;
++    auto* controller0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (controller0, nullptr);
++    controller0->setSampleRate (48000.0);
++
++    // A notch placed deep, then wound back the way the release ladder does.
++    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++    ASSERT_TRUE (controller0->retuneForTest (0, 0, -6.0,
++                                             NotchController::RetuneReason::Release));
++
++    std::vector<float> hop (512, 0.25f);
++    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
++    controller0->runOnce();          // publish a snapshot carrying deepestDb
++
++    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                       .getChildFile ("az-handsfree-laneg-deepest.json");
++    outFile.deleteFile();
++    ASSERT_TRUE (app.savePreset (outFile));
++
++    const auto result = PresetManager::loadFromFile (outFile);
++    outFile.deleteFile();
++
++    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
++    // One entry per (slot, lane, index) since lane S, and setNotch named lane
++    // 0 only -- so exactly one notch comes back.
++    ASSERT_EQ (result.preset.notches.size(), 1u);
++    EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -18.0);
++}
++
++// RED IF notchDefaults stops round-tripping (Q11). Without it a reloaded
++// preset caps every detector notch at PresetNotchDefaults' -12 dB, silently
++// undoing the ceiling the show was tuned at.
++TEST (GuiWiring, SavePresetRoundTripsTheCeilingThroughNotchDefaults)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    MainComponent app;
++    auto* controller0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (controller0, nullptr);
++    controller0->setSampleRate (48000.0);
++    controller0->setNotchDefaults (44.0, -24.0);
++    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 44.0, -24.0,
++                                        NotchController::Origin::Detector));
++
++    std::vector<float> hop (512, 0.25f);
++    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
++    controller0->runOnce();
++
++    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                       .getChildFile ("az-handsfree-laneg-ceiling.json");
++    outFile.deleteFile();
++    ASSERT_TRUE (app.savePreset (outFile));
++
++    const auto result = PresetManager::loadFromFile (outFile);
++    outFile.deleteFile();
++
++    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
++    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       44.0);
++    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
++}
++
++// RED IF a Retune event is serialised as notch_clear (B-3 of the spec's own
++// critique list). The `ev` key is what logstats.py dispatches on, and a
++// mislabelled retune closes the notch's record at the first 300 ms deepening.
++// No MainComponent is needed: the serialiser is static.
++TEST (GuiWiring, RetuneEventsAreLoggedUnderTheirOwnEventName)
++{
++    NotchController::NotchEvent e;
++    e.kind = NotchController::NotchEvent::Kind::Retune;
++    e.slot = 0; e.lane = 1; e.index = 3;
++    e.hz = 1007.8f; e.q = 30.0f;
++    e.fromDepthDb = -12.0f; e.depthDb = -18.0f;
++    e.origin = NotchController::Origin::Detector;
++    e.retuneReason = NotchController::RetuneReason::Deepen;
++    e.ageMs = 612.5;
++
++    const juce::var v = MainComponent::notchEventToVarForTest (e);
++    EXPECT_EQ (v["ev"].toString(), "notch_retune");
++    EXPECT_EQ (v["reason"].toString(), "deepen");
++    EXPECT_EQ (v["origin"].toString(), "detector");
++    EXPECT_DOUBLE_EQ ((double) v["from_db"], -12.0);
++    EXPECT_DOUBLE_EQ ((double) v["depth_db"], -18.0);
++    EXPECT_DOUBLE_EQ ((double) v["age_ms"], 612.5);
++    EXPECT_EQ ((int) v["slot"], 0);
++    EXPECT_EQ ((int) v["lane"], 1);
++    EXPECT_EQ ((int) v["index"], 3);
++    EXPECT_NEAR ((double) v["hz"], 1007.8, 0.01);
++    EXPECT_DOUBLE_EQ ((double) v["q"], 30.0);
++    // A retune is not a placement decision: no score block travels with it.
++    EXPECT_FALSE (v.getDynamicObject()->hasProperty ("score"));
++    EXPECT_FALSE (v.getDynamicObject()->hasProperty ("ctx"));
++}
++
++// RED IF a Set or a Clear picks up the retune name. `notch_clear` must stay
++// the name of exactly one Kind, or logstats closes records it should not.
++TEST (GuiWiring, SetAndClearKeepTheirOwnEventNames)
++{
++    NotchController::NotchEvent set;
++    set.kind = NotchController::NotchEvent::Kind::Set;
++    EXPECT_EQ (MainComponent::notchEventToVarForTest (set)["ev"].toString(), "notch_set");
++
++    NotchController::NotchEvent clear;
++    clear.kind = NotchController::NotchEvent::Kind::Clear;
++    clear.reason = NotchController::ClearReason::AutoRelease;
++    const juce::var cv = MainComponent::notchEventToVarForTest (clear);
++    EXPECT_EQ (cv["ev"].toString(), "notch_clear");
++    EXPECT_EQ (cv["reason"].toString(), "auto_release");
++    EXPECT_FALSE (cv.getDynamicObject()->hasProperty ("from_db"));
++}
++
++// RED IF a reason name is dropped or renamed -- logstats.py and the tester
++// notes both read these four strings.
++TEST (GuiWiring, EveryRetuneReasonHasItsOwnName)
++{
++    using RR = NotchController::RetuneReason;
++    const RR reasons[] = { RR::Deepen, RR::Release, RR::Reclamp, RR::Ceiling };
++    const char* names[] = { "deepen", "release", "reclamp", "ceiling" };
++    for (int i = 0; i < 4; ++i)
++    {
++        NotchController::NotchEvent e;
++        e.kind = NotchController::NotchEvent::Kind::Retune;
++        e.retuneReason = reasons[i];
++        EXPECT_EQ (MainComponent::notchEventToVarForTest (e)["reason"].toString(),
++                   juce::String (names[i]));
++    }
++}
++
+ //==============================================================================
+ // Lane D (data loop): the session log through the real wiring.
+ 
+ namespace
+ {
+ juce::File freshLogDir (const juce::String& name)
+ {
+     auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile ("az-handsfree-sessionlog").getChildFile (name);
+     dir.deleteRecursively();
+@@ -1258,20 +1396,69 @@ TEST (GuiWiring, FalseVerdictLogsVerdictThenClearsWithVerdictFalse)
+     EXPECT_EQ ((int) (*verdict)["index"], 0);
+ 
+     const auto* clear = firstEvent (events, "notch_clear");
+     ASSERT_NE (clear, nullptr);
+     EXPECT_EQ ((*clear)["reason"].toString(), "verdict_false");
+ 
+     // Order: verdict is written before the clear it causes.
+     EXPECT_LT (verdict - events.data(), clear - events.data());
+ }
+ 
++// Lane G / B-3 end to end: a depth change on a LIVE notch reaches the real
++// session log as its own line. RED IF notchEventToVar labels it notch_clear
++// -- the file would then show the notch closing 300 ms after placement, and
++// every deepened howl in a show log would read as a false positive.
++TEST (GuiWiring, ARetuneOnALiveNotchIsWrittenToTheSessionLog)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++    const auto dir = freshLogDir ("retune");
++    ASSERT_TRUE (app.startSessionLog (dir));
++    const auto file = app.sessionLogFileForTest();
++
++    auto* c0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (c0, nullptr);
++    c0->setSampleRate (48000.0);
++    ASSERT_TRUE (c0->setNotch (0, 0, 1007.8, 30.0, -6.0,
++                               NotchController::Origin::Detector));
++    // The deepen the reinforce loop would push once the howl held on.
++    ASSERT_TRUE (c0->retuneForTest (0, 0, -12.0,
++                                    NotchController::RetuneReason::Deepen));
++
++    std::vector<float> hop (512, 0.1f);
++    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
++    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
++    c0->runOnce();   // flushes both events into the logger
++
++    app.stopSessionLog();
++    const auto events = parsedLines (file);
++
++    const auto* retune = firstEvent (events, "notch_retune");
++    ASSERT_NE (retune, nullptr) << "no notch_retune line in the session log";
++    EXPECT_EQ ((*retune)["reason"].toString(), "deepen");
++    EXPECT_EQ ((*retune)["origin"].toString(), "detector");
++    EXPECT_EQ ((int) (*retune)["slot"], 0);
++    EXPECT_EQ ((int) (*retune)["lane"], 0);
++    EXPECT_EQ ((int) (*retune)["index"], 0);
++    EXPECT_NEAR ((double) (*retune)["hz"], 1007.8, 0.5);
++    EXPECT_NEAR ((double) (*retune)["from_db"], -6.0, 1e-4);
++    EXPECT_NEAR ((double) (*retune)["depth_db"], -12.0, 1e-4);
++    EXPECT_TRUE (retune->getDynamicObject()->hasProperty ("age_ms"));
++
++    // The notch is still OPEN: nothing closed it.
++    EXPECT_EQ (firstEvent (events, "notch_clear"), nullptr);
++
++    const auto* set = firstEvent (events, "notch_set");
++    ASSERT_NE (set, nullptr);
++    EXPECT_LT (set - events.data(), retune - events.data());
++}
++
+ // Mode and tuning land in the log. Red if requestMode / onTuningChanged stop
+ // logging, or the field names drift from the logstats contract.
+ TEST (GuiWiring, ModeAndTuningChangesAreLogged)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     MainComponent app;
+     const auto dir = freshLogDir ("mode");
+     ASSERT_TRUE (app.startSessionLog (dir));
+     const auto file = app.sessionLogFileForTest();
+ 
+diff --git a/tests/test_presetmanager.cpp b/tests/test_presetmanager.cpp
+index cde1a59..13d1ae6 100644
+--- a/tests/test_presetmanager.cpp
++++ b/tests/test_presetmanager.cpp
+@@ -500,20 +500,42 @@ TEST (PresetManager, NotchDefaultsSurviveTheRoundTrip)
+     p.notchDefaults.depthDB = -18.0;
+ 
+     const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+ 
+     ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       40.0);
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -18.0);
+     EXPECT_LT (result.preset.notchDefaults.depthDB, 0.0);
+ }
+ 
++// RED IF the deepest rung of the lane-G ladder stops round-tripping. -24 dB
++// is a legal ceiling and a legal notch depth, and a preset that cannot carry
++// it caps the app two rungs shallower than the operator asked for.
++TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
++{
++    // makeValidPreset(), not a default-constructed Preset: version, device and
++    // bufferSize are all validated, and a bare `Preset p;` is refused for a
++    // bufferSize of 0 long before it ever reaches the depth this test is about.
++    Preset p = makeValidPreset();
++    p.notchDefaults.Q       = 30.0;
++    p.notchDefaults.depthDB = -24.0;
++    PresetNotch n;
++    n.index = 0; n.freq = 1000.0; n.Q = 30.0; n.depthDB = -24.0; n.slot = 0; n.lane = 0;
++    p.notches = { n };
++
++    const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
++    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
++    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
++    ASSERT_EQ (result.preset.notches.size(), 1u);
++    EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -24.0);
++}
++
+ // The same rules as a real notch. A bad default is worse than a bad notch,
+ // because it seeds every notch the detector goes on to create.
+ TEST (PresetManager, APositiveDefaultDepthIsRefused)
+ {
+     const auto result = PresetManager::fromJSON (
+         R"({"version":"1.0","device":"d","sampleRate":48000,"bufferSize":64,)"
+         R"("notchDefaults":{"Q":40.0,"depth":18.0},"notches":[]})");
+ 
+     EXPECT_FALSE (result.ok);
+ }
+diff --git a/tools/logstats.py b/tools/logstats.py
+index 144fe45..fb52d06 100644
+--- a/tools/logstats.py
++++ b/tools/logstats.py
+@@ -1,15 +1,15 @@
+ #!/usr/bin/env python3
+ """Summarise a Hands-free session log (lane D, data-loop design §3.5).
+ 
+     python tools/logstats.py <session-*.jsonl>
+-    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2
++    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2
+ 
+ Stdlib only. Never assumes 1025 bins; never reads audio (there is none).
+ """
+ from __future__ import annotations
+ 
+ import argparse
+ import json
+ import sys
+ from pathlib import Path
+ 
+@@ -42,23 +42,42 @@ def summarise(events: list[dict]) -> dict:
+ 
+     key = lambda e: (int(e.get("slot", 0)), int(e.get("lane", 0)), int(e.get("index", 0)))
+     notches: list[dict] = []          # one per notch_set, in order
+     open_by_key: dict[tuple, dict] = {}
+     for e in events:
+         ev = e.get("ev")
+         if ev == "notch_set":
+             n = {"slot": e.get("slot"), "lane": e.get("lane"), "index": e.get("index"),
+                  "hz": float(e.get("hz", 0.0)), "origin": e.get("origin", "?"),
+                  "set_t": float(e.get("t", 0.0)), "clear_t": None, "reason": None,
+-                 "verdict": None, "score": e.get("score")}
++                 "verdict": None, "score": e.get("score"),
++                 # lane G: the depth a notch is RUNNING at, and how many times
++                 # it moved. Both start at the placement values.
++                 "depth_db": e.get("depth_db"), "deepest_db": e.get("depth_db"),
++                 "retunes": 0}
+             notches.append(n)
+             open_by_key[key(e)] = n
++        elif ev == "notch_retune":
++            # lane G: a retune UPDATES the open record. It must never close it
++            # -- a deepening 300 ms after placement would otherwise read as a
++            # 300 ms notch, and every deepened howl in the log would look like
++            # a false positive. An unknown ev name falls through every branch
++            # here, so a NEW event added later cannot corrupt an old reader
++            # either; that is why this is an if/elif chain and not a lookup
++            # that raises.
++            n = open_by_key.get(key(e))
++            if n is not None:
++                n["depth_db"] = e.get("depth_db")
++                if n["deepest_db"] is None or (e.get("depth_db") is not None
++                                               and float(e["depth_db"]) < float(n["deepest_db"])):
++                    n["deepest_db"] = e.get("depth_db")
++                n["retunes"] += 1
+         elif ev == "verdict":
+             n = open_by_key.get(key(e))
+             if n is not None:
+                 n["verdict"] = e.get("verdict")
+         elif ev == "notch_clear":
+             n = open_by_key.pop(key(e), None)
+             if n is not None:
+                 n["clear_t"] = float(e.get("t", 0.0))
+                 n["reason"] = e.get("reason")
+ 
+@@ -77,77 +96,85 @@ def summarise(events: list[dict]) -> dict:
+         else:
+             groups.append({"hz": n["hz"], "count": 1})
+ 
+     judged = [n for n in notches if n["verdict"] in ("good", "false")]
+     false_count = sum(1 for n in judged if n["verdict"] == "false")
+     return {
+         "header": header, "duration_ms": duration, "modes": modes, "notches": notches,
+         "groups": sorted(groups, key=lambda g: -g["count"]),
+         "verdicts": len(judged), "false": false_count,
+         "unjudged": len(notches) - len(judged),
++        "retunes": sum(n["retunes"] for n in notches),
+         "dropped": end.get("dropped_events"),
+     }
+ 
+ 
+ def print_report(s: dict) -> None:
+     h = s["header"]
+     print(f"session   {fmt_ms(s['duration_ms'])}  app {h.get('app_version', '?')}  os {h.get('os', '?')}")
+     print(f"device    {h.get('device', '?')!r}  {h.get('sample_rate', '?')} Hz  buffer {h.get('buffer_size', '?')}")
+     if s["modes"]:
+         print("modes     " + "  ".join(f"{fmt_ms(t)}:{m}" for t, m in s["modes"]))
+     print()
+-    print(f"{'#':>3} {'slot':>4} {'lane':>4} {'hz':>8} {'origin':<10} {'held':>8} {'verdict':<8} {'cleared by':<20}")
++    print(f"{'#':>3} {'slot':>4} {'lane':>4} {'hz':>8} {'origin':<10} {'depth':>7} {'deep':>6} "
++          f"{'rt':>3} {'held':>8} {'verdict':<8} {'cleared by':<20}")
+     for i, n in enumerate(s["notches"], 1):
+         held = (n["clear_t"] if n["clear_t"] is not None else s["duration_ms"]) - n["set_t"]
+         lane = "R" if n["lane"] == 1 else "L"
+-        print(f"{i:>3} {n['slot']:>4} {lane:>4} {n['hz']:>8.1f} {n['origin']:<10} {fmt_ms(held):>8} "
++        depth = "?" if n["depth_db"] is None else f"{float(n['depth_db']):.0f}dB"
++        deep = "?" if n["deepest_db"] is None else f"{float(n['deepest_db']):.0f}dB"
++        print(f"{i:>3} {n['slot']:>4} {lane:>4} {n['hz']:>8.1f} {n['origin']:<10} "
++              f"{depth:>7} {deep:>6} {n['retunes']:>3} {fmt_ms(held):>8} "
+               f"{(n['verdict'] or '-'):<8} {(n['reason'] or 'still active'):<20}")
+     print()
+     print("recurrence (Hz within one bin, count of placements):")
+     for g in s["groups"]:
+         if g["count"] > 1:
+             print(f"  {g['hz']:>8.1f} Hz  x{g['count']}")
+     if not any(g["count"] > 1 for g in s["groups"]):
+         print("  none")
+     print()
+     total = len(s["notches"])
+     v = s["verdicts"]
+-    print(f"notches {total}  judged {v}  false {s['false']}"
++    print(f"notches {total}  retunes {s['retunes']}  judged {v}  false {s['false']}"
+           f"  false-rate {(s['false'] / v * 100 if v else 0):.0f}%"
+           f"  unjudged {s['unjudged']} ({(s['unjudged'] / total * 100 if total else 0):.0f}%)")
+     if s["dropped"]:
+         print(f"WARNING: logger dropped {s['dropped']} event(s)")
+ 
+ 
+ def main(argv: list[str]) -> int:
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument("file", type=Path)
+     ap.add_argument("--expect-notches", type=int)
+     ap.add_argument("--expect-verdicts", type=int)
+     ap.add_argument("--expect-false", type=int)
+     ap.add_argument("--expect-recurrence-max", type=int)
++    ap.add_argument("--expect-retunes", type=int)
+     args = ap.parse_args(argv)
+ 
+     events = load(args.file)
+     if not events:
+         print("empty or unreadable log", file=sys.stderr)
+         return 2
+     s = summarise(events)
+     print_report(s)
+ 
+     failures = []
+     if args.expect_notches is not None and len(s["notches"]) != args.expect_notches:
+         failures.append(f"notches {len(s['notches'])} != {args.expect_notches}")
+     if args.expect_verdicts is not None and s["verdicts"] != args.expect_verdicts:
+         failures.append(f"verdicts {s['verdicts']} != {args.expect_verdicts}")
+     if args.expect_false is not None and s["false"] != args.expect_false:
+         failures.append(f"false {s['false']} != {args.expect_false}")
++    if args.expect_retunes is not None and s["retunes"] != args.expect_retunes:
++        failures.append(f"retunes {s['retunes']} != {args.expect_retunes}")
+     if args.expect_recurrence_max is not None:
+         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
+         if recurrence_max != args.expect_recurrence_max:
+             failures.append(f"recurrence-max {recurrence_max} != {args.expect_recurrence_max}")
+     for f in failures:
+         print("EXPECT FAILED: " + f, file=sys.stderr)
+     return 1 if failures else 0
+ 
+ 
+ if __name__ == "__main__":

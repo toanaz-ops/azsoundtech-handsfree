@@ -1,0 +1,662 @@
+# Review package: 01ecb4c..HEAD
+
+## Commits
+f5bac4d feat(dsp): Biquad::rampNotchDepth -- retune depth without clearing filter state
+
+## Files changed
+ src/dsp/Biquad.cpp    | 133 ++++++++++++++++--------
+ src/dsp/Biquad.h      |  73 ++++++++++++++
+ tests/test_biquad.cpp | 272 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 436 insertions(+), 42 deletions(-)
+
+## Diff
+diff --git a/src/dsp/Biquad.cpp b/src/dsp/Biquad.cpp
+index 3320e08..d052af4 100644
+--- a/src/dsp/Biquad.cpp
++++ b/src/dsp/Biquad.cpp
+@@ -8,23 +8,59 @@ namespace
+ }
+ 
+ Biquad::Biquad()
+     : b0_(1.0)
+     , b1_(0.0)
+     , b2_(0.0)
+     , a1_(0.0)
+     , a2_(0.0)
+     , z1_(0.0)
+     , z2_(0.0)
++    , target_{ 1.0, 0.0, 0.0, 0.0, 0.0 }
++    , delta_{ 0.0, 0.0, 0.0, 0.0, 0.0 }
++    , rampRemaining_(0)
+ {
+ }
+ 
++bool Biquad::designPeaking(double freq, double Q, double sampleRate,
++                           double depthDB, double out[5])
++{
++    // The same four guards as the pure notch -- see the derivation in
++    // Biquad.h. The pole radius here is sqrt((1 - alpha/A) / (1 + alpha/A)),
++    // i.e. the pure-notch expression with alpha replaced by alpha/A, so the
++    // same inputs push the poles onto or outside the unit circle.
++    if (sampleRate <= 0.0)          return false;
++    if (Q <= 0.0)                   return false;
++    if (freq <= 0.0)                return false;
++    if (freq >= 0.5 * sampleRate)   return false;
++
++    // A positive depth is a BOOST at the centre frequency. This filter sits in
++    // a feedback eliminator, so the one frequency it must never amplify is the
++    // one it was pointed at. Refuse rather than trust the caller's sign.
++    if (depthDB > 0.0)              return false;
++
++    const double A     = std::pow(10.0, depthDB / 40.0);
++    const double omega = 2.0 * kPi * freq / sampleRate;
++    const double alpha = std::sin(omega) / (2.0 * Q);
++    const double cosw  = std::cos(omega);
++
++    const double a0 = 1.0 + alpha / A;
++
++    // Normalise so a0 == 1 -- lets processSample skip one multiply.
++    out[0] = (1.0 + alpha * A) / a0;   // b0
++    out[1] = (-2.0 * cosw)     / a0;   // b1
++    out[2] = (1.0 - alpha * A) / a0;   // b2
++    out[3] = (-2.0 * cosw)     / a0;   // a1
++    out[4] = (1.0 - alpha / A) / a0;   // a2
++    return true;
++}
++
+ bool Biquad::setNotchFilter(double freq, double Q, double sampleRate)
+ {
+     // Parameter validation FIRST -- see the stability derivation in Biquad.h.
+     // Every rejected case produces poles at radius >= 1 or NaN coefficients,
+     // and the filter is left exactly as it was rather than half-written.
+     //
+     // Allocation-free, branch-only, no logging and no exceptions: this may be
+     // reached from the audio thread via NotchChain::setNotch().
+     if (sampleRate <= 0.0)
+     {
+@@ -64,80 +100,93 @@ bool Biquad::setNotchFilter(double freq, double Q, double sampleRate)
+     a1_ = a1 / a0;
+     a2_ = a2 / a0;
+ 
+     // Filter coefficients changed -- state belongs to the previous design.
+     reset();
+     return true;
+ }
+ 
+ bool Biquad::setNotchFilter(double freq, double Q, double sampleRate, double depthDB)
+ {
+-    // Same four guards as the pure notch -- see the derivation in Biquad.h.
+-    // The pole radius here is sqrt((1 - alpha/A) / (1 + alpha/A)), i.e. the
+-    // pure-notch expression with alpha replaced by alpha/A, so the same inputs
+-    // push the poles onto or outside the unit circle.
+-    if (sampleRate <= 0.0)
+-    {
+-        return false;
+-    }
+-    if (Q <= 0.0)
++    double c[5];
++    if (! designPeaking(freq, Q, sampleRate, depthDB, c))
+     {
+         return false;
+     }
+-    if (freq <= 0.0)
++
++    b0_ = c[0]; b1_ = c[1]; b2_ = c[2]; a1_ = c[3]; a2_ = c[4];
++
++    // A new DESIGN wins over an in-flight depth ramp: the ramp interpolates
++    // toward a target this call has just superseded.
++    rampRemaining_ = 0;
++
++    // Filter coefficients changed -- state belongs to the previous design.
++    reset();
++    return true;
++}
++
++bool Biquad::rampNotchDepth(double freq, double Q, double sampleRate, double depthDB,
++                            int rampSamples)
++{
++    double c[5];
++    if (! designPeaking(freq, Q, sampleRate, depthDB, c))
+     {
++        // Rejected: coefficients, state and any in-flight ramp are untouched.
+         return false;
+     }
+-    if (freq >= 0.5 * sampleRate)
++
++    if (rampSamples <= 0)
+     {
+-        return false;
++        b0_ = c[0]; b1_ = c[1]; b2_ = c[2]; a1_ = c[3]; a2_ = c[4];
++        rampRemaining_ = 0;
++        return true;   // NO reset(): the state is still valid at this freq/Q.
+     }
+ 
+-    // A positive depth is a BOOST at the centre frequency. This filter sits in
+-    // a feedback eliminator, so the one frequency it must never amplify is the
+-    // one it was pointed at. Refuse rather than trust the caller's sign.
+-    if (depthDB > 0.0)
++    // Deltas are measured from the coefficients the filter is running RIGHT
++    // NOW, not from the previous target, so a second command arriving
++    // mid-ramp starts a fresh straight line from wherever the first one got
++    // to instead of snapping back.
++    const double current[5] = { b0_, b1_, b2_, a1_, a2_ };
++    for (int i = 0; i < 5; ++i)
+     {
+-        return false;
++        target_[i] = c[i];
++        delta_[i]  = (c[i] - current[i]) / static_cast<double>(rampSamples);
+     }
+-
+-    // RBJ Audio EQ Cookbook -- peakingEQ, driven with negative gain so the
+-    // "peak" is a cut of exactly depthDB at freq.
+-    const double A     = std::pow(10.0, depthDB / 40.0);
+-    const double omega = 2.0 * kPi * freq / sampleRate;
+-    const double alpha = std::sin(omega) / (2.0 * Q);
+-    const double cosw  = std::cos(omega);
+-
+-    const double a0 = 1.0 + alpha / A;
+-
+-    const double b0 = 1.0 + alpha * A;
+-    const double b1 = -2.0 * cosw;
+-    const double b2 = 1.0 - alpha * A;
+-    const double a1 = -2.0 * cosw;
+-    const double a2 = 1.0 - alpha / A;
+-
+-    // Normalise so a0 == 1 -- lets processSample skip one multiply.
+-    b0_ = b0 / a0;
+-    b1_ = b1 / a0;
+-    b2_ = b2 / a0;
+-    a1_ = a1 / a0;
+-    a2_ = a2 / a0;
+-
+-    // Filter coefficients changed -- state belongs to the previous design.
+-    reset();
++    rampRemaining_ = rampSamples;
+     return true;
+ }
+ 
+ double Biquad::processSample(double input)
+ {
++    // The ONLY new work on the audio thread: one comparison, and while a ramp
++    // is live five additions. No allocation, no logging, no second branch.
++    if (rampRemaining_ > 0)
++    {
++        if (--rampRemaining_ == 0)
++        {
++            // Land ON the target rather than on the accumulated sum of
++            // deltas, so a long ramp cannot drift by rounding error.
++            b0_ = target_[0]; b1_ = target_[1]; b2_ = target_[2];
++            a1_ = target_[3]; a2_ = target_[4];
++        }
++        else
++        {
++            b0_ += delta_[0]; b1_ += delta_[1]; b2_ += delta_[2];
++            a1_ += delta_[3]; a2_ += delta_[4];
++        }
++    }
++
+     // Direct Form I transposed.
+     const double output = b0_ * input + z1_;
+     z1_ = b1_ * input - a1_ * output + z2_;
+     z2_ = b2_ * input - a2_ * output;
+     return output;
+ }
+ 
+ void Biquad::reset()
+ {
+     z1_ = 0.0;
+     z2_ = 0.0;
++    // An explicit reset is a statement that the past is gone; a ramp toward a
++    // target designed against that past has nothing left to interpolate.
++    rampRemaining_ = 0;
+ }
+diff --git a/src/dsp/Biquad.h b/src/dsp/Biquad.h
+index 102b791..e25d4d7 100644
+--- a/src/dsp/Biquad.h
++++ b/src/dsp/Biquad.h
+@@ -46,20 +46,59 @@
+ //   Q <= 0                ->  division by zero gives alpha = +-inf, then
+ //       a0 = 1 + inf = inf and every normalised coefficient is inf/inf = NaN.
+ //       NaN is the nastiest of the four because NaN compares false against
+ //       every downstream sanity check, so the failure is invisible.
+ //
+ // setNotchFilter() therefore rejects those cases, returns false and leaves
+ // the filter untouched (a rejected call is a no-op, not a half-applied
+ // design). It is branch-only: no allocation, no logging, no exceptions, so it
+ // remains safe to call from the audio thread.
+ 
++// Depth retune without a click: rampNotchDepth()
++// ==============================================
++// setNotchFilter() calls reset() because a new DESIGN owns no state from the
++// old one. That is right when the frequency or Q moves, and wrong when only
++// the depth does: clearing z1/z2 mid-signal is a step discontinuity straight
++// into a PA. rampNotchDepth() therefore keeps the state and walks the five
++// normalised coefficients linearly to the new design over `rampSamples`.
++//
++// Why an interpolated coefficient set is safe (spec 4.7, M-4)
++// -----------------------------------------------------------
++// Fix freq/Q/sampleRate, write u_i = alpha/A_i and d_i = 1 + u_i. Every convex
++// combination (weights w_i) of the a0-normalised peaking designs keeps
++// b1 == a1 and satisfies P + alpha*K == 1, with P = sum(w_i/d_i) and
++// K = sum(w_i/(A_i*d_i)). Substituting, the interpolated set IS a peaking RBJ
++// filter with numerator gain A_n = sum(w_i*A_i/d_i)/P and denominator gain
++// 1/A_d = sum(w_i/(A_i*d_i))/P:
++//
++//   |H(w)|^2 = [(cos w - cos w0)^2 + alpha^2 * A_n^2 * sin^2 w]
++//            / [(cos w - cos w0)^2 + alpha^2 * A_d^-2 * sin^2 w]
++//
++// Every A_i <= 1 (depth <= 0), so A_n <= 1 <= 1/A_d and |H| <= 1 at EVERY
++// frequency -- the ramp cannot boost anything, including the frequency it is
++// pointed at. The pole radius is sqrt((1 - alpha/A_d)/(1 + alpha/A_d)) < 1, so
++// it cannot diverge either. A ramp restarted mid-flight is the three-point
++// case of the same argument. Measured 2026-09-06: max gain 1.9e-15 dB over
++// 3 rates x 5 frequencies x 3 Qs x 7 depth pairs x 101 probes, and over 20 000
++// random convex combinations x 400 frequencies. Coefficient deltas are ~1e-6
++// per sample -- nowhere near the subnormal range.
++//
++// A ramp is only ever entered between two designs sharing freq, Q and
++// sampleRate (NotchChain::setNotch enforces that). setNotchFilter() and
++// reset() CANCEL an in-flight ramp: the newer instruction wins.
++//
++// NotchChain::clearNotch does NOT cancel a ramp, so an Idle slot can carry
++// rampRemaining_ > 0 that nobody ticks. Harmless: setNotch on an Idle slot
++// takes the reset path, which cancels it. And a ramp cut short by a device
++// stop leaves the filter at an intermediate depth while NotchInfo.depthDB
++// already reads the target -- 10 ms of disagreement, accepted (spec 4.7, m-5).
++
+ #pragma once
+ 
+ class Biquad
+ {
+ public:
+     Biquad();
+ 
+     // Configures the biquad as an RBJ notch. Returns true if the parameters
+     // were valid and applied, false if they were rejected -- in which case
+     // the filter (coefficients AND state) is left exactly as it was.
+@@ -93,21 +132,55 @@ public:
+     //   - depthDB > 0. The peaking form is symmetric: a positive gain BOOSTS
+     //     the centre frequency by that many dB. In a feedback eliminator a
+     //     sign error upstream would amplify precisely the frequency that is
+     //     already ringing, so a boost is refused rather than trusted.
+     //     depthDB == 0 is accepted and is a mathematical no-op (A == 1 makes
+     //     the numerator and denominator identical, H == 1).
+     //
+     // Branch-only and allocation-free, like its sibling: reachable from the
+     // audio thread via NotchChain::setNotch.
+     bool setNotchFilter(double freq, double Q, double sampleRate, double depthDB);
++
++    // Retunes a RUNNING notch to `depthDB` while keeping the filter state,
++    // interpolating all five coefficients over `rampSamples` calls to
++    // processSample(). Applies the SAME four rejections as the four-argument
++    // setNotchFilter (sampleRate > 0, Q > 0, 0 < freq < sampleRate/2,
++    // depthDB <= 0); on rejection it returns false and leaves the
++    // coefficients, the state AND any in-flight ramp exactly as they were.
++    // rampSamples <= 0 installs the target immediately, still without reset().
++    // Branch-only and allocation-free: reachable from the audio thread via
++    // NotchChain::setNotch.
++    bool rampNotchDepth(double freq, double Q, double sampleRate, double depthDB,
++                        int rampSamples);
++
++    // TEST ACCESSORS ONLY -- the ramp's whole point is that state SURVIVES it,
++    // and no black-box measurement can tell a preserved state from a cleared
++    // one (spec 5.1, M-7).
++    struct State  { double z1, z2; };
++    struct Coeffs { double b0, b1, b2, a1, a2; };
++    State  stateForTest()  const { return { z1_, z2_ }; }
++    Coeffs coeffsForTest() const { return { b0_, b1_, b2_, a1_, a2_ }; }
++    int    rampRemainingForTest() const { return rampRemaining_; }
+     double processSample(double input);
+     void reset();
+ 
+ private:
++    // The four-argument peaking design, in ONE place: setNotchFilter and
++    // rampNotchDepth must never be able to drift apart on either the formula
++    // or the four rejections. Writes the a0-normalised b0,b1,b2,a1,a2 into
++    // `out` and returns true; returns false and writes nothing on rejection.
++    static bool designPeaking(double freq, double Q, double sampleRate,
++                              double depthDB, double out[5]);
++
+     // Coefficients (a0-normalised).
+     double b0_, b1_, b2_;
+     double a1_, a2_;
+ 
+     // Direct Form I transposed state.
+     double z1_, z2_;
++
++    // Ramp state. rampRemaining_ == 0 means "not ramping" and is the only
++    // thing processSample() branches on.
++    double target_[5];
++    double delta_[5];
++    int    rampRemaining_;
+ };
+\ No newline at end of file
+diff --git a/tests/test_biquad.cpp b/tests/test_biquad.cpp
+index fce7a67..e7a23c8 100644
+--- a/tests/test_biquad.cpp
++++ b/tests/test_biquad.cpp
+@@ -5,20 +5,21 @@
+ // These are functional single-threaded tests -- real-time thread safety
+ // is a property of the caller, not the filter.
+ 
+ #include <gtest/gtest.h>
+ #include "dsp/Biquad.h"
+ 
+ // juce::ScopedNoDenormals lives in juce_audio_basics (not juce_core); the
+ // test target already links juce_dsp, which includes juce_audio_basics.
+ #include <juce_audio_basics/juce_audio_basics.h>
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <vector>
+ 
+ namespace
+ {
+     constexpr double kPi = 3.14159265358979323846;
+ 
+     // Generate N samples of a unit-amplitude sine at `freqHz`, sampled at
+     // `sampleRate`. Returns the samples so tests can feed them through a
+     // filter and observe steady-state behaviour.
+@@ -61,20 +62,53 @@ namespace
+             (void)filter.processSample(s);
+         }
+ 
+         double out = 0.0;
+         for (int i = 0; i < silenceSamples; ++i)
+         {
+             out = filter.processSample(0.0);
+         }
+         return out;
+     }
++
++    // |H(e^{j w})| straight from the five NORMALISED coefficients the filter is
++    // running RIGHT NOW. Evaluating the transfer function analytically is what
++    // makes the mid-ramp no-boost test exact: it reads the coefficient set the
++    // biquad actually holds at that instant, with no need to freeze the ramp.
++    double magnitudeAt(const Biquad::Coeffs& c, double freqHz, double sampleRate)
++    {
++        const double w   = 2.0 * kPi * freqHz / sampleRate;
++        const double cw  = std::cos(w),  sw  = std::sin(w);
++        const double c2w = std::cos(2.0 * w), s2w = std::sin(2.0 * w);
++        const double nre = c.b0 + c.b1 * cw + c.b2 * c2w;
++        const double nim = -(c.b1 * sw + c.b2 * s2w);
++        const double dre = 1.0 + c.a1 * cw + c.a2 * c2w;
++        const double dim = -(c.a1 * sw + c.a2 * s2w);
++        return std::sqrt((nre * nre + nim * nim) / (dre * dre + dim * dim));
++    }
++
++    // 40 log-spaced probes over 20 Hz..20 kHz plus 20 packed around f0, which
++    // is where a peaking filter's gain actually lives.
++    std::vector<double> noBoostProbeFrequencies(double f0, double Q, double sampleRate)
++    {
++        std::vector<double> probes;
++        for (int i = 0; i < 40; ++i)
++            probes.push_back(20.0 * std::pow(1000.0, static_cast<double>(i) / 39.0));
++        const double bw = f0 / Q;
++        for (int i = 0; i < 20; ++i)
++            probes.push_back(f0 - 3.0 * bw + 6.0 * bw * static_cast<double>(i) / 19.0);
++        std::vector<double> kept;
++        for (double f : probes)
++            if (f > 0.0 && f < 0.5 * sampleRate)
++                kept.push_back(f);
++        return kept;
++    }
+ }
+ 
+ TEST(Biquad, NotchAttenuatesTargetFrequency)
+ {
+     // 1 kHz notch at 48 kHz sample rate, Q=10 (~very narrow).
+     constexpr double kSampleRate = 48000.0;
+     constexpr double kFreq        = 1000.0;
+     constexpr double kQ           = 10.0;
+ 
+     Biquad filter;
+@@ -492,10 +526,248 @@ TEST(Biquad, DepthFormAppliesTheSameParameterGuardsAsThePureNotch)
+     // diverge does the same here and must be refused identically.
+     constexpr double kSampleRate = 48000.0;
+ 
+     Biquad filter;
+     EXPECT_FALSE(filter.setNotchFilter(1000.0, 10.0, 0.0,   -12.0));  // rate <= 0
+     EXPECT_FALSE(filter.setNotchFilter(1000.0, 0.0,  kSampleRate, -12.0));  // Q <= 0
+     EXPECT_FALSE(filter.setNotchFilter(0.0,    10.0, kSampleRate, -12.0));  // freq <= 0
+     EXPECT_FALSE(filter.setNotchFilter(24000.0, 10.0, kSampleRate, -12.0)); // >= Nyquist
+     EXPECT_FALSE(filter.setNotchFilter(30000.0, 10.0, kSampleRate, -12.0)); // above Nyquist
+ }
++
++// RED IF rampNotchDepth calls reset() (or setNotchFilter) internally. This is
++// the one assertion the M-7 critique says every other ramp test passes anyway:
++// coefficient comparisons, max|y| bounds and steady-state attenuation are all
++// blind to a silently cleared state.
++TEST(Biquad, RampNotchDepthPreservesFilterStateExactly)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 44100.0, -6.0));
++
++    // Charge the state mid-cycle -- 10 samples is a quarter period at 1 kHz /
++    // 44.1 kHz, so z1/z2 are both far from zero.
++    const auto tone = sineWave(1000.0, 44100.0, 4410);
++    for (int i = 0; i < 3307; ++i)
++        f.processSample(0.5 * tone[static_cast<std::size_t>(i)]);
++
++    const Biquad::State before = f.stateForTest();
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 44100.0, -12.0, 441));
++    const Biquad::State after = f.stateForTest();
++
++    EXPECT_DOUBLE_EQ(after.z1, before.z1);
++    EXPECT_DOUBLE_EQ(after.z2, before.z2);
++    EXPECT_NE(before.z1, 0.0) << "state was never charged: the test proves nothing";
++    EXPECT_EQ(f.rampRemainingForTest(), 441);
++}
++
++// RED IF the ramp jumps coefficients in one step (a click) rather than
++// interpolating. 0.08 is the hard bound: a 0.5-amplitude 1 kHz sine at
++// 44.1 kHz steps by at most 2*pi*1000/44100*0.5 = 0.0712 per sample, so any
++// step past 0.08 is the filter's doing, not the signal's.
++TEST(Biquad, RampNotchDepthDoesNotClick)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 44100.0, -6.0));
++
++    const auto tone = sineWave(1000.0, 44100.0, 12000);
++    std::vector<double> y(12000);
++    for (int i = 0; i < 12000; ++i)
++    {
++        if (i == 10000)
++            ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 44100.0, -12.0, 441));
++        y[static_cast<std::size_t>(i)] = f.processSample(0.5 * tone[static_cast<std::size_t>(i)]);
++    }
++
++    auto maxStep = [&y](int from, int to) {
++        double worst = 0.0;
++        for (int i = from + 1; i <= to; ++i)
++            worst = std::max(worst, std::abs(y[static_cast<std::size_t>(i)]
++                                             - y[static_cast<std::size_t>(i - 1)]));
++        return worst;
++    };
++    const double before = maxStep(9559, 10000);   // the 441 samples before the ramp
++    const double during = maxStep(10000, 10441);  // the ramp window itself
++
++    EXPECT_LT(during, 0.08) << "absolute per-sample step bound for this signal";
++    EXPECT_LE(during, 1.05 * before) << "the ramp must not roughen the waveform";
++}
++
++// RED IF an intermediate coefficient set boosts ANY frequency (M-4). Reads the
++// live coefficients at five points of the ramp and evaluates |H| analytically,
++// so nothing has to freeze the ramp to measure it.
++TEST(Biquad, RampMidpointsNeverBoostAnyFrequency)
++{
++    const double rates[] = { 44100.0, 48000.0, 96000.0 };
++    const double freqs[] = { 120.0, 482.0, 1000.0, 4000.0, 9000.0 };
++    const double qs[]    = { 8.0, 30.0, 50.0 };
++    const double pairs[][2] = { { -6.0, -12.0 }, { -12.0, -6.0 }, { -6.0, -24.0 },
++                                { -24.0, -6.0 }, { -12.0, -18.0 }, { -18.0, -12.0 },
++                                { 0.0, -24.0 } };
++
++    for (double sr : rates)
++        for (double f0 : freqs)
++            for (double Q : qs)
++                for (const auto& pair : pairs)
++                {
++                    if (f0 >= 0.5 * sr)
++                        continue;
++                    Biquad f;
++                    ASSERT_TRUE(f.setNotchFilter(f0, Q, sr, pair[0]));
++                    ASSERT_TRUE(f.rampNotchDepth(f0, Q, sr, pair[1], 6));
++
++                    const auto probes = noBoostProbeFrequencies(f0, Q, sr);
++                    for (int step = 0; step < 5; ++step)
++                    {
++                        f.processSample(0.0);   // advance one ramp sample
++                        const Biquad::Coeffs c = f.coeffsForTest();
++                        for (double probe : probes)
++                            EXPECT_LE(magnitudeAt(c, probe, sr), 1.0 + 1e-9)
++                                << "boost at " << probe << " Hz, step " << step
++                                << ", sr " << sr << ", f0 " << f0 << ", Q " << Q;
++                    }
++                }
++}
++
++// RED IF a ramp restarted mid-flight lands outside the convex hull of the two
++// designs it sits between (the 3-point case of the spec 4.7 proof).
++TEST(Biquad, RampRestartedMidFlightStillNeverBoosts)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 48000.0, -6.0));
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 48000.0, -24.0, 20));
++    for (int i = 0; i < 9; ++i)
++        f.processSample(0.0);
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 48000.0, -12.0, 20));
++
++    const auto probes = noBoostProbeFrequencies(1000.0, 30.0, 48000.0);
++    for (int step = 0; step < 20; ++step)
++    {
++        f.processSample(0.0);
++        const Biquad::Coeffs c = f.coeffsForTest();
++        for (double probe : probes)
++            EXPECT_LE(magnitudeAt(c, probe, 48000.0), 1.0 + 1e-9);
++    }
++}
++
++// RED IF the ramp accumulates rounding error instead of snapping to target on
++// its last sample.
++TEST(Biquad, RampReachesTheExactTargetCoefficients)
++{
++    Biquad ramped, direct;
++    ASSERT_TRUE(ramped.setNotchFilter(1000.0, 30.0, 48000.0, -6.0));
++    ASSERT_TRUE(direct.setNotchFilter(1000.0, 30.0, 48000.0, -18.0));
++    ASSERT_TRUE(ramped.rampNotchDepth(1000.0, 30.0, 48000.0, -18.0, 480));
++
++    for (int i = 0; i < 480; ++i)
++        ramped.processSample(0.0);
++
++    const Biquad::Coeffs a = ramped.coeffsForTest();
++    const Biquad::Coeffs b = direct.coeffsForTest();
++    EXPECT_DOUBLE_EQ(a.b0, b.b0);
++    EXPECT_DOUBLE_EQ(a.b1, b.b1);
++    EXPECT_DOUBLE_EQ(a.b2, b.b2);
++    EXPECT_DOUBLE_EQ(a.a1, b.a1);
++    EXPECT_DOUBLE_EQ(a.a2, b.a2);
++    EXPECT_EQ(ramped.rampRemainingForTest(), 0);
++}
++
++// RED IF an intermediate coefficient set puts a pole outside the unit circle.
++TEST(Biquad, RampDoesNotDivergeOverEveryLadderStepAndRate)
++{
++    const double rates[]  = { 44100.0, 48000.0, 96000.0 };
++    const double ladder[] = { -6.0, -12.0, -18.0, -24.0 };
++
++    for (double sr : rates)
++        for (int i = 0; i < 4; ++i)
++            for (int j = 0; j < 4; ++j)
++            {
++                if (i == j) continue;
++                Biquad f;
++                ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, sr, ladder[i]));
++                ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, sr, ladder[j],
++                                             static_cast<int>(0.010 * sr)));
++                const auto tone = sineWave(1000.0, sr, 8192);
++                for (int n = 0; n < 8192; ++n)
++                {
++                    const double out = f.processSample(tone[static_cast<std::size_t>(n)]);
++                    ASSERT_LE(std::abs(out), 1.0 + 1e-9)
++                        << "sr " << sr << " " << ladder[i] << " -> " << ladder[j]
++                        << " at sample " << n;
++                }
++            }
++}
++
++// RED IF a rejected ramp half-applies: coefficients, state or the in-flight
++// ramp move even though the call returned false.
++TEST(Biquad, RampNotchDepthRejectionLeavesEverythingUntouched)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 48000.0, -6.0));
++    const auto tone = sineWave(1000.0, 48000.0, 1000);
++    for (double s : tone)
++        f.processSample(s);
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 48000.0, -12.0, 480));
++    for (int i = 0; i < 100; ++i)
++        f.processSample(0.0);
++
++    const Biquad::Coeffs c0 = f.coeffsForTest();
++    const Biquad::State  s0 = f.stateForTest();
++    const int            r0 = f.rampRemainingForTest();
++
++    EXPECT_FALSE(f.rampNotchDepth(24000.0, 30.0, 48000.0, -18.0, 480));  // >= Nyquist
++    EXPECT_FALSE(f.rampNotchDepth(1000.0,   0.0, 48000.0, -18.0, 480));  // Q <= 0
++    EXPECT_FALSE(f.rampNotchDepth(1000.0,  30.0,     0.0, -18.0, 480));  // sr <= 0
++    EXPECT_FALSE(f.rampNotchDepth(-5.0,    30.0, 48000.0, -18.0, 480));  // freq <= 0
++    EXPECT_FALSE(f.rampNotchDepth(1000.0,  30.0, 48000.0,  +3.0, 480));  // boost
++
++    const Biquad::Coeffs c1 = f.coeffsForTest();
++    EXPECT_DOUBLE_EQ(c1.b0, c0.b0);
++    EXPECT_DOUBLE_EQ(c1.a1, c0.a1);
++    EXPECT_DOUBLE_EQ(c1.a2, c0.a2);
++    EXPECT_DOUBLE_EQ(f.stateForTest().z1, s0.z1);
++    EXPECT_DOUBLE_EQ(f.stateForTest().z2, s0.z2);
++    EXPECT_EQ(f.rampRemainingForTest(), r0);
++}
++
++// RED IF a setNotchFilter landing mid-ramp lets the stale ramp keep walking
++// the coefficients afterwards.
++TEST(Biquad, SetNotchFilterCancelsAnInFlightRampAndResetsState)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 48000.0, -6.0));
++    const auto tone = sineWave(1000.0, 48000.0, 1000);
++    for (double s : tone)
++        f.processSample(s);
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 48000.0, -24.0, 480));
++    for (int i = 0; i < 100; ++i)
++        f.processSample(0.0);
++
++    ASSERT_TRUE(f.setNotchFilter(2000.0, 30.0, 48000.0, -12.0));
++    EXPECT_EQ(f.rampRemainingForTest(), 0);
++    EXPECT_DOUBLE_EQ(f.stateForTest().z1, 0.0);
++    EXPECT_DOUBLE_EQ(f.stateForTest().z2, 0.0);
++
++    Biquad direct;
++    ASSERT_TRUE(direct.setNotchFilter(2000.0, 30.0, 48000.0, -12.0));
++    f.processSample(0.0);   // one more sample: a live ramp would move b0_ here
++    EXPECT_DOUBLE_EQ(f.coeffsForTest().b0, direct.coeffsForTest().b0);
++}
++
++// RED IF rampSamples <= 0 stops meaning "apply immediately, keep the state".
++TEST(Biquad, NonPositiveRampSamplesAppliesTheTargetAtOnceAndKeepsState)
++{
++    Biquad f;
++    ASSERT_TRUE(f.setNotchFilter(1000.0, 30.0, 48000.0, -6.0));
++    const auto tone = sineWave(1000.0, 48000.0, 1000);
++    for (double s : tone)
++        f.processSample(s);
++    const Biquad::State before = f.stateForTest();
++
++    ASSERT_TRUE(f.rampNotchDepth(1000.0, 30.0, 48000.0, -18.0, 0));
++    Biquad direct;
++    ASSERT_TRUE(direct.setNotchFilter(1000.0, 30.0, 48000.0, -18.0));
++
++    EXPECT_DOUBLE_EQ(f.coeffsForTest().b0, direct.coeffsForTest().b0);
++    EXPECT_DOUBLE_EQ(f.coeffsForTest().a2, direct.coeffsForTest().a2);
++    EXPECT_DOUBLE_EQ(f.stateForTest().z1, before.z1);
++    EXPECT_EQ(f.rampRemainingForTest(), 0);
++}
