@@ -77,8 +77,9 @@ half of the live-ceiling rule, the **preset** release-ladder and reclamp pair, a
 ## Global Constraints
 
 - **Depth is always inside [−24, 0] dB.** `setNotchImpl` clamps `depthDB = max(depthDB, -24.0)` for EVERY `Origin` (Q12); `pushRetuneLocked` refuses anything outside the range. No `NotchCommand::Set` may ever leave this controller with `depthDB > 0` or `< -24`.
-- **A deepening step is at most 6 dB.** `kDepthStepDb = 6.0`, fixed rungs `{-6, -12, -18, -24}`. The **effective ladder** (Q13) is the fixed rungs shallower than the ceiling plus the ceiling itself as the last rung, so the final step can be SMALLER than 6 dB (−6 → −10 under `presets/Music.json`) but never larger. A step in the SHALLOW direction may be larger than 6 dB (a ceiling dropped several rungs at once) — invariant 3, allowed because shallower is never dangerous.
-- **Every depth change on a running notch is ramped over `kRampMs = 10.0` ms** (`NotchChain::kRampMs`), i.e. ≤ 0.6 dB/ms in the deep direction.
+- **A DEEPEN step is at most 6 dB.** `kDepthStepDb = 6.0`, fixed rungs `{-6, -12, -18, -24}`. The **effective ladder** (Q13) is the fixed rungs shallower than the ceiling plus the ceiling itself as the last rung, so the final step can be SMALLER than 6 dB (−6 → −10 under `presets/Music.json`) but never larger. A step in the SHALLOW direction is **unbounded** (a ceiling dropped several rungs at once) — invariant 3, allowed because shallower is never dangerous.
+- **A RECLAMP is the deliberate exception, up to 18 dB in the deep direction.** `RetuneReason::Reclamp` goes straight to `max(deepestDb, ceilingRung)` in ONE 10 ms ramp — −6 → −24 after a full release. It is not a violation: the target is a depth **this notch already held**, invariant 2 still holds (never past the live ceiling), `|H| ≤ 1` at every ramp midpoint (`Biquad.RampMidpointsNeverBoostAnyFrequency`), and the coefficient walk is continuous, so no reset and no click.
+- **Every depth change on a running notch is ramped over `kRampMs = 10.0` ms** (`NotchChain::kRampMs`), i.e. ≤ 0.6 dB/ms for a deepen step and ≤ 1.8 dB/ms for a worst-case reclamp. **`NotchChain` enforces none of this** — it accepts any valid depth (see `NotchChain.h`); the ladder in `NotchController` is what holds the rule, and the rule holds only while the ladder is the sole caller of `pushRetuneLocked`.
 - **Never remove a clamp, a limiter, a NaN/denormal guard, or a bounds check.** `ScopedNoDenormals` (`AudioEngine.cpp:487`) and the `isfinite` + output clamp (`AudioEngine.cpp:605-642`) are untouched by this lane.
 - **No allocation, no logging, no locks on the audio thread.** `Biquad::processSample` gains exactly one branch (`rampRemaining_ > 0`) plus five additions.
 - **No new lock order.** `modelMutex_` and `snapshotMutex_` are never nested today and must not become nested. The release freeze reads the detector-thread members `frameMaxScore_` / `frameScoreValid_` (`NotchController.h:433-434`), never the snapshot.
@@ -133,7 +134,7 @@ half of the live-ceiling rule, the **preset** release-ladder and reclamp pair, a
   ```
 - Consumes: nothing new. `setNotchFilter(double,double,double,double)` (`Biquad.h:102`) keeps its exact signature and behaviour.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_biquad.cpp`. `sineWave` (line 25) and `rms` (line 38) already exist in that file's anonymous namespace — reuse them; add only the two helpers below to the same namespace (put them next to `chargeThenFeedSilence`, line 53).
 
@@ -412,12 +413,12 @@ TEST(Biquad, NonPositiveRampSamplesAppliesTheTargetAtOnceAndKeepsState)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release 2>&1 | tail -5`
 Expected: compile errors — `'rampNotchDepth': is not a member of 'Biquad'`, same for `stateForTest`, `coeffsForTest`, `rampRemainingForTest`.
 
-- [ ] **Step 3: Extend `src/dsp/Biquad.h`**
+- [x] **Step 3: Extend `src/dsp/Biquad.h`**
 
 Append this paragraph to the header's doc block, immediately before `#pragma once` (line 56):
 
@@ -512,7 +513,7 @@ private:
     int    rampRemaining_;
 ```
 
-- [ ] **Step 4: Implement in `src/dsp/Biquad.cpp`**
+- [x] **Step 4: Implement in `src/dsp/Biquad.cpp`**
 
 Extend the constructor initialiser list (lines 10-19) to zero the new members:
 
@@ -671,7 +672,7 @@ void Biquad::reset()
 }
 ```
 
-- [ ] **Step 5: Run the Biquad tests**
+- [x] **Step 5: Run the Biquad tests**
 
 Run:
 ```
@@ -681,12 +682,12 @@ cd build && ctest -C Release -R Biquad --output-on-failure
 ```
 Expected: PASS — all `Biquad.*` tests, the nine new ones included.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (454 + 9 = 463).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -719,7 +720,7 @@ git commit -m "feat(dsp): Biquad::rampNotchDepth -- retune depth without clearin
   //      freq and Q compare equal to the stored NotchInfo.
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_notchchain.cpp`. `sineWave` (line 20) and `rms` (line 31) already exist there.
 
@@ -832,12 +833,12 @@ TEST(NotchChain, RejectedDepthOnARunningNotchLeavesTheSlotUnchanged)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchChain --output-on-failure`
 Expected: FAIL — `DepthOnlyRetuneOfARunningNotchKeepsTheFilterState` reports `chain.processSample(0.0)` equal to 0 (today's `setNotch` always resets).
 
-- [ ] **Step 3: Extend `src/dsp/NotchChain.h`**
+- [x] **Step 3: Extend `src/dsp/NotchChain.h`**
 
 Add after `static constexpr int MAX_NOTCHES = 16;` (line 33):
 
@@ -873,7 +874,7 @@ Replace the `setNotch` doc comment (lines 53-56) with:
     void   setNotch(int index, double freq, double Q, double depthDB);
 ```
 
-- [ ] **Step 4: Implement in `src/dsp/NotchChain.cpp`**
+- [x] **Step 4: Implement in `src/dsp/NotchChain.cpp`**
 
 Add the include at the top (after line 1):
 
@@ -938,7 +939,7 @@ void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
 }
 ```
 
-- [ ] **Step 5: Run the NotchChain tests**
+- [x] **Step 5: Run the NotchChain tests**
 
 Run:
 ```
@@ -948,12 +949,12 @@ cd build && ctest -C Release -R NotchChain --output-on-failure
 ```
 Expected: PASS. Record the four measured attenuations printed by a failure-free run of `MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel` — they are the numbers the release note quotes.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (469).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -993,7 +994,7 @@ git commit -m "feat(dsp): NotchChain ramps a depth-only retune over kRampMs inst
   ```
   Task 5 reads it as `pc.breakdown.riseRatio`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_candidatescorer.cpp`. That file already has `Rig` (line 72, with `tap`, `detector`, `analyzer`, `scorer`, `cycle()`, `feedHops()`), `makeToneInNoise()` (line 36), `kHop`, `kFrameMs` and `kSampleRate` in its anonymous namespace — use those names, do not invent new helpers.
 
@@ -1089,12 +1090,12 @@ TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release 2>&1 | tail -5`
 Expected: compile error — `'riseRatio': is not a member of 'CandidateScorer::ScoreBreakdown'`.
 
-- [ ] **Step 3: Add the field in `src/dsp/CandidateScorer.h`**
+- [x] **Step 3: Add the field in `src/dsp/CandidateScorer.h`**
 
 Replace the `ScoreBreakdown` body (lines 84-89) with:
 
@@ -1116,7 +1117,7 @@ Replace the `ScoreBreakdown` body (lines 84-89) with:
         double refAgeMs = 0.0;
 ```
 
-- [ ] **Step 4: Assign it in `src/dsp/CandidateScorer.cpp`**
+- [x] **Step 4: Assign it in `src/dsp/CandidateScorer.cpp`**
 
 In the rise branch, the no-history case (lines 77-80):
 
@@ -1143,7 +1144,7 @@ and inside `if (reference != nullptr)` (line 98), right after `rise` is computed
 
 Leave the "history too young" path alone — `out.riseRatio` keeps its 1.0 default there, which is the documented neutral, and the comment at line 108 already explains that branch.
 
-- [ ] **Step 5: Run the scorer tests**
+- [x] **Step 5: Run the scorer tests**
 
 Run:
 ```
@@ -1153,12 +1154,12 @@ cd build && ctest -C Release -R CandidateScorer --output-on-failure
 ```
 Expected: PASS.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (472). Every pre-existing scorer AND controller test must be untouched — if a placement test moved, the field was not additive and the change is wrong.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -1226,7 +1227,7 @@ git commit -m "feat(dsp): expose the raw riseRatio in ScoreBreakdown (score unch
   double ceilingDbFor (const ModelNotch& n) const;   // == the ceilingRung (Q13)
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_notchcontroller.cpp`, after the last `NotchControllerRingRisk` test (the file ends at line 1681). `Harness`, `FakeClock`, `Recorder`, the `Ev` alias, `pump`, `SineSource`, `NoiseSource` and `primeAndPlace` already exist in that file — use those names.
 
@@ -1491,12 +1492,12 @@ TEST (NotchControllerLadder, SnapshotCarriesTheDeepestDepthTheNotchEverHeld)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release 2>&1 | tail -8`
 Expected: compile errors — `nextDeeperRungDb`, `nextShallowerRungDb`, `deepestDbForTest`, `activeForTest`, `retuneForTest`, `RetuneReason`, `Kind::Retune`, `fromDepthDb`, `riseRatio`, `SnapshotNotch::deepestDb` and `SnapshotBuffer::releaseFrozen` all undeclared.
 
-- [ ] **Step 3: Extend `src/app/NotchController.h`**
+- [x] **Step 3: Extend `src/app/NotchController.h`**
 
 Add `#include <optional>` and `#include <utility>` next to the existing includes (lines 42-48).
 
@@ -1725,7 +1726,7 @@ And the override member, next to `failSetNotchLaneForTest_` (line 467):
     std::optional<std::pair<bool, float>> ringRiskOverrideForTest_;
 ```
 
-- [ ] **Step 4: Implement in `src/app/NotchController.cpp`**
+- [x] **Step 4: Implement in `src/app/NotchController.cpp`**
 
 Add `#include <optional>` and `#include <utility>` to the include block (lines 3-5).
 
@@ -1989,7 +1990,7 @@ void NotchController::setRingRiskOverrideForTest (std::optional<std::pair<bool, 
 }
 ```
 
-- [ ] **Step 5: Run the controller tests**
+- [x] **Step 5: Run the controller tests**
 
 Run:
 ```
@@ -1999,12 +2000,12 @@ cd build && ctest -C Release -R NotchController --output-on-failure
 ```
 Expected: PASS, including the eleven new `NotchControllerLadder.*` tests (the two ladder-arithmetic tests, `ActiveForTestReadsTheFlagNotTheRetainedDepth`, and the eight model/command tests).
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (483). No pre-existing test may move: nothing calls `pushRetuneLocked` outside the seam yet, and the only shipped behaviour change is the −24 clamp, which no shipped preset triggers.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -2038,7 +2039,7 @@ git commit -m "feat(controller): depth ladder state, -24 clamp for every origin,
   int primeAndPlaceSlowly (Harness&);        // 64 noise blocks + <= 150 ramp blocks
   ```
 
-- [ ] **Step 1: Fix the two existing tests the new policy makes wrong (M-12)**
+- [x] **Step 1: Fix the two existing tests the new policy makes wrong (M-12)**
 
 These are pre-existing tests that assert 1.1.3's fixed depth. They are not "broken by the change" — they encoded the old policy, and the spec says what replaces it. Edit them BEFORE writing the new tests so the run in Step 3 is unambiguous.
 
@@ -2077,7 +2078,7 @@ TEST (NotchControllerDetection, SetNotchDefaultsFlowIntoPlacedNotch)
 }
 ```
 
-- [ ] **Step 2: Add `RampSineSource` to the fixture and write the failing tests**
+- [x] **Step 2: Add `RampSineSource` to the fixture and write the failing tests**
 
 Add to the anonymous namespace in `tests/test_notchcontroller.cpp` **after `pump` closes at line 349** — not after `SineSource` at 327 (B-6). Both new helpers call `NoiseSource` (declared `:329`), `pump` (`:344-349`) and `kWarmupBlocks` (`:308`), so an insertion above `pump` does not compile. Line 349 is also where Task 7 adds `pumpQuietFor`.
 
@@ -2341,12 +2342,12 @@ TEST (NotchControllerLadder, PresetNotchesKeepTheirOwnCeilingAndDetectorNotchesF
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
 Expected: FAIL — `ASlowlyRisingHowlIsPlacedAtMinusSix` and `ASteeplyRisingHowlIsPlacedAtMinusTwelve` both report `-18`, and the two edited tests fail for the same reason.
 
-- [ ] **Step 4: Implement the placement policy in `src/app/NotchController.cpp`**
+- [x] **Step 4: Implement the placement policy in `src/app/NotchController.cpp`**
 
 **B-2 — read this before touching the file.** Today `placeConfirmed` reads the three
 `const`s at `:585-587` and only then searches for a free index at `:589-596`. The v1
@@ -2432,17 +2433,17 @@ And the `depth=` field of the `[detect]` log line (line 698):
         + " Q=" + juce::String (q, 1) + " depth=" + juce::String (depthDb, 1)
 ```
 
-- [ ] **Step 5: Run the controller tests**
+- [x] **Step 5: Run the controller tests**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
 Expected: PASS. The release ladder does not exist yet (Task 7), so every auto-release test still clears at 30 s exactly as it does today — nothing in this task moves their timing.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (489).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -2495,7 +2496,7 @@ Do not "cover" it here with a seam that writes `releasedSteps` directly, and do 
 reorder Tasks 6 and 7 — the release ladder reads `quietMs`, which this task is what
 zeroes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_notchcontroller.cpp`.
 
@@ -2716,12 +2717,12 @@ TEST (NotchControllerLadder, SoundcheckNotchesNeverDeepen)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
 Expected: FAIL — `AContinuingHowlDeepensOneRungPer300ms` never leaves −12, `TheLastStepLandsExactlyOnAnOffRungCeiling` stays at −12, and `DeepeningStopsAtTheCeilingRung` never reaches −18. (Nothing in this run exercises the reclamp branch — see the M-A note above.)
 
-- [ ] **Step 3: Implement the deepen/reclamp branch in `src/app/NotchController.cpp`**
+- [x] **Step 3: Implement the deepen/reclamp branch in `src/app/NotchController.cpp`**
 
 **m-B / m-C — find this by ANCHOR, not by line number.** Task 5 inserts into
 `placeConfirmed`, which sits ABOVE the reinforce loop, so every absolute number in
@@ -2825,17 +2826,17 @@ would leave the comment standing twice.
                 }
 ```
 
-- [ ] **Step 4: Run the controller tests**
+- [x] **Step 4: Run the controller tests**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (497 — one fewer than rev 2: the reclamp test moved to Task 7, M-A).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -2878,7 +2879,7 @@ B-4: the v1 plan used `pumpQuietFor(..., 55000.0)` on notches standing at −24,
 
 **Thread facts this task must respect:** step 3 runs on the detector thread and takes `modelMutex_`. `snapshotMutex_` must NOT be taken inside it — publishing `releaseFrozen` therefore happens in its own scope BEFORE `modelMutex_` is acquired, keeping the two mutexes un-nested exactly as they are today (M-5). The freeze reads `frameScoreValid_` / `frameMaxScore_` (`NotchController.h:433-434`), which are detector-thread-only members holding precisely the two numbers the snapshot publish just wrote — no lock needed, and no new lock order created.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_notchcontroller.cpp`. Add this helper to the anonymous namespace next to `pump` (line 344) first:
 
@@ -3301,12 +3302,12 @@ TEST (NotchControllerLadder, NoCommandEverLeavesTheLegalDepthRange)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
 Expected: FAIL — `ReleaseWalksTheLadderAt30sThen10sPerRung` finds the notch already cleared at 30.5 s (today's cliff), the freeze tests all release regardless of the override, `AReturningHowlReclampsImmediatelyToDeepestDb` finds the notch cleared long before its 42 s pump ends, and `ALoweredCeilingAlsoCapsTheReclampTarget` the same.
 
-- [ ] **Step 3: Publish `releaseFrozen`'s neighbours, update the constant's doc, and collapse the duplicate 0.55**
+- [x] **Step 3: Publish `releaseFrozen`'s neighbours, update the constant's doc, and collapse the duplicate 0.55**
 
 **m-D: `kRiskFreezeFraction`'s own doc string says "one constant, not two", and rev 2
 still left two.** `gui::SpectrumView::kRingRiskRisingFraction` (`src/gui/SpectrumView.h:239`)
@@ -3350,7 +3351,7 @@ In `src/app/NotchController.h:82-83`, replace the `kAutoReleaseMs` comment:
     static constexpr double kAutoReleaseMs       = 30000.0;
 ```
 
-- [ ] **Step 4: Replace step 3 in `src/app/NotchController.cpp`**
+- [x] **Step 4: Replace step 3 in `src/app/NotchController.cpp`**
 
 Replace lines 403-416 in `runOnce` with:
 
@@ -3494,7 +3495,7 @@ Replace lines 403-416 in `runOnce` with:
     }
 ```
 
-- [ ] **Step 5: Run the controller tests**
+- [x] **Step 5: Run the controller tests**
 
 Step 3 touched two headers (`NotchController.h`, `SpectrumView.h`), so this run
 reconfigures first:
@@ -3557,12 +3558,12 @@ TEST (NotchControllerAutoRelease, LiveTapReleasesThroughTheLadderAfter40s)
 
 The test also asserts `EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs)` — still true (40 s > 30 s) and left alone. If any of these five now reports TWO clears, the ladder is emitting a Clear per rung instead of a Retune: fix the loop, not the test.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (512).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -3602,7 +3603,7 @@ git commit -m "feat(controller): release ladder with a freezable quiet clock and
 
 **Thread facts:** `roomMemory_` is written from the release path (detector thread, `modelMutex_` held) and read from `placeConfirmed` (detector thread) — and cleared from `setWidth`/`clearAll`/`setSampleRate` (message thread). It therefore lives under `modelMutex_`, the lock all four already take or can take without creating a new order. No allocation: fixed-size arrays, oldest entry overwritten.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_notchcontroller.cpp`. `pumpQuietFor` comes from Task 7.
 
@@ -3903,12 +3904,12 @@ TEST (NotchControllerLadder, LinkedReleaseWritesAndConsumesBothLanes)
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
 Expected: FAIL — `AHowlReturningToTheSameBinStartsAtTheRememberedDepth` places at −12 (the steep-rise rung) instead of the remembered depth.
 
-- [ ] **Step 3: Declare the memory in `src/app/NotchController.h`**
+- [x] **Step 3: Declare the memory in `src/app/NotchController.h`**
 
 Next to the `pushRetuneLocked` declaration (Task 4's block):
 
@@ -3953,7 +3954,7 @@ and, next to `model_` (line 454):
     std::array<int, kChannels> roomMemoryHead_ {};
 ```
 
-- [ ] **Step 4: Implement in `src/app/NotchController.cpp`**
+- [x] **Step 4: Implement in `src/app/NotchController.cpp`**
 
 Add the three helpers after `pushRetuneLocked`:
 
@@ -4143,17 +4144,17 @@ Finally, in Task 7's release path, record before the Clear:
                 }
 ```
 
-- [ ] **Step 5: Run the controller tests**
+- [x] **Step 5: Run the controller tests**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
 Expected: PASS.
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (520).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -4182,7 +4183,7 @@ git commit -m "feat(controller): room memory -- a howl returning to the same bin
 - Consumes (Tasks 4, 7, 8): `NotchEvent::Kind::Retune`, `RetuneReason`, `fromDepthDb`, `SnapshotNotch::deepestDb`.
 - Produces: the log schema `ev: "notch_retune"` with keys `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `reason` (`deepen|release|reclamp|ceiling`), `from_db`, `age_ms`. Task 10 documents it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/test_gui_wiring.cpp`, after `savePreset`'s existing lane test (around line 1129).
 
@@ -4343,7 +4344,7 @@ TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
 }
 ```
 
-- [ ] **Step 2: Extend the log fixture and its test**
+- [x] **Step 2: Extend the log fixture and its test**
 
 **M-7 — the fixture has to tell a story that could actually have happened.** The v1 lines said `from_db:-12, depth_db:-18, reason:deepen` for the lane-1 index-0 notch, whose `notch_set` on line 4 already reads `depth_db:-18`: it deepens FROM a depth it never held, TO the depth it was placed at. A fixture that contradicts itself is worse than none — it is what the next reader will copy. Make the whole life of that notch consistent with the lane-G ladder:
 
@@ -4404,7 +4405,7 @@ Then extend the fixture test in `tests/CMakeLists.txt:113-117`:
                 --expect-recurrence-max 2 --expect-retunes 2)
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cmake --build build --config Release 2>&1 | tail -5`
 Expected: compile error — `notchEventToVarForTest` and `retuneForTest` unresolved on `MainComponent`.
@@ -4412,7 +4413,7 @@ Expected: compile error — `notchEventToVarForTest` and `retuneForTest` unresol
 Run: `python tools/logstats.py tests/fixtures/session-sample.jsonl --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2`
 Expected: FAIL — `unrecognized arguments: --expect-retunes`. Then, with that flag removed, it exits 0 and reports nothing new: m-7 — the current reader does **not** miscount, it **ignores** the two lines. `summarise` is an `if/elif` chain on `ev` with no `else` (`tools/logstats.py:45-63`), so an unknown name simply falls through: `notches` stays 4 and every other total is unchanged. That is the correct behaviour for an old reader meeting a new log, and the branch added in Step 5 must preserve it. The defect being fixed is not a wrong number — it is a **blind spot**: the depth column shows the placement depth forever, and the retunes are invisible.
 
-- [ ] **Step 4: Implement in `src/app/MainComponent.cpp`**
+- [x] **Step 4: Implement in `src/app/MainComponent.cpp`**
 
 Add next to `reasonName` (line 66) — m-5: a **free** function in the same anonymous namespace as `originName` (`:54`) and `reasonName` (`:66`), with no `MainComponent::` qualifier. `notchEventToVar` calls it unqualified from the same translation unit; writing it as a member would need a header declaration it does not have and would not link.
 
@@ -4490,7 +4491,7 @@ and after `preset.sampleRate = presetRate;` (line 985):
     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
 ```
 
-- [ ] **Step 5: Implement in `tools/logstats.py`**
+- [x] **Step 5: Implement in `tools/logstats.py`**
 
 In `summarise`, extend the `notch_set` record and add the branch (lines 48-63):
 
@@ -4574,7 +4575,7 @@ In `main`, add the flag and its check:
 
 The file is already opened with `encoding="utf-8"` in `load()` (line 19) and writes nothing back — repo rule 6 is satisfied; do not change that call.
 
-- [ ] **Step 6: Run the log tool by hand, then the suites**
+- [x] **Step 6: Run the log tool by hand, then the suites**
 
 Run: `python tools/logstats.py tests/fixtures/session-sample.jsonl --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2`
 Expected: exit 0, and the table's first row shows `-6dB` running / `-12dB` deepest / `2` retunes with `held` ~40.4 s (5001 → 45400, m-A) — the record stayed OPEN across both retunes.
@@ -4587,12 +4588,12 @@ cd build && ctest -C Release -R "GuiWiring|PresetManager|logstats" --output-on-f
 ```
 Expected: PASS.
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` (526).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 rm -f .superpowers/sdd/.gitignore
@@ -4628,7 +4629,7 @@ git commit -m "feat(app): log notch_retune, save deepestDb, round-trip the notch
 
 **Interfaces:** none — prose only.
 
-- [ ] **Step 1: `docs/GIOI-THIEU.md`**
+- [x] **Step 1: `docs/GIOI-THIEU.md`**
 
 Line 28, inside the overview diagram, replace `tự nhả filter khi hết hú`:
 ```
@@ -4651,7 +4652,7 @@ Line 50, the presets row — say the two numbers are ceilings now:
 | **Preset có sẵn** | `Speech` (Q=40, trần −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, trần −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Trần −10 của Music **tới được**: theo Q13 thang hiệu lực là −6 → −10, bậc cuối chính là trần, nên Music vẫn cắt đủ 10 dB như 1.1.3 chứ không bị lượng tử về −6. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). Từ 1.2.0 file lưu ra mang **độ sâu phòng đã cần** (`deepestDb`) và mang cả trần trong `notchDefaults`, nên nạp lại đúng như lúc lưu. |
 ```
 
-- [ ] **Step 2: `docs/KY-THUAT-CHONG-HU.md`**
+- [x] **Step 2: `docs/KY-THUAT-CHONG-HU.md`**
 
 Line 32, the mermaid box: `auto-release 30 s` → `thang nhả 30 s + 10 s/bậc`.
 
@@ -4762,7 +4763,7 @@ Section **## 7. Log session** (line 359-360) — add the row and amend `notch_se
 
 Section **## 8. Trạng thái & kiểm chứng** (line 389) — replace the version line with 1.2.0 and the suite count the final run reports.
 
-- [ ] **Step 3: `docs/spec-ring-risk.md`**
+- [x] **Step 3: `docs/spec-ring-risk.md`**
 
 Insert before `## Out of scope`:
 
@@ -4797,7 +4798,7 @@ Ba điều cần biết khi đọc chip cạnh thang nhả:
   giữ bậc, không giới hạn.
 ```
 
-- [ ] **Step 4: `docs/superpowers/specs/2026-09-05-data-loop-design.md`**
+- [x] **Step 4: `docs/superpowers/specs/2026-09-05-data-loop-design.md`**
 
 In the §3.2 table (lines 103-111), insert after the `notch_set` row:
 
@@ -4820,28 +4821,28 @@ cũ đọc bằng tool mới vẫn chạy đúng, và một `ev` thêm sau này 
 hỏng reader cũ.
 ```
 
-- [ ] **Step 5: roadmap + spec status**
+- [x] **Step 5: roadmap + spec status**
 
 `docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md` line 23 — replace the lane G row's last column with `đã hạ cánh 1.2.0`, and line 70's `| G | chờ S, D | |` with `| G | đã hạ cánh 1.2.0 | thang độ sâu + nhả dần + nhớ phòng; ramp 10 ms trong Biquad |`. In lane A's row, add: `fallback notch = thang G (đặt −6, đào 6 dB/300 ms, nhả 30 s + 10 s/bậc)`.
 
 `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` line 5 — change `**Trạng thái:** spec v2 ... chờ owner duyệt trước khi viết plan` to `**Trạng thái:** đã thực thi, 1.2.0 alpha (plan: docs/superpowers/plans/2026-09-07-gain-aware-notch.md).`
 
-- [ ] **Step 6: `docs/release-notes/1.2.0-alpha.md`**
+- [x] **Step 6: `docs/release-notes/1.2.0-alpha.md`**
 
-Create it in the shape of `1.1.3-alpha.md`. It must contain, in this order: the version and date; the suite count from the final `ctest` run; the four measured attenuations from Task 2's test; a "cái gì đổi" list covering placement (−6/−12), deepening (6 dB/300 ms), the release ladder (30 s + 10 s/rung, Clear at −6), the freeze (no time cap), room memory (5 min, same bin, one use), the −24 clamp, the 10 ms ramp, `notch_retune` in the log, and `savePreset` writing `deepestDb` + `notchDefaults`; and an explicit **"nghe ở âm lượng thấp trước"** block naming the three rows from spec §3 that testers will hear: placement (up to ~0.6 s more howl before it is fully suppressed), the release window from 30 s to the Clear at 40–60 s depending on the rung reached (up to 18 dB more tone missing than 1.1.3), and the "stuck on a shallow rung" case (6–12 dB shallower for the notch's whole life — the intended tone win, and the one thing the suite cannot check). It must also state the Q13 consequence for the shipped presets: `Music` still reaches its −10 dB ceiling and `Speech` its −18, so neither is quieter than on 1.1.3 once the ladder has climbed.
+Create it in the shape of `1.1.3-alpha.md`. It must contain, in this order: the version and date; the suite count from the final `ctest` run; the four measured attenuations from Task 2's test; a "cái gì đổi" list covering placement (−6/−12), deepening (6 dB/300 ms), the release ladder (30 s + 10 s/rung, Clear at −6), the freeze (no time cap), room memory (5 min, same bin, one use), the −24 clamp, the 10 ms ramp, `notch_retune` in the log, and `savePreset` writing `deepestDb` + `notchDefaults`; and an explicit **"nghe ở âm lượng thấp trước"** block naming the three rows from spec §3 that testers will hear: placement (up to ~0.6 s more howl before it is fully suppressed), the release window from 30 s to the Clear at 30–60 s depending on the rung reached (−6: 30 s, the Clear lands on the first expiry; −12 and Music's −10: 40 s; −18: 50 s; −24: 60 s) (up to 18 dB more tone missing than 1.1.3), and the "stuck on a shallow rung" case (6–12 dB shallower for the notch's whole life — the intended tone win, and the one thing the suite cannot check). It must also state the Q13 consequence for the shipped presets: `Music` still reaches its −10 dB ceiling and `Speech` its −18, so neither is quieter than on 1.1.3 once the ladder has climbed.
 
-- [ ] **Step 7: `installer/TESTER-NOTES.md`**
+- [x] **Step 7: `installer/TESTER-NOTES.md`**
 
 Update the header block (version, build date, suite count, SHA-256 — the SHA comes from the installer the release script actually produces, so fill it in AFTER Step 9). Add a `## Mới trong 1.2.0` section before `## Mới trong 1.0.5`, written for a soundman, not a developer. It must say:
 
 - notches now start shallow and get deeper only while the howl continues, so a sudden howl may be audible ~0.3–0.6 s longer than on 1.1.3 — **test at low volume first**;
 - a notch that never needs to go deep will stay at −6 or −12 for its whole life, and that is correct, not a bug — **and this is the one behaviour no automated test in the project can check** (M-3), so it is the rig's job: if every notch on your rig ends up at the DEPTH slider's value, say so, because that is the reinforce loop misreading the spectrum;
-- after a howl stops the notch now backs off in steps instead of vanishing at 30 s: the first step is at 30 s and each one after it costs 10 s, so a notch that reached the DEPTH slider's value takes **40–60 s** to disappear (40 s from −12, 50 s from −18, 60 s from −24) and between 30 s and that moment **more tone is missing than on 1.1.3**;
+- after a howl stops the notch now backs off in steps instead of vanishing at 30 s: the first step is at 30 s and each one after it costs 10 s, so a notch takes **30–60 s** to disappear depending on the rung it stood on (30 s from −6 — already the shallowest rung, so the first expiry Clears it; 40 s from −12 and from Music's −10; 50 s from −18; 60 s from −24) and between 30 s and that moment **more tone is missing than on 1.1.3**;
 - while RING RISK reads RISING or CRITICAL, notches stop backing off entirely, with no time limit;
 - the same howl coming back within 5 minutes is notched deep immediately;
 - what to report: a click or a "zip" when a notch changes depth (there must be none — every change is ramped over 10 ms); a howl the app never gets on top of; a notch that goes deeper than the DEPTH slider says.
 
-- [ ] **Step 8: `memory/`**
+- [x] **Step 8: `memory/`**
 
 Create `memory/gain-aware-notch-lane-g-2026-09-07.md` with the front-matter shape the other notes use, recording whatever this lane actually taught — at minimum: that a coefficient ramp needs a state-identity assertion because every black-box measurement passes a silent `reset()` (M-7); that the reinforce loop and `runOnce` step 3 both already hold a non-recursive `modelMutex_`, which is why a `*Locked` sibling was the only option (B-1); that `pushClearLocked` leaves every field but `active` intact, so slot reuse must be re-initialised at `setNotchImpl` (B-2); that `ev` — not `kind` — is the log's dispatch key (B-3); and the M-9 consequence that "deepen" and "still howling" are the same test, so the ladder stops at the first rung that works.
 
@@ -4857,7 +4858,7 @@ Add, from this plan's own two 2026-09-07 revisions — these are lessons about w
 
 Add one line to `memory/MEMORY.md`'s `## Notes` list, in the same style as its neighbours, linking the new file.
 
-- [ ] **Step 9: Verify and commit**
+- [x] **Step 9: Verify and commit**
 
 Run: `cd build && ctest -C Release`
 Expected: `100% tests passed` — record the number for the release note and the tester notes.
@@ -4878,7 +4879,7 @@ git add docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md docs/super
 git commit -m "docs: lane G -- depth ladder, release staircase, room memory, notch_retune schema"
 ```
 
-- [ ] **Step 10: Release to the alpha testers**
+- [ ] **Step 10: Release to the alpha testers**  — **chưa xong (release-alpha.ps1 chạy sau fix wave này)**
 
 Per CLAUDE.md's standing instruction, a finished change ships. This one is a minor version.
 

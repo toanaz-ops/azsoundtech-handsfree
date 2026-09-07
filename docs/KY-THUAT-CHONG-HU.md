@@ -2,7 +2,7 @@
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
 > đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
-> ctest, **546/546** tại `fba2626`; **chưa đóng gói** — `release-alpha.ps1` sẽ
+> ctest, **547/547** tại `63c1759`; **chưa đóng gói** — `release-alpha.ps1` sẽ
 > chạy sau final review, SHA-256/kích thước cập nhật khi đó; 1.2.0 = lane G,
 > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
@@ -119,7 +119,10 @@ hệ số **đang chạy** giữa ramp rồi tính `|H|` giải tích.
 Suy giảm đo được tại f0 sau khi ramp xong, từng bậc, sai số ±0,5 dB — test
 `NotchChain.MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel` in ra
 `−6,000000 / −12,000000 / −18,000000 / −24,000000 dB` (chạy lại 07/09/2026
-trên binary Release ở `af5201e`).
+trên binary Release ở `fba2626`). Con số đo được không phụ thuộc commit nào
+trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (và
+`cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
+nay cho cùng bốn số này.
 
 **Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
 non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
@@ -250,7 +253,10 @@ lượng tử trần −10 xuống −6 sẽ làm Music nông hơn 1.1.3 4 dB m�
   chứng được — nêu trong tester notes, đừng dựng test giả cho nó.
 - **Nhả**: `quietMs` tích lũy khi bin im; ≥ `kReleaseFirstMs` = 30 s ⇒ nông
   một bậc, mỗi `kReleaseStepMs` = 10 s tiếp theo một bậc nữa, tới −6 thì
-  `Clear(AutoRelease)` — tổng 40 s từ −12, 50 s từ −18, 60 s từ −24. Đồng hồ
+  `Clear(AutoRelease)` — **30–60 s** tùy bậc đang đứng lúc bin im: 30 s từ −6
+  (đã ở bậc nông nhất, hết 30 s là `Clear` luôn, không có bậc nào để nhả),
+  40 s từ −12 (và từ −10 của `Music.json`: `nextShallowerRungDb(−10) = −6`),
+  50 s từ −18, 60 s từ −24. Đồng hồ
   **đóng băng** khi `frameScoreValid_ && frameMaxScore_ ≥ kRiskFreezeFraction`
   (= 0.55) `× kConfirmScore` (băng RISING của chip), không có trần thời gian
   (Q9), và đóng băng là **theo slot**: một bin đang căng giữ **mọi** notch của
@@ -428,8 +434,9 @@ hướng an toàn (chỉ cắt thêm, không bao giờ khuếch đại).
 LOAD trên dàn thật.** Cơ chế trên là hai chiều: nạp một file mà trần **nông
 hơn** trần đang chạy (ví dụ `Music.json` trần −10 trong khi rig đang đứng ở
 −18/−24) kéo **mọi notch Detector** đang sâu hơn trần mới lên ngay ở tick kế
-tiếp của detector — `n.depthDB < ceiling` tại `NotchController.cpp:786-796`
-đẩy một `pushRetuneLocked` reason `Ceiling`, ramp 10 ms — tức tới **+14 dB**
+tiếp của detector — nhánh `if (n.depthDB < ceiling)` tại
+`NotchController.cpp:792-805` (bên trong `if (n.origin == Origin::Detector)`
+mở ở `:752`) đẩy một `pushRetuneLocked` reason `Ceiling`, ramp 10 ms — tức tới **+14 dB**
 năng lượng quay lại đúng tần số vừa hú. Trần **sâu hơn** thì 0 dB ngay lúc nạp,
 chỉ mở đường đào sâu hơn về sau. Preset/Manual/Soundcheck có trần riêng (Q8) và
 không bị kéo. **Mở âm lượng thấp trước khi LOAD, đừng LOAD giữa bài.**
@@ -524,8 +531,8 @@ Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu 
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
 10 ms trong `Biquad`, sự kiện `notch_retune` trong log.
 
-- Suite: **546/546 test pass** (ctest Release, MSVC) sau fix round 2 Task 9
-  của lane G (`fba2626`) — +92 so với 1.1.3 (454). Bốn bậc thang đo được đúng
+- Suite: **547/547 test pass** (ctest Release, MSVC) sau fix wave final review
+  của lane G (`63c1759`) — +93 so với 1.1.3 (454). Bốn bậc thang đo được đúng
   `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
   `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
 - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).

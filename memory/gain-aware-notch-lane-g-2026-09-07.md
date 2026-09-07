@@ -1,8 +1,8 @@
 # Bài học từ lane G (gain-aware notch: thang độ sâu, nhả dần, nhớ phòng) — 2026-09-07
 
 **Bối cảnh:** 10 task SDD + fix rounds trên nhánh
-`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..fba2626`, 1.2.0
-alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **546**.
+`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..63c1759`, 1.2.0
+alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **547**.
 **Đụng audio
 path** (`Biquad`, `NotchChain`, `NotchController`). Spec
 `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` (v2 + Q13 + Q14),
@@ -187,6 +187,25 @@ sách (`idForValue` → 0), và chạm vào MỘT combo khác đọc combo trố
 panel này được viết — chỉ lộ ra khi có một writer thật đưa một giá trị ngoài
 lưới vào model. Bài học: mỗi lần một trường model có thêm một đường GHI mới,
 phải rà lại **mọi** nơi ĐỌC trường đó, không chỉ nơi vừa sửa.
+
+### 21. Sổ sách đi kèm một phép ghi phải nằm CẠNH phép ghi, không ở chỗ gọi
+
+`stageChangedAtMs` được đóng dấu ở **bốn** chỗ gọi `pushRetuneLocked` chứ không
+nằm trong chính nó, dù nó chỉ có đúng một nghĩa: "`liveMs_` lúc depth đổi lần
+cuối", và depth chỉ đổi ở đúng một dòng — `n.depthDB = newDepthDb` trong
+`pushRetuneLocked`. Bốn bản sao đều đúng, nên không test nào đỏ. Nguy hiểm là
+**bản thứ năm**: một caller mới quên đóng dấu để lại notch trông như đã đứng
+yên từ lúc đặt, và cổng 300 ms của DEEPEN (`liveMs_ − stageChangedAtMs >=
+kDeepenAfterMs`) mở ngay — notch leo nhiều bậc trong một cửa sổ, trên PA thật.
+Chuyển dấu vào trong helper (`63c1759`); test `RetuneStampsStageChangedAtMs`
+lái qua seam `retuneForTest` nên nó khẳng định hợp đồng của **helper**, không
+phải của một caller.
+
+Một chỗ gọi vẫn giữ dấu — và đó là điểm đáng nhớ: nhánh kẹp lại có đường tắt
+`target == n.depthDB || pushRetuneLocked(...)`, tức có một đường **kẹp lại mà
+không gửi gì cả** (notch đã đứng đúng ở đích). Đường đó vẫn phải nạp lại cổng
+DEEPEN. Xóa sạch bốn dấu là đổi hành vi ở đúng đường đó — "dọn cho gọn" một
+cách máy móc là cách làm hỏng. Đọc từng chỗ gọi trước khi xóa.
 
 ---
 

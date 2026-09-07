@@ -1,6 +1,6 @@
 # Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
 
-Ngày build: 2026-09-07 · suite test 546/546 xanh (`fba2626`) · installer: kích
+Ngày build: 2026-09-07 · suite test 547/547 xanh (`63c1759`) · installer: kích
 thước điền sau khi đóng gói
 
 SHA-256 của Setup 1.2.0:
@@ -83,9 +83,15 @@ Từ trước tới nay, notch cắt thẳng đúng con số trên slider **DEPT
    nguyên cho tới khi bạn bấm chọn một mục trong danh sách.
 
 **Báo lại ngay** nếu gặp: tiếng "cạch"/"zip" khi notch đổi độ sâu; một tiếng hú
-app không bao giờ khống chế được; hoặc một notch **sâu hơn** con số trên slider
-DEPTH (không đường nào được phép). Kèm file log session trong
-`%APPDATA%\AZSoundtech\HandsFree\logs\`.
+app không bao giờ khống chế được; hoặc một notch **của detector** (dòng có cột
+LANE trong ACTIVE NOTCHES, **không** phải notch từ Preset/Manual/Soundcheck)
+sâu hơn con số trên slider DEPTH — đường đó không được phép.
+
+Notch từ **Preset, Manual hoặc Soundcheck mang trần riêng của nó** (Q8) và
+**được phép** đứng sâu hơn slider: một preset lưu sau khi vừa hú nạp lại ở
+`deepestDb`, có thể tới −24 dB, dù slider đang để −6 — đúng là dòng chảy bước 3
+của kịch bản test dưới đây. Đó là thiết kế, không phải lỗi. Kèm file log session
+trong `%APPDATA%\AZSoundtech\HandsFree\logs\`.
 
 ## Mới trong 1.0.5 (so với 1.0.4)
 
@@ -118,7 +124,8 @@ DEPTH (không đường nào được phép). Kèm file log session trong
    marker trên phổ. Nhìn cột độ sâu trong **ACTIVE NOTCHES**: nó phải bắt đầu
    ở **−6** (hoặc −12) rồi đi sâu dần, chứ không nhảy thẳng vào số trên slider
    DEPTH. Hết hú: 30 giây sau nó nông đi một bậc, rồi mỗi 10 giây một bậc, tới
-   −6 thì biến mất (40–60 giây tổng cộng).
+   −6 thì biến mất (**30–60 giây** tổng cộng, tùy bậc nó đang đứng khi hết hú:
+   −6 → 30 s; −12 hoặc −10 → 40 s; −18 → 50 s; −24 → 60 s).
 6. BYPASS: nghe passthrough trong suốt, không màu.
 7. ROUTING: bật thêm slot 02, đổi kênh vào/ra → không click/pop, không sập.
 8. Thanh ANALYSER: đổi averaging (0.1 s → 3 s), Peak hold, RANGE (gõ "60",

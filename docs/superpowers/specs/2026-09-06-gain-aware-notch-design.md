@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
 **Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q14, đừng hỏi lại).
-**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task + fix rounds, suite 546/546 tại `fba2626`, chưa đóng gói — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task + fix rounds, suite 547/547 tại `63c1759`, chưa đóng gói — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
 
@@ -256,8 +256,14 @@ audio.
 
 - Mỗi làn một mảng cố định 16 mục `{frequencyHz, deepestDb, clearedAtMs}`,
   ghi vòng (đè cũ nhất). Không allocate.
-- Ghi khi Clear do `AutoRelease` từ bậc −6 (không ghi Manual/ClearAll/
-  WidthChange/VerdictFalse/PartialApplyUnwind).
+- Ghi khi Clear do `AutoRelease` (không ghi Manual/ClearAll/WidthChange/
+  VerdictFalse/PartialApplyUnwind). **Chính xác hơn "từ bậc −6"**: chỗ ghi là
+  nhánh `else` của `if (n.depthDB < kDepthLadderDb[0])` trong vòng nhả
+  (`NotchController.cpp:830-844`), tức mọi notch có `depthDB >= −6` khi đồng
+  hồ im hết hạn — bậc −6 là trường hợp thường gặp, nhưng một notch Manual đặt
+  ở độ sâu **lệch bậc và nông hơn −6** (vd. −3 dB) rơi thẳng vào nhánh này
+  ngay lần hết hạn đầu tiên và ghi `deepestDb = −3` vào phòng nhớ. Đúng
+  nghĩa: cái được ghi là "độ sâu bin này đã cần", không phải "bậc −6".
 - Đọc ở §4.3 bước 3: cùng làn, **cùng bin** (`lround(f / binWidth)` bằng
   nhau, ±0 — Q10; lệch một bin là hú mới, bắt đầu −6), `liveMs_ −
   clearedAtMs ≤ kMemoryTtlMs (300 000)`. Trúng thì **xóa mục** (đã dùng).
@@ -381,9 +387,25 @@ audio.
    `max(deepestDb, ceilingRung)`, và `deepestDb` của notch Detector bị kẹp
    về trần mỗi tick (§4.1, §4.4, §4.5 bước 2). Không có đường nào để một
    `deepestDb` ghi lại dưới trần cũ quay lại làm depth dưới trần mới.
-3. Một lần đổi depth theo hướng **sâu** ≤ 6 dB. Theo hướng **nông** có thể
-   > 6 dB một lần (hạ trần nhiều bậc) — được phép, nông đi không nguy hiểm.
-   Mọi lần đều trải `kRampMs` ⇒ ≤ 0.6 dB/ms theo hướng sâu.
+3. Một bước **ĐÀO SÂU** (`RetuneReason::Deepen`) ≤ 6 dB — `nextDeeperRungDb`
+   đi đúng một bậc, và bậc cuối còn có thể nhỏ hơn 6 dB khi trần lệch bậc
+   (Q13). Theo hướng **nông** thì **không có trần**: hạ trần nhiều bậc một
+   lúc đổi > 6 dB trong một bước, được phép vì nông đi không nguy hiểm.
+
+   **Ngoại lệ có chủ ý — KẸP LẠI (`RetuneReason::Reclamp`, §4.4):** một lần
+   kẹp lại đi thẳng về `max(deepestDb, ceilingRung)`, tức **tới 18 dB theo
+   hướng SÂU trong một ramp 10 ms** (−6 → −24 sau khi đã nhả hết ba bậc).
+   Đó là thiết kế, không phải vi phạm: đích đến là **một độ sâu chính notch
+   này đã từng đứng** và đã được chứng minh là cần, invariant 2 vẫn giữ
+   (không bao giờ quá trần), `|H| ≤ 1` ở mọi điểm giữa ramp
+   (`Biquad.RampMidpointsNeverBoostAnyFrequency`), và hệ số đi liên tục nên
+   không có reset, không có "cạch".
+
+   Mọi lần đổi đều trải `kRampMs` ⇒ ≤ 0.6 dB/ms cho bước đào sâu, ≤ 1.8 dB/ms
+   cho một lần kẹp lại tối đa. **`NotchChain` không cưỡng chế điều nào ở
+   trên** (`NotchChain.h` nói rõ nó nhận bất kỳ độ sâu hợp lệ nào) — thang
+   trong `NotchController` mới là nơi giữ, và invariant này chỉ đúng chừng
+   nào thang còn là đường duy nhất gọi `pushRetuneLocked`.
 4. Bộ hệ số đích bị `Biquad` từ chối ⇒ slot không đổi, ramp cũ (nếu có)
    không đổi.
 5. Ramp chỉ giữa hai bộ cùng `freq`, `Q`, `sampleRate`; đổi bất kỳ cái nào
@@ -484,8 +506,13 @@ cách chỉnh nằm trong plan Task 5.
   nhỏ: 200 block ngẫu nhiên reinforce/yên/frozen).
 
 ### 5.4 Snapshot tool / ảnh
-- `HandsFreeSnapshot` không cần stage mới; ảnh `console-live.png` gửi owner
-  theo luật GUI, số depth trên panel là −6/−12 thay vì −18.
+- `console-live.png`: gửi owner theo luật GUI, số depth trên panel là
+  −6/−12 thay vì −18. Tool có stage sẵn thang −18/−12/−6 (`97521aa`).
+- `console-preset-music.png` (thêm ở fix wave final review, I-4): đúng khung
+  của `console-live` nhưng đặt notch defaults về cặp lệch bậc của
+  `presets/Music.json` (Q 25, −10 dB) rồi `TuningPanel::refresh()` +
+  `SlotPanel::refresh()`, để có ảnh chứng minh hành vi `fba2626` — ô DEPTH
+  hiện "−10 dB" và ô Q hiện "25" bằng chữ thay vì bỏ trống.
 
 ## 6. Việc phải làm ngoài code
 
