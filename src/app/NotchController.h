@@ -513,8 +513,10 @@ private:
     // --- "Room memory" (spec 4.6, Q3/Q6/Q10) ------------------------------
     // What a bin needed LAST time, so a howl that comes back inside
     // kMemoryTtlMs is answered at the depth that killed it rather than
-    // crawling up the ladder again while the room rings. Per lane, fixed size,
-    // oldest entry overwritten -- no allocation, ever. Detector-thread reads
+    // crawling up the ladder again while the room rings. Per lane, fixed size:
+    // a free slot is refilled first, and only when all kMemoryEntriesPerLane
+    // are LIVE is the oldest write overwritten -- no allocation, ever.
+    // Detector-thread reads
     // (placeConfirmed, the release path) and message-thread wipes (setWidth,
     // clearAll, setSampleRate) all go through modelMutex_, the lock every one
     // of those already takes: no new lock, no new order.
@@ -537,8 +539,10 @@ private:
     // would otherwise each write twice.
     void   rememberReleaseLocked (int lane, double frequencyHz, double deepestDb, bool bothLanes);
     // modelMutex_ HELD. The remembered depth for (lane, bin), CONSUMING the
-    // entry -- one use only. NaN when nothing matched. Bin equality is exact
-    // (Q10): one bin away is a new howl.
+    // entry -- one use only, and the slot is emptied so the ring can reuse it.
+    // NaN when nothing matched. Bin equality is exact (Q10): one bin away is a
+    // new howl. The caller may only ever DEEPEN a placement with the result
+    // (Q14) -- see placeConfirmed step 3.
     double takeRememberedDepthLocked (int lane, double frequencyHz, double binWidthHz, bool bothLanes);
     void   clearRoomMemoryLocked();
     // The ceiling this notch obeys: its own, or the LIVE slider for a Detector

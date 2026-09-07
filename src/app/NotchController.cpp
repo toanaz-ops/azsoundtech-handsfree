@@ -343,30 +343,59 @@ void NotchController::rememberReleaseLocked (int lane, double frequencyHz,
 {
     const int first = bothLanes ? 0 : lane;
     const int last  = bothLanes ? width_ - 1 : lane;
+    // Every caller reaches this from a lane index the release loop already
+    // bounded to [0, width_); a negative one would index the array out of
+    // range, so it is asserted rather than silently skipped.
+    jassert (first >= 0);
     for (int l = first; l <= last && l < kChannels; ++l)
     {
-        if (l < 0)
-            continue;
         auto& bank = roomMemory_[(std::size_t) l];
 
-        // Merge onto an existing entry for the same frequency rather than
-        // writing a second one. A LINKED pair clears on the same tick and both
-        // lanes write both banks, so without this the ring fills with
+        // One pass, two answers.
+        //
+        // `target`: an existing entry for the same frequency, MERGED onto
+        // rather than duplicated. A LINKED pair clears on the same tick and
+        // both lanes write both banks, so without this the ring fills with
         // duplicates and a lookup consumes one while leaving its twin behind.
-        int target = -1;
+        //
+        // `firstFree`: the first slot holding nothing -- never written, or
+        // emptied by a consume or a TTL expiry. Refilling a hole before
+        // touching the head is what makes the ring hold sixteen LIVE entries:
+        // without it a consumed slot rots as a permanent gap while the head
+        // walks past it and evicts a live neighbour instead, so a room that
+        // howls at a few bins repeatedly ends up with a memory that holds far
+        // fewer than the sixteen the header promises.
+        int target = -1, firstFree = -1;
         for (int k = 0; k < kMemoryEntriesPerLane; ++k)
-            if (bank[(std::size_t) k].used
-                && bank[(std::size_t) k].frequencyHz == frequencyHz)
+        {
+            auto& slot = bank[(std::size_t) k];
+            if (slot.used)
             {
-                target = k;
-                break;
+                if (slot.frequencyHz == frequencyHz)
+                {
+                    target = k;
+                    break;
+                }
             }
+            else if (firstFree < 0)
+                firstFree = k;
+        }
 
         const bool merging = target >= 0;
         if (! merging)
         {
-            target = roomMemoryHead_[(std::size_t) l];
-            roomMemoryHead_[(std::size_t) l] = (target + 1) % kMemoryEntriesPerLane;
+            if (firstFree >= 0)
+            {
+                // A hole: fill it and leave the head where it is, so the
+                // oldest LIVE entry keeps its place in the eviction order.
+                target = firstFree;
+            }
+            else
+            {
+                // Every slot live: the head is the oldest write, and it goes.
+                target = roomMemoryHead_[(std::size_t) l];
+                roomMemoryHead_[(std::size_t) l] = (target + 1) % kMemoryEntriesPerLane;
+            }
         }
 
         auto& e = bank[(std::size_t) target];
@@ -388,12 +417,11 @@ double NotchController::takeRememberedDepthLocked (int lane, double frequencyHz,
     const long targetBin = std::lround (frequencyHz / binWidthHz);
     const int  first = bothLanes ? 0 : lane;
     const int  last  = bothLanes ? width_ - 1 : lane;
+    jassert (first >= 0);   // as in rememberReleaseLocked: a validated lane
 
     double best = std::numeric_limits<double>::quiet_NaN();
     for (int l = first; l <= last && l < kChannels; ++l)
     {
-        if (l < 0)
-            continue;
         for (auto& e : roomMemory_[(std::size_t) l])
         {
             if (! e.used)
@@ -404,11 +432,16 @@ double NotchController::takeRememberedDepthLocked (int lane, double frequencyHz,
                 continue;
             if (liveMs_ - e.clearedAtMs > kMemoryTtlMs)
             {
-                e.used = false;   // expired: drop it while we are here
+                // Expired: drop it while we are here. Emptied WHOLE, not just
+                // un-`used`, so the slot really goes back into service --
+                // rememberReleaseLocked refills a hole before it evicts a live
+                // entry, and a half-cleared slot still carrying a frequency is
+                // an invitation for a later reader to match on it.
+                e = MemoryEntry {};
                 continue;
             }
-            best   = std::isnan (best) ? e.deepestDb : std::min (best, e.deepestDb);
-            e.used = false;       // one use only (spec 4.6)
+            best = std::isnan (best) ? e.deepestDb : std::min (best, e.deepestDb);
+            e    = MemoryEntry {};   // one use only (spec 4.6), slot reclaimed
         }
     }
     return best;
@@ -1064,10 +1097,15 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
         if (linkedNow) { index = firstFreeIndexAllLanesLocked(); firstLane = 0; lastLane = width_ - 1; }
         else           { index = firstFreeIndexLocked (lane); }
         // Room memory (spec 4.6), looked up ONLY when a placement is actually
-        // going to happen: the entry is CONSUMED by the lookup, and spending
-        // it on a placement that then bails on a full chain would lose the
-        // room's history for nothing.
-        if (index >= 0)
+        // going to happen AND could use the answer: the entry is CONSUMED by
+        // the lookup. Spending it on a placement that then bails on a full
+        // chain would lose the room's history for nothing -- and so would
+        // spending it on a Soundcheck placement, whose depth is the slider and
+        // nothing else (KD-7, the override at the end of the depth choice
+        // below). Consuming an entry there would silently throw the room's
+        // history away and leave the next DETECTOR howl at that bin crawling
+        // up from -6.
+        if (index >= 0 && origin != Origin::Soundcheck)
             remembered = takeRememberedDepthLocked (lane, cand.frequencyHz,
                                                     pc.sampleRate / (double) Detector::kFftSize,
                                                     linkedNow);
@@ -1084,8 +1122,20 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     // step 3 (spec 4.6): this bin howled before, recently, and we know what it
     // took. Skip the crawl. Nowhere else: this is the ONE place a remembered
     // depth may enter a placement.
+    //
+    // Q14 (owner ruling 2026-09-07,
+    // docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md): the
+    // memory may only ever DEEPEN a placement, never shallow it. min() picks
+    // the deeper of the two because deeper is more negative. An entry records
+    // what the bin needed last time -- and "last time" includes a notch that
+    // never had to dig: a -6 that never reinforced, or an operator's Manual -3
+    // left to age out. Assigning `remembered` outright would let such an entry
+    // CLAMP the next placement to -3 and undercut the -12 the steep-rise
+    // branch asked for, on a howl already loud enough to have triggered it --
+    // i.e. the memory would make the app quieter-acting at exactly the bin it
+    // was added to protect. Steps 1-2 stay the floor; the memory only lowers.
     if (! std::isnan (remembered))
-        depthDb = remembered;
+        depthDb = std::min (depthDb, remembered);
 
     // step 4: never deeper than the ceiling, which under Q13 IS the deepest
     // rung. max() picks the SHALLOWER of the two because deeper is more
