@@ -77,6 +77,22 @@ const char* reasonName (NotchController::ClearReason r)
     return "unknown";
 }
 
+// Lane G. A FREE function, in the same anonymous namespace as originName and
+// reasonName above -- notchEventToVar calls it unqualified from this same
+// translation unit, and a `MainComponent::` member would need a header
+// declaration it deliberately does not have.
+const char* retuneReasonName (NotchController::RetuneReason r)
+{
+    switch (r)
+    {
+        case NotchController::RetuneReason::Deepen:  return "deepen";
+        case NotchController::RetuneReason::Release: return "release";
+        case NotchController::RetuneReason::Reclamp: return "reclamp";
+        case NotchController::RetuneReason::Ceiling: return "ceiling";
+    }
+    return "deepen";
+}
+
 const char* modeName (AudioEngine::Mode m)
 {
     switch (m)
@@ -559,7 +575,14 @@ bool MainComponent::isSlotLinked (int slotIndex) const
 juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
 {
     using Ev = NotchController::NotchEvent;
-    auto v = SessionLogger::makeEvent (e.kind == Ev::Kind::Set ? "notch_set" : "notch_clear");
+    // B-3: `ev` is the key tools/logstats.py dispatches on, and the ternary
+    // this replaced would have written every Retune as a notch_clear -- which
+    // closes the notch's record at its first 300 ms deepening and makes every
+    // deepened notch look like a 300 ms false positive.
+    const char* evName = e.kind == Ev::Kind::Set    ? "notch_set"
+                       : e.kind == Ev::Kind::Retune ? "notch_retune"
+                                                    : "notch_clear";
+    auto v = SessionLogger::makeEvent (evName);
     auto* o = v.getDynamicObject();
     o->setProperty ("slot", e.slot);
     o->setProperty ("lane", e.lane);
@@ -568,6 +591,14 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("q", (double) e.q);
     o->setProperty ("depth_db", (double) e.depthDb);
     o->setProperty ("origin", originName (e.origin));
+
+    if (e.kind == Ev::Kind::Retune)
+    {
+        o->setProperty ("reason", retuneReasonName (e.retuneReason));
+        o->setProperty ("from_db", (double) e.fromDepthDb);
+        o->setProperty ("age_ms", e.ageMs);
+        return v;   // no score, no ctx: a retune is not a placement decision
+    }
 
     if (e.kind == Ev::Kind::Clear)
     {
@@ -955,7 +986,11 @@ bool MainComponent::savePreset (const juce::File& file)
             pn.index   = sn.index;
             pn.freq    = sn.frequency;
             pn.Q       = sn.Q;
-            pn.depthDB = sn.depthDB;
+            // Q11: the depth the room NEEDED, not the rung the release ladder
+            // happens to be resting on when SAVE was pressed. A preset saved
+            // during a quiet stretch would otherwise reload two rungs too
+            // shallow and let the same howl come back.
+            pn.depthDB = sn.deepestDb;
             pn.slot    = s;
             pn.lane    = sn.channel;
             preset.notches.push_back (pn);
@@ -983,6 +1018,13 @@ bool MainComponent::savePreset (const juce::File& file)
     }
 
     preset.sampleRate = presetRate;
+
+    // Q11: the CEILING round-trips too. Without this a reloaded preset falls
+    // back to PresetNotchDefaults' -12 dB (PresetManager.h) and caps every
+    // detector notch two rungs shallower than the show was tuned at -- a bug
+    // that predates lane G and that lane G's ladder makes load-bearing.
+    preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
+    preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
 
     juce::StringArray errors;
     const bool ok = PresetManager::saveToFile (preset, file, errors);

@@ -2,7 +2,7 @@
 """Summarise a Hands-free session log (lane D, data-loop design §3.5).
 
     python tools/logstats.py <session-*.jsonl>
-    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2
+    python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2
 
 Stdlib only. Never assumes 1025 bins; never reads audio (there is none).
 """
@@ -49,9 +49,28 @@ def summarise(events: list[dict]) -> dict:
             n = {"slot": e.get("slot"), "lane": e.get("lane"), "index": e.get("index"),
                  "hz": float(e.get("hz", 0.0)), "origin": e.get("origin", "?"),
                  "set_t": float(e.get("t", 0.0)), "clear_t": None, "reason": None,
-                 "verdict": None, "score": e.get("score")}
+                 "verdict": None, "score": e.get("score"),
+                 # lane G: the depth a notch is RUNNING at, and how many times
+                 # it moved. Both start at the placement values.
+                 "depth_db": e.get("depth_db"), "deepest_db": e.get("depth_db"),
+                 "retunes": 0}
             notches.append(n)
             open_by_key[key(e)] = n
+        elif ev == "notch_retune":
+            # lane G: a retune UPDATES the open record. It must never close it
+            # -- a deepening 300 ms after placement would otherwise read as a
+            # 300 ms notch, and every deepened howl in the log would look like
+            # a false positive. An unknown ev name falls through every branch
+            # here, so a NEW event added later cannot corrupt an old reader
+            # either; that is why this is an if/elif chain and not a lookup
+            # that raises.
+            n = open_by_key.get(key(e))
+            if n is not None:
+                n["depth_db"] = e.get("depth_db")
+                if n["deepest_db"] is None or (e.get("depth_db") is not None
+                                               and float(e["depth_db"]) < float(n["deepest_db"])):
+                    n["deepest_db"] = e.get("depth_db")
+                n["retunes"] += 1
         elif ev == "verdict":
             n = open_by_key.get(key(e))
             if n is not None:
@@ -84,6 +103,7 @@ def summarise(events: list[dict]) -> dict:
         "groups": sorted(groups, key=lambda g: -g["count"]),
         "verdicts": len(judged), "false": false_count,
         "unjudged": len(notches) - len(judged),
+        "retunes": sum(n["retunes"] for n in notches),
         "dropped": end.get("dropped_events"),
     }
 
@@ -95,11 +115,15 @@ def print_report(s: dict) -> None:
     if s["modes"]:
         print("modes     " + "  ".join(f"{fmt_ms(t)}:{m}" for t, m in s["modes"]))
     print()
-    print(f"{'#':>3} {'slot':>4} {'lane':>4} {'hz':>8} {'origin':<10} {'held':>8} {'verdict':<8} {'cleared by':<20}")
+    print(f"{'#':>3} {'slot':>4} {'lane':>4} {'hz':>8} {'origin':<10} {'depth':>7} {'deep':>6} "
+          f"{'rt':>3} {'held':>8} {'verdict':<8} {'cleared by':<20}")
     for i, n in enumerate(s["notches"], 1):
         held = (n["clear_t"] if n["clear_t"] is not None else s["duration_ms"]) - n["set_t"]
         lane = "R" if n["lane"] == 1 else "L"
-        print(f"{i:>3} {n['slot']:>4} {lane:>4} {n['hz']:>8.1f} {n['origin']:<10} {fmt_ms(held):>8} "
+        depth = "?" if n["depth_db"] is None else f"{float(n['depth_db']):.0f}dB"
+        deep = "?" if n["deepest_db"] is None else f"{float(n['deepest_db']):.0f}dB"
+        print(f"{i:>3} {n['slot']:>4} {lane:>4} {n['hz']:>8.1f} {n['origin']:<10} "
+              f"{depth:>7} {deep:>6} {n['retunes']:>3} {fmt_ms(held):>8} "
               f"{(n['verdict'] or '-'):<8} {(n['reason'] or 'still active'):<20}")
     print()
     print("recurrence (Hz within one bin, count of placements):")
@@ -111,7 +135,7 @@ def print_report(s: dict) -> None:
     print()
     total = len(s["notches"])
     v = s["verdicts"]
-    print(f"notches {total}  judged {v}  false {s['false']}"
+    print(f"notches {total}  retunes {s['retunes']}  judged {v}  false {s['false']}"
           f"  false-rate {(s['false'] / v * 100 if v else 0):.0f}%"
           f"  unjudged {s['unjudged']} ({(s['unjudged'] / total * 100 if total else 0):.0f}%)")
     if s["dropped"]:
@@ -125,6 +149,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-verdicts", type=int)
     ap.add_argument("--expect-false", type=int)
     ap.add_argument("--expect-recurrence-max", type=int)
+    ap.add_argument("--expect-retunes", type=int)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -141,6 +166,8 @@ def main(argv: list[str]) -> int:
         failures.append(f"verdicts {s['verdicts']} != {args.expect_verdicts}")
     if args.expect_false is not None and s["false"] != args.expect_false:
         failures.append(f"false {s['false']} != {args.expect_false}")
+    if args.expect_retunes is not None and s["retunes"] != args.expect_retunes:
+        failures.append(f"retunes {s['retunes']} != {args.expect_retunes}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

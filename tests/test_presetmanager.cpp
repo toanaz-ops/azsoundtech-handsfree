@@ -507,6 +507,28 @@ TEST (PresetManager, NotchDefaultsSurviveTheRoundTrip)
     EXPECT_LT (result.preset.notchDefaults.depthDB, 0.0);
 }
 
+// RED IF the deepest rung of the lane-G ladder stops round-tripping. -24 dB
+// is a legal ceiling and a legal notch depth, and a preset that cannot carry
+// it caps the app two rungs shallower than the operator asked for.
+TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
+{
+    // makeValidPreset(), not a default-constructed Preset: version, device and
+    // bufferSize are all validated, and a bare `Preset p;` is refused for a
+    // bufferSize of 0 long before it ever reaches the depth this test is about.
+    Preset p = makeValidPreset();
+    p.notchDefaults.Q       = 30.0;
+    p.notchDefaults.depthDB = -24.0;
+    PresetNotch n;
+    n.index = 0; n.freq = 1000.0; n.Q = 30.0; n.depthDB = -24.0; n.slot = 0; n.lane = 0;
+    p.notches = { n };
+
+    const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+    ASSERT_EQ (result.preset.notches.size(), 1u);
+    EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -24.0);
+}
+
 // The same rules as a real notch. A bad default is worse than a bad notch,
 // because it seeds every notch the detector goes on to create.
 TEST (PresetManager, APositiveDefaultDepthIsRefused)
