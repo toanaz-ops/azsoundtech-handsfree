@@ -2252,3 +2252,267 @@ TEST (NotchControllerLadder, PresetNotchesKeepTheirOwnCeilingAndDetectorNotchesF
     // The detector notch obeys the -24 slider, so the steep-rise rung stands.
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -12.0);
 }
+
+// === Task 6: the deepen ladder inside the reinforce loop ==================
+//
+// M-3: the harness writes the RAW tone into h.tap, so nothing applies the
+// notch chain between the tone and the Detector -- the analyser sees the
+// UN-notched spectrum on every frame. The Q7 claim "the ladder stops at the
+// first rung that quiets the bin" therefore cannot be observed here and no
+// test below pretends it can: in this fixture the bin never goes quiet and the
+// ladder always climbs to the ceiling. That claim belongs in the tester notes.
+//
+// M-A: the reclamp branch is implemented in this task but has no red test in
+// it. Only the release ladder of task 7 can put releasedSteps above 0 through
+// the real path, and faking it through retuneForTest cannot work (that seam
+// writes depthDB and nothing else). AReturningHowlReclampsImmediatelyToDeepestDb
+// lives in task 7.
+
+// RED IF the ladder stops climbing while the bin is still over threshold
+// (spec 4.4). The tone never stops, so every 300 ms of live time buys one
+// rung until the ceiling's rung is reached.
+TEST (NotchControllerLadder, AContinuingHowlDeepensOneRungPer300ms)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);   // ceiling: the whole ladder
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -12.0);
+    const double placedAt = h.controller.liveMsForTest();
+
+    // Keep the howl going. 300 ms is ~29 blocks of 10.667 ms.
+    SineSource tone;
+    double sawMinus18At = -1.0, sawMinus24At = -1.0;
+    for (int i = 0; i < 200; ++i)
+    {
+        pump (h, tone.hop());
+        const double d = h.controller.depthDbForTest (0, slot);
+        if (sawMinus18At < 0.0 && d <= -18.0) sawMinus18At = h.controller.liveMsForTest();
+        if (sawMinus24At < 0.0 && d <= -24.0) sawMinus24At = h.controller.liveMsForTest();
+    }
+
+    ASSERT_GT (sawMinus18At, 0.0) << "the ladder never reached -18";
+    ASSERT_GT (sawMinus24At, 0.0) << "the ladder never reached -24";
+    EXPECT_GE (sawMinus18At - placedAt, NotchController::kDeepenAfterMs);
+    EXPECT_GE (sawMinus24At - sawMinus18At, NotchController::kDeepenAfterMs);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -24.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0);
+}
+
+// RED IF the ceiling stops capping the climb. A ceiling of -18 must leave the
+// notch at -18 no matter how long the howl continues.
+TEST (NotchControllerLadder, DeepeningStopsAtTheCeilingRung)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -18.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+
+    SineSource tone;
+    for (int i = 0; i < 300; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -18.0);
+}
+
+// RED IF the last step of the climb is a full 6 dB past an off-rung ceiling,
+// or is quantised away (Q13). Ceiling -13.7: the effective ladder is
+// -6 -> -12 -> -13.7, so the final step is 1.7 dB, not 6.
+TEST (NotchControllerLadder, TheLastStepLandsExactlyOnAnOffRungCeiling)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -13.7);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));   // steep -> -12, capped -12
+    ASSERT_GE (slot, 0);
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -12.0);
+
+    SineSource tone;
+    for (int i = 0; i < 300; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -13.7);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -13.7);
+}
+
+// RED IF a ceiling of -6 stops meaning "never deepen" (spec 4.1, Q13: the
+// effective ladder for ceiling -6 is one rung long).
+//
+// M-2: this must NOT assert "no Set at all". Detection stays armed -- and it
+// has to, because reinforcement lives behind the same gate -- so the armed
+// detector keeps confirming and placing FRESH notches on the still-ringing
+// lane, each of which is a legitimate Set on a DIFFERENT index. Assert on the
+// depth of THIS slot, and on commands carrying this (lane, index) only.
+TEST (NotchControllerLadder, ACeilingOfMinusSixNeverDeepens)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -6.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    NotchCommand drained {};
+    while (h.commands.read (&drained, 1) == 1) {}
+
+    SineSource tone;
+    int retunesOfThisSlot = 0;
+    for (int i = 0; i < 300; ++i)
+    {
+        pump (h, tone.hop());
+        while (h.commands.read (&drained, 1) == 1)
+            if (drained.type == NotchCommandType::Set
+                && drained.channel == 0 && drained.index == slot)
+                ++retunesOfThisSlot;
+    }
+
+    EXPECT_TRUE (h.controller.activeForTest (0, slot));
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -6.0);
+    EXPECT_EQ (retunesOfThisSlot, 0) << "a ceiling of -6 emitted a retune";
+}
+
+// RED IF a Preset notch is dragged down the ladder (spec 4.3): the file said
+// what it wanted, and its own depth is its ceiling.
+TEST (NotchControllerLadder, APresetNotchNeverDeepens)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+    // Place it exactly on the tone SineSource produces (bin 43 = 1007.8125 Hz)
+    // so the reinforce loop finds it every frame.
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -12.0,
+                                        NotchController::Origin::Preset));
+
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource tone;
+    for (int i = 0; i < 200; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+}
+
+// RED IF a LINKED pair can end up on different rungs. Both lanes are
+// reinforced from the same frame, so they must climb together.
+TEST (NotchControllerLadder, LinkedLanesStayOnTheSameRung)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    NoiseSource quietL, quietR; quietR.rng.seed (999u);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+
+    SineSource toneL, toneR;
+    for (int i = 0; i < 200; ++i)
+        pumpStereo (h, toneL.hop(), toneR.hop());
+
+    // B-3: activeForTest, not "depthDbForTest < 0" -- a cleared slot keeps its
+    // depth, so a depth probe would compare two dead lanes and pass on nothing.
+    bool sawAny = false;
+    for (int i = 0; i < NotchController::kSlots; ++i)
+        if (h.controller.activeForTest (0, i) && h.controller.activeForTest (1, i))
+        {
+            sawAny = true;
+            EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, i),
+                              h.controller.depthDbForTest (1, i)) << "index " << i;
+            EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, i),
+                              h.controller.deepestDbForTest (1, i)) << "index " << i;
+        }
+    EXPECT_TRUE (sawAny) << "no linked pair was ever placed";
+}
+
+// RED IF an INDEP placement touches the other lane (spec 5.3, INDEP leaves the
+// other lane alone) -- the half the LINKED test above cannot see. The right
+// lane is quiet throughout, so nothing may appear on it at any rung.
+TEST (NotchControllerLadder, IndepLeavesTheOtherLaneUntouchedThroughTheWholeClimb)
+{
+    StereoHarness h;
+    h.controller.setLinked (false);
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    NoiseSource quietL, quietR; quietR.rng.seed (999u);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+
+    SineSource toneL;
+    for (int i = 0; i < 200; ++i)
+        pumpStereo (h, toneL.hop(), quietR.hop());
+
+    bool sawLeft = false;
+    for (int i = 0; i < NotchController::kSlots; ++i)
+    {
+        sawLeft |= h.controller.activeForTest (0, i);
+        EXPECT_FALSE (h.controller.activeForTest (1, i))
+            << "INDEP placed or deepened on the quiet lane, index " << i;
+    }
+    EXPECT_TRUE (sawLeft) << "the ringing lane never placed anything";
+}
+
+// RED IF a Soundcheck notch is deepened or reclamped (KD-7).
+TEST (NotchControllerLadder, SoundcheckNotchesNeverDeepen)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    h.controller.startSoundcheck();
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    const double placed = h.controller.depthDbForTest (0, slot);
+
+    SineSource tone;
+    for (int i = 0; i < 200; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), placed);
+}
+
+// RED IF any command the ladder emits leaves the validated depth window
+// (spec 4.10 invariant 1 / Q12). A small fuzz over the ceiling, on-rung and
+// off-rung: every Set this controller emits -- placement OR retune -- must
+// carry a depth in [-24, 0]. Deliberately cheap: the point is that no ceiling
+// value can talk the ladder past the floor, not a statistical claim.
+TEST (NotchControllerLadder, NoEmittedSetEverLeavesTheValidDepthWindow)
+{
+    const double ceilings[] = { -6.0, -7.3, -10.0, -13.7, -18.0, -23.4, -24.0 };
+    for (double ceiling : ceilings)
+    {
+        Harness h;
+        h.controller.setDetectionActive (true);
+        h.controller.setNotchDefaults (30.0, ceiling);
+
+        NoiseSource quiet;
+        for (int i = 0; i < kWarmupBlocks; ++i)
+            pump (h, quiet.hop());
+
+        SineSource tone;
+        int sets = 0;
+        for (int i = 0; i < 120; ++i)
+        {
+            pump (h, tone.hop());
+            NotchCommand cmd {};
+            while (h.commands.read (&cmd, 1) == 1)
+                if (cmd.type == NotchCommandType::Set)
+                {
+                    ++sets;
+                    EXPECT_LE (cmd.depthDB, 0.0f)   << "ceiling " << ceiling;
+                    EXPECT_GE (cmd.depthDB, -24.0f) << "ceiling " << ceiling;
+                }
+        }
+        EXPECT_GT (sets, 0) << "ceiling " << ceiling << ": nothing was ever emitted";
+    }
+}

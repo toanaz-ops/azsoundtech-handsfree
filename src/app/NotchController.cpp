@@ -1007,6 +1007,82 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                         > la.analyzer.getThreshold())
                 {
                     n.lastDetectedMs = liveMs_;
+                    // Lane G: the bin is loud again, so the release clock's
+                    // banked quiet time is spent, not merely paused.
+                    n.quietMs        = 0.0;
+
+                    if (n.releasedSteps > 0)
+                    {
+                        // RECLAMP (spec 4.4, Q3). No 300 ms gate: the ladder
+                        // had already PROVEN this bin needs deepestDb, and a
+                        // howl coming back is the emergency the whole feature
+                        // exists for. One step, ramped over kRampMs like every
+                        // other depth change -- it may be more than 6 dB, and
+                        // that is deliberate (invariant 3 bounds the DEEP
+                        // direction per step; this is a return to a depth this
+                        // notch already ran at).
+                        //
+                        // M-B: the target is CLAMPED to the live ceiling. The
+                        // ceiling is read fresh every tick, and the operator
+                        // may have pulled the slider up while this notch was
+                        // releasing -- the ceiling branch of the release
+                        // ladder cannot have caught that, because a notch
+                        // sitting SHALLOWER than the new ceiling never enters
+                        // it. Without the max() a notch that climbed to -24,
+                        // released to -6 under a slider then dropped to -12
+                        // would reclamp to -24: 12 dB past the ceiling,
+                        // violating Q1 and spec 4.10 invariant 2. max() picks
+                        // the SHALLOWER value. For Preset/Manual,
+                        // ceilingDbFor(n) IS their own depth, which equals
+                        // deepestDb, so this is identity.
+                        const double target = std::max (n.deepestDb, ceilingDbFor (n));
+                        if (pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
+                        {
+                            // Keep the memory and the depth in step: when the
+                            // ceiling did not bind, target == deepestDb and
+                            // this is a no-op; when it did, the notch must not
+                            // go on remembering a rung it is no longer allowed
+                            // to stand on. The release ladder's per-tick clamp
+                            // says the same thing from the other side.
+                            n.deepestDb        = target;
+                            n.releasedSteps    = 0;
+                            n.stageChangedAtMs = liveMs_;
+                        }
+                    }
+                    else if (n.origin == Origin::Detector)
+                    {
+                        // DEEPEN (spec 4.4). Only Detector notches climb:
+                        // Preset/Manual said what they wanted (Q8) and
+                        // Soundcheck is already excluded above (KD-7).
+                        //
+                        // M-9, and it is a CONSEQUENCE of Q2, not a bug: the
+                        // test that decides "deepen" is the same test that
+                        // decides "still howling", run on the spectrum AFTER
+                        // the notch. So the ladder stops at the first rung
+                        // that quiets the bin and may never reach the
+                        // ceiling. That is the point -- depth by need.
+                        //
+                        // M-3: no headless test can SEE that, because the
+                        // fixture feeds the analyser the un-notched tone. It
+                        // is a rig claim; the tester notes carry it.
+                        //
+                        // Q13: the ceiling IS the last rung, and it need not
+                        // be a multiple of 6 -- presets/Music.json ships -10,
+                        // so this loop's final step there is 4 dB, not 6.
+                        const double ceiling = ceilingDbFor (n);
+                        if (n.depthDB > ceiling
+                            && (liveMs_ - n.stageChangedAtMs) >= kDeepenAfterMs)
+                        {
+                            // nextDeeperRungDb caps at the ceiling itself, so
+                            // the step can never overshoot it.
+                            const double next = nextDeeperRungDb (n.depthDB, ceiling);
+                            if (pushRetuneLocked (c, i, next, RetuneReason::Deepen))
+                            {
+                                n.deepestDb        = next;
+                                n.stageChangedAtMs = liveMs_;
+                            }
+                        }
+                    }
                 }
             }
         }
