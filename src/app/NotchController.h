@@ -151,7 +151,14 @@ public:
     // shallower than 1.1.3 with nothing saying so.
     //
     // nextDeeperRungDb: the shallowest fixed rung strictly deeper than
-    //   `currentDb`, capped at `ceilingDb`. Saturates at the ceiling.
+    //   `currentDb`, capped at `ceilingDb`. Fix-round 1 (review finding
+    //   "Important 2"): AT the ceiling this returns `currentDb` unchanged;
+    //   DEEPER than the ceiling (currentDb < ceilingDb -- a lowered slider
+    //   left an existing notch past its new ceiling) this returns the
+    //   ceiling itself, which is SHALLOWER than currentDb. A caller that only
+    //   ever deepens must compare the result against currentDb before
+    //   sending a command, or it will re-send a shallower depth as if it were
+    //   a step down.
     // nextShallowerRungDb: the deepest fixed rung strictly shallower than
     //   `currentDb`, saturating at -6. Needs no ceiling -- a release always
     //   moves toward a fixed rung.
@@ -302,6 +309,21 @@ public:
     // that already hold it; this seam is what lets the command path be tested
     // before those callers exist.
     bool   retuneForTest (int channel, int index, double newDepthDb, RetuneReason reason);
+    // Fix-round 1 (review finding "Important 1"): ceilingDbFor and the rest of
+    // ModelNotch's ladder state had no accessor at all, so nothing asserted
+    // "Detector follows the live slider, everything else keeps its own depth"
+    // (Q8), nor that a reused slot's stageChangedAtMs/releasedSteps/ceilingDb
+    // are actually re-initialised alongside deepestDb/quietMs.
+    //
+    // ceilingDbForTest: the RESOLVED ceiling -- what ceilingDbFor(n) returns
+    // (the live slider for a Detector notch, n.ceilingDb for everything else).
+    double ceilingDbForTest       (int channel, int index) const;
+    // rawCeilingDbForTest: the STORED field itself -- NaN for a Detector
+    // notch, the caller's own depth otherwise. Distinct from ceilingDbForTest
+    // so a test can tell "resolves to the slider" from "IS the slider".
+    double rawCeilingDbForTest    (int channel, int index) const;
+    int    releasedStepsForTest   (int channel, int index) const;
+    double stageChangedAtMsForTest (int channel, int index) const;
     // Forces the pair the release freeze reads (spec 4.5 seam, M-6):
     // {valid, score}. nullopt restores the real frameScoreValid_/frameMaxScore_.
     // A static tone cannot hold score >= 0.385 for 30 s -- mNorm is a

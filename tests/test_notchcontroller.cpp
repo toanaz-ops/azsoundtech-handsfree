@@ -1720,6 +1720,13 @@ TEST (NotchControllerLadder, TheEffectiveLadderEndsOnTheCeilingItself)
     // An odd Manual depth resolves in the direction of travel, still capped.
     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -3.0, -24.0),  -6.0);
     EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -9.0, -24.0), -12.0);
+
+    // Fix-round 1 (review finding "Important 2"): DEEPER than the ceiling --
+    // e.g. the slider dropped after a notch already stood past its new
+    // ceiling -- steps the notch back UP to the ceiling, not further down.
+    // This is a step in the SHALLOWER direction; the stale header comment
+    // claimed the function was a no-op here.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-24.0, -10.0), -10.0);
 }
 
 // RED IF a release step can jump more than one rung, or past -6. Q13 needs no
@@ -1741,20 +1748,80 @@ TEST (NotchControllerLadder, NextShallowerIsExactlyOneRungAndStopsAtMinus6)
 // REUSED (B-2). pushClearLocked only lowers `active`, so without this a manual
 // -6 dB notch inherits the -24 dB deepestDb of the previous tenant and gets
 // reclamped to -24 on its first reinforce.
+// Fix-round 1 (review finding "Important 1"): the original test covered only
+// deepestDb/quietMs of the five ladder fields setNotchImpl re-initialises.
+// Extended to cover all five, and to place the FIRST tenant as Manual with a
+// non-NaN raw ceiling and non-zero live time, so a stale ceilingDb or a stale
+// stageChangedAtMs would be PROVABLY stale rather than accidentally still
+// matching the reused slot's own values.
 TEST (NotchControllerLadder, ReusingASlotResetsEveryLadderField)
 {
     Harness h;
     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -24.0,
-                                        NotchController::Origin::Detector));
+                                        NotchController::Origin::Manual));
     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 0), -24.0);
+    EXPECT_EQ (h.controller.releasedStepsForTest (0, 0), 0);
+    const double firstStageChangedAtMs = h.controller.stageChangedAtMsForTest (0, 0);
+
+    // Move live time forward so the second placement's stageChangedAtMs is
+    // measurably different from the first, if it were left stale.
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 50; ++i) {          // 50 * 5 ms = 250 ms of live time
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
 
     h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
-                                        NotchController::Origin::Manual));
+                                        NotchController::Origin::Detector));
 
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -6.0);
     EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0),    0.0);
+    EXPECT_EQ (h.controller.releasedStepsForTest (0, 0), 0);
+    EXPECT_TRUE (std::isnan (h.controller.rawCeilingDbForTest (0, 0)))
+        << "Manual's -24 ceiling must not survive into a reused Detector slot";
+    EXPECT_GT (h.controller.stageChangedAtMsForTest (0, 0), firstStageChangedAtMs)
+        << "stageChangedAtMs must be re-stamped to the CURRENT live time, not left stale";
+}
+
+// RED IF ceilingDbFor stops resolving to the LIVE slider for a Detector
+// notch, or starts doing the same for anything else (Q8). ceilingDbForTest is
+// the RESOLVED ceiling ceilingDbFor(n) returns; rawCeilingDbForTest is the
+// stored field itself -- NaN for Detector, the notch's own depth otherwise.
+TEST (NotchControllerLadder, CeilingIsTheSliderForDetectorAndOwnDepthForPresetAndManual)
+{
+    Harness h;
+
+    // Detector: raw field is the NaN sentinel, and the resolved ceiling
+    // tracks the LIVE slider -- including a change made AFTER placement.
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    EXPECT_TRUE (std::isnan (h.controller.rawCeilingDbForTest (0, 0)));
+    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 0), h.controller.getNotchDepthDb());
+
+    h.controller.setNotchDefaults (30.0, -12.0);
+    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 0), -12.0)
+        << "a Detector notch's ceiling must follow the slider even after placement";
+
+    // Manual: raw and resolved are both the caller's own depth; moving the
+    // slider afterward changes NOTHING for it.
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -9.0,
+                                        NotchController::Origin::Manual));
+    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 1), -9.0);
+    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 1), -9.0);
+    h.controller.setNotchDefaults (30.0, -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 1), -9.0)
+        << "a Manual notch's ceiling must NOT drag with the slider";
+
+    // Preset (adopted): same as Manual -- its own depth, slider-independent.
+    PresetNotch p;
+    p.index = 2; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -15.0;
+    ASSERT_EQ (h.controller.adoptPreset ({ p }), 1);
+    EXPECT_DOUBLE_EQ (h.controller.rawCeilingDbForTest (0, 2), -15.0);
+    EXPECT_DOUBLE_EQ (h.controller.ceilingDbForTest (0, 2), -15.0);
 }
 
 // RED IF `activeForTest` is implemented as "depthDB < 0" (B-3). It must read

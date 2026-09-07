@@ -122,6 +122,10 @@ void NotchController::setWidth (int lanes)
 
 double NotchController::nextDeeperRungDb (double currentDb, double ceilingDb)
 {
+    // A NaN ceiling means "unresolved" -- callers must pass ceilingDbFor()'s
+    // result, never a raw ModelNotch::ceilingDb (which is NaN for Detector).
+    jassert (! std::isnan (ceilingDb));
+
     // The shallowest FIXED rung strictly deeper than `currentDb` ...
     double next = kDepthLadderDb[kDepthLadderSize - 1];
     for (int i = 0; i < kDepthLadderSize; ++i)
@@ -134,9 +138,14 @@ double NotchController::nextDeeperRungDb (double currentDb, double ceilingDb)
     // (Q13). std::max picks the SHALLOWER of the two, because deeper is more
     // negative: ceiling -10 turns "-6 -> -12" into "-6 -> -10".
     //
-    // A caller must already have established `currentDb > ceilingDb` -- at or
-    // past the ceiling this returns `currentDb` unchanged, which every caller
-    // treats as "nothing to do" rather than as a step.
+    // Fix-round 1 (review finding "Important 2"): the true contract, past
+    // what the comment used to say. AT the ceiling (currentDb == ceilingDb)
+    // this returns currentDb unchanged. DEEPER than the ceiling (currentDb <
+    // ceilingDb -- e.g. the slider moved after a Detector notch already stood
+    // past the new ceiling) this returns the ceiling itself, which is
+    // SHALLOWER than currentDb -- a step in the wrong direction for a caller
+    // that only ever deepens. Such a caller MUST compare the result against
+    // currentDb before sending it as a command.
     return std::max (next, ceilingDb);
 }
 
@@ -272,6 +281,11 @@ void NotchController::pushClearLocked (int channel, int index, ClearReason reaso
 bool NotchController::pushRetuneLocked (int channel, int index, double newDepthDb,
                                         RetuneReason reason)
 {
+    // modelMutex_ HELD (the caller's contract, see the header). Documents the
+    // precondition every caller already relies on -- slotOf() below would
+    // otherwise index out of `model_` silently in a Release build.
+    jassert (channel >= 0 && channel < kChannels && index >= 0 && index < kSlots);
+
     auto& n = model_[slotOf (channel, index)];
     if (! n.active)
         return false;
@@ -588,6 +602,36 @@ bool NotchController::retuneForTest (int channel, int index, double newDepthDb,
         return false;
     const std::lock_guard<std::mutex> lock (modelMutex_);
     return pushRetuneLocked (channel, index, newDepthDb, reason);
+}
+
+// Fix-round 1 (review finding "Important 1"): ceilingDbFor and the rest of
+// ModelNotch's ladder state had no accessor and no test.
+double NotchController::ceilingDbForTest (int channel, int index) const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return ceilingDbFor (model_[slotOf (std::clamp (channel, 0, kChannels - 1),
+                                        std::clamp (index, 0, kSlots - 1))]);
+}
+
+double NotchController::rawCeilingDbForTest (int channel, int index) const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
+                          std::clamp (index, 0, kSlots - 1))].ceilingDb;
+}
+
+int NotchController::releasedStepsForTest (int channel, int index) const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
+                          std::clamp (index, 0, kSlots - 1))].releasedSteps;
+}
+
+double NotchController::stageChangedAtMsForTest (int channel, int index) const
+{
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
+                          std::clamp (index, 0, kSlots - 1))].stageChangedAtMs;
 }
 
 void NotchController::setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override)
