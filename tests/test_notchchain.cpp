@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <vector>
 
 namespace
@@ -457,4 +459,175 @@ TEST(NotchChain, SetNotchRejectsAPositiveDepthAndLeavesTheSlotIdle)
         s = chain.processSample(s);
     }
     EXPECT_NEAR(rms(samples, 4096), 1.0 / std::sqrt(2.0), 1e-2);
+}
+
+// RED IF a depth-only setNotch on a running slot goes back through
+// setNotchFilter (which resets the state). After a reset, feeding 0.0 into a
+// charged chain returns EXACTLY 0.0; after a ramp it does not.
+TEST(NotchChain, DepthOnlyRetuneOfARunningNotchKeepsTheFilterState)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+
+    const auto tone = sineWave(1000.0, 48000.0, 4800);
+    for (int i = 0; i < 3600; ++i)
+        chain.processSample(tone[static_cast<std::size_t>(i)]);
+
+    chain.setNotch(0, 1000.0, 30.0, -12.0);   // same freq, same Q: ramp
+    EXPECT_NE(chain.processSample(0.0), 0.0) << "state was cleared: this was a reset, not a ramp";
+
+    // NotchInfo reports the TARGET immediately, not the ramp's position.
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, -12.0);
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+}
+
+// RED IF a frequency change stops taking the reset path.
+TEST(NotchChain, ChangingFrequencyStillResetsTheFilterState)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+
+    const auto tone = sineWave(1000.0, 48000.0, 4800);
+    for (int i = 0; i < 3600; ++i)
+        chain.processSample(tone[static_cast<std::size_t>(i)]);
+
+    chain.setNotch(0, 1500.0, 30.0, -6.0);            // different freq
+    EXPECT_DOUBLE_EQ(chain.processSample(0.0), 0.0);  // state cleared
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).frequency, 1500.0);
+}
+
+// RED IF a Q change stops taking the reset path. m-2: the controller must
+// resend the STORED Q for exactly this reason -- one bit of difference and the
+// retune becomes a reset, i.e. a click.
+TEST(NotchChain, ChangingQStillResetsTheFilterState)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+
+    const auto tone = sineWave(1000.0, 48000.0, 4800);
+    for (int i = 0; i < 3600; ++i)
+        chain.processSample(tone[static_cast<std::size_t>(i)]);
+
+    chain.setNotch(0, 1000.0, 30.000000001, -6.0);
+    EXPECT_DOUBLE_EQ(chain.processSample(0.0), 0.0);
+}
+
+// RED IF an Idle slot stops taking the reset path (it has no state worth
+// keeping, and its stored NotchInfo may name a different design entirely).
+TEST(NotchChain, SetNotchOnAnIdleSlotStillTakesTheResetPath)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+    const auto tone = sineWave(1000.0, 48000.0, 4800);
+    for (int i = 0; i < 3600; ++i)
+        chain.processSample(tone[static_cast<std::size_t>(i)]);
+
+    chain.clearNotch(0);
+    chain.setNotch(0, 1000.0, 30.0, -12.0);   // same params, but the slot was Idle
+    EXPECT_DOUBLE_EQ(chain.processSample(0.0), 0.0);
+}
+
+// The measured level, rung by rung (CLAUDE.md: state the level change, and
+// prove it in a test). RED IF a ramped retune lands anywhere but the rung it
+// was asked for. 0.5 dB is the tolerance the spec 5.2 names.
+TEST(NotchChain, MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel)
+{
+    const double ladder[] = { -6.0, -12.0, -18.0, -24.0 };
+    const int    rampSamples = static_cast<int>(0.010 * 48000.0);   // kRampMs
+
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+
+    const auto tone = sineWave(1000.0, 48000.0, 96000);
+    for (double rung : ladder)
+    {
+        chain.setNotch(0, 1000.0, 30.0, rung);
+
+        // Let the ramp finish and the filter settle at the new design before
+        // measuring: a Q of 30 at 1 kHz rings for ~10 ms on its own.
+        std::vector<double> out(48000);
+        for (int i = 0; i < 48000; ++i)
+            out[static_cast<std::size_t>(i)] = chain.processSample(tone[static_cast<std::size_t>(i)]);
+        ASSERT_GT(48000, rampSamples);
+
+        const double measuredDb = 20.0 * std::log10(rms(out, 24000)
+                                                    / rms(std::vector<double>(tone.begin(),
+                                                                              tone.begin() + 48000), 24000));
+        EXPECT_NEAR(measuredDb, rung, 0.5) << "rung " << rung << " dB";
+        std::cout << "[ LADDER   ] requested " << rung << " dB -> measured "
+                  << std::fixed << std::setprecision(6) << measuredDb << " dB"
+                  << std::defaultfloat << std::endl;
+    }
+}
+
+// RED IF a ramped retune can be half-applied. A rejected design must leave the
+// slot -- coefficients, state and reported depth -- exactly as it was.
+TEST(NotchChain, RejectedDepthOnARunningNotchLeavesTheSlotUnchanged)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -12.0);
+    chain.setNotch(0, 1000.0, 30.0, +3.0);   // boost: refused by the biquad
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, -12.0);
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+}
+
+// RED IF kRampMs is not actually plumbed into the ramp -- a rampSamples of 0
+// installs the target in ONE step while still preserving the state, so every
+// test above stays green and only the click comes back.
+//
+// The probe is exact rather than statistical. Two chains are driven with
+// identical input to the same state, so their z1 agree bit for bit; one is then
+// retuned -6 -> -24 dB. Biquad steps the coefficients BEFORE it computes the
+// output, and the transposed form makes that output b0*x + z1, so the first
+// sample after the command differs by exactly |db0| * x -- where db0 is one
+// ramp STEP (the full coefficient distance over kRampMs) if the retune ramps,
+// and the FULL coefficient distance if it was installed in one go. Two standalone
+// biquads supply that distance, so the test calibrates itself instead of
+// hard-coding a design.
+TEST(NotchChain, ADepthOnlyRetuneMovesOverkRampMsRatherThanInOneStep)
+{
+    const int rampSamples = static_cast<int>(NotchChain::kRampMs * 48000.0 / 1000.0);
+    ASSERT_EQ(rampSamples, 480);
+
+    Biquad shallow, deep;
+    ASSERT_TRUE(shallow.setNotchFilter(1000.0, 30.0, 48000.0,  -6.0));
+    ASSERT_TRUE(deep   .setNotchFilter(1000.0, 30.0, 48000.0, -24.0));
+    const double fullStep = std::abs(deep.coeffsForTest().b0 - shallow.coeffsForTest().b0);
+    ASSERT_GT(fullStep, 1e-6) << "the two designs share a b0: this probe cannot tell them apart";
+
+    NotchChain ramped(48000.0);
+    NotchChain control(48000.0);
+    ramped .setNotch(0, 1000.0, 30.0, -6.0);
+    control.setNotch(0, 1000.0, 30.0, -6.0);
+
+    // 3612 samples is a whole number of quarter-cycles, so tone[3612] == 1.0:
+    // the probe sample sits at the tone's PEAK, not at a zero crossing where any
+    // coefficient difference would be multiplied by nothing.
+    const auto tone = sineWave(1000.0, 48000.0, 4800);
+    for (int i = 0; i < 3612; ++i)
+    {
+        ramped .processSample(tone[static_cast<std::size_t>(i)]);
+        control.processSample(tone[static_cast<std::size_t>(i)]);
+    }
+    ASSERT_NEAR(tone[3612], 1.0, 1e-9);
+
+    ramped.setNotch(0, 1000.0, 30.0, -24.0);
+
+    const double firstDiff = std::abs(ramped .processSample(tone[3612])
+                                    - control.processSample(tone[3612]));
+
+    EXPECT_NEAR(firstDiff, fullStep / static_cast<double>(rampSamples), fullStep * 1e-4)
+        << "first step was " << firstDiff << ", one kRampMs step is "
+        << (fullStep / rampSamples) << ", the whole distance is " << fullStep;
+
+    // And the retune did land: after the ramp plus a settle the deep design is
+    // fully in force, so the two chains are far apart.
+    double maxDiff = 0.0;
+    for (int i = 3613; i < 4800; ++i)
+    {
+        maxDiff = std::max(maxDiff,
+                           std::abs(ramped .processSample(tone[static_cast<std::size_t>(i)])
+                                  - control.processSample(tone[static_cast<std::size_t>(i)])));
+    }
+    EXPECT_GT(maxDiff, fullStep) << "the two chains never diverged: the retune did nothing";
 }

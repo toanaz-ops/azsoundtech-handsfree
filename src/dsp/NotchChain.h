@@ -32,6 +32,12 @@ class NotchChain
 public:
     static constexpr int MAX_NOTCHES = 16;
 
+    // Depth-only retune ramp (spec 4.7, decision Q5). 10 ms is one block at a
+    // 2048 buffer and seven at 64, so it is always at least one callback and
+    // never long enough to be heard as a slew. 6 dB over 10 ms is 0.6 dB/ms --
+    // the invariant the controller's ladder is written against.
+    static constexpr double kRampMs = 10.0;
+
     enum class NotchState
     {
         Idle,
@@ -53,6 +59,21 @@ public:
     // Installs a notch in `index`. If the biquad rejects the parameters
     // (sampleRate <= 0, Q <= 0, freq <= 0, or freq >= sampleRate/2 -- see
     // Biquad.h) the slot is left untouched and stays whatever it was.
+    //
+    // DEPTH-ONLY RETUNE (spec 4.7): when the slot is already Active and both
+    // `freq` and `Q` compare EQUAL to the stored NotchInfo, only the depth is
+    // moving, so the filter state is still meaningful and clearing it would be
+    // a step discontinuity into the PA. That case routes to
+    // Biquad::rampNotchDepth and interpolates over kRampMs instead. Everything
+    // else -- an Idle slot, a new frequency, a new Q -- keeps taking the
+    // setNotchFilter + reset path exactly as before.
+    //
+    // The comparison is a plain `==` on doubles ON PURPOSE: the caller
+    // (NotchController::pushRetuneLocked) resends the freq and Q it stored
+    // when the notch was placed, so the values are bit-identical by
+    // construction. A near-miss falls through to the reset path, which is the
+    // SAFE direction to fail in -- an audible click, never a filter running
+    // one design while claiming another.
     void   setNotch(int index, double freq, double Q, double depthDB);
     void   clearNotch(int index);
     void   reset();
