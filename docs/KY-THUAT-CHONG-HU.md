@@ -2,7 +2,7 @@
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
 > đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
-> ctest, **539/539** tại `b8e3f25`; **chưa đóng gói** — `release-alpha.ps1` sẽ
+> ctest, **546/546** tại `fba2626`; **chưa đóng gói** — `release-alpha.ps1` sẽ
 > chạy sau final review, SHA-256/kích thước cập nhật khi đó; 1.2.0 = lane G,
 > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
@@ -424,6 +424,22 @@ khi vừa hú sẽ nạp lại notch ở `deepestDb` (có thể tới −24 dB) 
 đang để bao nhiêu — cắt nhiều hơn một file lưu trên 1.1.3, nhưng luôn theo
 hướng an toàn (chỉ cắt thêm, không bao giờ khuếch đại).
 
+**⚠️ Cảnh báo trần NÔNG hơn (fix round 2, `fba2626`) — đọc trước khi bấm
+LOAD trên dàn thật.** Cơ chế trên là hai chiều: nạp một file mà trần **nông
+hơn** trần đang chạy (ví dụ `Music.json` trần −10 trong khi rig đang đứng ở
+−18/−24) kéo **mọi notch Detector** đang sâu hơn trần mới lên ngay ở tick kế
+tiếp của detector — `n.depthDB < ceiling` tại `NotchController.cpp:786-796`
+đẩy một `pushRetuneLocked` reason `Ceiling`, ramp 10 ms — tức tới **+14 dB**
+năng lượng quay lại đúng tần số vừa hú. Trần **sâu hơn** thì 0 dB ngay lúc nạp,
+chỉ mở đường đào sâu hơn về sau. Preset/Manual/Soundcheck có trần riêng (Q8) và
+không bị kéo. **Mở âm lượng thấp trước khi LOAD, đừng LOAD giữa bài.**
+
+Trần không nhất thiết rơi đúng bậc combo (Q13). Từ fix round 2, `TuningPanel`
+và `SlotPanel` hiện giá trị ngoài danh sách đó như **chữ** (vd. "−10 dB",
+"25") thay vì bỏ trống hay reset — và giữ nguyên số đó cho tới khi người vận
+hành thật sự chọn một mục trong danh sách; chạm vào một combo KHÁC không còn
+âm thầm đẩy Q 10 / −6 dB lên mọi slot Global (N2, đã đóng).
+
 **Vẫn còn lệch, không phải việc của lane G:** mặc định `notchDefaults.depthDB`
 của `PresetManager` là −12 dB trong khi `NotchController::kDefaultNotchDepthDb`
 là −18. File do app này LƯU ra đã mang `notchDefaults` nên không dính, nhưng
@@ -446,6 +462,7 @@ một preset viết tay không có khối đó vẫn im lặng nhận trần −
 | Ramp khuếch đại giữa chừng | Chứng minh tổ hợp lồi `A_n ≤ 1 ≤ 1/A_d` + test đo `\|H\|` tại 5 điểm giữa ramp |
 | Notch sâu hơn −24 dB từ file preset | Kẹp ở `setNotchImpl` cho MỌI Origin, có log (Q12); `pushRetuneLocked` từ chối |
 | "Nhớ phòng" / `deepestDb` cũ vượt trần mới của slider | Kẹp `deepestDb` về trần **mỗi tick** vô điều kiện, VÀ kẹp lại mục tiêu reclamp ngay lúc dùng (M-B) |
+| Nạp preset trần NÔNG hơn kéo notch Detector đang sâu hơn lên ngay (tới +14 dB tại bin đang hú) | Ramp 10 ms giới hạn biên độ một bước; Preset/Manual/Soundcheck mang trần riêng (Q8), không bị kéo; tester được cảnh báo mở âm lượng thấp trước khi LOAD |
 | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
 | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
 | Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
@@ -475,7 +492,7 @@ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30
 | `notch_retune` | lane G đổi độ sâu một notch đang chạy | slot, làn, index, Hz, Q, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` (tính từ lúc ĐẶT, không phải từ lần retune trước) |
 | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
 | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
-| `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono) |
+| `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono), `ceiling_applied` (bool, luôn ghi — file có mang khối `notchDefaults` và có slot Global để áp không), `q`/`depth_db` (trần vừa áp, chỉ khi `ceiling_applied` là true — đọc lại SAU clamp, cùng tên/kiểu với sự kiện `tuning`) |
 | `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
 
 Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
@@ -507,8 +524,8 @@ Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu 
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
 10 ms trong `Biquad`, sự kiện `notch_retune` trong log.
 
-- Suite: **539/539 test pass** (ctest Release, MSVC) sau fix round Task 9 của
-  lane G (`b8e3f25`) — +85 so với 1.1.3 (454). Bốn bậc thang đo được đúng
+- Suite: **546/546 test pass** (ctest Release, MSVC) sau fix round 2 Task 9
+  của lane G (`fba2626`) — +92 so với 1.1.3 (454). Bốn bậc thang đo được đúng
   `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
   `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
 - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).

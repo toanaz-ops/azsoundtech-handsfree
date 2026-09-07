@@ -1,8 +1,8 @@
 # Bài học từ lane G (gain-aware notch: thang độ sâu, nhả dần, nhớ phòng) — 2026-09-07
 
 **Bối cảnh:** 10 task SDD + fix rounds trên nhánh
-`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..b8e3f25`, 1.2.0
-alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **539**.
+`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..fba2626`, 1.2.0
+alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **546**.
 **Đụng audio
 path** (`Biquad`, `NotchChain`, `NotchController`). Spec
 `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` (v2 + Q13 + Q14),
@@ -155,8 +155,10 @@ cờ "chưa verify" và cờ đó nằm im cho tới khi người đọc thứ h
 ### 17. Reviewer sai số dòng, implementer đúng — grep, đừng tin bên nào
 
 Ba lần: `logstats_fixture` (reviewer nói 112, thực 113), `NotchDefaultsSurvive…`
-(497 vs **496**), cờ `--expect-*` (128-131 vs **124-127**, nay **148-152** sau
-`af5201e` thêm `--expect-retunes`). Cross-check cũng là một nguồn cần verify.
+(497 vs **496**), cờ `--expect-*` (128-131 vs **124-127**, nay **153-157** sau
+`af5201e` thêm `--expect-retunes` — round-1 fix của chính note này trích một
+range lệch 5 dòng so với đúng, chưa ai grep lại; xem bài học 20).
+Cross-check cũng là một nguồn cần verify.
 
 ### 18. `effectiveLinked()` bật trên harness mono làm placement tràn sang làn 1
 
@@ -173,6 +175,18 @@ làn 1 đó **đầu độc penalty harmonic** ở các test sau trong cùng fil
   thầm đè chính sách "`.superpowers/` phải TRACKED" của repo. Xóa file đó ngay
   trước commit cuối, mọi session SDD (đã có note riêng
   `sdd-workspace-gitignore-trap-2026-09-04.md`).
+
+### 20. Một giá trị model ngoài danh sách combo thì mọi panel hiển thị nó cũng phải được kiểm
+
+Một file preset mang trần ngoài lưới (Q13, vd. −10 dB của `Music.json`) **không
+tới được** GUI cho tới khi `loadPreset` thật sự đọc lại `notchDefaults` (Q11) —
+và ngay khi đường đó mở ra, hai lỗi mới lộ diện chỉ vì có giá trị thật để hiển
+thị: `TuningPanel`/`SlotPanel` bỏ trống ô combo cho một id không có trong danh
+sách (`idForValue` → 0), và chạm vào MỘT combo khác đọc combo trống đó ra Q 10
+/ −6 dB rồi đẩy lên **mọi** slot Global đang chạy. Cả hai lỗi nằm im từ lúc các
+panel này được viết — chỉ lộ ra khi có một writer thật đưa một giá trị ngoài
+lưới vào model. Bài học: mỗi lần một trường model có thêm một đường GHI mới,
+phải rà lại **mọi** nơi ĐỌC trường đó, không chỉ nơi vừa sửa.
 
 ---
 

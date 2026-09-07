@@ -1,6 +1,6 @@
 # Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
 
-Ngày build: 2026-09-07 · suite test 539/539 xanh (`b8e3f25`) · installer: kích
+Ngày build: 2026-09-07 · suite test 546/546 xanh (`fba2626`) · installer: kích
 thước điền sau khi đóng gói
 
 SHA-256 của Setup 1.2.0:
@@ -69,6 +69,18 @@ Từ trước tới nay, notch cắt thẳng đúng con số trên slider **DEPT
    đã từng cần sâu bao nhiêu và đặt thẳng vào, không dò lại từ −6 dB.
 6. **Không được có tiếng "cạch".** Mọi lần đổi độ sâu đều trải 10 ms. Nghe thấy
    "cạch" hoặc "zip" lúc notch đổi độ sâu là **lỗi phải báo**.
+7. **⚠️ Đọc TRƯỚC khi bấm LOAD trên dàn thật: preset trần NÔNG hơn kéo notch
+   đang sâu lên ngay.** Nạp một file mà trần thấp hơn trần đang chạy (vd.
+   `Music.json` trần −10 dB trong khi rig đang đứng ở −18/−24) kéo **mọi
+   notch Detector** đang sâu hơn trần mới lên ngay ở lượt dò kế tiếp — tới
+   **+14 dB** năng lượng quay lại đúng tần số vừa hú, ramp 10 ms nên không có
+   tiếng "cạch" nhưng vẫn là một cú tăng mức THẬT. Trần SÂU hơn thì không đổi
+   gì lúc nạp. **Mở âm lượng nhỏ trước khi bấm LOAD, đừng LOAD giữa bài.**
+   Preset/Manual/Soundcheck không bị kéo theo cách này.
+8. **Ô Q/DEPTH có thể hiện một số không có trong danh sách.** Sau khi LOAD một
+   file mang trần lệch bậc (vd. −10 dB của `Music.json`), ô đó hiện đúng số đó
+   bằng chữ thay vì để trống — bình thường, không phải lỗi hiển thị; nó giữ
+   nguyên cho tới khi bạn bấm chọn một mục trong danh sách.
 
 **Báo lại ngay** nếu gặp: tiếng "cạch"/"zip" khi notch đổi độ sâu; một tiếng hú
 app không bao giờ khống chế được; hoặc một notch **sâu hơn** con số trên slider
@@ -96,7 +108,10 @@ DEPTH (không đường nào được phép). Kèm file log session trong
    đang đứng lúc bấm; và LOAD đè lên notch đang sống đi đường ramp mượt 10 ms
    — không xóa filter, không được nghe thấy "cạch" — **chỉ khi** tần số/Q
    trong file khớp đúng notch đang đứng ở cùng index; lệch tần số hoặc Q thì
-   vẫn reset như trước, không phải lỗi.)
+   vẫn reset như trước, không phải lỗi. LOAD cũng đọc lại **trần** từ file
+   [`notchDefaults`] cho mọi slot Global — **mở âm lượng nhỏ trước khi thử
+   LOAD `Music.json` (trần −10 dB) trên một rig đang cắt sâu hơn**, xem mục 7
+   ở trên.)
 4. SOUNDCHECK 15 giây với mic mở → app khóa các đỉnh tìm thấy (bảng ACTIVE
    NOTCHES); hết 15 giây app NGỪNG DÒ (đúng thiết kế) → bấm AUTO để chạy show.
 5. AUTO: gây hú nhẹ (mic gần loa, gain thấp) → notch xuất hiện trong ~1 giây,
