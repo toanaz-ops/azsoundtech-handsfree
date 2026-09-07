@@ -158,6 +158,21 @@ struct Preset
     int          bufferSize = 0;    ///< Samples.
 
     PresetNotchDefaults      notchDefaults;
+
+    /** Did the FILE carry a "notchDefaults" block, or is `notchDefaults` above
+        standing in with PresetNotchDefaults' documented values?
+
+        The block is optional (see PresetNotchDefaults), so the struct alone
+        cannot answer that -- and the two cases mean different things to
+        MainComponent::loadPreset, which applies a file's ceiling to the live
+        NotchControllers. Absent must leave the running ceiling untouched: a v1
+        preset, or any file written before the ceiling was saved at all, would
+        otherwise drag a rig tuned at -18 dB back to the fallback -12 on every
+        load. Set by fromJSON; never written into the file (toJSON always emits
+        the block, so anything this app saves reads back as true).
+    */
+    bool hasNotchDefaults = false;
+
     std::vector<PresetNotch> notches;
 
     /** OPTIONAL routing section. Empty for every v1 file. */

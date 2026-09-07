@@ -90,7 +90,10 @@ const char* retuneReasonName (NotchController::RetuneReason r)
         case NotchController::RetuneReason::Reclamp: return "reclamp";
         case NotchController::RetuneReason::Ceiling: return "ceiling";
     }
-    return "deepen";
+    // Same fallthrough as originName and reasonName: an enumerator added
+    // without a name here reads as "unknown" in the log rather than
+    // masquerading as a deepening that never happened.
+    return "unknown";
 }
 
 const char* modeName (AudioEngine::Mode m)
@@ -918,6 +921,47 @@ bool MainComponent::loadPreset (const juce::File& file)
         for (auto& controller : notchControllers_)
             controller->start();
 
+    // Q11, the READ side: the file's CEILING lands on the live controllers.
+    //
+    // savePreset writes notchDefaults from slot 0; without this nothing ever
+    // read it back, so reopening a show tuned at -18 dB left the ceiling
+    // wherever the tuning strip happened to be standing and capped every
+    // detector notch placed after the load at that value instead.
+    //
+    // ONLY when the file actually carried the block. `hasNotchDefaults` is
+    // false for a v1 preset and for anything written before the ceiling was
+    // saved at all, and PresetNotchDefaults' -12 dB fallback must not be
+    // mistaken for an operator's choice -- applying it would walk a rig tuned
+    // at -18 back two rungs every time an old file was opened.
+    //
+    // Routing mirrors the TuningPanel handler above (the Global strip): every
+    // slot on Global tuning follows, a slot switched to Custom keeps its own
+    // values until its Tune combo goes back to G. The preset format carries
+    // ONE global pair, so there is nothing per-slot to restore.
+    //
+    // Expected level change: 0 dB right here. The ceiling caps FUTURE
+    // deepening only; the notches this load installed were adopted at their
+    // own file depth by adoptPreset above.
+    if (result.preset.hasNotchDefaults)
+    {
+        for (int i = 0; i < kMaxSlots; ++i)
+        {
+            if (! slotUsesGlobalTuning_[(std::size_t) i])
+                continue;
+
+            // setNotchDefaults clamps to Q 8..50 / -24..-6 dB, so a file
+            // carrying a legal-but-extreme pair cannot push the controller
+            // outside the range the panels can reach.
+            notchControllers_[(std::size_t) i]->setNotchDefaults (
+                result.preset.notchDefaults.Q, result.preset.notchDefaults.depthDB);
+        }
+
+        // The strip re-reads slot 0 through paramsProvider, so the Q and depth
+        // combos show what the file just installed rather than the value the
+        // operator left them on.
+        tuningPanel_.refresh();
+    }
+
     // M-4: the mono-skip count had nowhere to go but a Logger line and a test
     // accessor. It belongs in the session log next to the notches the load
     // DID install -- a preset that silently loses half its notches on a mono
@@ -1019,10 +1063,17 @@ bool MainComponent::savePreset (const juce::File& file)
 
     preset.sampleRate = presetRate;
 
-    // Q11: the CEILING round-trips too. Without this a reloaded preset falls
-    // back to PresetNotchDefaults' -12 dB (PresetManager.h) and caps every
-    // detector notch two rungs shallower than the show was tuned at -- a bug
-    // that predates lane G and that lane G's ladder makes load-bearing.
+    // Q11: the CEILING is written here and read back by loadPreset(), which
+    // applies it to every slot on Global tuning. Both halves are needed: a
+    // preset whose ceiling is only WRITTEN reloads onto whatever the tuning
+    // strip was left on, and one that is neither written nor read falls back
+    // to PresetNotchDefaults' -12 dB (PresetManager.h), capping every detector
+    // notch two rungs shallower than the show was tuned at.
+    //
+    // Slot 0 is the source because notchDefaults is a single global pair in
+    // the format and every Global slot carries the same values. A slot on
+    // Custom tuning is not represented in the file at all -- see the note in
+    // the task-9 report if per-slot ceilings ever arrive.
     preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
 

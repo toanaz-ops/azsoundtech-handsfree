@@ -66,10 +66,15 @@ def summarise(events: list[dict]) -> dict:
             # that raises.
             n = open_by_key.get(key(e))
             if n is not None:
-                n["depth_db"] = e.get("depth_db")
-                if n["deepest_db"] is None or (e.get("depth_db") is not None
-                                               and float(e["depth_db"]) < float(n["deepest_db"])):
-                    n["deepest_db"] = e.get("depth_db")
+                # depth_db is guarded the same way deepest_db is: a truncated
+                # or hand-edited line without it must not erase the running
+                # depth the notch_set established. The retune still counts --
+                # it happened, we just cannot say what it moved to.
+                d = e.get("depth_db")
+                if d is not None:
+                    n["depth_db"] = d
+                    if n["deepest_db"] is None or float(d) < float(n["deepest_db"]):
+                        n["deepest_db"] = d
                 n["retunes"] += 1
         elif ev == "verdict":
             n = open_by_key.get(key(e))

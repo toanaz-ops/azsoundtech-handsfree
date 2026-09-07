@@ -1240,6 +1240,85 @@ TEST (GuiWiring, SavePresetRoundTripsTheCeilingThroughNotchDefaults)
     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
 }
 
+// RED IF loadPreset ignores the ceiling the file carries (fix round 1, the
+// READ side of Q11). savePreset has written notchDefaults since af5201e but
+// nothing ever read it back: reopening a show tuned at -18 dB left the live
+// ceiling wherever the slider happened to be standing, and every detector
+// notch placed after the load was capped there instead of at the tuned value.
+//
+// Expected level change: 0 dB at load time. The ceiling caps FUTURE deepening
+// only; the notches in the file are still adopted at their own file depth.
+TEST (GuiWiring, LoadPresetAppliesTheCeilingTheFileCarries)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+
+    // The show is tuned at Q 30 / -18 dB and saved there.
+    controller0->setNotchDefaults (30.0, -18.0);
+    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    controller0->runOnce();
+
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-ceiling-load.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (outFile));
+
+    // The operator then drags both controls somewhere else, the way the
+    // tuning strip does between two shows.
+    controller0->setNotchDefaults (8.0, -6.0);
+    ASSERT_DOUBLE_EQ (controller0->getNotchDepthDb(), -6.0);
+
+    ASSERT_TRUE (app.loadPreset (outFile));
+    outFile.deleteFile();
+
+    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
+    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
+
+    // Every OTHER slot follows too, because they all sit on Global tuning --
+    // the same routing the TuningPanel handler uses.
+    auto* controller1 = app.getNotchControllerForTest (1);
+    ASSERT_NE (controller1, nullptr);
+    EXPECT_DOUBLE_EQ (controller1->getNotchDepthDb(), -18.0);
+}
+
+// RED IF a preset WITHOUT a notchDefaults block resets the live ceiling to
+// PresetNotchDefaults' -12 dB (M-3). Every file written before af5201e is such
+// a file, and a rig tuned at -18 must not be quietly walked back two rungs by
+// opening one of them.
+TEST (GuiWiring, LoadPresetLeavesTheCeilingAloneWhenTheFileCarriesNone)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    auto* controller0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller0, nullptr);
+    controller0->setSampleRate (48000.0);
+    controller0->setNotchDefaults (30.0, -18.0);
+
+    // Hand-written because savePreset ALWAYS writes the block now; this is the
+    // shape of a v1 file (and of the plan Task 25 sample).
+    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("az-handsfree-laneg-no-defaults.json");
+    outFile.deleteFile();
+    ASSERT_TRUE (outFile.replaceWithText (
+        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
+        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
+
+    ASSERT_TRUE (app.loadPreset (outFile));
+    outFile.deleteFile();
+
+    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
+    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
+}
+
 // RED IF a Retune event is serialised as notch_clear (B-3 of the spec's own
 // critique list). The `ev` key is what logstats.py dispatches on, and a
 // mislabelled retune closes the notch's record at the first 300 ms deepening.
