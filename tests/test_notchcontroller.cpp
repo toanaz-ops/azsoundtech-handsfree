@@ -149,12 +149,15 @@ TEST (NotchControllerLiveClock, AlternatingEmptyPollsTrackWallTime)  // half-spe
     EXPECT_NEAR (h.controller.liveMsForTest(), 2000.0, 60.0);
 }
 
-TEST (NotchControllerAutoRelease, LiveTapReleasesAfter30s)
+// Lane G: the 1.1.3 cliff is now a ladder. The claim is unchanged -- an
+// un-reinforced notch eventually leaves -- only the clock moved. From -12:
+// -6 at 30 s, Clear at 40 s (task-7 brief's rung table).
+TEST (NotchControllerAutoRelease, LiveTapReleasesThroughTheLadderAfter40s)
 {
     Harness h;
     ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Detector));
     std::vector<float> hop (512, 0.1f);
-    for (int i = 0; i < 7000; ++i) {          // 7000 * 5 ms = 35 s of live audio
+    for (int i = 0; i < 8800; ++i) {          // 8800 * 5 ms = 44 s of live audio
         h.tap.write (hop.data(), hop.size());
         h.clock.advance (5.0);
         h.controller.runOnce();
@@ -272,7 +275,10 @@ TEST (NotchControllerPreset, AdoptedPresetsAutoReleaseLikeDetectorNotches)   // 
     ASSERT_EQ (h.controller.adoptPreset (notches), 1);
 
     std::vector<float> hop (512, 0.1f);
-    for (int i = 0; i < 7000; ++i) {          // 35 s of live audio
+    // Preset notches ride the lane-G release ladder like any other non-
+    // Soundcheck notch (only KD-7 exempts anything). From -12: -6 at 30 s,
+    // Clear at 40 s. 8800 * 5 ms = 44 s.
+    for (int i = 0; i < 8800; ++i) {
         h.tap.write (hop.data(), hop.size());
         h.clock.advance (5.0);
         h.controller.runOnce();
@@ -346,6 +352,15 @@ void pump (Harness& h, const std::vector<float>& hop)
     ASSERT_EQ (h.tap.write (hop.data(), hop.size()), hop.size());
     h.clock.advance (kBlockMs);
     h.controller.runOnce();
+}
+
+// Pumps ambient noise for `ms` of LIVE time. The tap stays alive (D-06) so
+// the release clock runs, and the noise never feeds peakiness at 1 kHz.
+void pumpQuietFor (Harness& h, NoiseSource& quiet, double ms)
+{
+    const int blocks = (int) std::lround (ms / kBlockMs);
+    for (int i = 0; i < blocks; ++i)
+        pump (h, quiet.hop());
 }
 
 // A tone that CREEPS up out of the noise instead of switching on. SineSource
@@ -567,7 +582,7 @@ TEST (NotchControllerDetection, TwoBlocksOnlyDoesNotSet)
     EXPECT_EQ (h.commands.getAvailableRead(), 0u);
 }
 
-TEST (NotchControllerDetection, HowlThatStopsAutoReleasesAfter30s)
+TEST (NotchControllerDetection, HowlThatStopsAutoReleasesThroughTheLadder)
 {
     Harness h;
     h.controller.setDetectionActive (true);
@@ -582,9 +597,11 @@ TEST (NotchControllerDetection, HowlThatStopsAutoReleasesAfter30s)
         ;
 
     // Howl stops: low-level ambient noise keeps the tap alive (D-06) but never
-    // feeds peakiness at the notch bin, so the 30 s release timer runs out.
+    // feeds peakiness at the notch bin, so the release ladder runs to the end.
+    // The notch was detector-placed and deepened against the -18 default
+    // ceiling, so the Clear is at 30 + 10 + 10 = 50 s (task-7 rung table).
     NoiseSource quiet;
-    for (int i = 0; i < 3500; ++i)   // 3500 * 10.667 ms ~= 37.3 s
+    for (int i = 0; i < 5200; ++i)   // 5200 * 10.667 ms ~= 55.5 s
         pump (h, quiet.hop());
     h.controller.runOnce();
 
@@ -1206,7 +1223,10 @@ TEST (NotchControllerStereo, IndepAutoReleaseIsPerLane)
     //
     // Left goes quiet, right keeps ringing, for > 30 s of live time.
     NoiseSource quietL;
-    const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
+    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
+    // slack the 1.1.3 version carried are kept.
+    const int blocks = (int) ((NotchController::kReleaseFirstMs
+                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
     for (int i = 0; i < blocks; ++i)
         pumpStereo (h, quietL.hop(), toneR.hop());
 
@@ -1233,7 +1253,10 @@ TEST (NotchControllerStereo, LinkedAutoReleaseWaitsForBothLanes)
     //
     // Left goes quiet, RIGHT now rings the same frequency: the pair stays.
     NoiseSource quietL; SineSource toneR;
-    const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 20;
+    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
+    // slack the 1.1.3 version carried are kept.
+    const int blocks = (int) ((NotchController::kReleaseFirstMs
+                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
     for (int i = 0; i < blocks; ++i)
         pumpStereo (h, quietL.hop(), toneR.hop());
 
@@ -1420,12 +1443,15 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
         for (const auto& e : r.events) if (e.kind == Ev::Kind::Set) { ++sets; EXPECT_FALSE (e.hasScore); EXPECT_EQ (e.origin, NotchController::Origin::Manual); }
         EXPECT_EQ (sets, 3);
     }
-    // AutoRelease: mirror LiveTapReleasesAfter30s (this file, ~line 151).
+    // AutoRelease: mirror LiveTapReleasesThroughTheLadderAfter40s (above).
     {
         Recorder r; Harness h; h.controller.setEventSink (r.sink());
         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
         NoiseSource quiet;
-        const int blocks = (int) (NotchController::kAutoReleaseMs / kBlockMs) + 10;
+        // Manual -12: its own depth is its ceiling, so -6 at 30 s and the
+        // Clear at 40 s.
+        const int blocks = (int) ((NotchController::kReleaseFirstMs
+                                  + NotchController::kReleaseStepMs) / kBlockMs) + 10;
         for (int i = 0; i < blocks; ++i)
             pump (h, quiet.hop());
         const auto c = r.clears();
@@ -2550,5 +2576,513 @@ TEST (NotchControllerLadder, NoEmittedSetEverLeavesTheValidDepthWindow)
                 }
         }
         EXPECT_GT (sets, 0) << "ceiling " << ceiling << ": nothing was ever emitted";
+    }
+}
+
+// ===========================================================================
+// Task 7 -- the release ladder in runOnce step 3 (spec 4.5, Q3/Q4/Q9).
+// ===========================================================================
+
+// RED IF the release cliff comes back, or the rung timings move (spec 4.5,
+// Q3). This is the headline behaviour of the whole lane.
+TEST (NotchControllerLadder, ReleaseWalksTheLadderAt30sThen10sPerRung)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+
+    pumpQuietFor (h, quiet, 29000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0) << "released early";
+
+    pumpQuietFor (h, quiet, 1500.0);                     // past 30 s
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+
+    pumpQuietFor (h, quiet, 9000.0);                     // 9 s into the 10 s rung
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+
+    pumpQuietFor (h, quiet, 1500.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0);
+
+    pumpQuietFor (h, quiet, 10500.0);                    // 30 + 10 + 10 = 50 s: Clear
+    // B-3: the notch is GONE, which is `active == false`. depthDbForTest still
+    // reads -6 here, because pushClearLocked deliberately leaves depthDB alone
+    // for the Clear event to read.
+    EXPECT_FALSE (h.controller.activeForTest (0, 0))
+        << "the notch never cleared at the bottom of the ladder";
+
+    NotchController::SnapshotBuffer snap;
+    std::vector<float> hop (512, 0.05f);
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+    h.controller.copySnapshot (snap);
+    EXPECT_EQ (snap.notchCount, 0u);
+}
+
+// RED IF the final rung stops emitting a real Clear with the AutoRelease
+// reason -- lane D's label and Task 8's room-memory write both hang off it.
+TEST (NotchControllerLadder, TheBottomOfTheLadderClearsWithAutoRelease)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 52000.0);   // from -18: 30 + 10 + 10 = 50 s, +2 s margin
+    h.controller.runOnce();
+
+    const auto clears = r.clears();
+    ASSERT_EQ (clears.size(), 1u);
+    EXPECT_EQ (clears[0].reason, NotchController::ClearReason::AutoRelease);
+    EXPECT_FLOAT_EQ (clears[0].depthDb, -6.0f) << "cleared from the wrong rung";
+
+    int retunes = 0;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune
+            && e.retuneReason == NotchController::RetuneReason::Release)
+            ++retunes;
+    EXPECT_EQ (retunes, 2) << "-18 -> -12 -> -6 is two release steps";
+}
+
+// RED IF the freeze stops working (spec 4.5 step 1, Q4). A tense room must not
+// have its notches wound back under it. There is deliberately NO time cap.
+TEST (NotchControllerLadder, RingRiskAtRisingFreezesTheReleaseClock)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    h.controller.setRingRiskOverrideForTest (
+        std::make_pair (true, NotchController::kRiskFreezeFraction
+                              * CandidateScorer::kConfirmScore));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 90000.0);   // three times the first rung's time
+    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0), 0.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0);
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_TRUE (snap.releaseFrozen) << "the frozen flag was never published (Q9)";
+
+    // Room calms: the clock starts again from where it was, which is 0.
+    h.controller.setRingRiskOverrideForTest (std::nullopt);
+    pumpQuietFor (h, quiet, 31000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+}
+
+// RED IF an INVALID ring-risk reading is treated as a freeze (spec 4.5,
+// invariant 7). Detection off must release exactly as 1.1.3 did.
+TEST (NotchControllerLadder, InvalidRingRiskDoesNotFreezeTheClock)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Detector));
+    h.controller.setRingRiskOverrideForTest (std::make_pair (false, 1.0f));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 31000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0);
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.releaseFrozen);
+}
+
+// RED IF a score just under the RISING band starts freezing the clock.
+TEST (NotchControllerLadder, ScoreJustBelowTheRisingBandDoesNotFreeze)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Detector));
+    h.controller.setRingRiskOverrideForTest (
+        std::make_pair (true, NotchController::kRiskFreezeFraction
+                              * CandidateScorer::kConfirmScore - 0.01f));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 31000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0);
+}
+
+// RED IF lowering the depth slider mid-show stops pulling a Detector notch up
+// to the new rung (spec 4.1). The ceiling is read LIVE, every tick.
+TEST (NotchControllerLadder, LoweringTheCeilingPullsADetectorNotchUpOnTheNextTick)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 200.0);
+    h.controller.setNotchDefaults (30.0, -12.0);   // ceiling drops two rungs' worth
+    pumpQuietFor (h, quiet, 200.0);
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -12.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+
+    const Ev* ceil = nullptr;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune
+            && e.retuneReason == NotchController::RetuneReason::Ceiling) { ceil = &e; break; }
+    ASSERT_NE (ceil, nullptr);
+    EXPECT_FLOAT_EQ (ceil->fromDepthDb, -18.0f);
+    EXPECT_FLOAT_EQ (ceil->depthDb,     -12.0f);
+}
+
+// RED IF RAISING the ceiling deepens a notch on its own (spec 5.3). The
+// ceiling branch is a one-way valve -- it pulls a notch UP to a lowered
+// ceiling, and a raised one buys nothing until the bin actually rings again
+// and the deepen path (Task 6) runs. Detection is OFF here precisely so
+// nothing can reinforce.
+TEST (NotchControllerLadder, RaisingTheCeilingDoesNotDeepenUntilTheBinRingsAgain)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+
+    NoiseSource quiet;
+    h.controller.setNotchDefaults (30.0, -12.0);   // lower: pulls up to -12
+    pumpQuietFor (h, quiet, 300.0);
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+
+    h.controller.setNotchDefaults (30.0, -24.0);   // raise it all the way back
+    pumpQuietFor (h, quiet, 5000.0);               // well past kDeepenAfterMs
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -12.0)
+        << "raising the ceiling re-deepened a notch with no reinforce";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune)
+            EXPECT_NE (e.retuneReason, NotchController::RetuneReason::Deepen);
+}
+
+// RED IF the slider starts dragging a Preset or Manual notch (Q8).
+TEST (NotchControllerLadder, LoweringTheCeilingLeavesPresetAndManualNotchesAlone)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Preset));
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 1200.0, 30.0, -24.0,
+                                        NotchController::Origin::Manual));
+
+    NoiseSource quiet;
+    h.controller.setNotchDefaults (30.0, -6.0);
+    pumpQuietFor (h, quiet, 500.0);
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 1), -24.0);
+}
+
+// RED IF the ceiling branch fires for a non-Detector notch (B-1). This is the
+// exact case that ships: tests/test_gui_wiring.cpp adopts a preset notch at
+// -9.0, which is not a ladder rung. Under spec v2's quantisation the FIRST
+// runOnce() after adoption would have retuned it to -6 -- a preset silently
+// 3 dB shallower than the file says, and a violation of Q8 / spec 4.1. Q13
+// removes the quantisation, and the Origin guard means the branch cannot come
+// back even if the arithmetic changes again.
+TEST (NotchControllerLadder, AnOffRungPresetDepthSurvivesTheFirstTick)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setNotchDefaults (30.0, -24.0);
+    // The shape tests/test_gui_wiring.cpp uses: an adopted preset notch at -9.
+    PresetNotch p;
+    p.index = 2; p.freq = 1234.0; p.Q = 28.0; p.depthDB = -9.0;
+    ASSERT_EQ (h.controller.adoptPreset ({ p }), 1);
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 2), -9.0);
+
+    std::vector<float> hop (512, 0.05f);
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 2), -9.0)
+        << "the ceiling branch moved a Preset notch";
+    for (const auto& e : r.events)
+        EXPECT_NE (e.kind, Ev::Kind::Retune);
+}
+
+// RED IF a Preset notch is exempted from the RELEASE ladder, or if its reclamp
+// target drifts off its own depth (spec 5.3). Q8 makes the slider unable to
+// touch it; it does NOT make it immortal -- only Soundcheck is (KD-7).
+TEST (NotchControllerLadder, APresetNotchReleasesDownTheLadderAndReclampsToItsOwnDepth)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    PresetNotch p;
+    p.index = 0; p.freq = 1007.8125; p.Q = 30.0; p.depthDB = -12.0;
+    ASSERT_EQ (h.controller.adoptPreset ({ p }), 1);
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 31000.0);   // from -12: the first rung costs 30 s
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0);
+    EXPECT_TRUE (h.controller.activeForTest (0, 0));
+
+    // The howl comes back: a reclamp goes to deepestDb, which for a preset
+    // notch is the depth the FILE named -- never deeper, never the slider's.
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 40; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0)
+        << "a preset notch reclamped past its own depth";
+}
+
+// RED IF a reclamp waits for the 300 ms gate, or fails to return to the
+// DEEPEST rung the notch ever held (spec 4.4, Q3). A howl coming back is the
+// emergency this feature exists for -- it is answered on the same frame.
+//
+// M-A: this test lives in Task 7, not Task 6 where the branch is written,
+// because the state it needs (releasedSteps > 0) can only be built by the
+// RELEASE ladder.
+TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    SineSource tone;
+    for (int i = 0; i < 200; ++i)      // climb to the ceiling rung
+        pump (h, tone.hop());
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0);
+
+    // Real release path: 30 s buys the first rung (-18), 10 s the second
+    // (-12). 42 s is past both and well short of the 50 s that would take it
+    // to -6 and the 60 s that would Clear it. releasedSteps is 2 here, and
+    // nothing but the ladder could have set it.
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 42000.0);
+    ASSERT_TRUE (h.controller.activeForTest (0, slot));
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -12.0);
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0)
+        << "releasing must not forget the rung the room needed";
+    ASSERT_EQ (h.controller.releasedStepsForTest (0, slot), 2);
+
+    NotchCommand drained {};
+    while (h.commands.read (&drained, 1) == 1) {}
+    const double before = h.controller.liveMsForTest();
+
+    // The howl comes back. The analysis window is four hops long and tapered,
+    // so a single hop of tone sitting at its very end is not yet a peak the
+    // reinforce loop can see -- that is a property of the FFT window, not of
+    // the reclamp, and it is why this is a short loop rather than one pump.
+    // What is pinned is what the reclamp OWES: once the bin does ring, the
+    // depth is back at deepestDb without waiting out the 300 ms deepen gate.
+    int blocks = 0;
+    while (h.controller.depthDbForTest (0, slot) > -24.0 && blocks < 8)
+    {
+        pump (h, tone.hop());
+        ++blocks;
+    }
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
+        << "the reclamp never fired";
+    EXPECT_LT (h.controller.liveMsForTest() - before, NotchController::kDeepenAfterMs)
+        << "the reclamp waited for the deepen gate instead of firing on the frame";
+    // The banked quiet time is SPENT, not merely paused. It cannot be pinned
+    // at exactly 0: step 3 of the SAME runOnce adds this tick's dt back on
+    // whenever the frame was not also frozen, so one block's worth is the
+    // ceiling of what may legitimately be standing here.
+    EXPECT_LE (h.controller.quietMsForTest (0, slot), kBlockMs);
+    // After a reclamp the notch must be back on the 30 s FIRST-rung threshold.
+    EXPECT_EQ (h.controller.releasedStepsForTest (0, slot), 0);
+
+    pumpQuietFor (h, quiet, 29000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
+        << "the reclamp left releasedSteps standing, so the notch released "
+           "again after 10 s instead of 30";
+    pumpQuietFor (h, quiet, 1500.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -18.0);
+}
+
+// RED IF a lowered ceiling fails to cap what a later reclamp can do (M-B).
+// This is the ONE sequence that reaches the unconditional deepestDb clamp:
+// the notch ends up SHALLOWER than the new ceiling, so the Set(ceiling)
+// branch never runs and cannot do the clamping for it. Without the fix the
+// notch reclamps to -24 under a -12 ceiling -- 12 dB louder a cut than the
+// operator asked for, on a live PA (Q1, spec 4.10 invariant 2).
+TEST (NotchControllerLadder, ALoweredCeilingAlsoCapsTheReclampTarget)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+
+    // From -24: -18 at 30 s, -12 at 40 s, -6 at 50 s, Clear at 60 s. 52 s
+    // lands on -6 with 2 s of the next 10 s rung banked.
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 52000.0);
+    ASSERT_TRUE (h.controller.activeForTest (0, 0));
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+
+    // The operator drops the slider two rungs while the notch sits shallow.
+    // -6 is NOT deeper than -12, so the Set(ceiling) branch is skipped --
+    // only the unconditional clamp can act here.
+    h.controller.setNotchDefaults (30.0, -12.0);
+    pumpQuietFor (h, quiet, 100.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0)
+        << "the ceiling branch deepened a notch that was already shallow enough";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0)
+        << "the per-tick ceiling clamp skipped a notch shallower than the ceiling";
+
+    // The howl returns.
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 40; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0)
+        << "the reclamp went 12 dB past the ceiling the operator set";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+}
+
+// Edge (a), found in Task 6's review and only reachable once the release
+// ladder exists. RED IF the reclamp re-sends the depth already running: the
+// operator sets the slider to EXACTLY the rung the notch was wound back to,
+// the per-tick ceiling clamp pulls deepestDb down to it, and the reclamp
+// target then equals depthDB. A Set at an unchanged depth restarts Biquad's
+// 10 ms ramp on a live PA for no reason. The BOOKKEEPING must still run --
+// releasedSteps back to 0, or the next release comes after 10 s not 30.
+TEST (NotchControllerLadder, ACeilingLevelWithTheReleasedDepthReclampsWithoutResendingIt)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 42000.0);          // -18 at 30 s, -12 at 40 s
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+    ASSERT_EQ (h.controller.releasedStepsForTest (0, 0), 2);
+
+    h.controller.setNotchDefaults (30.0, -12.0);
+    pumpQuietFor (h, quiet, 100.0);
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -12.0);
+
+    NotchCommand drained {};
+    while (h.commands.read (&drained, 1) == 1) {}
+    const std::size_t eventsBefore = r.events.size();
+
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 40; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+    EXPECT_EQ (h.controller.releasedStepsForTest (0, 0), 0)
+        << "the reclamp skipped its bookkeeping along with the redundant Set";
+    for (std::size_t i = eventsBefore; i < r.events.size(); ++i)
+        EXPECT_NE (r.events[i].kind, Ev::Kind::Retune)
+            << "an unchanged depth was re-sent, restarting the ramp";
+    while (h.commands.read (&drained, 1) == 1)
+        EXPECT_FALSE (drained.type == NotchCommandType::Set
+                      && drained.channel == 0 && drained.index == 0)
+            << "a Set at the depth already running";
+}
+
+// Edge (b), the other half of the same review finding. RED IF a reclamp can
+// emit a SHALLOWER depth under reason Reclamp. Slider raised ABOVE deepestDb
+// while the notch is released: the per-tick ceiling pass (this task) must
+// have already pulled the notch up to the new ceiling under reason Ceiling,
+// so by the time the howl returns the reclamp target equals depthDB and
+// nothing is sent. A Reclamp event reading shallower than the depth it left
+// would mislabel a ceiling move as an emergency re-cut.
+TEST (NotchControllerLadder, ACeilingRaisedAboveTheDeepestRungPullsUpAsCeilingNotReclamp)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 42000.0);          // -18 at 30 s, -12 at 40 s
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+
+    // Slider to -6: shallower than BOTH deepestDb (-24) and the running
+    // depth (-12), so the ceiling pass has to move the notch itself.
+    h.controller.setNotchDefaults (30.0, -6.0);
+    pumpQuietFor (h, quiet, 100.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -6.0);
+
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 40; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0)
+        << "the reclamp went past the ceiling the operator set";
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune
+            && e.retuneReason == NotchController::RetuneReason::Reclamp)
+            ADD_FAILURE() << "a ceiling move was labelled Reclamp, from "
+                          << e.fromDepthDb << " to " << e.depthDb;
+    // The move that DID happen is a Ceiling retune, -12 -> -6.
+    const Ev* ceil = nullptr;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune
+            && e.retuneReason == NotchController::RetuneReason::Ceiling) { ceil = &e; break; }
+    ASSERT_NE (ceil, nullptr);
+    EXPECT_FLOAT_EQ (ceil->fromDepthDb, -12.0f);
+    EXPECT_FLOAT_EQ (ceil->depthDb,      -6.0f);
+}
+
+// RED IF a Soundcheck notch is ever released (KD-7). It already had a test
+// (SoundcheckNotchNeverAutoReleases); this one pins that the LADDER does not
+// touch it either -- no Retune of any reason, at any rung.
+TEST (NotchControllerLadder, SoundcheckNotchesNeverRelease)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Soundcheck));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 60000.0);
+    h.controller.runOnce();
+
+    for (const auto& e : r.events)
+        EXPECT_NE (e.kind, Ev::Kind::Retune) << "the ladder moved a soundcheck notch";
+    EXPECT_TRUE (r.clears().empty());
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0);
+}
+
+// RED IF anything in the fixture can emit a Set outside [-24, 0] (invariant
+// 1). 200 randomised blocks of reinforce / quiet / frozen, watching every
+// command that leaves the controller.
+TEST (NotchControllerLadder, NoCommandEverLeavesTheLegalDepthRange)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    std::mt19937 rng { 20260907u };
+    std::uniform_int_distribution<int> pick { 0, 2 };
+    NoiseSource quiet;
+    SineSource  tone;
+
+    for (int i = 0; i < 200; ++i)
+    {
+        switch (pick (rng))
+        {
+            case 0: pump (h, tone.hop()); break;
+            case 1: pump (h, quiet.hop()); break;
+            case 2:
+                h.controller.setRingRiskOverrideForTest (std::make_pair (true, 0.9f));
+                pump (h, quiet.hop());
+                h.controller.setRingRiskOverrideForTest (std::nullopt);
+                break;
+        }
+        NotchCommand cmd {};
+        while (h.commands.read (&cmd, 1) == 1)
+            if (cmd.type == NotchCommandType::Set)
+            {
+                EXPECT_LE (cmd.depthDB,  0.0f);
+                EXPECT_GE (cmd.depthDB, -24.0f);
+            }
     }
 }

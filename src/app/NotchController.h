@@ -81,7 +81,11 @@ public:
     // legitimate gap between tap writes (2048 samples @ 44.1 kHz = 46.4 ms)
     // with >5x margin. Bound assumed: buffer sizes up to ~2730 @ 44.1 kHz.
     static constexpr double kTapSilenceTimeoutMs = 250.0;
-    // Spec §5.2 step 7: 30 s without peakiness releases a notch.
+    // Spec §5.2 step 7 as amended by lane G (spec 4.5, Q3): 30 s of quiet
+    // buys the FIRST rung of the release ladder, not a Clear. kReleaseStepMs
+    // (10 s) buys each rung after it, and only the notch already sitting at
+    // -6 dB is cleared. The name and value are kept because this is still
+    // "how long the first release takes"; kReleaseFirstMs is its lane-G alias.
     static constexpr double kAutoReleaseMs       = 30000.0;
 
     static constexpr double kSoundcheckDurationMs = 15000.0;

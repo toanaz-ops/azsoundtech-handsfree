@@ -538,7 +538,45 @@ void NotchController::runOnce()
         }
     }
 
-    // 3. Auto-release: only meaningful while audio actually flows (D-06).
+    // 3. Release ladder (spec 4.5), replacing 1.1.3's "30 s -> Clear" cliff.
+
+    // --- step 1: FREEZE ----------------------------------------------------
+    // Computed and PUBLISHED unconditionally, above the tapAlive gate (M-6).
+    // Writing latest_.releaseFrozen only while the tap is alive would leave
+    // the flag saying whatever it last said once the tap died -- a GUI or a
+    // log reader would then be told "frozen" about a slot that has no audio
+    // at all. A dead tap is not a frozen clock; it is no clock.
+    //
+    // Read the two detector-thread members the snapshot publish above just
+    // wrote. snapshotMutex_ is deliberately NOT taken while modelMutex_ is
+    // held: model -> snapshot would be a lock order this app has never had,
+    // and inventing one for a readout is not a trade worth making (M-5).
+    // These members are written and read only on this thread.
+    bool  riskValid = frameScoreValid_;
+    float riskScore = frameMaxScore_;
+    if (ringRiskOverrideForTest_.has_value())
+    {
+        riskValid = ringRiskOverrideForTest_->first;
+        riskScore = ringRiskOverrideForTest_->second;
+    }
+    // The GUI's RISING band, from ONE shared constant
+    // (gui::SpectrumView::kRingRiskRisingFraction aliases this name). An
+    // INVALID reading never freezes (invariant 7): detection off must release
+    // exactly as 1.1.3 did, or turning detection off would strand every notch.
+    const bool frozen = tapAlive
+                     && riskValid
+                     && riskScore >= kRiskFreezeFraction * CandidateScorer::kConfirmScore;
+
+    // Its own scope, before modelMutex_ is taken anywhere below, so the two
+    // mutexes stay un-nested. Q9: no time cap on the freeze, and 1.2.0 draws
+    // nothing with this flag -- it exists so a later GUI or the session log
+    // can say WHY a notch is not winding back.
+    {
+        const std::lock_guard<std::mutex> lock (snapshotMutex_);
+        latest_.releaseFrozen = frozen;
+    }
+
+    //    The ladder itself is only meaningful while audio actually flows (D-06).
     if (tapAlive)
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
@@ -546,10 +584,102 @@ void NotchController::runOnce()
             for (int i = 0; i < kSlots; ++i)
             {
                 auto& n = model_[slotOf (c, i)];
-                // KD-7: soundcheck notches never auto-release.
-                if (n.active && n.origin != Origin::Soundcheck
-                    && (liveMs_ - n.lastDetectedMs) > kAutoReleaseMs)
+                // KD-7: soundcheck notches never release, never deepen, never
+                // follow the ceiling. They clear only on an explicit request.
+                if (! n.active || n.origin == Origin::Soundcheck)
+                    continue;
+
+                // --- live ceiling (spec 4.1) -------------------------------
+                // The ceiling is read fresh every tick, so an operator who
+                // pulls the depth slider up mid-show sees it take effect.
+                //
+                // B-1: DETECTOR ONLY, and the guard is load-bearing, not
+                // decoration. Q8 / spec 4.1 say the slider must not touch a
+                // Preset or Manual notch, and the shipping path proves it
+                // matters: tests/test_gui_wiring.cpp adopts a preset notch at
+                // -9.0. Under spec v2's quantisation the ceiling for that
+                // notch resolved to -6, so `-9 < -6` fired on the very first
+                // runOnce() and pulled a preset 3 dB shallower than its file.
+                // Q13 removes the quantisation (ceilingDbFor returns -9 and
+                // the comparison is false), but the Origin test is what keeps
+                // this branch off Preset/Manual whatever the arithmetic does
+                // next.
+                //
+                // Raising the ceiling deepens nothing here, deliberately: the
+                // comparison is one-way, so a raised ceiling only buys depth
+                // through the reinforce path's deepen branch (spec 5.3).
+                if (n.origin == Origin::Detector)
+                {
+                    const double ceiling = ceilingDbFor (n);
+
+                    // M-B: clamp the MEMORY unconditionally, every tick, even
+                    // when depthDB is already shallower than the ceiling and
+                    // the Set below will not run. This line is the whole fix.
+                    //
+                    // The hole it closes: climb to -24 under a -24 slider
+                    // (deepestDb -24) -> go quiet, release all the way to -6
+                    // (deepestDb untouched, that is the point of it) ->
+                    // operator drops the slider to -12. The test below reads
+                    // `-6 < -12` = FALSE, so without this line nothing happens
+                    // and deepestDb stays -24 -- and the next returning howl
+                    // reclamps to -24, 12 dB past the ceiling. That violates
+                    // Q1 and spec 4.10 invariant 2, and it is a LOUDER-than-
+                    // asked-for outcome on a live PA, which is the one
+                    // direction this codebase does not get to be sloppy in.
+                    //
+                    // It runs BEFORE the Set below so the reclamp branch in
+                    // processSpectrumForDetection can never see a deepestDb
+                    // the ceiling has already outlawed.
+                    //
+                    // max() picks the SHALLOWER of the two (deeper is more
+                    // negative). It never deepens deepestDb: a RAISED ceiling
+                    // leaves max(deepestDb, ceiling) == deepestDb.
+                    n.deepestDb = std::max (n.deepestDb, ceiling);
+
+                    if (n.depthDB < ceiling)
+                    {
+                        // One ramped step, possibly more than 6 dB, and
+                        // possibly landing off-rung (Q13: the ceiling IS the
+                        // last rung). Invariant 3 bounds the DEEP direction
+                        // only -- shallower is never dangerous.
+                        if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
+                        {
+                            n.stageChangedAtMs = liveMs_;
+                            n.quietMs          = 0.0;   // a depth change restarts the clock
+                        }
+                        continue;   // one depth change per notch per tick
+                    }
+                }
+
+                // --- steps 2-4: the quiet clock and the ladder -------------
+                if (! frozen)
+                    n.quietMs += dt;
+
+                const double needed = (n.releasedSteps == 0) ? kReleaseFirstMs
+                                                             : kReleaseStepMs;
+                if (n.quietMs < needed)
+                    continue;
+
+                if (n.depthDB < kDepthLadderDb[0])
+                {
+                    // Up one rung, never two: nextShallowerRungDb returns the
+                    // deepest rung strictly shallower than where the notch
+                    // stands, so an odd Preset/Manual depth resolves to the
+                    // nearest rung above it and nothing is skipped.
+                    const double next = nextShallowerRungDb (n.depthDB);
+                    if (pushRetuneLocked (c, i, next, RetuneReason::Release))
+                    {
+                        ++n.releasedSteps;
+                        n.stageChangedAtMs = liveMs_;
+                        n.quietMs          = 0.0;
+                    }
+                }
+                else
+                {
+                    // Already on the shallowest rung: the notch has nothing
+                    // left to give back, so it goes.
                     pushClearLocked (c, i, ClearReason::AutoRelease);
+                }
             }
     }
 
@@ -1036,7 +1166,19 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                         // ceilingDbFor(n) IS their own depth, which equals
                         // deepestDb, so this is identity.
                         const double target = std::max (n.deepestDb, ceilingDbFor (n));
-                        if (pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
+                        // Task 7 review, edge (a): the operator may have set
+                        // the slider to EXACTLY the rung the ladder wound this
+                        // notch back to. The release ladder's per-tick ceiling
+                        // clamp then pulled deepestDb down to that same value,
+                        // so `target` is the depth ALREADY RUNNING. Sending it
+                        // would restart Biquad's 10 ms ramp on a live PA for a
+                        // depth change of zero. Short-circuit: the push is
+                        // skipped, the bookkeeping below is NOT -- the notch is
+                        // reclamped, it simply had nowhere to go, and leaving
+                        // releasedSteps standing would make its next release
+                        // come after 10 s instead of 30.
+                        if (target == n.depthDB
+                            || pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
                         {
                             // Keep the memory and the depth in step: when the
                             // ceiling did not bind, target == deepestDb and
