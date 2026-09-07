@@ -32,14 +32,15 @@ class NotchChain
 public:
     static constexpr int MAX_NOTCHES = 16;
 
-    // Depth-only retune ramp (spec 4.7, decision Q5). 10 ms is 441 samples at
-    // 44.1 kHz, 480 at 48 kHz, 960 at 96 kHz. The ramp advances per SAMPLE,
-    // not per callback, so both buffer sizes in this app are correct: at a
-    // buffer >= 512 samples (e.g. 2048) the ramp starts and finishes inside a
-    // single callback; at a 64-sample buffer it straddles roughly 7-8
-    // callbacks. 10 ms is the value it is because 6 dB over 10 ms is
-    // 0.6 dB/ms -- the invariant the controller's ladder is written against
-    // (spec 4.7).
+    // kRampMs: a depth-only retune walks its coefficients over 10 ms --
+    // 441 samples at 44.1 kHz, 480 at 48 kHz, 960 at 96 kHz. The ramp is
+    // per-sample, so how it lands on callback boundaries does not matter:
+    // at a 1024-sample buffer or larger it starts and finishes inside one
+    // callback at every rate above; at a 64-sample buffer it straddles
+    // about 7 callbacks at 44.1/48 kHz and 15 at 96 kHz. 10 ms is chosen so
+    // a 6 dB rung moves at most 0.6 dB/ms (spec 4.7); nothing in NotchChain
+    // enforces that bound -- the controller's ladder must not send a
+    // multi-rung step in the deep direction.
     static constexpr double kRampMs = 10.0;
 
     enum class NotchState
