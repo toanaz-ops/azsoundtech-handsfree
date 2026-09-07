@@ -627,9 +627,22 @@ void NotchController::runOnce()
                     // asked-for outcome on a live PA, which is the one
                     // direction this codebase does not get to be sloppy in.
                     //
-                    // It runs BEFORE the Set below so the reclamp branch in
-                    // processSpectrumForDetection can never see a deepestDb
-                    // the ceiling has already outlawed.
+                    // Fix round 1 (Important 2): this clamp does NOT by
+                    // itself stop a same-tick reclamp from seeing a stale
+                    // deepestDb. Within one runOnce, step 1 (detection, which
+                    // contains the reclamp branch) runs BEFORE this step 3,
+                    // so on the exact tick the slider moves, the reclamp
+                    // still sees whatever deepestDb held before this line
+                    // ran this tick. What this line guarantees is that
+                    // deepestDb is honest for every LATER tick, and for
+                    // anything that reads it directly between now and the
+                    // next reclamp -- savePreset, the snapshot. The actual
+                    // PA-safety guarantee that a reclamp can never land past
+                    // the ceiling is the independent
+                    // std::max (n.deepestDb, ceilingDbFor (n)) at the
+                    // reclamp site itself (below, in the detection pass) --
+                    // it must not be removed even if this line's ordering
+                    // ever changes.
                     //
                     // max() picks the SHALLOWER of the two (deeper is more
                     // negative). It never deepens deepestDb: a RAISED ceiling
@@ -1165,6 +1178,15 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                         // the SHALLOWER value. For Preset/Manual,
                         // ceilingDbFor(n) IS their own depth, which equals
                         // deepestDb, so this is identity.
+                        //
+                        // Fix round 1 (Important 2, mirror of the step-3
+                        // comment at the ceiling clamp above): THIS max() is
+                        // the actual PA-safety guarantee, not the step-3
+                        // clamp. Step 1 (here) runs before step 3 within one
+                        // runOnce, so on the tick the slider moves, deepestDb
+                        // may still be stale when this line reads it -- this
+                        // independent clamp is what keeps the reclamp target
+                        // from ever landing past the live ceiling regardless.
                         const double target = std::max (n.deepestDb, ceilingDbFor (n));
                         // Task 7 review, edge (a): the operator may have set
                         // the slider to EXACTLY the rung the ladder wound this

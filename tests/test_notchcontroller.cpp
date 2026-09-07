@@ -1223,10 +1223,16 @@ TEST (NotchControllerStereo, IndepAutoReleaseIsPerLane)
     //
     // Left goes quiet, right keeps ringing, for > 30 s of live time.
     NoiseSource quietL;
-    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
-    // slack the 1.1.3 version carried are kept.
+    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. Fix round 1, Minor
+    // 1: +20 was thin -- integer truncation of each term costs almost a full
+    // block, and 4707 (this line, before the fix) left only 18 blocks over
+    // the 4689 actually needed:
+    //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) + ceil(10000 / kBlockMs)
+    //   = 2813 + 938 + 938 = 4689
+    // +60 restores a real margin without depending on how the division
+    // truncates for the rung this notch stands on.
     const int blocks = (int) ((NotchController::kReleaseFirstMs
-                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
+                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 60;
     for (int i = 0; i < blocks; ++i)
         pumpStereo (h, quietL.hop(), toneR.hop());
 
@@ -1253,10 +1259,16 @@ TEST (NotchControllerStereo, LinkedAutoReleaseWaitsForBothLanes)
     //
     // Left goes quiet, RIGHT now rings the same frequency: the pair stays.
     NoiseSource quietL; SineSource toneR;
-    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. The + 20 blocks of
-    // slack the 1.1.3 version carried are kept.
+    // From the -18 ceiling: 30 + 10 + 10 = 50 s to Clear. Fix round 1, Minor
+    // 1: +20 was thin -- integer truncation of each term costs almost a full
+    // block, and 4707 (this line, before the fix) left only 18 blocks over
+    // the 4689 actually needed:
+    //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) + ceil(10000 / kBlockMs)
+    //   = 2813 + 938 + 938 = 4689
+    // +60 restores a real margin without depending on how the division
+    // truncates for the rung this notch stands on.
     const int blocks = (int) ((NotchController::kReleaseFirstMs
-                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 20;
+                              + 2 * NotchController::kReleaseStepMs) / kBlockMs) + 60;
     for (int i = 0; i < blocks; ++i)
         pumpStereo (h, quietL.hop(), toneR.hop());
 
@@ -1449,9 +1461,12 @@ TEST (NotchControllerEvents, EveryClearPathCarriesItsReason)
         ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
         NoiseSource quiet;
         // Manual -12: its own depth is its ceiling, so -6 at 30 s and the
-        // Clear at 40 s.
+        // Clear at 40 s. Fix round 1, Minor 1: +10 was thin -- 3760 (before
+        // the fix) left only 9 blocks over the 3751 actually needed:
+        //   ceil(30000 / kBlockMs) + ceil(10000 / kBlockMs) = 2813 + 938 = 3751
+        // +60 restores a real margin.
         const int blocks = (int) ((NotchController::kReleaseFirstMs
-                                  + NotchController::kReleaseStepMs) / kBlockMs) + 10;
+                                  + NotchController::kReleaseStepMs) / kBlockMs) + 60;
         for (int i = 0; i < blocks; ++i)
             pump (h, quiet.hop());
         const auto c = r.clears();
@@ -2669,6 +2684,47 @@ TEST (NotchControllerLadder, RingRiskAtRisingFreezesTheReleaseClock)
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
 }
 
+// Fix round 1, Important 1. RED IF the frozen flag survives a dead tap
+// (M-6). A dead tap is not a frozen clock; it is no clock at all -- a GUI or
+// a log reader must never be told "frozen" about a slot with no audio.
+TEST (NotchControllerLadder, ReleaseFrozenGoesFalseWhenTheTapDies)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    h.controller.setRingRiskOverrideForTest (
+        std::make_pair (true, NotchController::kRiskFreezeFraction
+                              * CandidateScorer::kConfirmScore));
+
+    // One live block: the tap is alive and RING RISK reads RISING, so the
+    // clock freezes immediately (same shape as RingRiskAtRisingFreezesThe
+    // ReleaseClock).
+    NoiseSource quiet;
+    pump (h, quiet.hop());
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_TRUE (snap.releaseFrozen) << "expected the live tap to freeze first";
+    const double quietBefore = h.controller.quietMsForTest (0, 0);
+
+    // The tap stops delivering data entirely -- no tap.write, no pump().
+    // Advance the FakeClock past kTapSilenceTimeoutMs (250 ms) and call
+    // runOnce() directly. The override still reports RISING; only tap
+    // liveness may change here.
+    //
+    // RED IF the publish were moved back inside `if (tapAlive)`: the stale
+    // `true` from the block above would persist forever, because nothing
+    // would ever write `false` to a dead slot's snapshot again.
+    h.clock.advance (NotchController::kTapSilenceTimeoutMs + 10.0);
+    h.controller.runOnce();
+
+    h.controller.copySnapshot (snap);
+    EXPECT_FALSE (snap.releaseFrozen)
+        << "a dead tap must never be reported as a frozen release clock";
+    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0), quietBefore)
+        << "a dead tap must not advance the quiet clock either";
+}
+
 // RED IF an INVALID ring-risk reading is treated as a freeze (spec 4.5,
 // invariant 7). Detection off must release exactly as 1.1.3 did.
 TEST (NotchControllerLadder, InvalidRingRiskDoesNotFreezeTheClock)
@@ -2863,7 +2919,6 @@ TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
 
     NotchCommand drained {};
     while (h.commands.read (&drained, 1) == 1) {}
-    const double before = h.controller.liveMsForTest();
 
     // The howl comes back. The analysis window is four hops long and tapered,
     // so a single hop of tone sitting at its very end is not yet a peak the
@@ -2880,8 +2935,16 @@ TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
 
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
         << "the reclamp never fired";
-    EXPECT_LT (h.controller.liveMsForTest() - before, NotchController::kDeepenAfterMs)
-        << "the reclamp waited for the deepen gate instead of firing on the frame";
+    // Fix round 1, Minor 2: EXPECT_LT (liveMs delta, kDeepenAfterMs) was
+    // tautological here -- the loop above caps at 8 blocks (~85 ms of live
+    // time), which is under kDeepenAfterMs (300 ms) no matter what the
+    // reclamp branch does, so it could never catch a reclamp that actually
+    // waited out the deepen gate. Assert on the block count instead: the
+    // analysis window is four hops long and tapered (see the comment above),
+    // so a reclamp that is firing on the frame -- not waiting for the gate --
+    // should land within one window's worth of hops.
+    EXPECT_LE (blocks, 4)
+        << "the reclamp took longer than one analysis window to fire";
     // The banked quiet time is SPENT, not merely paused. It cannot be pinned
     // at exactly 0: step 3 of the SAME runOnce adds this tick's dt back on
     // whenever the frame was not also frozen, so one block's worth is the
