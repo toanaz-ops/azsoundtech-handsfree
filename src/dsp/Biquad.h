@@ -53,6 +53,45 @@
 // design). It is branch-only: no allocation, no logging, no exceptions, so it
 // remains safe to call from the audio thread.
 
+// Depth retune without a click: rampNotchDepth()
+// ==============================================
+// setNotchFilter() calls reset() because a new DESIGN owns no state from the
+// old one. That is right when the frequency or Q moves, and wrong when only
+// the depth does: clearing z1/z2 mid-signal is a step discontinuity straight
+// into a PA. rampNotchDepth() therefore keeps the state and walks the five
+// normalised coefficients linearly to the new design over `rampSamples`.
+//
+// Why an interpolated coefficient set is safe (spec 4.7, M-4)
+// -----------------------------------------------------------
+// Fix freq/Q/sampleRate, write u_i = alpha/A_i and d_i = 1 + u_i. Every convex
+// combination (weights w_i) of the a0-normalised peaking designs keeps
+// b1 == a1 and satisfies P + alpha*K == 1, with P = sum(w_i/d_i) and
+// K = sum(w_i/(A_i*d_i)). Substituting, the interpolated set IS a peaking RBJ
+// filter with numerator gain A_n = sum(w_i*A_i/d_i)/P and denominator gain
+// 1/A_d = sum(w_i/(A_i*d_i))/P:
+//
+//   |H(w)|^2 = [(cos w - cos w0)^2 + alpha^2 * A_n^2 * sin^2 w]
+//            / [(cos w - cos w0)^2 + alpha^2 * A_d^-2 * sin^2 w]
+//
+// Every A_i <= 1 (depth <= 0), so A_n <= 1 <= 1/A_d and |H| <= 1 at EVERY
+// frequency -- the ramp cannot boost anything, including the frequency it is
+// pointed at. The pole radius is sqrt((1 - alpha/A_d)/(1 + alpha/A_d)) < 1, so
+// it cannot diverge either. A ramp restarted mid-flight is the three-point
+// case of the same argument. Measured 2026-09-06: max gain 1.9e-15 dB over
+// 3 rates x 5 frequencies x 3 Qs x 7 depth pairs x 101 probes, and over 20 000
+// random convex combinations x 400 frequencies. Coefficient deltas are ~1e-6
+// per sample -- nowhere near the subnormal range.
+//
+// A ramp is only ever entered between two designs sharing freq, Q and
+// sampleRate (NotchChain::setNotch enforces that). setNotchFilter() and
+// reset() CANCEL an in-flight ramp: the newer instruction wins.
+//
+// NotchChain::clearNotch does NOT cancel a ramp, so an Idle slot can carry
+// rampRemaining_ > 0 that nobody ticks. Harmless: setNotch on an Idle slot
+// takes the reset path, which cancels it. And a ramp cut short by a device
+// stop leaves the filter at an intermediate depth while NotchInfo.depthDB
+// already reads the target -- 10 ms of disagreement, accepted (spec 4.7, m-5).
+
 #pragma once
 
 class Biquad
@@ -100,14 +139,48 @@ public:
     // Branch-only and allocation-free, like its sibling: reachable from the
     // audio thread via NotchChain::setNotch.
     bool setNotchFilter(double freq, double Q, double sampleRate, double depthDB);
+
+    // Retunes a RUNNING notch to `depthDB` while keeping the filter state,
+    // interpolating all five coefficients over `rampSamples` calls to
+    // processSample(). Applies the SAME four rejections as the four-argument
+    // setNotchFilter (sampleRate > 0, Q > 0, 0 < freq < sampleRate/2,
+    // depthDB <= 0); on rejection it returns false and leaves the
+    // coefficients, the state AND any in-flight ramp exactly as they were.
+    // rampSamples <= 0 installs the target immediately, still without reset().
+    // Branch-only and allocation-free: reachable from the audio thread via
+    // NotchChain::setNotch.
+    bool rampNotchDepth(double freq, double Q, double sampleRate, double depthDB,
+                        int rampSamples);
+
+    // TEST ACCESSORS ONLY -- the ramp's whole point is that state SURVIVES it,
+    // and no black-box measurement can tell a preserved state from a cleared
+    // one (spec 5.1, M-7).
+    struct State  { double z1, z2; };
+    struct Coeffs { double b0, b1, b2, a1, a2; };
+    State  stateForTest()  const { return { z1_, z2_ }; }
+    Coeffs coeffsForTest() const { return { b0_, b1_, b2_, a1_, a2_ }; }
+    int    rampRemainingForTest() const { return rampRemaining_; }
     double processSample(double input);
     void reset();
 
 private:
+    // The four-argument peaking design, in ONE place: setNotchFilter and
+    // rampNotchDepth must never be able to drift apart on either the formula
+    // or the four rejections. Writes the a0-normalised b0,b1,b2,a1,a2 into
+    // `out` and returns true; returns false and writes nothing on rejection.
+    static bool designPeaking(double freq, double Q, double sampleRate,
+                              double depthDB, double out[5]);
+
     // Coefficients (a0-normalised).
     double b0_, b1_, b2_;
     double a1_, a2_;
 
     // Direct Form I transposed state.
     double z1_, z2_;
+
+    // Ramp state. rampRemaining_ == 0 means "not ramping" and is the only
+    // thing processSample() branches on.
+    double target_[5];
+    double delta_[5];
+    int    rampRemaining_;
 };
