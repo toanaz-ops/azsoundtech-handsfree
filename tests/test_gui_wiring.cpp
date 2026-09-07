@@ -1688,3 +1688,81 @@ TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
     presetFile.deleteFile();
     EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
 }
+
+// Fix round 2 of task 9. The ceiling a preset installs is NOT level-neutral:
+// NotchController re-tunes any LIVE detector notch deeper than the new ceiling
+// up to it on the next tick (NotchController.cpp, the ceiling clamp), so
+// loading a shallower ceiling over a -24 dB notch is a real +14 dB at that bin.
+// A load that moves the ceiling therefore has to say so in the session log.
+//
+// Red if `preset_load` stops carrying ceiling_applied / q / depth_db.
+TEST (GuiWiring, PresetLoadLogsTheCeilingItApplied)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    c0->setSampleRate (48000.0);
+    c0->setNotchDefaults (30.0, -18.0);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1000.0, 30.0, -18.0,
+                               NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.25f);
+    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
+    c0->runOnce();
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-r2-ceiling-log.json");
+    presetFile.deleteFile();
+    ASSERT_TRUE (app.savePreset (presetFile));
+
+    const auto dir = freshLogDir ("ceiling-load");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    const auto* load = firstEvent (events, "preset_load");
+    ASSERT_NE (load, nullptr) << "no preset_load line in the session log";
+    EXPECT_TRUE ((bool) (*load)["ceiling_applied"]);
+    EXPECT_NEAR ((double) (*load)["q"],        30.0,  1e-9);
+    EXPECT_NEAR ((double) (*load)["depth_db"], -18.0, 1e-9);
+}
+
+// The other half: a file with no notchDefaults block moves no ceiling, and the
+// log must not claim it did. Red if ceiling_applied is written unconditionally
+// or the q / depth_db pair is emitted for a load that applied nothing.
+TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("az-handsfree-r2-no-ceiling-log.json");
+    presetFile.deleteFile();
+    ASSERT_TRUE (presetFile.replaceWithText (
+        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
+        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
+
+    const auto dir = freshLogDir ("no-ceiling-load");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    ASSERT_TRUE (app.loadPreset (presetFile));
+    presetFile.deleteFile();
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+
+    const auto* load = firstEvent (events, "preset_load");
+    ASSERT_NE (load, nullptr);
+    EXPECT_FALSE ((bool) (*load)["ceiling_applied"]);
+    EXPECT_TRUE (load->getDynamicObject()->hasProperty ("ceiling_applied"));
+    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
+    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
+}

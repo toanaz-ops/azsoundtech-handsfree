@@ -179,3 +179,98 @@ TEST (TuningPanel, ManualParamEditSwitchesOneKnobToCustom)
 
     EXPECT_EQ (panel.getSelectedPresetId(), kOneKnobCustom);
 }
+
+//==============================================================================
+// Off-list values (fix round 2 of task 9).
+//
+// The strip's five combos hold fixed rungs -- depth -6/-12/-18/-24, Q
+// 10/20/30/40/50. A preset file's ceiling does NOT have to sit on one: Q13
+// lets the model keep the exact value it was given, and presets/Music.json
+// ships notchDefaults { Q 25, depth -10 }. Since fix round 1 loadPreset
+// installs that ceiling on every Global slot, so the strip is now handed
+// off-list values for the first time and has to cope with them.
+
+TEST (TuningPanel, AnOffListCeilingIsShownAsTextRatherThanBlankingTheCombo)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    panel.paramsProvider = []
+    {
+        gui::TuningPanel::Params p;   // Music.json's ceiling
+        p.depthDb = -10;
+        p.q       = 25;
+        return p;
+    };
+    panel.refresh();
+
+    // setSelectedId(0) would leave both labels EMPTY -- the operator would be
+    // looking at a strip that cannot say what the notch ceiling is.
+    EXPECT_EQ (panel.getDepthComboForTest().getText(), juce::String ("-10 dB"));
+    EXPECT_EQ (panel.getQComboForTest().getText(),     juce::String ("25"));
+
+    // The on-list three still select normally.
+    EXPECT_EQ (gui::TuningPanel::riseMsForId (panel.getRiseComboForTest().getSelectedId()), 250);
+    EXPECT_EQ (panel.getPersistComboForTest().getSelectedId(), 3);
+    EXPECT_FLOAT_EQ (gui::TuningPanel::thresholdForId (panel.getThrComboForTest().getSelectedId()),
+                     10.0f);
+}
+
+TEST (TuningPanel, TouchingAnotherComboReSendsTheOffListCeilingUnchanged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    panel.paramsProvider = []
+    {
+        gui::TuningPanel::Params p;
+        p.depthDb = -10;
+        p.q       = 25;
+        return p;
+    };
+    panel.refresh();
+
+    int calls = 0;
+    gui::TuningPanel::Params reported;
+    panel.onTuningChanged = [&] (const gui::TuningPanel::Params& p) { ++calls; reported = p; };
+
+    // A touch on RISE must carry the SAME ceiling out. Reading a blank combo
+    // as "id 0 -> first item" would push Q 10 / -6 dB to every Global slot --
+    // a ceiling change nobody asked for, on a live rig.
+    panel.getRiseComboForTest().setSelectedId (1, juce::sendNotificationSync);   // 100 ms
+
+    ASSERT_EQ (calls, 1);
+    EXPECT_EQ (reported.riseReferenceMs, 100);
+    EXPECT_EQ (reported.depthDb,         -10);
+    EXPECT_EQ (reported.q,                25);
+}
+
+TEST (TuningPanel, PickingARungFromAnOffListCeilingAppliesThatRung)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    gui::TuningPanel panel;
+    panel.setSize (720, gui::TuningPanel::kPanelHeight);
+
+    panel.paramsProvider = []
+    {
+        gui::TuningPanel::Params p;
+        p.depthDb = -10;
+        p.q       = 25;
+        return p;
+    };
+    panel.refresh();
+
+    gui::TuningPanel::Params reported;
+    panel.onTuningChanged = [&] (const gui::TuningPanel::Params& p) { reported = p; };
+
+    panel.getDepthComboForTest().setSelectedId (2, juce::sendNotificationSync);   // -12 dB
+
+    // The edited combo wins; the still-off-list one rides along untouched.
+    EXPECT_EQ (reported.depthDb, -12);
+    EXPECT_EQ (reported.q,        25);
+}

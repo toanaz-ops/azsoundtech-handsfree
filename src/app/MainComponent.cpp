@@ -939,9 +939,27 @@ bool MainComponent::loadPreset (const juce::File& file)
     // values until its Tune combo goes back to G. The preset format carries
     // ONE global pair, so there is nothing per-slot to restore.
     //
-    // Expected level change: 0 dB right here. The ceiling caps FUTURE
-    // deepening only; the notches this load installed were adopted at their
-    // own file depth by adoptPreset above.
+    // EXPECTED LEVEL CHANGE -- this is NOT 0 dB, and the round-1 note that
+    // said it was has been corrected here.
+    //
+    // A Detector notch carries no ceiling of its own (ModelNotch::ceilingDb is
+    // NaN, so ceilingDbFor() reads the LIVE value this line writes). The
+    // detection pass re-tunes any such notch standing DEEPER than the new
+    // ceiling up to it on the very next tick -- NotchController.cpp, the
+    // `n.depthDB < ceiling` branch -- as one ramped step of 10 ms. Loading a
+    // shallower ceiling over a live -24 dB notch under Music.json's -10 dB is
+    // therefore +14 dB at a bin that was ringing. Loading a DEEPER ceiling is
+    // 0 dB now and only allows deeper rungs later. Preset, Manual and
+    // Soundcheck notches carry their own ceiling (Q8) and are untouched either
+    // way, as are the notches this load just adopted at their file depth.
+    //
+    // The pull itself is by design (Q1/Q8) and is not changed here; what is
+    // added is that the load now SAYS it moved the ceiling, in the
+    // `preset_load` event below.
+    bool   ceilingApplied = false;
+    double appliedQ       = 0.0;
+    double appliedDepthDb = 0.0;
+
     if (result.preset.hasNotchDefaults)
     {
         for (int i = 0; i < kMaxSlots; ++i)
@@ -952,13 +970,26 @@ bool MainComponent::loadPreset (const juce::File& file)
             // setNotchDefaults clamps to Q 8..50 / -24..-6 dB, so a file
             // carrying a legal-but-extreme pair cannot push the controller
             // outside the range the panels can reach.
-            notchControllers_[(std::size_t) i]->setNotchDefaults (
-                result.preset.notchDefaults.Q, result.preset.notchDefaults.depthDB);
+            auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setNotchDefaults (result.preset.notchDefaults.Q,
+                                         result.preset.notchDefaults.depthDB);
+
+            // Read BACK, so the log carries the ceiling that is actually
+            // standing rather than the number the file asked for. They differ
+            // whenever the clamp above bit. Also: with every slot on Custom
+            // this loop never runs, and the load really did apply nothing.
+            if (! ceilingApplied)
+            {
+                ceilingApplied = true;
+                appliedQ       = controller.getNotchQ();
+                appliedDepthDb = controller.getNotchDepthDb();
+            }
         }
 
         // The strip re-reads slot 0 through paramsProvider, so the Q and depth
         // combos show what the file just installed rather than the value the
-        // operator left them on.
+        // operator left them on. A ceiling need not sit on a combo rung (Q13);
+        // TuningPanel::refresh shows such a value as text.
         tuningPanel_.refresh();
     }
 
@@ -973,6 +1004,29 @@ bool MainComponent::loadPreset (const juce::File& file)
         o->setProperty ("file", file.getFileName());
         o->setProperty ("adopted", adoptedTotal);
         o->setProperty ("skipped", lastLoadSkipped_);
+
+        // The ceiling this load moved, if it moved one (fix round 2).
+        //
+        // A load that LOWERS the ceiling is NOT level-neutral: the controller
+        // re-tunes every live detector notch deeper than the new ceiling up to
+        // it on the next tick, which is a real level rise at a bin that was
+        // ringing (a -24 dB notch under Music.json's -10 dB ceiling comes up
+        // 14 dB, ramped over 10 ms). That has to be readable afterwards, so
+        // the log says whether a ceiling was applied and which one.
+        //
+        // `ceiling_applied` is always written -- a reader must be able to tell
+        // "this load moved nothing" from "the field is new" -- but q /
+        // depth_db only when there is a ceiling to report. The names and the
+        // double type match the `tuning` event's, so logstats reads one column
+        // for both.
+        o->setProperty ("ceiling_applied", ceilingApplied);
+
+        if (ceilingApplied)
+        {
+            o->setProperty ("q",        appliedQ);
+            o->setProperty ("depth_db", appliedDepthDb);
+        }
+
         sessionLogger_.log (v);
     }
 
@@ -1072,8 +1126,9 @@ bool MainComponent::savePreset (const juce::File& file)
     //
     // Slot 0 is the source because notchDefaults is a single global pair in
     // the format and every Global slot carries the same values. A slot on
-    // Custom tuning is not represented in the file at all -- see the note in
-    // the task-9 report if per-slot ceilings ever arrive.
+    // Custom tuning is not represented in the file at all -- see
+    // docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md 4.8 / Q11
+    // if per-slot ceilings ever arrive.
     preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
 
