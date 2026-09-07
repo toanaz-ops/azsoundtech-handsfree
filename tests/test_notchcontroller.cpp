@@ -363,6 +363,18 @@ void pumpQuietFor (Harness& h, NoiseSource& quiet, double ms)
         pump (h, quiet.hop());
 }
 
+// A findable helper for "which index is holding a notch on this lane" -- the
+// room-memory tests all need it and none of them may use the depth to answer
+// it (B-3: pushClearLocked lowers `active` and LEAVES depthDB behind, so a
+// depth probe matches every slot that has ever held a notch).
+int firstActiveIndex (NotchController& c, int lane)
+{
+    for (int k = 0; k < NotchController::kSlots; ++k)
+        if (c.activeForTest (lane, k))
+            return k;
+    return -1;
+}
+
 // A tone that CREEPS up out of the noise instead of switching on. SineSource
 // starts at full amplitude in one block, so its rise ratio is enormous and
 // every test built on it places at -12; the -6 start of spec 4.3 is only
@@ -3148,4 +3160,316 @@ TEST (NotchControllerLadder, NoCommandEverLeavesTheLegalDepthRange)
                 EXPECT_GE (cmd.depthDB, -24.0f);
             }
     }
+}
+
+// === Lane G, Task 8: room memory (spec 4.6, Q3/Q6/Q10, m-8, M-11) =========
+
+// RED IF room memory stops working (spec 4.6, Q3/Q6). A howl that returns to
+// the same bin within 5 minutes must not start the ladder over.
+TEST (NotchControllerLadder, AHowlReturningToTheSameBinStartsAtTheRememberedDepth)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    SineSource tone;
+    for (int i = 0; i < 200; ++i)     // climb to the ceiling
+        pump (h, tone.hop());
+    const double deepest = h.controller.deepestDbForTest (0, slot);
+    ASSERT_DOUBLE_EQ (deepest, -24.0);
+
+    NoiseSource quiet;
+    // From -24: 30 + 10 + 10 + 10 = 60 s to Clear. 62 s leaves 2 s of margin.
+    pumpQuietFor (h, quiet, 62000.0);
+    ASSERT_FALSE (h.controller.activeForTest (0, slot))
+        << "the notch had not finished the release ladder, so nothing was remembered";
+
+    // The same howl comes back. With no memory this places at -12 (SineSource
+    // is a hard start, so the steep-rise branch fires); the memory must beat
+    // that and go straight to what the room needed.
+    SineSource again;
+    int placed = -1;
+    for (int i = 0; i < 60 && placed < 0; ++i)
+    {
+        pump (h, again.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), deepest);
+}
+
+// RED IF the bin tolerance loosens (Q10). One bin away is a DIFFERENT howl --
+// at 48 kHz / 2048 that is 23.4 Hz, and an instrument partial next door must
+// not inherit a -24 dB cut on its first block.
+//
+// m-F: the name says "starts fresh", NOT "starts at -6", because -6 is not
+// what this fixture produces. SineSource switches a full-scale tone on in one
+// block, so riseRatio is enormous, the steep-rise branch fires and the fresh
+// placement is -12 (spec 4.3 step 2). What is being pinned here is that the
+// depth came from the PLACEMENT POLICY and not from room memory, so the
+// assertion is exact: -12, never -24, and never a loose >= -12, which -24
+// would also have to fail but which would silently accept -6 if the
+// steep-rise branch broke.
+TEST (NotchControllerLadder, OneBinAwayIsANewHowlAndStartsFreshNotFromMemory)
+{
+    Harness h;
+    const double binHz = kTestSr / Detector::kFftSize;   // 23.4375
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    // Place at the ceiling by hand, then let the ladder clear it: the memory
+    // entry is written by the AutoRelease at the bottom of the ladder.
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 43.0 * binHz, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 62000.0);   // from -24: 60 s to Clear, +2 s margin
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+
+    // A candidate exactly ONE bin up. Memory must not answer for it.
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource neighbour; neighbour.freq = 44.0 * binHz;
+    int placed = -1;
+    for (int i = 0; i < 80 && placed < 0; ++i)
+    {
+        pump (h, neighbour.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -12.0)
+        << "a neighbouring bin inherited the remembered depth (or the "
+           "steep-rise placement branch stopped firing)";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, placed), -12.0)
+        << "the memory -24 leaked into deepestDb even though the depth was "
+           "placed fresh -- the next reclamp would then go to -24";
+}
+
+// RED IF the TTL stops expiring entries (spec 4.6). 5 minutes and one
+// millisecond is a different show.
+TEST (NotchControllerLadder, RoomMemoryExpiresAfterFiveMinutes)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 62000.0);                       // -24: cleared, remembered
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+    pumpQuietFor (h, quiet, NotchController::kMemoryTtlMs + 1000.0);   // expired
+
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource tone;
+    int placed = -1;
+    for (int i = 0; i < 80 && placed < 0; ++i)
+    {
+        pump (h, tone.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_GE (h.controller.depthDbForTest (0, placed), -12.0)
+        << "an expired entry was still used";
+}
+
+// RED IF a remembered entry can be used twice (spec 4.6). It describes ONE
+// release; a second howl at that bin has to earn its own depth.
+TEST (NotchControllerLadder, ARememberedEntryIsUsedOnlyOnce)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 62000.0);   // from -24: 60 s to Clear, +2 s margin
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource tone;
+    int first = -1;
+    for (int i = 0; i < 80 && first < 0; ++i)
+    {
+        pump (h, tone.hop());
+        first = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (first, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, first), -24.0);
+
+    // Clear it by hand (no AutoRelease => no new memory entry) and let it
+    // place again: the ladder must start from scratch.
+    h.controller.clearNotch (0, first, NotchController::ClearReason::Manual);
+    ASSERT_FALSE (h.controller.activeForTest (0, first));
+    int second = -1;
+    for (int i = 0; i < 80 && second < 0; ++i)
+    {
+        pump (h, tone.hop());
+        second = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (second, 0);
+    EXPECT_GE (h.controller.depthDbForTest (0, second), -12.0)
+        << "the entry was consumed twice";
+}
+
+// RED IF the ceiling stops capping a remembered depth (spec 4.3 step 4, m-8).
+// A -24 memory under a -12 ceiling must place at -12. Under Q13 that is the
+// ONLY thing the read path does to a remembered depth: no rung quantisation,
+// because the ceiling IS the deepest legal rung. A memory holding an odd depth
+// (a Manual -9 that auto-released) is therefore placed at -9 verbatim under a
+// -24 ceiling -- correct, and covered by the test after this one.
+TEST (NotchControllerLadder, ARememberedDepthIsStillCappedByTheCeiling)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 62000.0);   // from -24: 60 s to Clear, +2 s margin
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+
+    h.controller.setNotchDefaults (30.0, -12.0);   // ceiling drops
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource tone;
+    int placed = -1;
+    for (int i = 0; i < 80 && placed < 0; ++i)
+    {
+        pump (h, tone.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -12.0);
+}
+
+// RED IF the read path snaps a remembered depth to a fixed rung (m-8). A
+// Manual notch is placed at whatever the operator typed, so an entry can hold
+// -9; under a ceiling that permits it, -9 is what comes back. Quantising to
+// -6 would throw away 3 dB the room demonstrably needed, and quantising to -12
+// would place DEEPER than the notch ever ran, which invariant 2 forbids.
+TEST (NotchControllerLadder, AnOffRungRememberedDepthComesBackVerbatim)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -9.0,
+                                        NotchController::Origin::Manual));
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 42000.0);   // from -9: -6 at 30 s, Clear at 40 s
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+    SineSource tone;
+    int placed = -1;
+    for (int i = 0; i < 80 && placed < 0; ++i)
+    {
+        pump (h, tone.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -9.0);
+}
+
+// RED IF a room change stops wiping the memory (spec 4.6). setWidth is the
+// boundary that actually fires in the shipping app -- MainComponent's
+// onAfterRestart hook calls it on every engine restart, i.e. every device,
+// rate and buffer change.
+TEST (NotchControllerLadder, SetWidthClearAllAndSetSampleRateWipeRoomMemory)
+{
+    for (int which = 0; which < 3; ++which)
+    {
+        Harness h;
+        h.controller.setNotchDefaults (30.0, -24.0);
+        ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                            NotchController::Origin::Detector));
+        NoiseSource quiet;
+        pumpQuietFor (h, quiet, 62000.0);   // from -24: 60 s to Clear, +2 s margin
+        ASSERT_FALSE (h.controller.activeForTest (0, 0)) << "which=" << which;
+
+        if (which == 0) h.controller.setWidth (2);
+        if (which == 1) h.controller.clearAll();
+        if (which == 2) h.controller.setSampleRate (48000.0);
+
+        h.controller.setDetectionActive (true);
+
+        // processSpectrumForDetection returns early while detection is off, so the
+        // quiet pump above left the scorer with NO history. Warm it the same way
+        // primeAndPlace does before the tone arrives, or nothing ever confirms.
+        for (int i = 0; i < kWarmupBlocks; ++i)
+            pump (h, quiet.hop());
+        SineSource tone;
+        int placed = -1;
+        for (int i = 0; i < 80 && placed < 0; ++i)
+        {
+            pump (h, tone.hop());
+            placed = firstActiveIndex (h.controller, 0);
+        }
+        ASSERT_GE (placed, 0) << "which=" << which;
+        EXPECT_GE (h.controller.depthDbForTest (0, placed), -12.0)
+            << "memory survived a room change, which=" << which;
+    }
+}
+
+// RED IF a LINKED release leaves an orphan entry on one lane (M-11). One
+// Clear writes both lanes; one placement consumes both.
+TEST (NotchControllerLadder, LinkedReleaseWritesAndConsumesBothLanes)
+{
+    StereoHarness h;
+    h.controller.setLinked (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_TRUE (h.controller.setNotch (1, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+
+    NoiseSource quietL, quietR; quietR.rng.seed (999u);
+    // From -24: 30 + 10 + 10 + 10 = 60 s to Clear, +2 s margin.
+    const int blocks = (int) std::lround (62000.0 / kBlockMs);
+    for (int i = 0; i < blocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+    ASSERT_FALSE (h.controller.activeForTest (1, 0));
+
+    h.controller.setDetectionActive (true);
+
+    // processSpectrumForDetection returns early while detection is off, so the
+    // quiet pump above left the scorer with NO history. Warm it the same way
+    // primeAndPlace does before the tone arrives, or nothing ever confirms.
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpStereo (h, quietL.hop(), quietR.hop());
+    SineSource toneL, toneR;
+    int placed = -1;
+    for (int i = 0; i < 80 && placed < 0; ++i)
+    {
+        pumpStereo (h, toneL.hop(), toneR.hop());
+        placed = firstActiveIndex (h.controller, 0);
+    }
+    ASSERT_GE (placed, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -24.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (1, placed), -24.0);
 }

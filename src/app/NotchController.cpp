@@ -116,6 +116,14 @@ void NotchController::setWidth (int lanes)
     // scorer, the persistence streaks and the model are untouched here.
     for (auto& l : lanes_)
         l.blocksSinceReset = 0;
+
+    // Same boundary, same reason (spec 4.6): a restart means a different
+    // device, rate or room, and a remembered depth from the old one would be
+    // applied to a bin that now means a different frequency.
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        clearRoomMemoryLocked();
+    }
 }
 
 // --- Lane G ladder arithmetic (spec 4.1, Q13). Pure: no state, no locks. ---
@@ -327,6 +335,93 @@ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthD
     return true;
 }
 
+// --- Lane G room memory (spec 4.6, Q3/Q6/Q10). modelMutex_ HELD by every
+// caller; see the header for why that lock and no other. -------------------
+
+void NotchController::rememberReleaseLocked (int lane, double frequencyHz,
+                                             double deepestDb, bool bothLanes)
+{
+    const int first = bothLanes ? 0 : lane;
+    const int last  = bothLanes ? width_ - 1 : lane;
+    for (int l = first; l <= last && l < kChannels; ++l)
+    {
+        if (l < 0)
+            continue;
+        auto& bank = roomMemory_[(std::size_t) l];
+
+        // Merge onto an existing entry for the same frequency rather than
+        // writing a second one. A LINKED pair clears on the same tick and both
+        // lanes write both banks, so without this the ring fills with
+        // duplicates and a lookup consumes one while leaving its twin behind.
+        int target = -1;
+        for (int k = 0; k < kMemoryEntriesPerLane; ++k)
+            if (bank[(std::size_t) k].used
+                && bank[(std::size_t) k].frequencyHz == frequencyHz)
+            {
+                target = k;
+                break;
+            }
+
+        const bool merging = target >= 0;
+        if (! merging)
+        {
+            target = roomMemoryHead_[(std::size_t) l];
+            roomMemoryHead_[(std::size_t) l] = (target + 1) % kMemoryEntriesPerLane;
+        }
+
+        auto& e = bank[(std::size_t) target];
+        // The DEEPEST of the two wins: whichever lane needed more is what the
+        // room needed (M-11). min() picks the deeper, deeper being more negative.
+        e.deepestDb   = merging ? std::min (e.deepestDb, deepestDb) : deepestDb;
+        e.frequencyHz = frequencyHz;
+        e.clearedAtMs = liveMs_;
+        e.used        = true;
+    }
+}
+
+double NotchController::takeRememberedDepthLocked (int lane, double frequencyHz,
+                                                   double binWidthHz, bool bothLanes)
+{
+    if (! (binWidthHz > 0.0))
+        return std::numeric_limits<double>::quiet_NaN();
+
+    const long targetBin = std::lround (frequencyHz / binWidthHz);
+    const int  first = bothLanes ? 0 : lane;
+    const int  last  = bothLanes ? width_ - 1 : lane;
+
+    double best = std::numeric_limits<double>::quiet_NaN();
+    for (int l = first; l <= last && l < kChannels; ++l)
+    {
+        if (l < 0)
+            continue;
+        for (auto& e : roomMemory_[(std::size_t) l])
+        {
+            if (! e.used)
+                continue;
+            // Q10: SAME bin, +-0. One bin is 21.5 Hz at 44.1 kHz / 2048, and a
+            // partial next door must not inherit a deep cut on its first block.
+            if (std::lround (e.frequencyHz / binWidthHz) != targetBin)
+                continue;
+            if (liveMs_ - e.clearedAtMs > kMemoryTtlMs)
+            {
+                e.used = false;   // expired: drop it while we are here
+                continue;
+            }
+            best   = std::isnan (best) ? e.deepestDb : std::min (best, e.deepestDb);
+            e.used = false;       // one use only (spec 4.6)
+        }
+    }
+    return best;
+}
+
+void NotchController::clearRoomMemoryLocked()
+{
+    for (auto& bank : roomMemory_)
+        for (auto& e : bank)
+            e = MemoryEntry {};
+    roomMemoryHead_.fill (0);
+}
+
 void NotchController::clearNotch (int channel, int index, ClearReason reason)
 {
     // width gates the policy surface; internal fan-out loops never exceed it.
@@ -342,6 +437,10 @@ void NotchController::clearAll (ClearReason reason)
     for (int c = 0; c < kChannels; ++c)
         for (int i = 0; i < kSlots; ++i)
             pushClearLocked (c, i, reason);
+    // CLEAR ALL is the operator saying "forget everything you think you know
+    // about this room" -- leaving the memory would have the next howl come
+    // back deep-notched immediately.
+    clearRoomMemoryLocked();
 }
 
 int NotchController::adoptPreset (const std::vector<PresetNotch>& notches, int* skippedOut)
@@ -691,6 +790,15 @@ void NotchController::runOnce()
                 {
                     // Already on the shallowest rung: the notch has nothing
                     // left to give back, so it goes.
+                    //
+                    // What this bin needed, recorded before the record of it
+                    // goes away with the notch (spec 4.6). ONLY on an
+                    // AutoRelease: a manual clear, a CLEAR ALL, a width
+                    // change, a FALSE verdict or a partial-apply unwind are
+                    // all statements that this notch should not have been
+                    // there, and remembering a depth from one of those would
+                    // re-place it deep on the operator's next howl.
+                    rememberReleaseLocked (c, n.frequency, n.deepestDb, effectiveLinked());
                     pushClearLocked (c, i, ClearReason::AutoRelease);
                 }
             }
@@ -950,13 +1058,19 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     const double ceiling = notchDepthDb_.load (std::memory_order_relaxed);
 
     int index = -1, firstLane = lane, lastLane = lane;
+    double remembered = std::numeric_limits<double>::quiet_NaN();
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         if (linkedNow) { index = firstFreeIndexAllLanesLocked(); firstLane = 0; lastLane = width_ - 1; }
         else           { index = firstFreeIndexLocked (lane); }
-        // Task 8 hooks the room-memory lookup in HERE -- it needs `index >= 0`
-        // (the entry is consumed) and the bin width, and it must run under
-        // this same lock. Nothing to do in this task.
+        // Room memory (spec 4.6), looked up ONLY when a placement is actually
+        // going to happen: the entry is CONSUMED by the lookup, and spending
+        // it on a placement that then bails on a full chain would lose the
+        // room's history for nothing.
+        if (index >= 0)
+            remembered = takeRememberedDepthLocked (lane, cand.frequencyHz,
+                                                    pc.sampleRate / (double) Detector::kFftSize,
+                                                    linkedNow);
     }
     if (index < 0)
         return;   // chain full on the lanes concerned: same outcome as today
@@ -967,23 +1081,33 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     if (pc.breakdown.riseRatio >= kSteepRiseRatio)            // step 2: +6 dB or more
         depthDb = kDepthLadderDb[1];                          //         over the rise
                                                               //         window -> -12
-    // step 3 (room memory) is inserted HERE by Task 8, and nowhere else.
+    // step 3 (spec 4.6): this bin howled before, recently, and we know what it
+    // took. Skip the crawl. Nowhere else: this is the ONE place a remembered
+    // depth may enter a placement.
+    if (! std::isnan (remembered))
+        depthDb = remembered;
 
     // step 4: never deeper than the ceiling, which under Q13 IS the deepest
     // rung. max() picks the SHALLOWER of the two because deeper is more
     // negative: ceiling -10 turns a steep-rise -12 into -10.
+    //
+    // This is also the ONLY thing done to a remembered depth on read (m-8): an
+    // entry may legitimately hold an off-rung value -- a Manual -9 that
+    // auto-released -- and max() clamps it to the CURRENT ceiling without any
+    // rung quantisation. Snapping it to a rung would either throw away depth
+    // the room needed (-9 -> -6) or place DEEPER than the notch ever ran
+    // (-9 -> -12), which invariant 2 forbids.
     depthDb = std::max (depthDb, ceiling);
 
-    // KD-7, and this line stays LAST through Task 8: soundcheck has no ladder.
-    // Those notches never deepen, never release and never reclamp, so starting
-    // them shallow -- or letting a remembered depth decide for them -- would
-    // leave a howl the operator explicitly asked to lock permanently under-cut.
-    // Dropping this line reds SoundcheckPlacesAtTheFullSliderDepth and
-    // SoundcheckNotchesNeverDeepen TODAY. Moving it ABOVE the std::max above
-    // does not -- max(ceiling, ceiling) == ceiling -- until Task 8's room-
-    // memory step exists between them; it must stay LAST so that step (once
-    // inserted above) can never override a Soundcheck depth. The ordering
-    // only becomes test-visible once that step exists.
+    // KD-7, and this line STAYS LAST: soundcheck has no ladder and no room
+    // memory. Those notches never deepen, never release and never reclamp, so
+    // starting them shallow -- or letting a remembered depth decide for them --
+    // would leave a howl the operator explicitly asked to lock permanently
+    // under-cut. Dropping this line reds SoundcheckPlacesAtTheFullSliderDepth
+    // and SoundcheckNotchesNeverDeepen. Its POSITION is now load-bearing too:
+    // step 3 above can hand back any remembered depth, including one deeper or
+    // shallower than the ceiling, and only running this assignment after it
+    // guarantees a Soundcheck notch is placed at the slider and nowhere else.
     if (origin == Origin::Soundcheck)
         depthDb = ceiling;
 
@@ -1374,6 +1498,14 @@ void NotchController::setSampleRate (double sampleRate)
         // is what stops the chip claiming a measurement it does not have --
         // it reads N/A until this lane has committed a block at the new rate.
         l.blocksSinceReset = 0;
+    }
+
+    // m-7: this has no production caller today (the device path reaches the
+    // controller through setWidth), but the wipe belongs here for the day it
+    // does -- and for tools/snapshot.cpp and the tests, which do call it.
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        clearRoomMemoryLocked();
     }
 }
 

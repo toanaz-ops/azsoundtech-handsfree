@@ -509,6 +509,38 @@ private:
     // either would deadlock, and setNotchImpl would also stamp a fresh
     // lockedAtMs, destroying lane D's age label (B-1).
     bool pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason);
+
+    // --- "Room memory" (spec 4.6, Q3/Q6/Q10) ------------------------------
+    // What a bin needed LAST time, so a howl that comes back inside
+    // kMemoryTtlMs is answered at the depth that killed it rather than
+    // crawling up the ladder again while the room rings. Per lane, fixed size,
+    // oldest entry overwritten -- no allocation, ever. Detector-thread reads
+    // (placeConfirmed, the release path) and message-thread wipes (setWidth,
+    // clearAll, setSampleRate) all go through modelMutex_, the lock every one
+    // of those already takes: no new lock, no new order.
+    //
+    // NOT persisted. A preset describes a rig; this describes the last five
+    // minutes of one room, and writing it to disk would let a soundman open a
+    // file that silently deep-notches a frequency that is not ringing.
+    struct MemoryEntry
+    {
+        double frequencyHz = 0.0;
+        double deepestDb   = 0.0;
+        double clearedAtMs = 0.0;
+        bool   used        = false;   // false == empty slot
+    };
+
+    // modelMutex_ HELD. Records what `frequencyHz` needed. `bothLanes` writes
+    // the pair (M-11: a LINKED clear must not leave an orphan on one lane).
+    // An existing entry for the SAME frequency is merged rather than
+    // duplicated -- both lanes of a linked pair clear in the same tick and
+    // would otherwise each write twice.
+    void   rememberReleaseLocked (int lane, double frequencyHz, double deepestDb, bool bothLanes);
+    // modelMutex_ HELD. The remembered depth for (lane, bin), CONSUMING the
+    // entry -- one use only. NaN when nothing matched. Bin equality is exact
+    // (Q10): one bin away is a new howl.
+    double takeRememberedDepthLocked (int lane, double frequencyHz, double binWidthHz, bool bothLanes);
+    void   clearRoomMemoryLocked();
     // The ceiling this notch obeys: its own, or the LIVE slider for a Detector
     // notch (whose ceilingDb is NaN). Read fresh every tick, so lowering the
     // slider mid-show takes effect (spec 7).
@@ -632,6 +664,11 @@ private:
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
+
+    // Room memory (spec 4.6). Fixed arrays, guarded by modelMutex_ exactly
+    // like model_ above -- roomMemoryHead_[lane] is the next slot to overwrite.
+    std::array<std::array<MemoryEntry, kMemoryEntriesPerLane>, kChannels> roomMemory_ {};
+    std::array<int, kChannels> roomMemoryHead_ {};
 
     // Lane D. eventOutbox_ under modelMutex_; eventScratch_ is detector-thread
     // only (flushEventOutbox swaps them so the reserve() survives). eventSink_
