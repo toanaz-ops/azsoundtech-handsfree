@@ -32,10 +32,14 @@ class NotchChain
 public:
     static constexpr int MAX_NOTCHES = 16;
 
-    // Depth-only retune ramp (spec 4.7, decision Q5). 10 ms is one block at a
-    // 2048 buffer and seven at 64, so it is always at least one callback and
-    // never long enough to be heard as a slew. 6 dB over 10 ms is 0.6 dB/ms --
-    // the invariant the controller's ladder is written against.
+    // Depth-only retune ramp (spec 4.7, decision Q5). 10 ms is 441 samples at
+    // 44.1 kHz, 480 at 48 kHz, 960 at 96 kHz. The ramp advances per SAMPLE,
+    // not per callback, so both buffer sizes in this app are correct: at a
+    // buffer >= 512 samples (e.g. 2048) the ramp starts and finishes inside a
+    // single callback; at a 64-sample buffer it straddles roughly 7-8
+    // callbacks. 10 ms is the value it is because 6 dB over 10 ms is
+    // 0.6 dB/ms -- the invariant the controller's ladder is written against
+    // (spec 4.7).
     static constexpr double kRampMs = 10.0;
 
     enum class NotchState
