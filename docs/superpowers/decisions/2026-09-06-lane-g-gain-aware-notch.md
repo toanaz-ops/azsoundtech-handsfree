@@ -157,6 +157,21 @@ trần ⇒ Music: −6 là hết, nông hơn 1.1.3 (−10) tới 4 dB, và docs 
 
 **Chọn: 1.**
 
+---
+
+**Q14 — từ review Task 8 (opus, 2026-09-07), I-1.**
+
+## Q14 — Phòng nhớ ghi đè depth khởi điểm cả hai chiều: một notch −6 chưa từng đào (hoặc Manual −3 để tự nhả) ghi nhớ "−6"/"−3", rồi hú bùng quay lại cùng bin bị KẸP nông hơn bậc −12 lẽ ra được chọn. Sửa thế nào?
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Phòng nhớ chỉ được làm SÂU hơn, không bao giờ nông hơn**: `depth = min(depth chọn theo Q2, remembered)`, rồi kẹp trần như cũ. Nhớ −6 thành vô hại; nhớ −24 vẫn đặt −24 | khuyên dùng |
+| 2 | Giữ spec: ghi đè nguyên xi (chấp nhận under-cut khi nhớ nông) | |
+| 3 | Chỉ ghi nhớ khi `deepestDb` sâu hơn −6 (không nhớ notch chưa đào) và chỉ từ Origin Detector; vẫn ghi đè nguyên xi | |
+
+**Chọn: 1** — owner: "chờ phản biện xong rồi hấp thụ, sang plan luôn" (2026-09-07): điều phối lấy phương án khuyên dùng.
+
+
 ## Chỉ thị quy trình (owner, cùng phiên)
 
 Mọi ngả rẽ brainstorm của toàn dự án phải ghi kiểu này (câu hỏi + phương án

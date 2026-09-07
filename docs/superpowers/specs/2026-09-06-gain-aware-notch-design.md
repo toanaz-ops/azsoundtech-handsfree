@@ -1,7 +1,7 @@
 # Lane G — Gain-aware notch: depth theo nhu cầu, nhả dần, nối ring-risk
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
-**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q13, đừng hỏi lại).
+**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q14, đừng hỏi lại).
 **Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13; **cập nhật 2026-09-07 sau phản biện vòng 2** (B-5 fixture ramp, M-B kẹp lại vượt trần — xem §8). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
@@ -142,7 +142,9 @@ số trung gian (giữ nguyên tắc lane D).
 1. `depth = −6`.
 2. Nếu `pc.breakdown.riseRatio ≥ kSteepRiseRatio (2.0)` → `depth = −12`.
 3. Nếu "phòng nhớ" (§4.6) có mục cùng làn, **cùng bin** (Q10), chưa hết
-   hạn → `depth = deepestDb_nhớ`.
+   hạn → `depth = min(depth, deepestDb_nhớ)` — phòng nhớ **chỉ được làm sâu
+   hơn**, không bao giờ nông hơn bậc Q2 đã chọn (Q14: một notch −6 chưa đào
+   hay Manual −3 để tự nhả không được kẹp lần đặt sau).
 4. `depth = max(depth, trần)` (kẹp: không sâu hơn trần).
 5. `deepestDb = depth`, `stageChangedAtMs = liveMs_`, `quietMs = 0`.
 6. Phần còn lại (index, LINKED, event Set, ctx) như hôm nay.
@@ -514,7 +516,8 @@ cách chỉnh nằm trong plan Task 5.
   ép về trần theo đồng hồ (Q7).
 - Slider depth chỉ kéo notch Detector; Preset/Manual giữ `ceilingDb` riêng (Q8).
 - Đóng băng không có trần thời gian; `releaseFrozen` publish, không vẽ (Q9).
-- Phòng nhớ khớp cùng bin ±0 (Q10, lật ±1 bin của Q6).
+- Phòng nhớ khớp cùng bin ±0 (Q10, lật ±1 bin của Q6); chỉ làm sâu hơn,
+  `min(depth, remembered)` (Q14).
 - `savePreset` lưu `deepestDb` và round-trip trần vào `notchDefaults` (Q11).
 - Depth < −24 kẹp về −24 lúc `setNotchImpl`, mọi Origin, có log (Q12).
 - Không phải việc G, chỉ ghi nhận: default `notchDefaults.depthDB = −12` của
