@@ -835,8 +835,12 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     // Those notches never deepen, never release and never reclamp, so starting
     // them shallow -- or letting a remembered depth decide for them -- would
     // leave a howl the operator explicitly asked to lock permanently under-cut.
-    // Moving or dropping it reds SoundcheckPlacesAtTheFullSliderDepth and
-    // SoundcheckNotchesNeverDeepen.
+    // Dropping this line reds SoundcheckPlacesAtTheFullSliderDepth and
+    // SoundcheckNotchesNeverDeepen TODAY. Moving it ABOVE the std::max above
+    // does not -- max(ceiling, ceiling) == ceiling -- until Task 8's room-
+    // memory step exists between them; it must stay LAST so that step (once
+    // inserted above) can never override a Soundcheck depth. The ordering
+    // only becomes test-visible once that step exists.
     if (origin == Origin::Soundcheck)
         depthDb = ceiling;
 

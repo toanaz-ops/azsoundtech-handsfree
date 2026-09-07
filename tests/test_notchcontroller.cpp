@@ -381,9 +381,15 @@ void pump (Harness& h, const std::vector<float>& hop)
 //   2.5e-4 -> 1.744    2.2e-4 -> 1.7507    1.5e-4 -> 1.7507    1.0e-5 -> 1.7507
 // From 1e-5 to 2.2e-4 the ratio is flat at 1.7507 with refAgeMs 117.33 -- the
 // signature of a tone-vs-TONE comparison, where the ratio is a property of the
-// SLOPE alone (11 hops x 0.4053 dB, widened slightly by the 4-hop FFT window)
-// and not of the start level. 1.5e-4 sits mid-plateau: 2x below the value that
-// fails, and a decade above where the score margin over kConfirmScore thins.
+// SLOPE alone and not of the start level. It is NOT the 11-hop figure the
+// timestamp implies (r^11 = 1.04778^11 = 1.6708, the derivation's 1.671; a
+// geometric ramp's window weighting cancels exactly, so the 4-hop FFT window
+// does not widen it): the ratio is actually r^12 = 1.04778^12 = 1.75065 --
+// TWELVE hops of ramp gain measured against an ELEVEN-hop timestamp
+// (refAgeMs 117.33 = 11 x 10.667 ms) -- a one-hop offset between the
+// history's age label and the window content it is compared against. 1.5e-4
+// sits mid-plateau: 2x below the value that fails, and a decade above where
+// the score margin over kConfirmScore thins.
 //
 // +9.5 dB / 250 ms: over the 117.3 ms gap that is riseRatio ~1.75 -- above the
 // 1.5 that saturates rNorm, below kSteepRiseRatio 2.0.
@@ -2117,9 +2123,10 @@ TEST (NotchControllerLadder, ASlowlyRisingHowlIsPlacedAtMinusSix)
     h.controller.setDetectionActive (true);
 
     const int slot = primeAndPlaceSlowly (h);
-    ASSERT_GE (slot, 0) << "the slow ramp never confirmed -- LOWER kRampStartAmp "
-                           "so the tone spends longer under the peakiness "
-                           "threshold, or raise gainDbPerMs (B-5)";
+    ASSERT_GE (slot, 0) << "the slow ramp never confirmed inside 150 blocks -- "
+                           "RAISE kRampStartAmp (still below the noise floor) "
+                           "or steepen gainDbPerMs so peakiness clears the "
+                           "confirm threshold sooner (B-5)";
     EXPECT_TRUE (h.controller.activeForTest (0, slot));
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -6.0);
     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -6.0);
@@ -2146,9 +2153,12 @@ TEST (NotchControllerLadder, ASlowlyRisingHowlIsPlacedAtMinusSix)
         << "the ramp was too slow to confirm on rise (or the fixture confirmed "
            "before the scorer had 112.5 ms of history)";
     EXPECT_LT (set->riseRatio, NotchController::kSteepRiseRatio)
-        << "the tone stepped ONTO the noise floor instead of starting at it: "
-           "riseRatio is a tone-vs-noise ratio, so raise kRampStartAmp's "
-           "derivation, not the slope (B-5)";
+        << "the confirm landed while the 117 ms-old reference frame was still "
+           "a NOISE frame, so this measured a tone-vs-noise ratio, not "
+           "tone-vs-tone: LOWER kRampStartAmp (start further below the noise "
+           "floor), or add a few tone-only priming blocks before the "
+           "reference ages past the onset (B-5) -- raising it walks further "
+           "into the failing region, it does not fix it";
 }
 
 // RED IF the steep-rise jump stops firing (spec 4.3 step 2, Q6). SineSource
