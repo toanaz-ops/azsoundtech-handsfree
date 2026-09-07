@@ -251,9 +251,9 @@ int main (int argc, char** argv)
     // way the LANE column, the dashed stem and the R flag tag can be checked.
     struct Placement { int lane; int index; double hz; double q; double depthDb; int waitMs; };
     const Placement placements[] = {
-        { 0, 0,  247.0, 30.0, -18.0, fast ? 0 : 12000 },
-        { 1, 1, 1240.0, 30.0, -12.0, fast ? 0 :  9000 },
-        { 0, 2, 1920.0, 30.0, -21.0, fast ? 0 :  1500 },
+        { 0, 0,  247.0, 30.0, -18.0, fast ? 0 : 12000 },   // lane G: the rung the oldest howl earned
+        { 1, 1, 1240.0, 30.0, -12.0, fast ? 0 :  9000 },   // steep-rise placement, one rung down
+        { 0, 2, 1920.0, 30.0,  -6.0, fast ? 0 :  1500 },   // just placed: the ladder's first rung
     };
 
     for (const auto& placement : placements)
