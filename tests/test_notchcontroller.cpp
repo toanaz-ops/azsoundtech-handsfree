@@ -2081,6 +2081,50 @@ TEST (NotchControllerLadder, AdoptPresetClampsADeepPresetNotch)
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
 }
 
+// RED IF pushRetuneLocked stops stamping stageChangedAtMs itself and the
+// bookkeeping goes back to living at the call sites (final review, M-1). The
+// stamp is what re-arms the 300 ms DEEPEN gate; a retune that changes the
+// depth without moving the stamp leaves the notch free to climb another rung
+// on the very next tick, which is a multi-rung jump on a live PA.
+//
+// retuneForTest drives the locked helper the way the detector thread does, so
+// it is the only seam that can observe the helper's own contract rather than
+// one caller's version of it.
+TEST (NotchControllerLadder, RetuneStampsStageChangedAtMs)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -6.0,
+                                        NotchController::Origin::Detector));
+    const double atPlacement = h.controller.stageChangedAtMsForTest (0, 1);
+
+    // Live time only advances inside runOnce(), so the stamp taken at
+    // placement is provably older than the one the retune must write.
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 100; ++i) {          // 100 * 5 ms = 500 ms of live time
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
+    ASSERT_GT (h.controller.liveMsForTest(), atPlacement);
+
+    ASSERT_TRUE (h.controller.retuneForTest (0, 1, -12.0,
+                                             NotchController::RetuneReason::Deepen));
+
+    EXPECT_DOUBLE_EQ (h.controller.stageChangedAtMsForTest (0, 1),
+                      h.controller.liveMsForTest())
+        << "a successful retune must stamp stageChangedAtMs with the CURRENT "
+           "live time, from inside pushRetuneLocked";
+    EXPECT_GT (h.controller.stageChangedAtMsForTest (0, 1), atPlacement);
+
+    // A REFUSED retune must leave the stamp alone: nothing was sent, so the
+    // notch has stood at its depth since the successful one above.
+    const double afterRetune = h.controller.stageChangedAtMsForTest (0, 1);
+    EXPECT_FALSE (h.controller.retuneForTest (0, 1, -40.0,
+                                              NotchController::RetuneReason::Deepen))
+        << "-40 dB is past the ladder floor and must be refused";
+    EXPECT_DOUBLE_EQ (h.controller.stageChangedAtMsForTest (0, 1), afterRetune);
+}
+
 // RED IF pushRetuneLocked stops sending the STORED freq/Q (m-2). Sending the
 // live notchQ_ instead would differ by a bit whenever the operator had moved
 // the Q slider after placement, and NotchChain would take the reset path --

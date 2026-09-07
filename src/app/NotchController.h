@@ -476,6 +476,9 @@ private:
         // Deepest rung held since placement -- also where a reclamp jumps to.
         double deepestDb        = 0.0;
         // liveMs_ at the last depth change (deepen, release, reclamp, ceiling).
+        // Stamped by pushRetuneLocked itself, beside the depthDB write (M-1);
+        // the reclamp site stamps it a second time for the one path that
+        // reclamps without pushing anything.
         double stageChangedAtMs = 0.0;
         // ACCUMULATED quiet time since the last depth change or reinforce, in
         // live ms. A counter rather than a timestamp precisely so the freeze

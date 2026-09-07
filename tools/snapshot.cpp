@@ -24,6 +24,12 @@
 //                      column, the dashed R stem and the L/R picker all render
 //                      with something real behind them, plus a RING RISK chip
 //                      STAGED to Critical (see the note where it is set)
+//   console-preset-music.png
+//                      console-live's frame with the notch defaults set to
+//                      presets/Music.json's OFF-LIST pair (Q 25, depth -10 dB),
+//                      so the DEPTH and Q cells render the fba2626 behaviour:
+//                      a value that sits on no combo rung is shown as text
+//                      rather than leaving the combo blank
 //
 // The live shot uses the REAL path: audio is written into BOTH of slot 0's tap
 // rings and the controller's runOnce() publishes genuine two-lane snapshots,
@@ -348,5 +354,43 @@ int main (int argc, char** argv)
                  "(not measured -- see the comment in tools/snapshot.cpp)"
               << std::endl;
 
-    return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
+    if (! shoot (app, outDir.getChildFile ("console-live.png")))
+        return 1;
+
+    //--------------------------------------------------------------------
+    // The off-list-ceiling shot (final review, I-4).
+    //
+    // fba2626 changed what the tuning strip DISPLAYS when the values handed
+    // to it do not sit on a combo's fixed rungs: before it, an off-list value
+    // left the combo BLANK (idForValue returned 0), and the operator's next
+    // touch on any of the five combos pushed Q 10 / -6 dB onto every Global
+    // slot -- a ceiling nobody asked for, on a live rig. After it, the value
+    // is shown as text and currentParams() reports it back unchanged.
+    //
+    // That is a change to what the console LOOKS like and nothing pictured
+    // it. presets/Music.json ships exactly such a pair -- Q 25, depth -10 dB,
+    // neither on a rung -- so this shot puts the console in the state loading
+    // that preset produces. Everything else is console-live's frame: same
+    // three staged ages, same verdicts, same chip.
+    //
+    // The defaults go straight to the controllers rather than through
+    // loadPreset(): that path opens a file chooser and drives the device
+    // restart cycle, and the ceiling is the only part of the preset this shot
+    // is about. Both panels then re-read through their providers -- TuningPanel
+    // via paramsProvider (which reads controller 0), SlotPanel via
+    // slotTuningProvider (per row) -- so the strip and the routing table's
+    // mini combos are showing the SAME reality the real load would leave.
+    for (int i = 0; i < kMaxSlots; ++i)
+        if (auto* c = app.getNotchControllerForTest (i))
+            c->setNotchDefaults (25.0, -10.0);   // presets/Music.json
+
+    app.getTuningPanel().refresh();
+    slots.refresh();
+    app.resized();
+
+    std::cout << "console-preset-music: notch defaults set to Q 25 / -10 dB "
+                 "(presets/Music.json) -- the off-list ceiling render"
+              << std::endl;
+
+    return shoot (app, outDir.getChildFile ("console-preset-music.png")) ? 0 : 1;
 }

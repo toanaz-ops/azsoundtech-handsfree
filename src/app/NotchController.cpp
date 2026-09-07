@@ -331,7 +331,15 @@ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthD
     ev.ageMs = liveMs_ - n.lockedAtMs;
     pushEventLocked (std::move (ev));
 
-    n.depthDB = newDepthDb;
+    // Final review (M-1): the stamp lives HERE, beside the write it describes,
+    // not at the call sites. stageChangedAtMs means "liveMs_ at the last depth
+    // change", and the only place a depth changes is this line -- a caller that
+    // forgets to stamp (or a new caller written later) would leave a notch
+    // looking like it had stood at its depth since placement, and the DEEPEN
+    // gate (liveMs_ - stageChangedAtMs >= kDeepenAfterMs) would let it climb
+    // rung after rung inside one 300 ms window.
+    n.depthDB          = newDepthDb;
+    n.stageChangedAtMs = liveMs_;
     return true;
 }
 
@@ -789,8 +797,9 @@ void NotchController::runOnce()
                         // only -- shallower is never dangerous.
                         if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
                         {
-                            n.stageChangedAtMs = liveMs_;
-                            n.quietMs          = 0.0;   // a depth change restarts the clock
+                            // stageChangedAtMs is stamped inside
+                            // pushRetuneLocked (M-1), next to the depth write.
+                            n.quietMs = 0.0;   // a depth change restarts the clock
                         }
                         continue;   // one depth change per notch per tick
                     }
@@ -815,8 +824,7 @@ void NotchController::runOnce()
                     if (pushRetuneLocked (c, i, next, RetuneReason::Release))
                     {
                         ++n.releasedSteps;
-                        n.stageChangedAtMs = liveMs_;
-                        n.quietMs          = 0.0;
+                        n.quietMs = 0.0;   // stageChangedAtMs: see pushRetuneLocked
                     }
                 }
                 else
@@ -1382,8 +1390,16 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                             // go on remembering a rung it is no longer allowed
                             // to stand on. The release ladder's per-tick clamp
                             // says the same thing from the other side.
-                            n.deepestDb        = target;
-                            n.releasedSteps    = 0;
+                            n.deepestDb     = target;
+                            n.releasedSteps = 0;
+                            // The ONE stamp that stays outside pushRetuneLocked
+                            // (M-1). This branch is also entered on the
+                            // short-circuit above -- target == depthDB, nothing
+                            // pushed -- and that path must still re-arm the
+                            // DEEPEN gate: the notch WAS reclamped, it merely
+                            // had nowhere to go. In the pushing path this is a
+                            // no-op, pushRetuneLocked has already written the
+                            // same liveMs_.
                             n.stageChangedAtMs = liveMs_;
                         }
                     }
@@ -1427,8 +1443,11 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                             if (next < n.depthDB
                                 && pushRetuneLocked (c, i, next, RetuneReason::Deepen))
                             {
-                                n.deepestDb        = next;
-                                n.stageChangedAtMs = liveMs_;
+                                // stageChangedAtMs: see pushRetuneLocked (M-1).
+                                // It is what re-arms the 300 ms gate above, so
+                                // a rung climbed here cannot be followed by
+                                // another until the gate reopens.
+                                n.deepestDb = next;
                             }
                         }
                     }
