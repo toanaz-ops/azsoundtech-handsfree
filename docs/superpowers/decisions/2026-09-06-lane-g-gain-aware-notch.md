@@ -140,6 +140,23 @@ Người hỏi: Fable (điều phối). Người quyết: owner (ToanAZ).
 
 **Chọn: 1.**
 
+---
+
+**Q13 — từ đối chiếu plan (opus read-only, 2026-09-07), M-4.**
+
+## Q13 — Trần không phải bội của 6 (preset Music ship sẵn `depth: -10`, Speech −18): thang dừng ở đâu?
+
+Spec v2 §4.1 (sửa theo M-3 vòng 1) lượng tử về bậc nông nhất không sâu hơn
+trần ⇒ Music: −6 là hết, nông hơn 1.1.3 (−10) tới 4 dB, và docs không nói.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Thang = các bậc nông hơn trần, cộng chính trần làm bậc cuối.** Music: −6 → −10; trần −13.7: −6 → −12 → −13.7. Preset được tôn trọng đúng số; Detector đứng ở giá trị lẻ chỉ ở bậc cuối | khuyên dùng |
+| 2 | Giữ spec v2: lượng tử về bậc nông hơn. Music kẹt −6; phải sửa `presets/Music.json` thành −12 và ghi release note | |
+| 3 | Lượng tử về bậc gần nhất. Music thành −12, **vượt trần 2 dB** — phá Q1 | |
+
+**Chọn: 1.**
+
 ## Chỉ thị quy trình (owner, cùng phiên)
 
 Mọi ngả rẽ brainstorm của toàn dự án phải ghi kiểu này (câu hỏi + phương án

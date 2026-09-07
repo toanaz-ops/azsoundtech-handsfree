@@ -1,7 +1,7 @@
 # Lane G — Gain-aware notch: depth theo nhu cầu, nhả dần, nối ring-risk
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
-**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q12, đừng hỏi lại).
+**Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q13, đừng hỏi lại).
 **Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12, chờ owner duyệt trước khi viết plan. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
@@ -77,9 +77,13 @@ hai chỗ tester sẽ **nghe khác** rõ nhất về tone.
 - Bậc: `kDepthLadderDb[] = {−6, −12, −18, −24}`. Bậc *sâu hơn* = số âm hơn.
   Notch Detector **chỉ đứng trên bậc**, không bao giờ ở giá trị lẻ.
 - **Trần** = `notchDepthDb_` (preset, kẹp [−24, −6], không nhất thiết bội
-  của 6) đọc **sống** mỗi tick, **lượng tử hóa về bậc nông nhất không sâu
-  hơn trần**: trần −13.7 ⇒ bậc sâu nhất được phép là −12; trần −18 ⇒ −18;
-  trần −6 ⇒ không bao giờ đào. Gọi bậc này là `ceilingRung`.
+  của 6) đọc **sống** mỗi tick. **Thang hiệu lực = các bậc nông hơn trần,
+  cộng chính trần làm bậc cuối** (Q13): trần −10 (preset Music) ⇒ −6 → −10;
+  trần −13.7 ⇒ −6 → −12 → −13.7; trần −18 ⇒ −6 → −12 → −18; trần −6 ⇒
+  không bao giờ đào. Bậc cuối = trần, gọi là `ceilingRung` (có thể là giá
+  trị lẻ — ngoại lệ duy nhất của "chỉ đứng trên bậc"). Bậc kế sâu hơn từ
+  depth d = `min` giữa bậc thang kế và trần; bậc kế nông hơn từ trần = bậc
+  thang nông hơn gần nhất.
 - Hạ trần giữa chừng: notch Detector đang sâu hơn `ceilingRung` mới →
   `Set(ceilingRung)` trong tick kế (reason `Ceiling`), `deepestDb` cũng kẹp
   về đó. Nâng trần: không tự đào, chờ reinforce như bình thường. Notch
@@ -459,6 +463,8 @@ thêm `RampSineSource` vào fixture.
 - `NotchCommand`/`AudioEngine` không đổi; retune là `Set` lên index đang chạy.
 - Hằng số cố định cho 1.2.0, không đưa lên GUI.
 - Hạ trần nhiều bậc một lần theo hướng nông là hợp lệ (invariant 3).
+- Trần lẻ: thang = bậc nông hơn trần + chính trần làm bậc cuối (Q13, thay
+  cho lượng tử về bậc nông hơn của v2).
 - Thang **dừng ở điểm cân bằng** (bậc đầu tiên làm bin hết vượt ngưỡng), không
   ép về trần theo đồng hồ (Q7).
 - Slider depth chỉ kéo notch Detector; Preset/Manual giữ `ceilingDb` riêng (Q8).
