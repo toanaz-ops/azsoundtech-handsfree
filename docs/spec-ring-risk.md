@@ -237,6 +237,39 @@ Not optimised before anything has measured a problem.
   preset does not move the scorer's gate. Out of scope for lane R — changing it
   changes placement behaviour — and waiting on an owner decision.
 
+## A second reader: lane G's release ladder (1.2.0)
+
+Up to 1.1.3 only the GUI read `ringRiskScore`. From 1.2.0 `NotchController`
+reads **its own number** — `frameMaxScore_` / `frameScoreValid_`, two members
+that live on the detector thread only and hold exactly the two values just
+published into the snapshot — in order to **freeze the release clock** while
+`frameScoreValid_ && frameMaxScore_ >= 0.55 × CandidateScorer::kConfirmScore`,
+i.e. exactly the RISING boundary of `SpectrumView::riskForScore`. The constant
+is ONE in the literal sense (m-D, rev 3): `NotchController::kRiskFreezeFraction
+= 0.55f` is the DEFINITION and `SpectrumView::kRingRiskRisingFraction` is only
+an alias (`= NotchController::kRiskFreezeFraction`). There are no longer two
+`0.55f` literals that can drift apart; changing one changes both.
+
+Four things to know when reading the chip next to the release ladder:
+
+- **It does not take `snapshotMutex_`.** Today `modelMutex_` and
+  `snapshotMutex_` have never nested; reading the snapshot from inside the
+  release loop would invent a new lock order for one readout — not worth it
+  (M-5). The `releaseFrozen` flag is published in its OWN scope, **before**
+  `modelMutex_` is taken.
+- **The chip and the clock can disagree** (M-8). The chip still passes through
+  the 750 ms hold and reads `displayedSlot_` only, so the chip can say RISING
+  after the clock has resumed, and a slot that is not on screen can be frozen
+  with nothing on the display saying so. `SnapshotBuffer::releaseFrozen` exists
+  so that this can be shown later — 1.2.0 publishes it but does not draw it
+  (Q9).
+- **`ringRiskValid == false` does NOT freeze** (invariant 7). Detection off
+  must release exactly as it did in 1.1.3, otherwise turning detection off
+  would imprison every notch.
+- **There is no time cap on the freeze** (Q9), and the freeze is
+  **slot-global**: while the room is tense, every notch of that slot holds its
+  rung, indefinitely.
+
 ## Out of scope
 
 - Per-slot risk shown for **all** slots at once. The readout describes the

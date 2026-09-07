@@ -106,9 +106,25 @@ rồi `sessionLogger_.stop()`.
 | `mode` | MainComponent | `mode`: `bypass` / `auto` / `soundcheck` |
 | `tuning` | MainComponent | `slot` (−1 = global), `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
 | `notch_set` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `score`, `peakiness`, `rise`, `novelty`, `penalty`, `persist_needed`, `thr`, `ctx` |
+| `notch_retune` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` |
 | `notch_clear` | NotchController | `slot`, `lane`, `index`, `hz`, `reason`: `auto_release` / `manual` / `clear_all` / `width_change` / `verdict_false`, `age_ms` |
 | `verdict` | NotchListPanel → MainComponent | `slot`, `lane`, `index`, `hz`, `verdict`: `good` / `false`, `age_ms` |
 | `session_end` | SessionLogger | `dropped_events` |
+
+`notch_retune` (lane G, 1.2.0) là **cập nhật**, không phải đóng/mở: một notch
+có thể retune nhiều lần giữa `notch_set` và `notch_clear` của nó.
+`tools/logstats.py` xử lý nó bằng cách sửa bản ghi đang mở (`depth_db`,
+`deepest_db`, `retunes`) và **không** đóng bản ghi — nếu đóng thì một lần đào
+sâu ở mốc 300 ms sẽ biến mọi notch được đào thành "notch sống 300 ms", tức một
+false positive giả trên mọi dòng thống kê. Cờ `--expect-retunes` kiểm chứng số
+lần retune trong fixture ctest.
+
+Reader là một chuỗi `if/elif` trên `ev` và **bỏ qua tên lạ**, nên một file log
+cũ đọc bằng tool mới vẫn chạy đúng, và một `ev` thêm sau này cũng không làm
+hỏng reader cũ. **Một file log ghi bởi build nhánh TRƯỚC `af5201e` thì hỏng đối
+với logstats**: lúc đó `MainComponent` còn ghi mọi Retune thành `notch_clear`,
+nên tool đóng bản ghi ở lần đào sâu đầu tiên. Không bản nào như vậy được phát
+hành — chỉ cần biết khi đọc log nội bộ cũ.
 
 `ctx` của `notch_set` là ngữ cảnh phổ:
 
