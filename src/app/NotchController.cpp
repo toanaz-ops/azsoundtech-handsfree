@@ -1075,8 +1075,19 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                         {
                             // nextDeeperRungDb caps at the ceiling itself, so
                             // the step can never overshoot it.
+                            //
+                            // Fix-round 1 (M-1): the header contract on
+                            // nextDeeperRungDb asks callers to COMPARE the
+                            // result against currentDb before sending -- AT
+                            // the ceiling it returns currentDb unchanged, and
+                            // past the ceiling it can return something
+                            // SHALLOWER. The `n.depthDB > ceiling` guard above
+                            // already excludes both cases mathematically, but
+                            // this makes the contract explicit rather than
+                            // relying on that guard alone to keep holding.
                             const double next = nextDeeperRungDb (n.depthDB, ceiling);
-                            if (pushRetuneLocked (c, i, next, RetuneReason::Deepen))
+                            if (next < n.depthDB
+                                && pushRetuneLocked (c, i, next, RetuneReason::Deepen))
                             {
                                 n.deepestDb        = next;
                                 n.stageChangedAtMs = liveMs_;
