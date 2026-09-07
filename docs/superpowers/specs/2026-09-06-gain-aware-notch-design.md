@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
 **Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q13, đừng hỏi lại).
-**Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12, chờ owner duyệt trước khi viết plan. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+**Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13; **cập nhật 2026-09-07 sau phản biện vòng 2** (B-5 fixture ramp, M-B kẹp lại vượt trần — xem §8). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
 
@@ -86,7 +86,13 @@ hai chỗ tester sẽ **nghe khác** rõ nhất về tone.
   thang nông hơn gần nhất.
 - Hạ trần giữa chừng: notch Detector đang sâu hơn `ceilingRung` mới →
   `Set(ceilingRung)` trong tick kế (reason `Ceiling`), `deepestDb` cũng kẹp
-  về đó. Nâng trần: không tự đào, chờ reinforce như bình thường. Notch
+  về đó. **Và mỗi tick, với MỌI notch Detector, `deepestDb = max(deepestDb,
+  ceilingRung)` — không phụ thuộc `depthDB` hiện tại.** Chỉ kẹp khi `depthDB
+  < ceilingRung` là chưa đủ: một notch đã nhả lên bậc nông hơn trần mới
+  (ví dụ đang ở −6, trần vừa hạ xuống −12) không kích hoạt nhánh Set, nên
+  `deepestDb` cũ (−24) sống sót và lần kẹp lại kế tiếp sẽ đưa notch xuống
+  −24, sâu hơn trần 12 dB (vi phạm Q1 và invariant 2 §4.10). Nâng trần:
+  không tự đào, chờ reinforce như bình thường. Notch
   Preset/Manual: **slider không chạm** (Q8) — trần riêng của chúng là
   depth được cho, lưu trong `ceilingDb` của `ModelNotch`; Detector có
   `ceilingDb = NaN` nghĩa là "theo slider".
@@ -172,8 +178,14 @@ Trong vòng reinforce, khi reinforce **trúng** một notch (đã có test
 
 - `quietMs = 0`, `lastDetectedMs = liveMs_` (như hôm nay).
 - Nếu `releasedSteps > 0` (đang nhả; mọi origin trừ Soundcheck): kẹp lại
-  **ngay** — `pushRetuneLocked(c, i, deepestDb, Reclamp)`, `releasedSteps
-  = 0`, `stageChangedAtMs = liveMs_`. Không chờ 300 ms.
+  **ngay** — `pushRetuneLocked(c, i, max(deepestDb, ceilingRung), Reclamp)`,
+  `releasedSteps = 0`, `stageChangedAtMs = liveMs_`. Không chờ 300 ms.
+  **Đích kẹp lại bị trần kẹp**, không phải `deepestDb` trần trụi: trần đọc
+  sống, và giữa lúc nhả với lúc hú quay lại người vận hành có thể đã kéo
+  slider nông đi. `max` chọn giá trị NÔNG hơn (ít âm hơn). Với Preset/Manual
+  `ceilingRung` chính là depth của chúng nên `max` là phép đồng nhất; chỉ
+  notch Detector mới thấy khác biệt. Xem §4.1 (kẹp `deepestDb` mỗi tick) —
+  hai chỗ này cùng bảo vệ một invariant và phải cùng có.
 - Ngược lại, nếu `origin == Detector` **và** `depthDB > ceilingRung` (còn
   nông hơn) **và** `liveMs_ − stageChangedAtMs ≥ kDeepenAfterMs (300)`:
   `pushRetuneLocked(c, i, bậc kế sâu hơn, Deepen)`, `deepestDb = depth
@@ -212,7 +224,14 @@ Chỉ khi `tapAlive`. Với `dt` = bước live clock của tick này:
    **Q9: không trần thời gian**; publish `bool releaseFrozen` per-slot vào
    `SnapshotBuffer` (cạnh `ringRiskValid`) = giá trị `frozen` của tick nhả
    gần nhất, để GUI/log dùng sau. 1.2.0 không vẽ nó.
-2. Với mỗi notch active, origin ≠ Soundcheck: nếu `!frozen`, `quietMs += dt`.
+2. Với mỗi notch active, origin ≠ Soundcheck: **trước hết là trần sống**
+   (§4.1). Với notch `origin == Detector`, LUÔN `deepestDb = max(deepestDb,
+   ceilingRung)` — vô điều kiện, mỗi tick, kể cả khi `depthDB` đã nông hơn
+   trần và nhánh `Set(ceilingRung)` không chạy. Sau đó, nếu `depthDB <
+   ceilingRung` thì `Set(ceilingRung)` (reason `Ceiling`), `stageChangedAtMs
+   = liveMs_`, `quietMs = 0`, và tick này dừng ở đó cho notch đó (một lần
+   đổi depth mỗi notch mỗi tick). Notch Preset/Manual không đi qua nhánh
+   này (Q8). Rồi: nếu `!frozen`, `quietMs += dt`.
 3. Ngưỡng nhả: `quietMs ≥ kReleaseFirstMs (30 000)` khi `releasedSteps ==
    0`, `≥ kReleaseStepMs (10 000)` khi `releasedSteps > 0`.
 4. Đủ ngưỡng: nếu `depthDB < −6` → `pushRetuneLocked(c, i, bậc kế nông
@@ -356,7 +375,10 @@ audio.
 1. Controller không bao giờ phát `Set` với `depthDB > 0` hoặc `< −24`
    (kẹp trước khi push; `setNotchImpl` đã từ chối `> 0`).
 2. Notch Detector không bao giờ sâu hơn trần; Preset/Manual không bao giờ
-   sâu hơn depth được cho.
+   sâu hơn depth được cho. **Kể cả đường kẹp lại**: đích Reclamp là
+   `max(deepestDb, ceilingRung)`, và `deepestDb` của notch Detector bị kẹp
+   về trần mỗi tick (§4.1, §4.4, §4.5 bước 2). Không có đường nào để một
+   `deepestDb` ghi lại dưới trần cũ quay lại làm depth dưới trần mới.
 3. Một lần đổi depth theo hướng **sâu** ≤ 6 dB. Theo hướng **nông** có thể
    > 6 dB một lần (hạ trần nhiều bậc) — được phép, nông đi không nguy hiểm.
    Mọi lần đều trải `kRampMs` ⇒ ≤ 0.6 dB/ms theo hướng sâu.
@@ -406,8 +428,25 @@ Fixture (M-12): `tests/test_notchcontroller.cpp:438` hiện assert
 `depthDB == -18` cho placement Detector — sẽ đỏ, sửa theo spec. Fixture bật
 tone đột ngột sau 64 block noise (`:310-327`, `SineSource` biên cố định) nên
 `riseRatio ≫ 2.0` ⇒ mọi test hiện có sẽ ra **−12**, không phải −6. Test
-"khởi điểm −6" cần một nguồn **lên biên độ chậm** (ví dụ +3 dB/250 ms) —
-thêm `RampSineSource` vào fixture.
+"khởi điểm −6" cần một nguồn **lên biên độ chậm** — thêm `RampSineSource`
+vào fixture.
+
+**B-5 (2026-09-07, sửa ví dụ sai của v2):** ví dụ "+3 dB/250 ms" ở bản
+trước KHÔNG chạy được, và độ dốc không phải là biến quyết định. Hai điều
+kiện phải cùng đúng: (a) rise đủ để `rNorm` bão hòa (score là tích, cần
+`rNorm ≥ 0.7` ⇒ `rise ≥ 1.35`; +3 dB/250 ms chỉ cho `rise ≈ 1.18`), và
+(b) rise **không bao giờ** là tỉ số tone-trên-noise. Điều (b) mới là cái
+giết fixture v2: khung tham chiếu là khung ≥ 112,5 ms tuổi, nên trong ~11
+block tone đầu tiên tham chiếu vẫn là NOISE; một tone bật lên ở biên 0.02
+trên nền noise 0.01 cho `rise ≈ 64` bất kể dốc bao nhiêu. Vì peakiness là
+**bất biến tỉ lệ**, tone thuần đủ peaky ngay khi cửa sổ 2048 mẫu toàn tone
+(~4 block) nên confirm rơi đúng vào vùng đó ⇒ luôn ra −12.
+Cách duy nhất đúng: **ramp bắt đầu ĐÚNG ở sàn noise** (biên độ sine có
+magnitude bin bằng magnitude bin của noise, ≈ 3e-4 với fixture hiện tại),
+dốc ~+9,5 dB/250 ms. Khi đó ngay từ frame ĐẦU TIÊN mà scorer chấm điểm
+(peakiness phải > 10 trước đã, tức tone ≈ 20 dB trên sàn ≈ 0,53 s) tham
+chiếu đã nằm trong tone, `riseRatio ≈ 1,67` ổn định. Chi tiết số học và
+cách chỉnh nằm trong plan Task 5.
 - Khởi điểm −6 (nguồn chậm); `riseRatio ≥ 2.0` (nguồn đột ngột) → −12;
   `riseRatio` 1.9 → −6.
 - Slot tái dùng (B-2): Detector đào tới −24, Clear, đặt tay −6 cùng index
@@ -422,6 +461,12 @@ thêm `RampSineSource` vào fixture.
   −6; +10 s ⇒ Clear(AutoRelease).
 - Kẹp lại: đang ở −12 (từ deepest −18), reinforce một block ⇒ Set −18 ngay,
   reason `Reclamp`; `quietMs` về 0.
+- **Kẹp lại không vượt trần đã hạ** (M-B, 2026-09-07): đào tới −24 dưới trần
+  −24 → yên cho tới khi nhả hết thang về −6 (30 + 10 + 10 = 50 s, trước mốc
+  Clear ở 60 s) → hạ trần xuống −12 → vài tick yên: `deepestDb` phải đã là
+  −12 (nhánh `Set(ceilingRung)` KHÔNG chạy vì −6 nông hơn −12, nên đây là
+  test duy nhất bắt được phép kẹp vô điều kiện của §4.5 bước 2) → một block
+  hú ⇒ Reclamp về **−12**, không phải −24.
 - Đóng băng: snapshot `ringRiskValid=true, score ≥ 0.55×thr` ⇒ `quietMs`
   không tăng; `valid=false` ⇒ tăng bình thường.
 - Phòng nhớ: Clear ở f, đặt lại cùng bin trong 5 phút ⇒ khởi điểm =
@@ -501,6 +546,15 @@ DSP xác nhận.
 | M-11 | Phòng nhớ per-lane vs LINKED mồ côi; ±1 bin = ±21.5 Hz | §4.6 LINKED cả hai làn; dung sai Q10 |
 | M-12 | Test hiện có assert −18; fixture tone đột ngột ⇒ mọi test ra −12 | §5.3 |
 | m-1..m-8 | 5 vs 4 điều kiện; so sánh Q; so sánh bằng double; `clearNotch` không hủy ramp; ramp bị cắt; reader bỏ qua; `setSampleRate` không caller; guard tồn tại | §4.7, §4.4, §4.2 `releasedSteps`, §4.6, §3 |
+
+Vòng 2, 2026-09-07, phiên read-only đọc lại code thật trong khi soát plan.
+Chỉ hai mục chạm vào spec; phần còn lại là lỗi của plan và đã sửa trong
+plan rev 3.
+
+| ID | Nội dung | Xử lý |
+|---|---|---|
+| B-5 | Fixture ramp không thể ra −6: cơ chế quyết định không phải ĐỘ DỐC mà là ĐIỂM BẮT ĐẦU — 11 block tone đầu lấy khung tham chiếu là NOISE nên `riseRatio ≈ 64`, và peakiness bất biến tỉ lệ nên confirm rơi ngay trong cửa sổ đó ⇒ luôn −12 | §5.3: ramp phải khởi hành ĐÚNG ở sàn noise (≈ 3e-4); số học trong plan Task 5 |
+| M-B | Kẹp lại có thể vượt trần: đào −24 → nhả về −6 → hạ trần −12 (nhánh `Set(ceilingRung)` không chạy vì −6 nông hơn −12, `deepestDb` vẫn −24) → hú quay lại ⇒ Reclamp −24, sâu hơn trần 12 dB. Vi phạm Q1 và invariant 2 có từ v2 | §4.1 + §4.5 bước 2: kẹp `deepestDb` về trần VÔ ĐIỀU KIỆN mỗi tick cho notch Detector; §4.4: đích Reclamp là `max(deepestDb, ceilingRung)`; §4.10 inv. 2 nói rõ; test mới ở §5.3 |
 
 CONFIRMED (không cần verify lại): `reset()` ở `Biquad.cpp:68,126`; default
 −18 / clamp / đọc lúc đặt; auto-release `.cpp:404-416`; `rNorm` bão hòa

@@ -12,11 +12,35 @@
 
 **Release:** 1.2.0 (`pwsh -File installer\release-alpha.ps1 -Part minor`), after the docs task.
 
-## Revision 2026-09-07 — what a read-only cross-check changed
+## Revision 3, 2026-09-07 — what the SECOND read-only verification changed
+
+A third read-only pass re-derived the arithmetic of the rev-2 fixes against the real
+files and found one of them still unable to pass, one test asserting a state the seam
+cannot build, and one safety hole that has been in the design since v2. Q1–Q13 are
+untouched; **M-B enforces Q1 more strictly than any earlier revision did.**
+
+| ID | Defect | Fix |
+|---|---|---|
+| **B-5** (still open after rev 2) | `ASlowlyRisingHowlIsPlacedAtMinusSix` cannot pass with the rev-2 fixture, and the slope is the wrong knob. The rise reference is the 11th frame back (117.3 ms at the 10.667 ms hop, `CandidateScorer.cpp:83-106`), so for the first 11 tone blocks it is a NOISE frame. `amp = 0.02` puts the tone 64× over the noise floor (`0.02 × 512 = 10` vs `σ·√(Σw²) = 0.16`), so `riseRatio ≈ 64` **at any slope**. And peakiness is scale-invariant (`PeakinessAnalyzer.cpp:59-76`), so a pure tone confirms as soon as the 2048-sample window is all tone (~4 blocks) plus `kPersistenceBlocks` 3 — i.e. **inside** that window ⇒ the steep branch ⇒ −12, for every slope in [7.8, 12.2] dB/250 ms | Task 5 Step 2 rewritten. The tone now has **no onset step**: `kRampStartAmp = 3.0e-4`, derived as the sine amplitude whose bin magnitude EQUALS `NoiseSource`'s. Slope stays +9.5 dB/250 ms ⇒ `riseRatio ≈ 1.67` over the 117 ms gap, and ≤ 1.67 even while the reference is a noise frame, *because the tone starts at the noise level*. Confirm lands at `peakiness > 73` ⇒ ~1.0 s ⇒ block ~96. `primeAndPlaceSlowly` capped at **150** tone blocks (A ≈ 0.33; 2 s would clip at ≈ 1.9) and `RampSineSource` clamps `amp ≤ 0.9`. The `[1.5, 2.0)` assertions on `riseRatio` stay, with a note that the number is only meaningful once history exists. **The tunable is now the START amplitude**, not the slope |
+| **M-A** | `AReturningHowlReclampsImmediatelyToDeepestDb` asserted a state the seam never creates. `retuneForTest` only forwards to `pushRetuneLocked`, which writes `n.depthDB`; `releasedSteps` is incremented solely by Task 7's release branch and `stageChangedAtMs` is not restamped. So at the reinforce pump `releasedSteps == 0`, the reclamp branch is skipped, the deepen branch runs (`nextDeeperRungDb(-12, -24) = -18`) and the test reads **−18, not −24** | **The test MOVED to Task 7** and is rebuilt on the real path: climb to −24, 42 s of quiet so the ladder walks −24 → −18 → −12 with `releasedSteps == 2`, then one tone block ⇒ Reclamp to −24. `releasedSteps == 0` is pinned behaviourally (29 s more of quiet must NOT release) rather than by adding a `releasedStepsForTest` seam. Task 6 keeps only the deepen tests and states outright that its reclamp branch has no red test in that task |
+| **M-B** | **Reclamp was never clamped to the ceiling, so a Detector notch could end DEEPER than the slider** (violates Q1, spec §4.10 invariant 2). Sequence: climb to −24 under a −24 slider (`deepestDb −24`) → quiet, release to −6 (`deepestDb` untouched, by design) → operator drops the slider to −12 → the ceiling branch tests `depthDB(-6) < ceiling(-12)` = **false**, so nothing happens → howl returns → reclamp to −24, **12 dB deeper than the ceiling**, i.e. louder a cut than asked for on a live PA | Fixed in BOTH files. Spec §4.1 / §4.4 / §4.5 step 2 / §4.10 inv. 2 + a new §5.3 test. Plan: Task 6's reclamp target is `std::max(n.deepestDb, ceilingDbFor(n))` (and writes it back to `deepestDb`); Task 7's ceiling pass does `n.deepestDb = std::max(n.deepestDb, ceiling)` **unconditionally, every tick, for Detector notches**, before the `depthDB < ceiling` test rather than inside it; new test `ALoweredCeilingAlsoCapsTheReclampTarget` in Task 7 walks the four steps and asserts −12, not −24 |
+| m-A | `tests/fixtures/session-sample.jsonl`: the release at `t: 31000` is only 25 699 ms after the deepen at `t: 5301`, but the first release costs `kReleaseFirstMs` 30 000 ms — the fixture depicted a run the code cannot produce | release moved to **35400** (`age_ms 30399.0`), `auto_release` to **45400** = exactly `+kReleaseStepMs` (`age_ms 40399.0`). The `--expect-*` totals are re-derived from `tools/logstats.py:43-63, 80-88` and are unchanged (notches 4 / verdicts 3 / false 1 / recurrence-max 2 / retunes 2) because none of them reads `t` |
+| m-B | Stale absolute line ranges that Task 5's insertion invalidates: Task 6's "lines 755-760" and Task 8's "`:864-877` (setSampleRate)" | replaced with the exact anchor text to search for, plus "numbers are pre-Task-5" |
+| m-C | Tasks 5 and 6 re-emit comment lines that live ABOVE their stated replacement range (`NotchController.cpp:583-584` and `:752-754`), so a literal replace duplicates the comment | ranges widened to `583-596` and `752-760`, both stated as anchors |
+| m-D | `kRiskFreezeFraction`'s doc string claimed "one constant, not two" while declaring a second `0.55f` next to `gui::SpectrumView::kRingRiskRisingFraction` (`src/gui/SpectrumView.h:239`) | declared once in `NotchController.h`; Task 7 Step 3 changes `SpectrumView.h:239` to `= NotchController::kRiskFreezeFraction` (the GUI header already includes `app/NotchController.h` at `:45` — `rg "NotchController.h" src/gui`). No equality test: an alias makes the assertion a tautology |
+| m-E | `firstActiveIndex` was appended after the anonymous namespace closes (`tests/test_notchcontroller.cpp:405`) ⇒ global scope | moved to the anonymous namespace at line 349, with `pump` / `pumpQuietFor` / `RampSineSource` |
+| m-F | `OneBinAwayIsANewHowlAndStartsAtMinusSix` asserted `EXPECT_GE(depth, -12.0)`, a bound that also accepts −6 | renamed `OneBinAwayIsANewHowlAndStartsFreshNotFromMemory`; the comment states that `SineSource`'s hard start places at −12, and the assertions are exact `-12.0` on both `depthDbForTest` and `deepestDbForTest` |
+
+Test-count estimates moved with the tests: Task 6 **497** (one fewer), Task 7 **512**,
+Task 8 **520**, Task 9 **526**.
+
+## Revision 2, 2026-09-07 — what the first read-only cross-check changed
 
 A second session read the real files this plan cites and found the plan asserting
 things the code does not do. Everything below is already applied; the list exists so
-a reviewer can check the fix rather than re-derive the defect.
+a reviewer can check the fix rather than re-derive the defect. **Its B-5 row is
+superseded by rev 3's** — the slope derivation was right about the bounds and wrong
+about which parameter decides the outcome.
 
 **Owner ruling Q13 (new, changes Tasks 4–8 and 10).** The **effective ladder** is the
 rungs of `{−6, −12, −18, −24}` that are SHALLOWER than the ceiling, **plus the ceiling
@@ -1508,9 +1532,15 @@ After `static constexpr double kDefaultNotchDepthDb = -18.0;` (line 95), add the
     static constexpr double kMemoryTtlMs      = 300000.0;
     static constexpr int    kMemoryEntriesPerLane = 16;
     // Release-clock freeze (Q4). The SAME fraction the GUI's RISING band uses
-    // (gui::SpectrumView::kRingRiskRisingFraction, SpectrumView.h:239) -- one
-    // constant, not two that can drift apart. Frozen at
+    // -- one constant, not two that can drift apart. This IS the definition:
+    // gui::SpectrumView::kRingRiskRisingFraction (SpectrumView.h:239) is
+    // changed in Task 7 to alias this name, so there is no second 0.55f
+    // literal anywhere. Frozen at
     // score >= 0.55 x CandidateScorer::kConfirmScore = 0.385.
+    //
+    // Do not move this declaration into a .cpp or behind an accessor: the GUI
+    // header includes app/NotchController.h (SpectrumView.h:45) and needs it
+    // as a constant expression.
     static constexpr float  kRiskFreezeFraction = 0.55f;
 
     // Why a notch's depth moved. Lane D writes it into the session log as
@@ -1993,15 +2023,19 @@ git commit -m "feat(controller): depth ladder state, -24 clamp for every origin,
 **Mức level dự kiến (spec §3):** this is the first task the testers hear. A detector notch is now placed at **−6 dB**, or **−12 dB** when the candidate's raw rise ratio is ≥ 2.0 (+6 dB over the rise window) — instead of today's fixed **−18 dB**. At the notch's own bin that is **12 dB shallower** (or 6 dB) at the instant of placement; Task 6 walks it back down at 6 dB per 300 ms while the bin keeps ringing, so a fast-building howl reaches −18 about **300–600 ms later than 1.1.3 does**. Outside the bin: **0 dB**. A room that howls explosively will therefore be audibly howling for up to ~0.6 s longer than on 1.1.3 — **this is the row testers must try at low volume first.** Soundcheck notches are exempt (KD-7): they still take the full slider depth on the first block.
 
 **Files:**
-- Modify: `src/app/NotchController.cpp:580-632` (`placeConfirmed`: the depth choice moves BELOW the index lookup — see Step 4) and `:693-699` (the `[detect]` log line)
+- Modify: `src/app/NotchController.cpp:580-632` (`placeConfirmed`: the depth choice moves BELOW the index lookup — see Step 4) and `:693-699` (the `[detect]` log line). **m-C: the replaced region is `:583-596`, not `:585-596`** — it starts at the two comment lines `// soundcheckActive() takes modelMutex_ itself, ...` / `// lock below -- never underneath it.`, which the replacement block below re-emits. Replacing only `585-596` leaves those comments standing and the file ends up with them twice.
 - Modify: `tests/test_notchcontroller.cpp:349` (fixture: `RampSineSource` + `primeAndPlaceSlowly` go AFTER `pump` closes — B-6), `:436-438` (the stale `-18` assert), `:875-889` (`SetNotchDefaultsFlowIntoPlacedNotch`)
 - Test: `tests/test_notchcontroller.cpp`
 
 **Interfaces:**
 - Consumes (Task 3): `pc.breakdown.riseRatio`. Consumes (Task 4): `kDepthLadderDb`, `kSteepRiseRatio`, `NotchEvent::riseRatio`, `activeForTest`, and `setNotchImpl`'s initialisation of `deepestDb` / `ceilingDb`.
-- Produces: the placement depths Task 6 deepens from and Task 7 releases from. New test fixture symbol:
+- Produces: the placement depths Task 6 deepens from and Task 7 releases from. New test fixture symbols:
   ```cpp
-  struct RampSineSource { double freq; float amp; double gainDbPerMs; std::vector<float> hop(); };
+  constexpr float kRampStartAmp = 3.0e-4f;   // the sine amplitude whose bin
+                                             // magnitude EQUALS NoiseSource's
+  struct RampSineSource { double freq; float amp; double gainDbPerMs; double nextSample;
+                          std::vector<float> hop(); };   // amp clamped to 0.9
+  int primeAndPlaceSlowly (Harness&);        // 64 noise blocks + <= 150 ramp blocks
   ```
 
 - [ ] **Step 1: Fix the two existing tests the new policy makes wrong (M-12)**
@@ -2047,55 +2081,91 @@ TEST (NotchControllerDetection, SetNotchDefaultsFlowIntoPlacedNotch)
 
 Add to the anonymous namespace in `tests/test_notchcontroller.cpp` **after `pump` closes at line 349** — not after `SineSource` at 327 (B-6). Both new helpers call `NoiseSource` (declared `:329`), `pump` (`:344-349`) and `kWarmupBlocks` (`:308`), so an insertion above `pump` does not compile. Line 349 is also where Task 7 adds `pumpQuietFor`.
 
-**Deriving the ramp slope (B-5).** The +3 dB/250 ms of the spec's example can never
-confirm, and the arithmetic says so before a build does:
+**Deriving the ramp (B-5, rewritten at rev 3).** The rev-2 fixture — 64 noise blocks,
+then tone blocks starting at `amp = 0.02` — cannot place at −6 either, and for a
+different reason than the spec's +3 dB/250 ms example. **The decisive parameter is
+the START amplitude, not the slope.** Work it in this order:
 
-- `CandidateScorer` scores the rise axis as `rNorm = clamp((rise − 1) / 0.5, 0, 1)`
-  (`CandidateScorer.cpp:104-106`), where `rise = mag_now / mag_ref` and the reference
-  frame is the newest one at least `0.45 × riseReferenceMs` old (`:83`). With the
-  default `kDefaultRiseReferenceMs = 250.0` (`CandidateScorer.h:39`) that floor is
-  **112.5 ms**, and frames arrive one per hop (10.667 ms), so the reference is
-  **112.5–123.2 ms old**.
-- `score` is a PRODUCT of the axes, so `score ≤ rNorm`. Confirming needs
-  `score ≥ kConfirmScore = 0.7`, therefore `rNorm ≥ 0.7`, therefore
-  `rise ≥ 1 + 0.5 × 0.7 = 1.35`. To have margin, aim for `rNorm` saturated:
-  **`rise ≥ 1.5`**, i.e. `20·log10(1.5) = 3.52 dB` over 112.5 ms ⇒ **≥ 0.0313 dB/ms
-  ≈ 7.8 dB per 250 ms**.
-- The other side: the placement must stay in the −6 band, so
-  **`rise < kSteepRiseRatio = 2.0`** at the OLDEST reference the scan can pick,
-  123.2 ms ⇒ `< 6.02 dB` over 123.2 ms ⇒ **< 0.0489 dB/ms ≈ 12.2 dB per 250 ms**.
-- At +3 dB/250 ms = 0.012 dB/ms the rise over 117 ms is 1.4 dB ⇒ `rise = 1.18` ⇒
-  `rNorm = 0.35 < 0.7`. It never confirms — which is why the v1 test would have hung
-  on `ASSERT_GE(slot, 0)` rather than failing on the depth.
+- **The reference frame.** `rNorm = clamp((rise − 1) / 0.5, 0, 1)`
+  (`CandidateScorer.cpp:104-106`), `rise = mag_now / mag_ref`, and the reference is
+  the newest frame at least `0.45 × riseReferenceMs` old (`:83`). With
+  `kDefaultRiseReferenceMs = 250.0` (`CandidateScorer.h:39`) the floor is **112.5 ms**;
+  frames arrive one per 512-sample hop (10.667 ms), so the reference is the **11th
+  frame back, 117.3 ms old**.
+- **Why the rev-2 fixture fails.** Take the fixture's own numbers. `NoiseSource` is
+  uniform on ±0.01, so σ = 0.01/√3 = 5.77e-3, and a Hann-windowed 2048-point FFT
+  (`Detector.cpp:15-16, 90`; JUCE's transform is unnormalised) gives a per-bin
+  magnitude of about `σ·√(Σw²) = 5.77e-3 × √768 = 0.16`. A sine of amplitude `A` in
+  the same window lands at about `A·Σw/2 = A × 512`, so `amp = 0.02` is `≈ 10` —
+  **64× the noise floor**. For the first 11 tone blocks the reference frame is still
+  NOISE, so `riseRatio ≈ 64 ≫ 2.0` no matter what the slope is.
+- **And the confirm happens inside those 11 blocks.** `peakinessAt` is
+  `mag[bin] / mean(±3..±5 bins)` (`PeakinessAnalyzer.cpp:59-76`) — **scale-invariant**.
+  A pure tone is maximally peaky as soon as the 2048-sample window holds only tone,
+  which at a 512-sample hop is **4 blocks**; with `kPersistenceBlocks = 3` the confirm
+  lands at block ~4–6. That is inside the tone-vs-noise window ⇒ the steep branch ⇒
+  **−12, for every slope in [7.8, 12.2] dB/250 ms.** No slope fixes this.
+- **The fix: start the ramp AT the noise floor**, so `riseRatio` is never a
+  tone-vs-noise ratio. Equating the two magnitudes above:
+  `A₀ × 512 = 0.16` ⇒ **`A₀ ≈ 3.1e-4`** ⇒ `kRampStartAmp = 3.0e-4`.
+- **Slope +9.5 dB per 250 ms** (`0.038 dB/ms`, 38 dB/s). Over the 117.3 ms reference
+  gap that is `+4.45 dB` ⇒ **`riseRatio ≈ 1.67`**, inside `[1.5, 2.0)`: above the 1.5
+  that saturates `rNorm` (score is a product, and `score ≥ 0.7` needs `rNorm ≥ 0.7`,
+  i.e. `rise ≥ 1.35`), below `kSteepRiseRatio = 2.0`. And while the reference is still
+  a noise frame — the first 11 tone blocks — the ratio is `tone(now)/noise ≈
+  10^(0.4053·k/20) ≤ 1.67` as well, **because the tone starts at the noise level**.
+  So `riseRatio` never exceeds ~1.7 at ANY block, which is the whole point of the fix.
+- **Nothing is scored before the reference is tone-vs-tone anyway.** The scorer
+  refuses any candidate whose peakiness does not clear the analyser threshold
+  (`CandidateScorer.cpp:51`), so the first frame that gets a score at all needs
+  `peakiness > 10`, i.e. the tone ≈ 20 dB over the noise mean ⇒ `20/38 = 0.53 s`
+  ⇒ block ~49. By then the 11th-frame-back reference is deep inside the tone.
+- **When the confirm lands.** `pNorm = (peakiness/10 − 1)/9` (`CandidateScorer.cpp:57`),
+  so `pNorm > 0.7` needs `peakiness > 73`, i.e. the tone ≈ 37 dB over the noise mean
+  ⇒ `37/38 ≈ 1.0 s` ⇒ **block ~93**, plus persistence ⇒ ~96. `mNorm` is
+  `log(mag/baseline)/log 4` against a 3 s EMA (`:117-118`), saturated at +12.04 dB,
+  which the ramp passes after 0.32 s — so by confirm time `mNorm = 1`, `rNorm = 1`,
+  `penalty = 1` and `score = pNorm`. Confirm at ~block 96 with `riseRatio ≈ 1.67`
+  ⇒ **−6**.
+- **Headroom.** At block 150 the ramp has gained `150 × 0.4053 = 60.8 dB`
+  ⇒ `A = 3e-4 × 10^(60.8/20) ≈ 0.33` — safe. At 2 s (block 188) it is `≈ 1.9`, which
+  **clips**. So `primeAndPlaceSlowly` stops at **150 tone blocks** and
+  `RampSineSource` clamps `amp ≤ 0.9` as a second line of defence.
 
-**Pick +9.5 dB per 250 ms** (`0.038 dB/ms`). At the youngest reference (112.5 ms):
-`10^(0.038·112.5/20) = 1.64` ⇒ `rNorm` saturated. At the oldest (123.2 ms):
-`10^(0.038·123.2/20) = 1.71 < 2.0` ⇒ still the −6 band. Both bounds hold across the
-whole age window, with ~0.14 of headroom below the confirm floor and ~0.29 above the
-steep-rise line.
-
-**This number must still be tuned by RUNNING the test (TDD red → green).** The
-derivation fixes the two ends; the analyser's window, the noise floor and the
-peakiness threshold decide where inside them a real fixture lands. If the test does
-not confirm, raise the slope toward 12.2 dB/250 ms; if it places at −12, lower it
-toward 7.8. Do not move `kSteepRiseRatio` or `kConfirmScore` to make it pass.
+**The tunable is now the START amplitude, and it must still be settled by RUNNING the
+test (TDD red → green).** Too high ⇒ an onset step ⇒ tone-vs-noise rise ⇒ −12. Too low
+⇒ more blocks before `peakiness > 73`, and the 150-block cap is reached first. The
+slope only moves WHEN the confirm happens, not which band it lands in. Do not move
+`kSteepRiseRatio` or `kConfirmScore` to make it pass.
 
 ```cpp
-// A tone that CREEPS up instead of switching on. SineSource starts at full
-// amplitude in one block, so its rise ratio is enormous and every test built
-// on it places at -12; the -6 start of spec 4.3 is only observable behind a
-// slow build (M-12).
+// A tone that CREEPS up out of the noise instead of switching on. SineSource
+// starts at full amplitude in one block, so its rise ratio is enormous and
+// every test built on it places at -12; the -6 start of spec 4.3 is only
+// observable behind a slow build (M-12).
 //
-// +9.5 dB / 250 ms, derived in the plan (B-5): the scorer's reference frame is
-// 112.5-123.2 ms old, so this gives rise 1.64-1.71 -- above the 1.5 that
-// saturates rNorm (score is a product, and score >= 0.7 needs rNorm >= 0.7),
-// and below kSteepRiseRatio 2.0 so the placement stays in the -6 band. The
-// spec's illustrative +3 dB/250 ms gives rise 1.18 => rNorm 0.35 => it never
-// confirms at all.
+// WHY IT STARTS INAUDIBLE (B-5, and this is the load-bearing part): the
+// scorer's rise reference is the 11th frame back, 117.3 ms old. If the tone
+// switched on ABOVE the noise floor, that reference would be a NOISE frame for
+// the first 11 blocks and riseRatio would be the tone-to-noise ratio -- 64x at
+// amp 0.02 -- regardless of the slope. And peakiness is scale-invariant
+// (PeakinessAnalyzer.cpp:59-76), so a pure tone confirms as soon as the 2048
+// window is all tone (~4 blocks) -- i.e. INSIDE that window. Starting at the
+// noise floor is the only way to build a rise history that is tone-vs-tone.
+//
+// kRampStartAmp: NoiseSource (uniform +-0.01, sigma 5.77e-3) has a per-bin
+// magnitude of sigma * sqrt(sum w^2) = 0.16 in a Hann 2048 window; a sine of
+// amplitude A lands at A * sum(w)/2 = A * 512. Equal at A = 3.1e-4.
+//
+// +9.5 dB / 250 ms: over the 117.3 ms gap that is +4.45 dB => riseRatio ~1.67,
+// above the 1.5 that saturates rNorm and below kSteepRiseRatio 2.0. Confirm
+// needs peakiness > 73 (pNorm > 0.7) = ~37 dB over the floor = ~1.0 s.
+constexpr float kRampStartAmp = 3.0e-4f;
+
 struct RampSineSource
 {
     double freq        = 1000.0;
-    float  amp         = 0.02f;          // starts just over the noise floor
+    float  amp         = kRampStartAmp;   // starts AT the noise floor, not over it
     double gainDbPerMs = 9.5 / 250.0;
     double nextSample  = 0.0;
 
@@ -2108,18 +2178,22 @@ struct RampSineSource
                 std::sin (2.0 * kTestPi * freq * nextSample / kTestSr));
             nextSample += 1.0;
         }
-        amp = static_cast<float> (std::min (1.0, static_cast<double> (amp)
+        // 0.9 clamp: at 38 dB/s this source passes full scale at ~2 s, and a
+        // clipped tone is a different signal with a different spectrum. The
+        // caller stops long before here; this is the second line of defence.
+        amp = static_cast<float> (std::min (0.9, static_cast<double> (amp)
                                   * std::pow (10.0, gainDbPerMs * kBlockMs / 20.0)));
         return out;
     }
 };
 
 // primeAndPlace's shape, driven by a source that ramps. Returns the index of
-// the first Set, or -1. Stops at 80 blocks: RampSineSource reaches full scale
-// after ~34 dB of gain (~894 ms, ~84 blocks) and stops rising there, so a
-// fixture that has not confirmed by then never will -- and a loop that keeps
-// pumping a FLAT tone would confirm later on novelty alone and quietly test
-// something else. A -1 here means the slope needs retuning, not more blocks.
+// the first Set, or -1. Stops at 150 tone blocks = 1.6 s = +60.8 dB, where the
+// amplitude is ~0.33 -- comfortably under the clamp, and ~54 blocks past the
+// ~96 where the derivation puts the confirm. Pumping further would only reach
+// the clamp and then confirm on novelty alone from a FLAT tone, which would
+// quietly be testing something else. A -1 here means kRampStartAmp needs
+// retuning, not more blocks.
 int primeAndPlaceSlowly (Harness& h)
 {
     NoiseSource quiet;
@@ -2127,7 +2201,7 @@ int primeAndPlaceSlowly (Harness& h)
         pump (h, quiet.hop());
 
     RampSineSource tone;
-    for (int i = 0; i < 80; ++i)
+    for (int i = 0; i < 150; ++i)
     {
         pump (h, tone.hop());
         NotchCommand cmd {};
@@ -2150,8 +2224,9 @@ TEST (NotchControllerLadder, ASlowlyRisingHowlIsPlacedAtMinusSix)
     h.controller.setDetectionActive (true);
 
     const int slot = primeAndPlaceSlowly (h);
-    ASSERT_GE (slot, 0) << "the slow ramp never confirmed -- raise gainDbPerMs "
-                           "toward the 12.2 dB/250 ms upper bound (B-5)";
+    ASSERT_GE (slot, 0) << "the slow ramp never confirmed -- LOWER kRampStartAmp "
+                           "so the tone spends longer under the peakiness "
+                           "threshold, or raise gainDbPerMs (B-5)";
     EXPECT_TRUE (h.controller.activeForTest (0, slot));
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -6.0);
     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -6.0);
@@ -2163,13 +2238,24 @@ TEST (NotchControllerLadder, ASlowlyRisingHowlIsPlacedAtMinusSix)
     // the steep-rise branch did not fire. `rise` on the event is rNorm, which
     // saturates at 1.5 and cannot make this distinction -- riseRatio is the
     // raw ratio added in Task 4.
+    //
+    // riseRatio is only MEANINGFUL once the scorer has history at least
+    // 112.5 ms deep: with no history at all the rise branch returns rNorm 1
+    // and riseRatio 1.0 by definition (CandidateScorer.cpp:76-80), which would
+    // read as "too slow" here. kWarmupBlocks is 64 blocks of noise, so by the
+    // time anything can be confirmed the history is ~683 ms deep and this
+    // assertion is comparing two real frames.
     const Ev* set = nullptr;
     for (const auto& e : r.events)
         if (e.kind == Ev::Kind::Set) { set = &e; break; }
     ASSERT_NE (set, nullptr);
-    EXPECT_GE (set->riseRatio, 1.5f) << "the ramp was too slow to confirm on rise";
+    EXPECT_GE (set->riseRatio, 1.5f)
+        << "the ramp was too slow to confirm on rise (or the fixture confirmed "
+           "before the scorer had 112.5 ms of history)";
     EXPECT_LT (set->riseRatio, NotchController::kSteepRiseRatio)
-        << "the ramp was steep enough to be a -12 placement";
+        << "the tone stepped ONTO the noise floor instead of starting at it: "
+           "riseRatio is a tone-vs-noise ratio, so raise kRampStartAmp's "
+           "derivation, not the slope (B-5)";
 }
 
 // RED IF the steep-rise jump stops firing (spec 4.3 step 2, Q6). SineSource
@@ -2270,7 +2356,12 @@ spent on a placement that then bails on a full chain) and needs the bin, which n
 the sample rate the index block already has in scope. So the **whole depth choice
 moves BELOW the index lookup**, and Task 8 changes exactly one line of it.
 
-Replace `:585-596` — the three `const` reads AND the index-search block — with:
+Replace `:583-596` — the two-line `soundcheckActive()` comment, the three `const`
+reads AND the index-search block — with the code below. **m-C: the range starts at
+the COMMENT, not at `const Origin origin`.** The replacement re-emits those two
+comment lines, so a literal replace of `585-596` would leave a duplicated comment
+above the new one. Anchor on the text `// soundcheckActive() takes modelMutex_
+itself` and replace from there through the closing `}` of the index-search scope.
 
 ```cpp
     // soundcheckActive() takes modelMutex_ itself, so it is asked BEFORE the
@@ -2376,10 +2467,33 @@ git commit -m "feat(controller): place notches at -6 dB (-12 on a steep rise) un
 - Test: `tests/test_notchcontroller.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `pushRetuneLocked`, `ceilingDbFor`, `nextDeeperRungDb` (two-arg, Q13), `activeForTest`, `kDeepenAfterMs`, `RetuneReason`, and the `ModelNotch` fields `deepestDb` / `stageChangedAtMs` / `quietMs` / `releasedSteps`.
-- Produces: nothing new in the public API. Task 7 relies on `quietMs` being ZEROED here on every reinforce, and on `releasedSteps` returning to 0 on a reclamp.
+- Consumes (Task 4): `pushRetuneLocked`, `ceilingDbFor`, `nextDeeperRungDb` (two-arg, Q13), `activeForTest`, `kDeepenAfterMs`, `RetuneReason`, and the `ModelNotch` fields `deepestDb` / `stageChangedAtMs` / `quietMs` / `releasedSteps`. **Not** `retuneForTest` — rev 2 used it to fake a released notch and could not (M-A, below).
+- Produces: nothing new in the public API. Task 7 relies on `quietMs` being ZEROED here on every reinforce, and on `releasedSteps` returning to 0 on a reclamp — and carries the test for that, because only Task 7 can put `releasedSteps` above 0 in the first place.
 
 **Thread facts this task must respect:** the loop at `.cpp:737-763` already holds `modelMutex_` (taken at line 738), and `modelMutex_` is NOT recursive — `setNotch`/`setNotchImpl` take it themselves at `.cpp:162`, so calling either from here deadlocks (B-1). Everything goes through `pushRetuneLocked`. `liveMs_` only advances in step 2 of `runOnce`, AFTER the whole drain loop, so the 300 ms gate cannot fire twice within one drain. Under LINKED the loop visits both lanes from one frame (`.cpp:740-742`), which is what keeps a linked pair on the same rung.
+
+**M-A — the reclamp branch is written HERE, but its behavioural test lives in Task 7,
+and that is deliberate.** The rev-2 plan tested it here with
+`retuneForTest(0, slot, -12.0, Release)` followed by one tone frame. That test cannot
+pass: `retuneForTest` only forwards to `pushRetuneLocked`, which writes `n.depthDB`
+and nothing else. `releasedSteps` is incremented by exactly one place — Task 7's
+release branch — and `stageChangedAtMs` is not restamped either. So at the reinforce
+pump `releasedSteps == 0`, the reclamp branch is skipped, the deepen branch runs
+(`nextDeeperRungDb(-12, -24) = -18`) and the assertion reads **−18, not −24**.
+
+Two ways out: widen `retuneForTest` to take a `releasedSteps`, or build the state
+through the real path. **The plan takes the real path**, because a seam that can
+fabricate `releasedSteps` is a seam that can hide the bug where the release ladder
+fails to set it. The real path needs the release ladder, which does not exist until
+Task 7 — so `AReturningHowlReclampsImmediatelyToDeepestDb` is **moved to Task 7**,
+where it climbs to −24, sits quiet through 30 s + 10 s so the ladder walks
+−24 → −18 → −12 with `releasedSteps == 2`, and only then takes one tone block.
+
+The consequence to accept with open eyes: **the reclamp branch added in this task has
+no red test in this task.** Task 6's `ctest` run therefore proves the deepen half only.
+Do not "cover" it here with a seam that writes `releasedSteps` directly, and do not
+reorder Tasks 6 and 7 — the release ladder reads `quietMs`, which this task is what
+zeroes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2522,41 +2636,6 @@ TEST (NotchControllerLadder, APresetNotchNeverDeepens)
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
 }
 
-// RED IF a reclamp waits for the 300 ms gate, or fails to return to the
-// DEEPEST rung the notch ever held (spec 4.4, Q3). A howl coming back is the
-// emergency this feature exists for -- it is answered on the same frame.
-TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
-{
-    Harness h;
-    h.controller.setDetectionActive (true);
-    h.controller.setNotchDefaults (30.0, -24.0);
-
-    int slot = -1;
-    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
-    ASSERT_GE (slot, 0);
-    SineSource tone;
-    for (int i = 0; i < 200; ++i)      // climb to the ceiling rung
-        pump (h, tone.hop());
-    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0);
-
-    // Simulate a release having already happened: the notch is sitting on a
-    // shallower rung with releasedSteps > 0. Task 7's clock does this for
-    // real; here the seam gets us there in one line.
-    ASSERT_TRUE (h.controller.retuneForTest (0, slot, -12.0,
-                                             NotchController::RetuneReason::Release));
-
-    NotchCommand drained {};
-    while (h.commands.read (&drained, 1) == 1) {}
-    const double before = h.controller.liveMsForTest();
-
-    pump (h, tone.hop());              // ONE frame of howl at that bin
-
-    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
-        << "the reclamp waited instead of firing on the frame";
-    EXPECT_LT (h.controller.liveMsForTest() - before, NotchController::kDeepenAfterMs);
-    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, slot), 0.0);
-}
-
 // RED IF a LINKED pair can end up on different rungs. Both lanes are
 // reinforced from the same frame (.cpp:740-742), so they must climb together.
 TEST (NotchControllerLadder, LinkedLanesStayOnTheSameRung)
@@ -2640,11 +2719,24 @@ TEST (NotchControllerLadder, SoundcheckNotchesNeverDeepen)
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
-Expected: FAIL — `AContinuingHowlDeepensOneRungPer300ms` never leaves −12, and `AReturningHowlReclampsImmediatelyToDeepestDb` stays at −12.
+Expected: FAIL — `AContinuingHowlDeepensOneRungPer300ms` never leaves −12, `TheLastStepLandsExactlyOnAnOffRungCeiling` stays at −12, and `DeepeningStopsAtTheCeilingRung` never reaches −18. (Nothing in this run exercises the reclamp branch — see the M-A note above.)
 
 - [ ] **Step 3: Implement the deepen/reclamp branch in `src/app/NotchController.cpp`**
 
-Replace the body of the `if (PeakinessAnalyzer::peakinessAt(...) > la.analyzer.getThreshold())` block (lines 755-760) with:
+**m-B / m-C — find this by ANCHOR, not by line number.** Task 5 inserts into
+`placeConfirmed`, which sits ABOVE the reinforce loop, so every absolute number in
+this task is pre-Task-5 and will already be wrong when you get here. Search for the
+comment line
+
+```
+                // Same live threshold analyse() used to accept candidates --
+```
+
+(pre-Task-5 it is at `:752`) and replace from there down to and including the closing
+`}` of the `if (PeakinessAnalyzer::peakinessAt(...) > la.analyzer.getThreshold())`
+block (pre-Task-5 `:760`). **The stated region is `752-760`, not `755-760`:** the
+replacement below re-emits those three comment lines, so replacing only the `if`
+would leave the comment standing twice.
 
 ```cpp
                 // Same live threshold analyse() used to accept candidates --
@@ -2669,8 +2761,29 @@ Replace the body of the `if (PeakinessAnalyzer::peakinessAt(...) > la.analyzer.g
                         // that is deliberate (invariant 3 bounds the DEEP
                         // direction per step; this is a return to a depth this
                         // notch already ran at).
-                        if (pushRetuneLocked (c, i, n.deepestDb, RetuneReason::Reclamp))
+                        //
+                        // M-B: the target is CLAMPED to the live ceiling. The
+                        // ceiling is read fresh every tick, and the operator
+                        // may have pulled the slider up while this notch was
+                        // releasing -- Task 7's ceiling branch cannot have
+                        // caught that, because a notch sitting SHALLOWER than
+                        // the new ceiling never enters it. Without the max()
+                        // a notch that climbed to -24, released to -6 under a
+                        // slider then dropped to -12 would reclamp to -24:
+                        // 12 dB past the ceiling, violating Q1 and spec 4.10
+                        // invariant 2. max() picks the SHALLOWER value.
+                        // For Preset/Manual, ceilingDbFor(n) IS their own
+                        // depth, which equals deepestDb, so this is identity.
+                        const double target = std::max (n.deepestDb, ceilingDbFor (n));
+                        if (pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
                         {
+                            // Keep the memory and the depth in step: when the
+                            // ceiling did not bind, target == deepestDb and
+                            // this is a no-op; when it did, the notch must not
+                            // go on remembering a rung it is no longer allowed
+                            // to stand on. Task 7's per-tick clamp says the
+                            // same thing from the other side.
+                            n.deepestDb        = target;
                             n.releasedSteps    = 0;
                             n.stageChangedAtMs = liveMs_;
                         }
@@ -2720,7 +2833,7 @@ Expected: PASS.
 - [ ] **Step 5: Run the full suite**
 
 Run: `cd build && ctest -C Release`
-Expected: `100% tests passed` (498).
+Expected: `100% tests passed` (497 — one fewer than rev 2: the reclamp test moved to Task 7, M-A).
 
 - [ ] **Step 6: Commit**
 
@@ -2743,10 +2856,11 @@ git commit -m "feat(controller): deepen one rung per 300ms while the bin still r
 **Files:**
 - Modify: `src/app/NotchController.cpp:403-416` (step 3, replaced wholesale — the `releaseFrozen` publish is a NEW scope inside the replacement, not an edit to the snapshot block at `:361-372`. M-6: the v1 Files list cited `:369-371`, which is the `ringRiskScore`/`ringRiskValid`/`ringRiskThreshold` publish and is not touched by this task)
 - Modify: `src/app/NotchController.h:83` (`kAutoReleaseMs` doc string)
+- Modify: `src/gui/SpectrumView.h:239` (m-D: `kRingRiskRisingFraction` becomes an alias of `NotchController::kRiskFreezeFraction` instead of a second literal `0.55f` — Step 3)
 - Test: `tests/test_notchcontroller.cpp`
 
 **Interfaces:**
-- Consumes (Task 4): `pushRetuneLocked`, `ceilingDbFor`, `nextShallowerRungDb`, `activeForTest`, `kReleaseFirstMs`, `kReleaseStepMs`, `kRiskFreezeFraction`, `ringRiskOverrideForTest_`, `SnapshotBuffer::releaseFrozen`, `quietMsForTest`. Consumes (Task 6): `quietMs` zeroed and `releasedSteps` reset on reinforce.
+- Consumes (Task 4): `pushRetuneLocked`, `ceilingDbFor`, `nextShallowerRungDb`, `activeForTest`, `deepestDbForTest`, `kReleaseFirstMs`, `kReleaseStepMs`, `kDeepenAfterMs`, `kRiskFreezeFraction`, `ringRiskOverrideForTest_`, `SnapshotBuffer::releaseFrozen`, `quietMsForTest`, `liveMsForTest`. Consumes (Task 6): `quietMs` zeroed and `releasedSteps` reset on reinforce, and the reclamp branch itself — **M-A: this task carries the reclamp's only behavioural test** (`AReturningHowlReclampsImmediatelyToDeepestDb`), because `releasedSteps > 0` is a state only the release ladder in this task can produce.
 
 **Release timing — the arithmetic every pump length in this task and Task 8 is derived from.** From the rung a notch STANDS on, `kReleaseFirstMs` (30 s) buys the first step and `kReleaseStepMs` (10 s) each one after, including the Clear:
 
@@ -3027,6 +3141,111 @@ TEST (NotchControllerLadder, APresetNotchReleasesDownTheLadderAndReclampsToItsOw
         << "a preset notch reclamped past its own depth";
 }
 
+// RED IF a reclamp waits for the 300 ms gate, or fails to return to the
+// DEEPEST rung the notch ever held (spec 4.4, Q3). A howl coming back is the
+// emergency this feature exists for -- it is answered on the same frame.
+//
+// M-A: this test lives in Task 7, not Task 6 where the branch is written,
+// because the state it needs can only be built by the RELEASE ladder.
+// retuneForTest forwards to pushRetuneLocked, which writes depthDB and
+// nothing else -- releasedSteps stays 0, the reclamp branch is skipped, the
+// deepen branch runs instead and the notch reads -18. So the shallow rung is
+// reached the way a room reaches it: by going quiet.
+TEST (NotchControllerLadder, AReturningHowlReclampsImmediatelyToDeepestDb)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    SineSource tone;
+    for (int i = 0; i < 200; ++i)      // climb to the ceiling rung
+        pump (h, tone.hop());
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0);
+
+    // Real release path: 30 s buys the first rung (-18), 10 s the second
+    // (-12). 42 s is past both and well short of the 50 s that would take it
+    // to -6 and the 60 s that would Clear it. releasedSteps is 2 here, and
+    // nothing but the ladder could have set it.
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 42000.0);
+    ASSERT_TRUE (h.controller.activeForTest (0, slot));
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -12.0);
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -24.0)
+        << "releasing must not forget the rung the room needed";
+
+    NotchCommand drained {};
+    while (h.commands.read (&drained, 1) == 1) {}
+    const double before = h.controller.liveMsForTest();
+
+    pump (h, tone.hop());              // ONE frame of howl at that bin
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
+        << "the reclamp waited instead of firing on the frame";
+    EXPECT_LT (h.controller.liveMsForTest() - before, NotchController::kDeepenAfterMs);
+    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, slot), 0.0);
+
+    // releasedSteps has no accessor, and does not need one: its whole meaning
+    // is "which threshold does the next release use". After a reclamp the
+    // notch must be back on the 30 s FIRST-rung threshold. If releasedSteps
+    // had stayed at 2 this would release at 10 s and read -18 here.
+    pumpQuietFor (h, quiet, 29000.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -24.0)
+        << "the reclamp left releasedSteps standing, so the notch released "
+           "again after 10 s instead of 30";
+    pumpQuietFor (h, quiet, 1500.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -18.0);
+}
+
+// RED IF a lowered ceiling fails to cap what a later reclamp can do (M-B).
+// This is the ONE sequence that reaches the unconditional deepestDb clamp:
+// the notch ends up SHALLOWER than the new ceiling, so the Set(ceilingRung)
+// branch never runs and cannot do the clamping for it. Without the fix the
+// notch reclamps to -24 under a -12 ceiling -- 12 dB louder a cut than the
+// operator asked for, on a live PA (Q1, spec 4.10 invariant 2).
+//
+// Built by hand rather than through primeAndPlace so the notch is on a known
+// index while detection is OFF for the whole release; SineSource's bin 43 is
+// 1007.8125 Hz, so the reinforce loop finds it once detection is armed.
+TEST (NotchControllerLadder, ALoweredCeilingAlsoCapsTheReclampTarget)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1007.8125, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+
+    // From -24: -18 at 30 s, -12 at 40 s, -6 at 50 s, Clear at 60 s. 52 s
+    // lands on -6 with 2 s of the next 10 s rung banked.
+    NoiseSource quiet;
+    pumpQuietFor (h, quiet, 52000.0);
+    ASSERT_TRUE (h.controller.activeForTest (0, 0));
+    ASSERT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
+    ASSERT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+
+    // The operator drops the slider two rungs while the notch sits shallow.
+    // -6 is NOT deeper than -12, so the Set(ceilingRung) branch is skipped --
+    // only the unconditional clamp can act here.
+    h.controller.setNotchDefaults (30.0, -12.0);
+    pumpQuietFor (h, quiet, 100.0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -6.0)
+        << "the ceiling branch deepened a notch that was already shallow enough";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0)
+        << "the per-tick ceiling clamp skipped a notch shallower than the ceiling";
+
+    // The howl returns.
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 40; ++i)
+        pump (h, tone.hop());
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0)
+        << "the reclamp went 12 dB past the ceiling the operator set";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+}
+
 // RED IF a Soundcheck notch is ever released (KD-7). It already had a test
 // (SoundcheckNotchNeverAutoReleases); this one pins that the LADDER does not
 // touch it either -- no Retune of any reason, at any rung.
@@ -3085,9 +3304,40 @@ TEST (NotchControllerLadder, NoCommandEverLeavesTheLegalDepthRange)
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
-Expected: FAIL — `ReleaseWalksTheLadderAt30sThen10sPerRung` finds the notch already cleared at 30.5 s (today's cliff), and the freeze tests all release regardless of the override.
+Expected: FAIL — `ReleaseWalksTheLadderAt30sThen10sPerRung` finds the notch already cleared at 30.5 s (today's cliff), the freeze tests all release regardless of the override, `AReturningHowlReclampsImmediatelyToDeepestDb` finds the notch cleared long before its 42 s pump ends, and `ALoweredCeilingAlsoCapsTheReclampTarget` the same.
 
-- [ ] **Step 3: Publish `releaseFrozen`'s neighbours and update the constant's doc**
+- [ ] **Step 3: Publish `releaseFrozen`'s neighbours, update the constant's doc, and collapse the duplicate 0.55**
+
+**m-D: `kRiskFreezeFraction`'s own doc string says "one constant, not two", and rev 2
+still left two.** `gui::SpectrumView::kRingRiskRisingFraction` (`src/gui/SpectrumView.h:239`)
+is a second `0.55f` literal that means exactly the same thing. `SpectrumView.h`
+already includes `app/NotchController.h` (line 45 — verify with
+`rg "NotchController.h" src/gui`, which reports that include and one in
+`NotchListPanel.h:41`), so the GUI constant can simply BE the controller's:
+
+```cpp
+    // Where Rising starts, as a fraction of the threshold the DETECTOR
+    // published (snapshot.ringRiskThreshold). Nothing here hardcodes that
+    // threshold: it tracks the RESPONSE preset instead of being one more
+    // magic constant, and a GUI-side constant would silently disagree with
+    // the machine it describes the moment the DSP side moved.
+    //
+    // Lane G (m-D): it is now literally the same constant. NotchController's
+    // release-clock freeze uses this same band line (spec 4.5, Q4), so the
+    // value is DEFINED there and aliased here. Two 0.55f literals with one
+    // meaning is exactly the drift the comment above warns about, and a test
+    // asserting they are equal would only be checking that nobody edited one
+    // of them -- this makes the question unaskable instead.
+    static constexpr float kRingRiskRisingFraction = NotchController::kRiskFreezeFraction;
+```
+
+No test is added for the equality: the alias makes the two names the same object, so
+a `static_assert` or an `EXPECT_FLOAT_EQ` would be a tautology. What *is* worth
+checking is that the GUI still bands correctly, and `riskForScore`'s existing tests
+already do that.
+
+This is a header change, so it needs a full reconfigure + build (CLAUDE.md build
+table), and `src/gui/SpectrumView.h` joins the commit.
 
 In `src/app/NotchController.h:82-83`, replace the `kAutoReleaseMs` comment:
 
@@ -3175,19 +3425,41 @@ Replace lines 403-416 in `runOnce` with:
                 // comparison is one-way, so a raised ceiling only buys depth
                 // through Task 6's reinforce path (spec 5.3).
                 const double ceiling = ceilingDbFor (n);
-                if (n.origin == Origin::Detector && n.depthDB < ceiling)
+                if (n.origin == Origin::Detector)
                 {
-                    // One ramped step, possibly more than 6 dB, and possibly
-                    // landing off-rung (Q13: the ceiling IS the last rung).
-                    // Invariant 3 bounds the DEEP direction only -- shallower
-                    // is never dangerous.
-                    if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
+                    // M-B: clamp the MEMORY unconditionally, every tick, even
+                    // when depthDB is already shallower than the ceiling and
+                    // the Set below will not run. This line is the whole fix.
+                    //
+                    // The hole it closes: climb to -24 under a -24 slider
+                    // (deepestDb -24) -> go quiet, release all the way to -6
+                    // (deepestDb untouched, that is the point of it) ->
+                    // operator drops the slider to -12. The test below reads
+                    // `-6 < -12` = FALSE, so without this line nothing
+                    // happens and deepestDb stays -24 -- and the next returning
+                    // howl reclamps to -24, 12 dB past the ceiling. That
+                    // violates Q1 and spec 4.10 invariant 2, and it is a
+                    // LOUDER-than-asked-for outcome on a live PA, which is the
+                    // one direction this codebase does not get to be sloppy in.
+                    //
+                    // max() picks the SHALLOWER of the two (deeper is more
+                    // negative). It never deepens deepestDb: a RAISED ceiling
+                    // leaves max(deepestDb, ceiling) == deepestDb.
+                    n.deepestDb = std::max (n.deepestDb, ceiling);
+
+                    if (n.depthDB < ceiling)
                     {
-                        n.deepestDb        = std::max (n.deepestDb, ceiling);
-                        n.stageChangedAtMs = liveMs_;
-                        n.quietMs          = 0.0;   // a depth change restarts the clock
+                        // One ramped step, possibly more than 6 dB, and
+                        // possibly landing off-rung (Q13: the ceiling IS the
+                        // last rung). Invariant 3 bounds the DEEP direction
+                        // only -- shallower is never dangerous.
+                        if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
+                        {
+                            n.stageChangedAtMs = liveMs_;
+                            n.quietMs          = 0.0;   // a depth change restarts the clock
+                        }
+                        continue;   // one depth change per notch per tick
                     }
-                    continue;   // one depth change per notch per tick
                 }
 
                 // --- steps 2-4: the quiet clock and the ladder -------------
@@ -3224,7 +3496,10 @@ Replace lines 403-416 in `runOnce` with:
 
 - [ ] **Step 5: Run the controller tests**
 
-Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+Step 3 touched two headers (`NotchController.h`, `SpectrumView.h`), so this run
+reconfigures first:
+
+Run: `cmake -B build -G "Visual Studio 18 2026" -A x64 && cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
 Expected: PASS. **Five** pre-existing tests now take LONGER to clear and must be checked, not "fixed" — the behaviour they assert (a Clear eventually arrives, carrying `AutoRelease`) is still correct, only the clock moved. Every new pump length is computed from the rung the notch actually stands on, using the table in this task's header.
 
 **1. `NotchControllerAutoRelease.LiveTapReleasesAfter30s`** (line 152, notch at −12, pumps 7000 × 5 ms = 35 s). From −12 the Clear is at 40 s:
@@ -3285,7 +3560,7 @@ The test also asserts `EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs)` 
 - [ ] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
-Expected: `100% tests passed` (511).
+Expected: `100% tests passed` (512).
 
 - [ ] **Step 7: Commit**
 
@@ -3293,7 +3568,7 @@ Expected: `100% tests passed` (511).
 rm -f .superpowers/sdd/.gitignore
 ```
 ```bash
-git add src/app/NotchController.h src/app/NotchController.cpp tests/test_notchcontroller.cpp
+git add src/app/NotchController.h src/app/NotchController.cpp src/gui/SpectrumView.h tests/test_notchcontroller.cpp
 ```
 ```bash
 git commit -m "feat(controller): release ladder with a freezable quiet clock and a live ceiling"
@@ -3309,7 +3584,7 @@ git commit -m "feat(controller): release ladder with a freezable quiet clock and
 
 **Files:**
 - Modify: `src/app/NotchController.h` (the `MemoryEntry` struct, `roomMemory_`, `roomMemoryHead_`, three private helpers — declare them next to `pushRetuneLocked`)
-- Modify: `src/app/NotchController.cpp:80-117` (`setWidth`), `:223-229` (`clearAll`), `placeConfirmed`'s index-lookup block and depth choice **as Task 5 left them** (Task 5 moved both — do not go looking for the v1 line numbers `:589-596`), the release path's Clear branch (Task 7), `:864-877` (`setSampleRate`)
+- Modify: `src/app/NotchController.cpp:80-117` (`setWidth`), `:223-229` (`clearAll`), `placeConfirmed`'s index-lookup block and depth choice **as Task 5 left them** (Task 5 moved both — do not go looking for the v1 line numbers `:589-596`), the release path's Clear branch (Task 7), and `setSampleRate` (**m-B: pre-Task-5 that is `:864-877`, and Tasks 5–7 all insert above it — find it by the signature `void NotchController::setSampleRate (double sampleRate)`, not by the number**)
 - Test: `tests/test_notchcontroller.cpp`
 
 **Interfaces:**
@@ -3335,6 +3610,16 @@ Two fixture rules apply to every test below and are not repeated in each comment
 
 - **B-3: liveness is `activeForTest`, never `depthDbForTest(...) < 0.0`.** `pushClearLocked` (`NotchController.cpp:195-212`) lowers only `active` — `depthDB` stays because the Clear event reads it at `:208`. A depth probe therefore matches every slot that has ever held a notch, and the v1 versions of these tests would have "found" a cleared slot and asserted the remembered depth against a corpse.
 - **B-4: every quiet pump is derived from the rung the notch stands on**, using the table in Task 7's header. A notch that climbed to the −24 ceiling needs 30 + 10 + 10 + 10 = **60 s** to Clear, not the 55 s the v1 plan used, so the memory entry would never have been written at all.
+
+**m-E — `firstActiveIndex` goes in the ANONYMOUS NAMESPACE, not at the end of the
+file.** The anonymous namespace in `tests/test_notchcontroller.cpp` closes at
+`} // namespace` on **line 405**; everything appended after that is at global scope,
+where a non-`static` free function in a translation unit that is linked with the
+others is an ODR hazard and a linker surprise waiting for the next test file to
+declare the same name. Put it with the other helpers **at line 349, immediately after
+`pump` closes** — the same insertion point Task 5 uses for `RampSineSource` /
+`primeAndPlaceSlowly` and Task 7 uses for `pumpQuietFor`. (Numbers are pre-Task-5;
+search for the closing `}` of `void pump (Harness& h, const std::vector<float>& hop)`.)
 
 ```cpp
 // A findable helper for "which index is holding a notch on this lane" -- the
@@ -3389,7 +3674,16 @@ TEST (NotchControllerLadder, AHowlReturningToTheSameBinStartsAtTheRememberedDept
 // RED IF the bin tolerance loosens (Q10). One bin away is a DIFFERENT howl --
 // at 48 kHz / 2048 that is 23.4 Hz, and an instrument partial next door must
 // not inherit a -24 dB cut on its first block.
-TEST (NotchControllerLadder, OneBinAwayIsANewHowlAndStartsAtMinusSix)
+//
+// m-F: the name says "starts fresh", NOT "starts at -6", because -6 is not
+// what this fixture produces. SineSource switches a full-scale tone on in one
+// block, so riseRatio is enormous, the steep-rise branch fires and the fresh
+// placement is -12 (spec 4.3 step 2). What is being pinned here is that the
+// depth came from the PLACEMENT POLICY and not from room memory, so the
+// assertion is exact: -12, never -24, and never the loose `>= -12` of rev 2,
+// which -24 would also have to fail but which would silently accept -6 if the
+// steep-rise branch broke.
+TEST (NotchControllerLadder, OneBinAwayIsANewHowlAndStartsFreshNotFromMemory)
 {
     Harness h;
     const double binHz = kTestSr / Detector::kFftSize;   // 23.4375
@@ -3413,8 +3707,12 @@ TEST (NotchControllerLadder, OneBinAwayIsANewHowlAndStartsAtMinusSix)
         placed = firstActiveIndex (h.controller, 0);
     }
     ASSERT_GE (placed, 0);
-    EXPECT_GE (h.controller.depthDbForTest (0, placed), -12.0)
-        << "a neighbouring bin inherited the remembered depth";
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -12.0)
+        << "a neighbouring bin inherited the remembered depth (or the "
+           "steep-rise placement branch stopped firing)";
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, placed), -12.0)
+        << "the memory's -24 leaked into deepestDb even though the depth was "
+           "placed fresh -- the next reclamp would then go to -24";
 }
 
 // RED IF the TTL stops expiring entries (spec 4.6). 5 minutes and one
@@ -3770,7 +4068,10 @@ void NotchController::clearAll (ClearReason reason)
 }
 ```
 
-In `setSampleRate` (lines 864-877), after the lane loop:
+In `setSampleRate`, after the `for (auto& l : lanes_)` loop closes (m-B: the
+pre-Task-5 range is `864-877`, but Tasks 5, 6 and 7 all insert above it — anchor on
+`void NotchController::setSampleRate (double sampleRate)` and on the
+`l.blocksSinceReset = 0;` that ends the loop body):
 
 ```cpp
     // m-7: this has no production caller today (the device path reaches the
@@ -3850,7 +4151,7 @@ Expected: PASS.
 - [ ] **Step 6: Run the full suite**
 
 Run: `cd build && ctest -C Release`
-Expected: `100% tests passed` (519).
+Expected: `100% tests passed` (520).
 
 - [ ] **Step 7: Commit**
 
@@ -4053,13 +4354,45 @@ TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
 {"ev":"notch_retune","t":5301.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-12,"from_db":-6,"origin":"detector","reason":"deepen","age_ms":300.0}
 ```
 
-3. **Insert after line 11** (the `verdict` at `t: 31000.0`), so the file stays in ascending `t` order — a release, 10 s before the `auto_release` that already sits at `t: 41000.0`, which is exactly `kReleaseStepMs`:
+3. **Insert after line 11** (the `verdict` at `t: 31000.0`), so the file stays in ascending `t` order — the first release:
 
 ```
-{"ev":"notch_retune","t":31000.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":25999.0}
+{"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
 ```
 
-The notch now reads: placed −6 at 5001, deepened to −12 at 5301, released back to −6 at 31000, cleared by `auto_release` at 41000 with `age_ms:36000` — which is what the existing line 12 already says. A reader that CLOSES on a retune loses that clear and the fixture's counts move, which is what the `--expect-*` flags below catch.
+**m-A — why 35400 and not the 31000 rev 2 used.** The first release costs
+`kReleaseFirstMs` = **30 000 ms of quiet measured from the last depth change**, and
+the last depth change is the deepen at `t: 5301`. `31000 − 5301 = 25 699 ms`: the
+rev-2 fixture released 4.3 s before the ladder allows it, i.e. it depicted a run the
+shipped code cannot produce. Anything at or after `5301 + 30 000 = 35 301` is legal;
+**35400** is used for a round number with 99 ms of slack. `age_ms` on that line is
+measured from the SET, not from the deepen: `35400 − 5001 = 30 399.0`.
+
+4. **Edit line 12** (the existing `auto_release`): the next rung costs
+   `kReleaseStepMs` = 10 000 ms, so the Clear moves from `t: 41000.0` to exactly
+   `35400 + 10 000 =` **`45400.0`**, and its `age_ms` from `36000.0` to
+   `45400 − 5001 =` **`40399.0`**:
+
+```
+{"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
+```
+
+`session_end` stays at `t: 60000.0`, so the file is still in ascending `t` order and
+still ends after every notch.
+
+The notch now reads: placed −6 at 5001, deepened to −12 at 5301 (exactly
+`kDeepenAfterMs` later), released back to −6 at 35400 (exactly `kReleaseFirstMs`
+after the deepen), cleared by `auto_release` at 45400 (exactly `kReleaseStepMs`
+after the release), held 40.4 s. A reader that CLOSES on a retune loses that clear
+and the fixture's counts move, which is what the `--expect-*` flags below catch.
+
+**The `--expect-*` numbers do not move**, and that is worth checking rather than
+assuming (`tools/logstats.py:43-63, 80-88`): `notches` counts `notch_set` lines
+(still 4 — the retunes are not sets); `verdicts` counts notches whose `verdict` is
+`good`/`false` (still 3) and `false` (still 1); recurrence groups by Hz within one
+bin, so 1007.8 / 2437.5 / 1007.8 / 482.0 still gives a max of 2. None of these read
+`t` or `age_ms` at all, so moving two timestamps changes none of them; only the new
+`--expect-retunes 2` is new.
 
 Then extend the fixture test in `tests/CMakeLists.txt:113-117`:
 
@@ -4244,7 +4577,7 @@ The file is already opened with `encoding="utf-8"` in `load()` (line 19) and wri
 - [ ] **Step 6: Run the log tool by hand, then the suites**
 
 Run: `python tools/logstats.py tests/fixtures/session-sample.jsonl --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2`
-Expected: exit 0, and the table's first row shows `-6dB` running / `-12dB` deepest / `2` retunes with `held` still ~36 s (5001 → 41000) — the record stayed OPEN across both retunes.
+Expected: exit 0, and the table's first row shows `-6dB` running / `-12dB` deepest / `2` retunes with `held` ~40.4 s (5001 → 45400, m-A) — the record stayed OPEN across both retunes.
 
 Run:
 ```
@@ -4257,7 +4590,7 @@ Expected: PASS.
 - [ ] **Step 7: Run the full suite**
 
 Run: `cd build && ctest -C Release`
-Expected: `100% tests passed` (525).
+Expected: `100% tests passed` (526).
 
 - [ ] **Step 8: Commit**
 
@@ -4383,7 +4716,12 @@ lượng tử trần −10 xuống −6 sẽ làm Music nông hơn 1.1.3 4 dB m�
   chip), không có trần thời gian (Q9); cờ `SnapshotBuffer::releaseFrozen`
   publish ra nhưng 1.2.0 chưa vẽ.
 - **Kẹp lại**: bin hú lại khi đang nhả ⇒ về `deepestDb` **ngay trong frame
-  đó**, không chờ 300 ms.
+  đó**, không chờ 300 ms — nhưng **luôn kẹp bởi trần đang có hiệu lực**
+  (`max(deepestDb, ceilingRung)`, M-B). Trần đọc sống, nên nếu người vận hành
+  kéo slider nông đi trong lúc notch đang nhả, lần kẹp lại KHÔNG được vượt
+  giá trị mới. Song song, `deepestDb` của notch Detector bị kẹp về trần mỗi
+  tick, kể cả khi notch đang nông hơn trần — đó là đường duy nhất bắt được
+  trường hợp này.
 - **Nhớ phòng**: mỗi làn 16 mục `{tần số, deepestDb, thời điểm nhả}`, TTL 5
   phút, khớp **đúng cùng bin** (±0 — lệch một bin là 21,5 Hz @44,1k/2048, đủ
   để một partial nhạc cụ bên cạnh kế thừa nhầm một vết cắt sâu). Dùng một lần.
@@ -4436,9 +4774,11 @@ Cho tới 1.1.3 chỉ GUI đọc `ringRiskScore`. Từ 1.2.0 `NotchController` t
 sống trên detector thread và chứa đúng hai số vừa publish vào snapshot — để
 **đóng băng đồng hồ nhả** khi `frameScoreValid_ && frameMaxScore_ ≥ 0.55 ×
 CandidateScorer::kConfirmScore`, tức đúng ranh RISING của
-`SpectrumView::riskForScore`. Hằng số là MỘT: `NotchController::
-kRiskFreezeFraction` và `SpectrumView::kRingRiskRisingFraction` cùng giá trị
-0.55 và cùng ý nghĩa; đổi một chỗ phải đổi chỗ kia.
+`SpectrumView::riskForScore`. Hằng số là MỘT theo nghĩa đen (m-D, rev 3):
+`NotchController::kRiskFreezeFraction = 0.55f` là ĐỊNH NGHĨA, còn
+`SpectrumView::kRingRiskRisingFraction` chỉ là bí danh
+(`= NotchController::kRiskFreezeFraction`). Không còn hai literal 0.55f để
+lệch nhau; đổi một chỗ là đổi cả hai.
 
 Ba điều cần biết khi đọc chip cạnh thang nhả:
 
@@ -4505,13 +4845,15 @@ Update the header block (version, build date, suite count, SHA-256 — the SHA c
 
 Create `memory/gain-aware-notch-lane-g-2026-09-07.md` with the front-matter shape the other notes use, recording whatever this lane actually taught — at minimum: that a coefficient ramp needs a state-identity assertion because every black-box measurement passes a silent `reset()` (M-7); that the reinforce loop and `runOnce` step 3 both already hold a non-recursive `modelMutex_`, which is why a `*Locked` sibling was the only option (B-1); that `pushClearLocked` leaves every field but `active` intact, so slot reuse must be re-initialised at `setNotchImpl` (B-2); that `ev` — not `kind` — is the log's dispatch key (B-3); and the M-9 consequence that "deepen" and "still howling" are the same test, so the ladder stops at the first rung that works.
 
-Add, from this plan's own 2026-09-07 revision — these are lessons about writing the plan, and they are the ones that cost the most:
+Add, from this plan's own two 2026-09-07 revisions — these are lessons about writing the plan, and they are the ones that cost the most:
 
 - **`pushClearLocked` retaining `depthDB` makes "depth < 0" a false liveness test.** Six tests across three tasks were written on it and would all have passed against cleared slots. The accessor `activeForTest` exists only because of this.
 - **A ladder's timings must be derived from the rung, not from a round number.** `55000.0` looked like "past the 50 s release" and was 5 s short of the 60 s a −24 notch actually needs. Write the arithmetic in the comment or it drifts.
-- **A scoring fixture has to be derived from the scorer's own formula before it is written.** `RampSineSource` at the spec's illustrative +3 dB/250 ms can never confirm — `rNorm = (rise−1)/0.5` against a ≥ 112.5 ms reference gives 0.35 against a 0.7 floor. Two lines of algebra beat a build.
+- **A scoring fixture has to be derived from the scorer's own formula before it is written — and twice, because the first derivation solved the wrong variable.** The spec's illustrative +3 dB/250 ms can never confirm (`rNorm = (rise−1)/0.5` against a ≥ 112.5 ms reference gives 0.35 against a 0.7 floor). But fixing the SLOPE still could not produce a −6 placement: for the first 11 tone blocks the rise reference is a NOISE frame, and a tone that switches on above the floor gives `riseRatio ≈ 64` at any slope — while peakiness, being scale-invariant, confirms within ~4 blocks, i.e. inside that window. The parameter that decides the band is the ramp's **starting amplitude**, which has to equal the noise floor's per-bin magnitude. Two lines of algebra beat a build; three lines beat two.
 - **Q13: quantising a ceiling to a rung silently made the shipped `Music` preset 4 dB shallower than 1.1.3.** The defect was invisible in the spec, in the plan and in every test, because no test used a ceiling that was not a multiple of 6. When a constant can take values off the grid your tests use, test one that is.
 - **A plan is not verified until someone opens the files it cites.** Three helpers used in Task 9 (`TempDir`, `pumpOneBlockThroughSlotZero`, `notchControllerForTest`) did not exist anywhere in the repo; the plan itself flagged them as unverified and the flag was not acted on until a second reader looked.
+- **A one-way clamp guarding a value that has TWO ways to become stale is half a clamp** (M-B, and this is the safety lesson of the lane). The ceiling branch only clamped `deepestDb` when it also emitted a `Set` — i.e. only when the notch was currently deeper than the ceiling. A notch that had RELEASED to a shallower rung skipped the branch entirely and kept a `deepestDb` from under the old ceiling, which the next reclamp then honoured: **12 dB deeper than the operator's slider, on a live PA.** The fix is two lines and both are needed: clamp the remembered value unconditionally every tick, and clamp the reclamp target at the moment it is used. Whenever a "deepest ever" or "high water mark" is kept alongside a limit that can move, ask what happens when the limit moves while the value is not in use.
+- **A test that needs a state should build it the way production does.** Rev 2 reached "already released" with `retuneForTest(..., Release)`, which sets `depthDB` and nothing else — so the branch under test was never entered and the test would have read the deepen path's answer instead. The seam looked like it set the state because its argument was named `Release`.
 
 Add one line to `memory/MEMORY.md`'s `## Notes` list, in the same style as its neighbours, linking the new file.
 
@@ -4558,16 +4900,18 @@ git commit -m "chore: release 1.2.0 to alpha (lane G)"
 ## Self-review
 
 Run against the spec with fresh eyes after the plan was written, then **re-run
-2026-09-07 against the real files** by a second, read-only session. Everything
-in the "Revision 2026-09-07" table at the top of this document was found by
-that pass; this section reflects the plan AFTER those fixes.
+twice on 2026-09-07 against the real files** by two read-only sessions. The
+"Revision 2" table at the top is the first pass; the "Revision 3" table above it is
+the second, which re-derived the first pass's own arithmetic and found B-5 still
+open, M-A untestable and M-B a Q1 violation carried since spec v2. This section
+reflects the plan AFTER both.
 
 ### 1. Spec coverage
 
 | Spec § | Requirement | Task |
 |---|---|---|
 | §2.1 | place at −6, deepen 6 dB, never past the preset ceiling | 5, 6 |
-| §2.2 | release ladder −18 → −12 → −6 → Clear, 30 s then 10 s, reclamp immediately | 6 (reclamp), 7 (ladder) |
+| §2.2 | release ladder −18 → −12 → −6 → Clear, 30 s then 10 s, reclamp immediately | 6 (reclamp branch), 7 (ladder, **and the reclamp's only test** — M-A: `releasedSteps > 0` is a state only the release ladder can build) |
 | §2.3 | room memory: same frequency within 5 min restarts at the old depth | 8 |
 | §2.4 | release clock freezes at RISING/CRITICAL | 7 |
 | §2.5 | every depth change is a state-preserving 10 ms ramp | 1, 2 |
@@ -4576,14 +4920,14 @@ that pass; this section reflects the plan AFTER those fixes.
 | §4.2 | 5 new `ModelNotch` fields, `setNotchImpl` initialises all of them (B-2), −24 clamp + adopt log (Q12) | 4 |
 | §4.2 | `ScoreBreakdown::riseRatio` | 3; carried onto `NotchEvent::riseRatio` in 4 so a test can prove which band a fixture landed in (B-5) |
 | §4.3 | placement steps 1–4, Preset/Manual/Soundcheck rules. The block sits BELOW the index lookup (B-2) and the Soundcheck line is LAST | 5 (steps 1, 2, 4 + the final shape), 8 (step 3 filled in, same shape re-shown) |
-| §4.4 | `pushRetuneLocked`, deepen with the 300 ms gate, immediate reclamp, LINKED same rung, M-9 note | 4 (helper), 6 (loop) |
+| §4.4 | `pushRetuneLocked`, deepen with the 300 ms gate, immediate reclamp **clamped to the live ceiling** (M-B), LINKED same rung, M-9 note | 4 (helper), 6 (loop; reclamp target `max(deepestDb, ceilingDbFor(n))`), 7 (`AReturningHowlReclampsImmediatelyToDeepestDb`, `ALoweredCeilingAlsoCapsTheReclampTarget`) |
 | §4.5 | freeze from `frameMaxScore_`/`frameScoreValid_`, `quietMs`, thresholds, `releaseFrozen` (published EVERY tick, false when the tap is dead — M-6), test seams | 4 (seams), 7 (loop) |
 | §4.6 | `ReleasedMemory`: 16/lane, ring, AutoRelease only, same bin, TTL, one use, LINKED both lanes, wipes; an off-rung remembered depth is clamped to the ceiling on read and NOT quantised (m-8) | 8 |
 | §4.7 | `Biquad::rampNotchDepth`, the no-boost proof in the doc string, `setNotchFilter`/`reset` cancel, `clearNotch` note, `NotchChain::setNotch` routing, `kRampMs` | 1, 2 |
 | §4.8 | `Kind::Retune`, `RetuneReason`, `fromDepthDb`, `ev: "notch_retune"`, `logstats.py`, `SnapshotNotch::deepestDb`, `SnapshotBuffer::releaseFrozen`, `savePreset` (Q11) | 4 (types, snapshot), 9 (writer, reader, preset) |
 | §4.9 | the constant table, one place, not on the GUI | 4 |
 | §4.10 inv. 1 | never a Set outside [−24, 0] | 4 (clamp + refusal), 7 (fuzz test) |
-| §4.10 inv. 2 | never deeper than the ceiling | 5, 6, 7 |
+| §4.10 inv. 2 | never deeper than the ceiling, **including on the reclamp path** (M-B) | 5 (placement clamp), 6 (reclamp target clamped), 7 (per-tick unconditional `deepestDb = max(deepestDb, ceiling)` + `ALoweredCeilingAlsoCapsTheReclampTarget`) |
 | §4.10 inv. 3 | ≤ 6 dB per deepening step (Q13 can make the LAST step smaller, never larger); shallow steps may be larger | 6 (`nextDeeperRungDb`), 7 (ceiling/reclamp comments) |
 | §4.10 inv. 4 | a rejected design leaves the slot untouched | 1, 2, 4 |
 | §4.10 inv. 5 | ramp only between designs sharing freq/Q/sr | 2 |
@@ -4593,9 +4937,11 @@ that pass; this section reflects the plan AFTER those fixes.
 | §5.1 | eight Biquad tests, state identity and gain measurement included | 1 (nine tests) |
 | §5.2 | NotchChain ramp / reset routing, ±0.5 dB per rung, `NotchInfo.depthDB` immediate | 2 |
 | §5.3 | controller tests | 4, 5, 6, 7, 8 — see the row-by-row list below |
-| §5.3 "trần nâng về −18 ⇒ không đào lại cho tới khi reinforce" | the RAISE half of the live-ceiling rule | 7 (`RaisingTheCeilingDoesNotDeepenUntilTheBinRingsAgain`) — **added by the 2026-09-07 revision; the v1 plan covered only the lowering half** |
-| §5.3 "Preset: adoptPreset −12 ⇒ không đào; nhả thang; kẹp lại về −12" | a preset notch obeys the release ladder and reclamps to its OWN depth | 6 (`APresetNotchNeverDeepens`), 7 (`APresetNotchReleasesDownTheLadderAndReclampsToItsOwnDepth`) — **the release/reclamp half added by the revision** |
-| §5.3 "INDEP: làn kia không đổi" | the INDEP half of the LINKED/INDEP rung rule | 6 (`IndepLeavesTheOtherLaneUntouchedThroughTheWholeClimb`) — **added by the revision; the v1 plan covered only LINKED** |
+| §5.3 "trần nâng về −18 ⇒ không đào lại cho tới khi reinforce" | the RAISE half of the live-ceiling rule | 7 (`RaisingTheCeilingDoesNotDeepenUntilTheBinRingsAgain`) — **added by rev 2; the v1 plan covered only the lowering half** |
+| §5.3 "Preset: adoptPreset −12 ⇒ không đào; nhả thang; kẹp lại về −12" | a preset notch obeys the release ladder and reclamps to its OWN depth | 6 (`APresetNotchNeverDeepens`), 7 (`APresetNotchReleasesDownTheLadderAndReclampsToItsOwnDepth`) — **the release/reclamp half added by rev 2** |
+| §5.3 "INDEP: làn kia không đổi" | the INDEP half of the LINKED/INDEP rung rule | 6 (`IndepLeavesTheOtherLaneUntouchedThroughTheWholeClimb`) — **added by rev 2; the v1 plan covered only LINKED** |
+| §5.3 "Kẹp lại không vượt trần đã hạ" | the four-step sequence that reaches the unconditional `deepestDb` clamp — the only path where the `Set(ceilingRung)` branch cannot do the clamping for it | 7 (`ALoweredCeilingAlsoCapsTheReclampTarget`) — **added by rev 3 (M-B), together with the spec bullet it tests** |
+| §4.9 `kRiskFreezeFraction` | one constant for the RISING band, not two | 4 (declaration), 7 Step 3 (`SpectrumView.h:239` becomes an alias of it — m-D; rev 2 still had two `0.55f` literals) |
 | §5.3 "Đào … dừng ở bậc đầu tiên làm bin hết vượt ngưỡng" (Q7) | NOT covered by any test, and cannot be — see item 6 of §2 below | 6 (level note), 10 (tester notes) |
 | §5.4 | snapshot image showing a ladder rung | 10 (Step 9) |
 | §6 | docs, tester notes, release notes, roadmap, memory | 10 |
@@ -4605,7 +4951,8 @@ that pass; this section reflects the plan AFTER those fixes.
 
 Stated explicitly, as required:
 
-1. **§5.3, "`riseRatio` 1.9 → −6".** The boundary value cannot be produced deterministically from the audio fixture — the rise axis is a ratio between two real FFT frames, and no source in `tests/test_notchcontroller.cpp` can be dialled to land on 1.9 rather than 1.87 or 1.94. What Task 5 pins instead is the two sides of the line by construction: `RampSineSource` at +9.5 dB/250 ms (derived in Task 5, B-5) places at −6 with its logged `riseRatio` asserted to be in **[1.5, 2.0)**, and `SineSource`'s hard start (riseRatio ≫ 2) places at −12. Since the revision the band is asserted rather than assumed, so a fixture that drifts out of it fails loudly instead of passing for the wrong reason — but **the exact threshold value 2.0 is still pinned only by the constant, not by a test.** If a reviewer wants the boundary itself covered, the honest way is a pure test on a hand-built `ScoreBreakdown` — which would require extracting the depth choice from `placeConfirmed` into a static helper. That refactor is NOT in this plan; flag it rather than fake it.
+1. **§5.3, "`riseRatio` 1.9 → −6".** The boundary value cannot be produced deterministically from the audio fixture — the rise axis is a ratio between two real FFT frames, and no source in `tests/test_notchcontroller.cpp` can be dialled to land on 1.9 rather than 1.87 or 1.94. What Task 5 pins instead is the two sides of the line by construction: `RampSineSource`, starting AT the noise floor (`kRampStartAmp = 3.0e-4`, rev 3 / B-5) and rising +9.5 dB/250 ms, places at −6 with its logged `riseRatio` asserted to be in **[1.5, 2.0)**, and `SineSource`'s hard start (riseRatio ≫ 2) places at −12. Since rev 2 the band is asserted rather than assumed, so a fixture that drifts out of it fails loudly instead of passing for the wrong reason — but **the exact threshold value 2.0 is still pinned only by the constant, not by a test.** If a reviewer wants the boundary itself covered, the honest way is a pure test on a hand-built `ScoreBreakdown` — which would require extracting the depth choice from `placeConfirmed` into a static helper. That refactor is NOT in this plan; flag it rather than fake it.
+   **Rev 3 adds a caveat worth stating out loud:** `kRampStartAmp` is derived from `NoiseSource`'s amplitude and the Hann window's `Σw` / `√(Σw²)`, i.e. from a first-order estimate of two FFT magnitudes, not measured. The derivation fixes the SHAPE of the fixture (no onset step ⇒ rise is always tone-vs-tone) and that part is structural. The exact number is a starting point to be settled by running the test, and the failure messages on both `riseRatio` assertions say which direction to move it.
 
 2. **§5.3, "Slot tái dùng (B-2): … frame reinforce kế KHÔNG Reclamp".** Task 4's `ReusingASlotResetsEveryLadderField` pins the proximate cause (all five fields re-initialised, `releasedSteps == 0`), and Task 6's reclamp branch only fires on `releasedSteps > 0`. But no test drives the full sequence "deepen to −24 → Clear → manual −6 on the same index → one reinforce frame → assert no Reclamp". **Partially mapped only.**
 
@@ -4617,7 +4964,11 @@ Stated explicitly, as required:
 
 6. **`NotchController::setSampleRate` still has no production caller.** Task 8 wipes room memory there anyway, for the tests and `tools/snapshot.cpp` that do call it, and because it is where the wipe belongs the day the device path reaches it. Carried over from lane R's parked item, not resolved here.
 
-7. **§6, "sổ quyết định cập nhật nếu phản biện lật".** Nothing in this plan overturns Q1–Q13, so `docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md` is left untouched — **Q13 itself came the other way**: the 2026-09-07 cross-check found the spec v2 quantisation making `presets/Music.json` 4 dB shallower than 1.1.3, the owner ruled, and the decision record and spec §4.1/§7 were updated before this plan was. If executing a task forces a further decision to change, that file must be updated in the same commit — it is the reason the spec says "đừng hỏi lại".
+7. **Task 6's reclamp branch has no red test inside Task 6** (M-A, rev 3). The branch is written there because it lives in the reinforce loop, but the only state that reaches it — `releasedSteps > 0` — is produced by the release ladder, which is Task 7. `retuneForTest` cannot fake it: it forwards to `pushRetuneLocked`, which writes `depthDB` and nothing else. So Task 6's `ctest` run proves the deepen half only, and the reclamp is proven one task later by `AReturningHowlReclampsImmediatelyToDeepestDb`. **The alternative was a `retuneForTest` overload that sets `releasedSteps` directly — rejected**, because a seam that can fabricate that field is a seam that would keep passing if the release ladder stopped setting it. Stated here rather than hidden, so an executing agent does not "fix" Task 6 by adding one.
+
+8. **`releasedSteps` has no test accessor.** `depthDbForTest` / `deepestDbForTest` / `quietMsForTest` / `activeForTest` exist; `releasedSteps` deliberately does not. Its whole observable meaning is "which threshold does the next release use", so the tests assert THAT (after a reclamp, 29 s of quiet must not release; at 30 s it must) instead of reading the counter. If a later task genuinely cannot express something that way, add the accessor then and say why — do not add it speculatively.
+
+9. **§6, "sổ quyết định cập nhật nếu phản biện lật".** Nothing in this plan overturns Q1–Q13, so `docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md` is left untouched — **Q13 itself came the other way**: the 2026-09-07 cross-check found the spec v2 quantisation making `presets/Music.json` 4 dB shallower than 1.1.3, the owner ruled, and the decision record and spec §4.1/§7 were updated before this plan was. If executing a task forces a further decision to change, that file must be updated in the same commit — it is the reason the spec says "đừng hỏi lại".
 
 Also carried forward unchanged, as the spec's §7 requires: `PresetManager`'s `notchDefaults.depthDB` default of −12 (`PresetManager.h:146`) still disagrees with `NotchController::kDefaultNotchDepthDb` of −18 (`NotchController.h:95`). Task 9 makes `savePreset` write `notchDefaults`, which stops the disagreement mattering for a file this app SAVED, but a preset written by hand with no `notchDefaults` block still silently gets a −12 ceiling. **Not lane G's to fix (M-3); recorded in Task 10's `docs/KY-THUAT-CHONG-HU.md` §4 edit.** Lane R's parked items (I-3, `setSampleRate` having no production caller, A-R7) also remain open — the owner said not to fold them in.
 
@@ -4673,15 +5024,36 @@ Also carried forward unchanged, as the spec's §7 requires: `PresetManager`'s `n
 
 **INTRODUCED by this plan** (nothing above defines them today):
 
-`Biquad::rampNotchDepth`, `Biquad::designPeaking`, `Biquad::State`, `Biquad::Coeffs`, `Biquad::stateForTest`, `Biquad::coeffsForTest`, `Biquad::rampRemainingForTest`, `Biquad::target_/delta_/rampRemaining_`; `NotchChain::kRampMs`; `CandidateScorer::ScoreBreakdown::riseRatio`; `NotchController::kDepthLadderDb`, `kDepthLadderSize`, `kDepthStepDb`, `kMaxDepthDb`, `kDeepenAfterMs`, `kSteepRiseRatio`, `kReleaseFirstMs`, `kReleaseStepMs`, `kMemoryTtlMs`, `kMemoryEntriesPerLane`, `kRiskFreezeFraction`, `RetuneReason`, `NotchEvent::Kind::Retune`, `NotchEvent::retuneReason`, `NotchEvent::fromDepthDb`, `NotchEvent::riseRatio`, `nextDeeperRungDb` (two-arg), `nextShallowerRungDb`, `ceilingDbFor`, `pushRetuneLocked`, `MemoryEntry`, `rememberReleaseLocked`, `takeRememberedDepthLocked`, `clearRoomMemoryLocked`, `roomMemory_`, `roomMemoryHead_`, `ringRiskOverrideForTest_`, `depthDbForTest`, `deepestDbForTest`, `quietMsForTest`, `activeForTest`, `retuneForTest`, `setRingRiskOverrideForTest`, `SnapshotNotch::deepestDb`, `SnapshotBuffer::releaseFrozen`, `ModelNotch::{deepestDb, stageChangedAtMs, quietMs, releasedSteps, ceilingDb}`; the free `retuneReasonName` in `MainComponent.cpp`'s anonymous namespace, `MainComponent::notchEventToVarForTest`; test fixture `RampSineSource`, `primeAndPlaceSlowly`, `pumpQuietFor`, `firstActiveIndex`, `magnitudeAt`, `noBoostProbeFrequencies`; `logstats.py` `--expect-retunes` and the `notch_retune` branch.
+`Biquad::rampNotchDepth`, `Biquad::designPeaking`, `Biquad::State`, `Biquad::Coeffs`, `Biquad::stateForTest`, `Biquad::coeffsForTest`, `Biquad::rampRemainingForTest`, `Biquad::target_/delta_/rampRemaining_`; `NotchChain::kRampMs`; `CandidateScorer::ScoreBreakdown::riseRatio`; `NotchController::kDepthLadderDb`, `kDepthLadderSize`, `kDepthStepDb`, `kMaxDepthDb`, `kDeepenAfterMs`, `kSteepRiseRatio`, `kReleaseFirstMs`, `kReleaseStepMs`, `kMemoryTtlMs`, `kMemoryEntriesPerLane`, `kRiskFreezeFraction`, `RetuneReason`, `NotchEvent::Kind::Retune`, `NotchEvent::retuneReason`, `NotchEvent::fromDepthDb`, `NotchEvent::riseRatio`, `nextDeeperRungDb` (two-arg), `nextShallowerRungDb`, `ceilingDbFor`, `pushRetuneLocked`, `MemoryEntry`, `rememberReleaseLocked`, `takeRememberedDepthLocked`, `clearRoomMemoryLocked`, `roomMemory_`, `roomMemoryHead_`, `ringRiskOverrideForTest_`, `depthDbForTest`, `deepestDbForTest`, `quietMsForTest`, `activeForTest`, `retuneForTest`, `setRingRiskOverrideForTest`, `SnapshotNotch::deepestDb`, `SnapshotBuffer::releaseFrozen`, `ModelNotch::{deepestDb, stageChangedAtMs, quietMs, releasedSteps, ceilingDb}`; the free `retuneReasonName` in `MainComponent.cpp`'s anonymous namespace, `MainComponent::notchEventToVarForTest`; test fixture `kRampStartAmp`, `RampSineSource`, `primeAndPlaceSlowly`, `pumpQuietFor`, `firstActiveIndex`, `magnitudeAt`, `noBoostProbeFrequencies`; `logstats.py` `--expect-retunes` and the `notch_retune` branch.
 
-**WITHDRAWN by the 2026-09-07 revision** (named in v1, not introduced by this plan any more): `NotchController::ceilingRungDb` — deleted with its test, replaced by the two-arg `nextDeeperRungDb` (Q13); `MainComponent::retuneReasonName` as a member — it is a free function (m-5); the one-arg `nextDeeperRungDb`.
+**REDEFINED, not introduced:** `gui::SpectrumView::kRingRiskRisingFraction` already exists at `src/gui/SpectrumView.h:239` as a `0.55f` literal; Task 7 Step 3 changes only its initialiser to `NotchController::kRiskFreezeFraction` (m-D). The name, type and value are unchanged, so nothing that reads it needs touching — but it IS a header edit, so Task 7 reconfigures.
+
+**WITHDRAWN by rev 2** (named in v1, not introduced by this plan any more): `NotchController::ceilingRungDb` — deleted with its test, replaced by the two-arg `nextDeeperRungDb` (Q13); `MainComponent::retuneReasonName` as a member — it is a free function (m-5); the one-arg `nextDeeperRungDb`.
 
 **Names the v1 plan used without verifying, and which do NOT exist:** `TempDir`, `pumpOneBlockThroughSlotZero`, `notchControllerForTest`. The v1 self-review flagged them as unverified and the flag was not acted on; Task 9 now uses the real shape from `tests/test_gui_wiring.cpp:1016-1041` and names no helper that a grep of the repo does not find (M-1). **There are no unverified names left in this plan.**
 
-### 4. Where the cross-check itself was wrong
+### 4. Where the cross-checks themselves were wrong
 
-Recorded so the next reader does not "re-fix" these back:
+Recorded so the next reader does not "re-fix" these back.
+
+**Rev 3's own verification, corrected while applying it:**
+
+- The B-5 finding said the 150-block cap leaves the ramp at `A ≈ 0.6`. It does not:
+  150 blocks × 10.667 ms × 0.038 dB/ms = **60.8 dB**, and `3e-4 × 10^(60.8/20) ≈ 0.33`.
+  The plan states 0.33. The finding's other two amplitude figures check out
+  (`A ≈ 1.9` at 2 s ⇒ clipping; `A ≈ 0.024` at the ~1.0 s confirm).
+- The B-5 finding said the confirm lands "at block ~90–110" without saying what
+  eligibility costs. Two separate gates apply and the plan now names both:
+  `peakiness > 10` before the scorer will score the candidate at all
+  (`CandidateScorer.cpp:51`, ≈ block 49), and `peakiness > 73` for `pNorm > 0.7`
+  (≈ block 93, +3 for persistence). The first one is why `riseRatio` is never
+  read while the reference frame is still noise — a stronger argument for the fix
+  than the one the finding gave.
+- The M-A finding offered "extend `retuneForTest` to accept `releasedSteps`" as an
+  alternative. The plan **moves the test to Task 7** instead and records why in
+  §2 item 7; the seam is not added.
+
+**Rev 2's cross-check, as recorded at the time:**
 
 - **m-1**: the cross-check said `add_test(NAME logstats_fixture …)` is at "112-117 (not 113-117)". `grep -n` in this worktree puts `add_test(NAME logstats_fixture` on line **113**; line 112 is the `if(Python3_Interpreter_FOUND)` that opens the block. The plan keeps **113-117** and notes the enclosing `if`.
 - **m-2**: the cross-check said `NotchDefaultsSurviveTheRoundTrip` "starts at 497". `grep -n` puts it at **496**. The plan uses 496.
@@ -4691,4 +5063,4 @@ Everything else the cross-check reported was reproduced against the files before
 
 ### 5. Type consistency
 
-Checked across tasks: `deepestDb` (not `deepestDB`) everywhere — `ModelNotch::deepestDb`, `SnapshotNotch::deepestDb`, `deepestDbForTest`, and the log key `deepest_db` in `logstats.py` only. `depthDB` keeps its existing capitalisation everywhere it already exists (`NotchInfo::depthDB`, `ModelNotch::depthDB`, `NotchCommand::depthDB`, `SnapshotNotch::depthDB`, `PresetNotch::depthDB`) and the new accessor is `depthDbForTest` to match the file's existing `getNotchDepthDb` style. `RetuneReason` values are `Deepen/Release/Reclamp/Ceiling` in C++ and `deepen/release/reclamp/ceiling` in JSON, in that one mapping, in `retuneReasonName`. `kRampMs` lives on `NotchChain` only; `kDeepenAfterMs`, `kReleaseFirstMs`, `kReleaseStepMs`, `kMemoryTtlMs` on `NotchController` only. `nextDeeperRungDb (currentDb, ceilingDb)` and `nextShallowerRungDb (currentDb)` are used with those exact spellings and arities in Tasks 4, 6 and 7; `ceilingDbFor (n)` is the only way any task obtains a ceiling, and no task calls a quantiser, because there is none.
+Checked across tasks: `deepestDb` (not `deepestDB`) everywhere — `ModelNotch::deepestDb`, `SnapshotNotch::deepestDb`, `deepestDbForTest`, and the log key `deepest_db` in `logstats.py` only. `depthDB` keeps its existing capitalisation everywhere it already exists (`NotchInfo::depthDB`, `ModelNotch::depthDB`, `NotchCommand::depthDB`, `SnapshotNotch::depthDB`, `PresetNotch::depthDB`) and the new accessor is `depthDbForTest` to match the file's existing `getNotchDepthDb` style. `RetuneReason` values are `Deepen/Release/Reclamp/Ceiling` in C++ and `deepen/release/reclamp/ceiling` in JSON, in that one mapping, in `retuneReasonName`. `kRampMs` lives on `NotchChain` only; `kDeepenAfterMs`, `kReleaseFirstMs`, `kReleaseStepMs`, `kMemoryTtlMs` on `NotchController` only. `kRiskFreezeFraction` is declared on `NotchController` and only ALIASED by `gui::SpectrumView::kRingRiskRisingFraction` (m-D) — there is no second literal. `kRampStartAmp` is a `float` in the test fixture's anonymous namespace, never a production constant. `std::max` is used for every ceiling clamp in both directions of the code (placement step 4, the reclamp target, the per-tick `deepestDb` clamp) and always with the same meaning: pick the SHALLOWER, because deeper is more negative. `nextDeeperRungDb (currentDb, ceilingDb)` and `nextShallowerRungDb (currentDb)` are used with those exact spellings and arities in Tasks 4, 6 and 7; `ceilingDbFor (n)` is the only way any task obtains a ceiling, and no task calls a quantiser, because there is none.
