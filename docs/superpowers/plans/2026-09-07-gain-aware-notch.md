@@ -4665,7 +4665,7 @@ Section **### Bộ lọc notch và độ sâu** (lines 79-92) — append after t
 `reset()` mỗi lần đổi hệ số, đúng khi tần số hoặc Q đổi và **sai** khi chỉ độ
 sâu đổi: xóa `z1/z2` giữa dòng tín hiệu là một bước nhảy vào loa.
 `Biquad::rampNotchDepth` giữ nguyên state và nội suy tuyến tính 5 hệ số trong
-`NotchChain::kRampMs` = **10 ms** (≤ 0,6 dB/ms). `NotchChain::setNotch` chỉ đi
+`NotchChain::kRampMs` = **10 ms** (0,6 dB/ms cho MỘT bậc 6 dB; kẹp lại/hạ trần có thể vượt một bậc trong cùng 10 ms — NotchChain không cưỡng chế, xem spec §4.10 inv 3). `NotchChain::setNotch` chỉ đi
 đường ramp khi slot đang Active **và** `freq`, `Q` bằng đúng giá trị đã lưu;
 mọi trường hợp khác vẫn reset như cũ.
 
