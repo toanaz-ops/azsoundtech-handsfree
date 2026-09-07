@@ -348,6 +348,96 @@ void pump (Harness& h, const std::vector<float>& hop)
     h.controller.runOnce();
 }
 
+// A tone that CREEPS up out of the noise instead of switching on. SineSource
+// starts at full amplitude in one block, so its rise ratio is enormous and
+// every test built on it places at -12; the -6 start of spec 4.3 is only
+// observable behind a slow build (M-12).
+//
+// WHY IT STARTS INAUDIBLE (B-5, and this is the load-bearing part): the
+// scorer's rise reference is the 11th frame back, 117.3 ms old. If the tone
+// switched on ABOVE the noise floor, that reference would be a NOISE frame for
+// the first 11 blocks and riseRatio would be the tone-to-noise ratio -- 64x at
+// amp 0.02 -- regardless of the slope. And peakiness is scale-invariant
+// (PeakinessAnalyzer.cpp:59-76), so a pure tone confirms as soon as the 2048
+// window is all tone (~4 blocks) -- i.e. INSIDE that window. Starting BELOW
+// the noise floor is the only way to build a rise history that is tone-vs-
+// tone: it holds rNorm and mNorm under their thresholds until the reference
+// frame is itself tone, which is block 15 (ref = the first all-tone window at
+// block 4). Measured: this fixture confirms at tone block 16.
+//
+// kRampStartAmp, DERIVED then MEASURED. The derivation: NoiseSource (uniform
+// +-0.01, sigma 5.77e-3) has a per-bin magnitude of sigma * sqrt(sum w^2) =
+// 0.16 in a Hann 2048 window; a sine of amplitude A lands at A * sum(w)/2 =
+// A * 512, so they are equal at A = 3.1e-4. Running it put 3.0e-4 at
+// riseRatio 2.12 -- STILL the steep branch -- because the tone phase feeds no
+// noise UNDER the ramp: peakiness is scale-invariant and saturates (~105) as
+// soon as the window is all tone, so the confirm is gated only by rNorm and
+// mNorm and it landed at block ~11, where the 117.3 ms reference is still the
+// LAST NOISE FRAME. Starting at the floor is not enough; the tone must start
+// BELOW it, so that no axis can cross before the reference is itself tone.
+//
+// Measured plateau (sweep at rev 3, this machine, Release):
+//   3.0e-4 -> 2.117 (FAILS: noise reference)   2.8e-4 -> 1.967 (marginal)
+//   2.5e-4 -> 1.744    2.2e-4 -> 1.7507    1.5e-4 -> 1.7507    1.0e-5 -> 1.7507
+// From 1e-5 to 2.2e-4 the ratio is flat at 1.7507 with refAgeMs 117.33 -- the
+// signature of a tone-vs-TONE comparison, where the ratio is a property of the
+// SLOPE alone (11 hops x 0.4053 dB, widened slightly by the 4-hop FFT window)
+// and not of the start level. 1.5e-4 sits mid-plateau: 2x below the value that
+// fails, and a decade above where the score margin over kConfirmScore thins.
+//
+// +9.5 dB / 250 ms: over the 117.3 ms gap that is riseRatio ~1.75 -- above the
+// 1.5 that saturates rNorm, below kSteepRiseRatio 2.0.
+constexpr float kRampStartAmp = 1.5e-4f;   // BELOW the noise floor (0.16 bin mag)
+
+struct RampSineSource
+{
+    double freq        = 1000.0;
+    float  amp         = kRampStartAmp;   // starts BELOW the noise floor, never over it
+    double gainDbPerMs = 9.5 / 250.0;
+    double nextSample  = 0.0;
+
+    std::vector<float> hop()
+    {
+        std::vector<float> out ((std::size_t) Detector::kHopSize);
+        for (int i = 0; i < Detector::kHopSize; ++i)
+        {
+            out[(std::size_t) i] = amp * static_cast<float> (
+                std::sin (2.0 * kTestPi * freq * nextSample / kTestSr));
+            nextSample += 1.0;
+        }
+        // 0.9 clamp: at 38 dB/s this source passes full scale at ~2 s, and a
+        // clipped tone is a different signal with a different spectrum. The
+        // caller stops long before here; this is the second line of defence.
+        amp = static_cast<float> (std::min (0.9, static_cast<double> (amp)
+                                  * std::pow (10.0, gainDbPerMs * kBlockMs / 20.0)));
+        return out;
+    }
+};
+
+// primeAndPlace's shape, driven by a source that ramps. Returns the index of
+// the first Set, or -1. Stops at 150 tone blocks = 1.6 s = +60.8 dB, where the
+// amplitude is ~0.16 -- comfortably under the 0.9 clamp, and 134 blocks past
+// the 16 where the confirm measures. Pumping further would only reach the
+// clamp and then confirm on novelty alone from a FLAT tone, which would
+// quietly be testing something else. A -1 here means kRampStartAmp needs
+// retuning, not more blocks.
+int primeAndPlaceSlowly (Harness& h)
+{
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    RampSineSource tone;
+    for (int i = 0; i < 150; ++i)
+    {
+        pump (h, tone.hop());
+        NotchCommand cmd {};
+        if (h.commands.read (&cmd, 1) == 1 && cmd.type == NotchCommandType::Set)
+            return cmd.index;
+    }
+    return -1;
+}
+
 void pumpStereo (StereoHarness& h, const std::vector<float>& left, const std::vector<float>& right)
 {
     ASSERT_EQ (h.tapL.write (left.data(),  left.size()),  left.size());
@@ -433,9 +523,12 @@ TEST (NotchControllerDetection, PersistentHowlSetsNotchOnBothChannels)
     EXPECT_EQ (cmd.type, NotchCommandType::Set);
     EXPECT_EQ (cmd.channel, 1);
     EXPECT_EQ (cmd.index, slot);
-    // Runtime defaults (brief 2026-08-24): Q 30, depth -18.
+    // Runtime defaults (brief 2026-08-24): Q 30. Depth is now the LADDER's
+    // (lane G, spec 4.3), not notchDepthDb_: SineSource switches its tone on
+    // hard, so riseRatio is far past kSteepRiseRatio and the notch starts on
+    // the second rung. -18 arrives later, via the deepen path (Task 6).
     EXPECT_FLOAT_EQ (cmd.Q, 30.0f);
-    EXPECT_FLOAT_EQ (cmd.depthDB, -18.0f);
+    EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
     // Frequency within half a bin (11.72 Hz) of the 1 kHz tone.
     EXPECT_NEAR (cmd.frequency, 1000.0, 0.5 * kTestSr / Detector::kFftSize);
 }
@@ -885,7 +978,11 @@ TEST (NotchControllerDetection, SetNotchDefaultsFlowIntoPlacedNotch)
     NotchCommand cmd {};
     ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
     EXPECT_FLOAT_EQ (cmd.Q, 20.0f);
-    EXPECT_FLOAT_EQ (cmd.depthDB, -24.0f);
+    // Lane G: the depth default is now the CEILING (Q1), not the starting
+    // depth. A ceiling of -24 permits the whole ladder, and SineSource's hard
+    // start puts the first rung at -12.
+    EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -12.0);
 }
 
 TEST (NotchControllerDetection, DetectionCommandsCarrySlotIdOnBothLanes)
@@ -2004,4 +2101,144 @@ TEST (NotchControllerLadder, SnapshotCarriesTheDeepestDepthTheNotchEverHeld)
     EXPECT_FLOAT_EQ (snap.notches[0].depthDB,   -6.0f);
     EXPECT_FLOAT_EQ (snap.notches[0].deepestDb, -18.0f);
     EXPECT_FALSE (snap.releaseFrozen);
+}
+
+// ===========================================================================
+// Lane G Task 5: the PLACEMENT depth. A confirmed candidate starts on the
+// shallowest rung the policy allows, not at the slider's depth.
+// ===========================================================================
+
+// RED IF placement goes back to reading notchDepthDb_ directly. A howl that
+// creeps up gets the SHALLOWEST rung -- the whole point of lane G is that a
+// room which only needs 6 dB does not lose 18 dB of tone (spec 4.3 step 1).
+TEST (NotchControllerLadder, ASlowlyRisingHowlIsPlacedAtMinusSix)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    h.controller.setDetectionActive (true);
+
+    const int slot = primeAndPlaceSlowly (h);
+    ASSERT_GE (slot, 0) << "the slow ramp never confirmed -- LOWER kRampStartAmp "
+                           "so the tone spends longer under the peakiness "
+                           "threshold, or raise gainDbPerMs (B-5)";
+    EXPECT_TRUE (h.controller.activeForTest (0, slot));
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -6.0);
+
+    // B-5: prove the FIXTURE is the thing being tested, not an accident. -6 is
+    // also what a fixture that barely confirmed on some other axis would
+    // produce, so pin the raw rise inside the band the derivation aimed at:
+    // >= 1.5 saturates rNorm (so the confirm was earned on rise), < 2.0 is why
+    // the steep-rise branch did not fire. `rise` on the event is rNorm, which
+    // saturates at 1.5 and cannot make this distinction -- riseRatio is the
+    // raw ratio added in Task 3.
+    //
+    // riseRatio is only MEANINGFUL once the scorer has history at least
+    // 112.5 ms deep: with no history at all the rise branch returns rNorm 1
+    // and riseRatio 1.0 by definition, which would read as "too slow" here.
+    // kWarmupBlocks is 64 blocks of noise, so by the time anything can be
+    // confirmed the history is ~683 ms deep and this assertion is comparing
+    // two real frames.
+    const Ev* set = nullptr;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Set) { set = &e; break; }
+    ASSERT_NE (set, nullptr);
+    EXPECT_GE (set->riseRatio, 1.5f)
+        << "the ramp was too slow to confirm on rise (or the fixture confirmed "
+           "before the scorer had 112.5 ms of history)";
+    EXPECT_LT (set->riseRatio, NotchController::kSteepRiseRatio)
+        << "the tone stepped ONTO the noise floor instead of starting at it: "
+           "riseRatio is a tone-vs-noise ratio, so raise kRampStartAmp's "
+           "derivation, not the slope (B-5)";
+}
+
+// RED IF the steep-rise jump stops firing (spec 4.3 step 2, Q6). SineSource
+// switches a full-scale tone on in one block, so riseRatio >> 2.0.
+TEST (NotchControllerLadder, ASteeplyRisingHowlIsPlacedAtMinusTwelve)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -12.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -12.0);
+}
+
+// RED IF the ceiling stops clamping the STARTING depth (spec 4.3 step 4). A
+// ceiling of -6 must never let even a steep rise place at -12.
+TEST (NotchControllerLadder, ACeilingOfMinusSixCapsEvenASteepRise)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -6.0);
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -6.0);
+}
+
+// RED IF the ceiling is quantised down to a fixed rung instead of BEING the
+// last rung (Q13). presets/Music.json ships depth -10; under v2's
+// `ceilingRungDb` a steep rise there would have placed at -6, i.e. 4 dB
+// shallower than 1.1.3, with nothing in the release note saying so.
+TEST (NotchControllerLadder, AnOffRungCeilingIsItselfTheDeepestPlacement)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    h.controller.setNotchDefaults (30.0, -10.0);   // the shipped Music ceiling
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));   // steep: wants -12
+    ASSERT_GE (slot, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot),   -10.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -10.0);
+}
+
+// RED IF a Soundcheck placement is dragged onto the ladder. KD-7 exempts
+// soundcheck notches from every part of lane G: they are placed at the depth
+// the operator asked for, on the first block, and never move.
+TEST (NotchControllerLadder, SoundcheckPlacesAtTheFullSliderDepth)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -18.0);
+    h.controller.startSoundcheck();
+
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -18.0);
+}
+
+// RED IF a Detector notch stops following the LIVE slider, or a Preset notch
+// starts following it (Q8). Detector: ceilingDb is NaN. Preset: its own depth.
+TEST (NotchControllerLadder, PresetNotchesKeepTheirOwnCeilingAndDetectorNotchesFollowTheSlider)
+{
+    Harness h;
+    h.controller.setNotchDefaults (30.0, -24.0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Preset));
+    // A preset notch is placed AT its own depth and that depth is its ceiling:
+    // deepestDb equals it, so nothing below can deepen past it.
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -12.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -12.0);
+
+    // The preset's OWN Set is still in the command ring. primeAndPlace reads
+    // the first command it finds once two are available, so leaving it there
+    // makes the helper report the preset's index 0 as the detector's slot --
+    // and the test then asserts the preset's depth against the detector's
+    // policy. Flush it out before the detector is allowed to place.
+    h.controller.runOnce();
+    NotchCommand presetCmd {};
+    while (h.commands.read (&presetCmd, 1) == 1)
+        ;
+
+    h.controller.setDetectionActive (true);
+    int slot = -1;
+    ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+    ASSERT_GE (slot, 0);
+    ASSERT_NE (slot, 0);
+    // The detector notch obeys the -24 slider, so the steep-rise rung stands.
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -12.0);
 }

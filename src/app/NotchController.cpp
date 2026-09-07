@@ -799,16 +799,46 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     // lock below -- never underneath it.
     const Origin origin  = soundcheckActive() ? Origin::Soundcheck : Origin::Detector;
     const double q       = notchQ_.load (std::memory_order_relaxed);
-    const double depthDb = notchDepthDb_.load (std::memory_order_relaxed);
+    // Lane G (spec 4.3, Q1): the depth default is now the CEILING, not the
+    // depth. A notch is placed as SHALLOW as the policy allows and earns the
+    // rest from the reinforce loop, so a room that only needs 6 dB keeps the
+    // 12 dB of tone 1.1.3 threw away. Q13: the ceiling need not be a multiple
+    // of 6 and is itself the deepest rung -- presets/Music.json ships -10.
+    const double ceiling = notchDepthDb_.load (std::memory_order_relaxed);
 
     int index = -1, firstLane = lane, lastLane = lane;
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         if (linkedNow) { index = firstFreeIndexAllLanesLocked(); firstLane = 0; lastLane = width_ - 1; }
         else           { index = firstFreeIndexLocked (lane); }
+        // Task 8 hooks the room-memory lookup in HERE -- it needs `index >= 0`
+        // (the entry is consumed) and the bin width, and it must run under
+        // this same lock. Nothing to do in this task.
     }
     if (index < 0)
         return;   // chain full on the lanes concerned: same outcome as today
+
+    // --- the depth choice (spec 4.3). It lives BELOW the index lookup so that
+    // Task 8's step 3 can read the room memory the lookup above provides.
+    double depthDb = kDepthLadderDb[0];                       // step 1: -6
+    if (pc.breakdown.riseRatio >= kSteepRiseRatio)            // step 2: +6 dB or more
+        depthDb = kDepthLadderDb[1];                          //         over the rise
+                                                              //         window -> -12
+    // step 3 (room memory) is inserted HERE by Task 8, and nowhere else.
+
+    // step 4: never deeper than the ceiling, which under Q13 IS the deepest
+    // rung. max() picks the SHALLOWER of the two because deeper is more
+    // negative: ceiling -10 turns a steep-rise -12 into -10.
+    depthDb = std::max (depthDb, ceiling);
+
+    // KD-7, and this line stays LAST through Task 8: soundcheck has no ladder.
+    // Those notches never deepen, never release and never reclamp, so starting
+    // them shallow -- or letting a remembered depth decide for them -- would
+    // leave a howl the operator explicitly asked to lock permanently under-cut.
+    // Moving or dropping it reds SoundcheckPlacesAtTheFullSliderDepth and
+    // SoundcheckNotchesNeverDeepen.
+    if (origin == Origin::Soundcheck)
+        depthDb = ceiling;
 
     // Lane D (data loop): the one allocation per placed notch, on the
     // detector thread (plan A-4). Shared by the lane-0 and lane-1 Set events
