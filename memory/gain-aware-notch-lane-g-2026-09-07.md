@@ -1,7 +1,9 @@
 # Bài học từ lane G (gain-aware notch: thang độ sâu, nhả dần, nhớ phòng) — 2026-09-07
 
-**Bối cảnh:** 10 task SDD trên nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568`,
-commit `01ecb4c..HEAD`, release 1.2.0 alpha. Suite 454 → **535**. **Đụng audio
+**Bối cảnh:** 10 task SDD + fix rounds trên nhánh
+`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..b8e3f25`, 1.2.0
+alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **539**.
+**Đụng audio
 path** (`Biquad`, `NotchChain`, `NotchController`). Spec
 `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` (v2 + Q13 + Q14),
 sổ quyết định `docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md`
@@ -153,8 +155,8 @@ cờ "chưa verify" và cờ đó nằm im cho tới khi người đọc thứ h
 ### 17. Reviewer sai số dòng, implementer đúng — grep, đừng tin bên nào
 
 Ba lần: `logstats_fixture` (reviewer nói 112, thực 113), `NotchDefaultsSurvive…`
-(497 vs **496**), cờ `--expect-*` (128-131 vs **124-127**). Cross-check cũng là
-một nguồn cần verify.
+(497 vs **496**), cờ `--expect-*` (128-131 vs **124-127**, nay **148-152** sau
+`af5201e` thêm `--expect-retunes`). Cross-check cũng là một nguồn cần verify.
 
 ### 18. `effectiveLinked()` bật trên harness mono làm placement tràn sang làn 1
 

@@ -1,7 +1,7 @@
 # Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
 
-Ngày build: 2026-09-07 · suite test 535/535 xanh · installer: kích thước điền
-sau khi đóng gói
+Ngày build: 2026-09-07 · suite test 539/539 xanh (`b8e3f25`) · installer: kích
+thước điền sau khi đóng gói
 
 SHA-256 của Setup 1.2.0:
 `<điền sau khi installer\release-alpha.ps1 -Part minor chạy xong>`
@@ -52,13 +52,19 @@ Từ trước tới nay, notch cắt thẳng đúng con số trên slider **DEPT
    đều kết thúc đúng bằng con số trên slider DEPTH, hãy báo lại.** Đó là dấu
    hiệu máy đang đọc sai phổ, không phải chuyện sở thích.
 3. **Hết hú thì notch lùi từng bậc, không biến mất một phát.** Bậc đầu ở 30
-   giây, mỗi bậc sau cách 10 giây, tới −6 dB thì nhả hẳn. Một notch đã leo tới
-   con số trên slider DEPTH cần **40–60 giây** để biến mất (40 s từ −12, 50 s
-   từ −18, 60 s từ −24). **Trong khoảng từ 30 giây tới lúc đó, tone tại tần số
-   ấy mất nhiều hơn 1.1.3** — 1.1.3 đã nhả sạch ở 30 giây rồi.
-4. **Phòng đang căng thì notch không lùi.** Chip **RING RISK** báo **RISING**
-   hoặc **CRITICAL** → đồng hồ nhả đứng yên, **không có giới hạn thời gian**,
-   và đứng cho **mọi notch của slot đó**, không riêng notch đang hú.
+   giây, mỗi bậc sau cách 10 giây, tới trần thì nhả hẳn. Một notch đã leo tới
+   con số trên slider DEPTH cần **30–60 giây** để biến mất, tùy trần: **30 s**
+   nếu trần −6 (đã ở đáy, nhả ngay ở bậc đầu), **40 s** từ trần −12 hoặc −10
+   (Music), **50 s** từ trần −18 (Speech), **60 s** từ trần −24. **Trong
+   khoảng từ 30 giây tới lúc đó, tone tại tần số ấy mất nhiều hơn 1.1.3** —
+   1.1.3 đã nhả sạch ở 30 giây rồi.
+4. **Phòng đang căng thì notch không lùi.** Đồng hồ nhả đọc **thẳng số của
+   detector** (không qua chip): phòng còn căng (≥ ngưỡng RISING) thì đứng yên,
+   **không có giới hạn thời gian**, cho **mọi notch của slot đó**, không riêng
+   notch đang hú. Chip **RING RISK** trên màn hình là cùng ngưỡng nhưng có
+   **hold 750 ms** và chỉ đọc slot đang hiển thị — chip báo LOW ở một slot
+   khác không có nghĩa đồng hồ slot đó đang chạy lại; đừng suy đồng hồ từ chip
+   của slot bạn không đang xem.
 5. **Hú cũ quay lại trong 5 phút thì bị cắt sâu ngay.** App nhớ đúng tần số đó
    đã từng cần sâu bao nhiêu và đặt thẳng vào, không dò lại từ −6 dB.
 6. **Không được có tiếng "cạch".** Mọi lần đổi độ sâu đều trải 10 ms. Nghe thấy
@@ -87,8 +93,10 @@ DEPTH (không đường nào được phép). Kèm file log session trong
    `%APPDATA%\AZSoundtech\HandsFree\presets\` → có `Speech.json` + `Music.json`.
    Bấm **SAVE…** lưu một file, rồi **LOAD…** nạp lại → app không sập, notch
    phản ánh đúng file. (Từ 1.2.0: SAVE ghi độ sâu phòng đã CẦN, không phải bậc
-   đang đứng lúc bấm; và LOAD đè lên notch đang sống nay chuyển mượt 10 ms chứ
-   không xóa filter — không được nghe thấy "cạch".)
+   đang đứng lúc bấm; và LOAD đè lên notch đang sống đi đường ramp mượt 10 ms
+   — không xóa filter, không được nghe thấy "cạch" — **chỉ khi** tần số/Q
+   trong file khớp đúng notch đang đứng ở cùng index; lệch tần số hoặc Q thì
+   vẫn reset như trước, không phải lỗi.)
 4. SOUNDCHECK 15 giây với mic mở → app khóa các đỉnh tìm thấy (bảng ACTIVE
    NOTCHES); hết 15 giây app NGỪNG DÒ (đúng thiết kế) → bấm AUTO để chạy show.
 5. AUTO: gây hú nhẹ (mic gần loa, gain thấp) → notch xuất hiện trong ~1 giây,

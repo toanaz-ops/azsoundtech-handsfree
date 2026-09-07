@@ -252,11 +252,13 @@ an alias (`= NotchController::kRiskFreezeFraction`). There are no longer two
 
 Four things to know when reading the chip next to the release ladder:
 
-- **It does not take `snapshotMutex_`.** Today `modelMutex_` and
-  `snapshotMutex_` have never nested; reading the snapshot from inside the
-  release loop would invent a new lock order for one readout — not worth it
-  (M-5). The `releaseFrozen` flag is published in its OWN scope, **before**
-  `modelMutex_` is taken.
+- **The freeze READ takes no lock; the `releaseFrozen` publish takes
+  `snapshotMutex_` in its own scope, before `modelMutex_`.** `frameMaxScore_`
+  and `frameScoreValid_` live on the detector thread only, so reading them
+  needs no mutex at all. Today `modelMutex_` and `snapshotMutex_` have never
+  nested; inventing a new lock order for that readout was never on the table
+  (M-5). The `releaseFrozen` flag is published under `snapshotMutex_`, in its
+  own scope, **before** `modelMutex_` is taken anywhere below.
 - **The chip and the clock can disagree** (M-8). The chip still passes through
   the 750 ms hold and reads `displayedSlot_` only, so the chip can say RISING
   after the clock has resumed, and a slot that is not on screen can be frozen

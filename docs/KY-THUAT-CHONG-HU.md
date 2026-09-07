@@ -1,7 +1,10 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
-> đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã release alpha; 1.2.0 = lane G, thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
+> đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
+> ctest, **539/539** tại `b8e3f25`; **chưa đóng gói** — `release-alpha.ps1` sẽ
+> chạy sau final review, SHA-256/kích thước cập nhật khi đó; 1.2.0 = lane G,
+> thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
 > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
 
 ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
@@ -95,9 +98,13 @@ tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo c�
 `reset()` mỗi lần đổi hệ số, đúng khi tần số hoặc Q đổi và **sai** khi chỉ độ
 sâu đổi: xóa `z1/z2` giữa dòng tín hiệu là một bước nhảy vào loa.
 `Biquad::rampNotchDepth` giữ nguyên state và nội suy tuyến tính 5 hệ số trong
-`NotchChain::kRampMs` = **10 ms** (≤ 0,6 dB/ms). `NotchChain::setNotch` chỉ đi
-đường ramp khi slot đang Active **và** `freq`, `Q` bằng đúng giá trị đã lưu;
-mọi trường hợp khác vẫn reset như cũ.
+`NotchChain::kRampMs` = **10 ms cho mọi lần đổi depth**: một bậc 6 dB tương
+đương 0,6 dB/ms, nhưng **kẹp lại** (`max(deepestDb, ceiling)` từ một bậc vừa
+nhả) hoặc **hạ trần** có thể đi hơn một bậc trong cùng 10 ms — **chủ ý**,
+`NotchChain` không ép giới hạn 0,6 dB/ms này (bước nhiều bậc theo hướng sâu
+là việc controller phải tự tránh, không phải việc của ramp). `NotchChain::setNotch`
+chỉ đi đường ramp khi slot đang Active **và** `freq`, `Q` bằng đúng giá trị đã
+lưu; mọi trường hợp khác vẫn reset như cũ.
 
 Vì sao bộ hệ số nội suy an toàn: cố định `freq/Q/sr`, mọi tổ hợp lồi của các bộ
 peaking đã chuẩn hóa vẫn **là** một peaking RBJ với gain tử `A_n ≤ 1 ≤ 1/A_d`,
@@ -358,8 +365,8 @@ chờ chủ sở hữu quyết, xem `docs/spec-ring-risk.md` mục "Known gaps (
 File JSON `%APPDATA%/AZSoundtech/HandsFree/presets/*.json`: version, device
 (chỉ metadata, không bao giờ chặn nạp), sampleRate **số** (không phải chuỗi
 "48000 Hz"), bufferSize, danh sách notch đã khóa, và khối tùy chọn
-`notchDefaults {Q, depth}` — chỗ duy nhất để Speech (Q=40/−18 dB) và Music
-(Q=25/−10 dB) tồn tại, vì preset đóng gói trong repo chưa khóa notch nào
+`notchDefaults {Q, depth (trần)}` — chỗ duy nhất để Speech (Q=40/trần −18 dB) và
+Music (Q=25/trần −10 dB) tồn tại, vì preset đóng gói trong repo chưa khóa notch nào
 (nốt nào cũng vậy — một default mang notch tần số đoán mò sẽ cắt dB thật trên
 mọi PA nó chạm).
 
@@ -398,12 +405,24 @@ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
 Từ 1.2.0 `savePreset` ghi `deepestDb` (độ sâu phòng đã cần) chứ không phải bậc
 đang đứng lúc bấm SAVE, và ghi cả `notchDefaults {Q, depth}` từ tuning đang
 chạy — trước đó `savePreset` không set `notchDefaults`, nên nạp lại rơi về mặc
-định −12 dB của `PresetNotchDefaults` và trần bị hạ hai bậc mà không ai báo.
-Độ sâu sâu hơn −24 dB trong file bị **kẹp về −24** lúc adopt, cho mọi Origin,
-và `adoptPreset` ghi một dòng `juce::Logger` đếm số notch bị kẹp (Q12).
-`adoptPreset` cũng có thể re-Set một index đang Active mà không clear trước:
-từ 1.2.0 đường đó rơi vào nhánh **ramp** thay vì reset — nạp preset đè lên
-notch đang sống nay chuyển mượt 10 ms chứ không xóa state filter.
+định −12 dB của `PresetNotchDefaults` và trần bị hạ **một bậc** (−18 → −12) mà
+không ai báo. Độ sâu sâu hơn −24 dB trong file bị **kẹp về −24** lúc adopt, cho
+mọi Origin, và `adoptPreset` ghi một dòng `juce::Logger` đếm số notch bị kẹp
+(Q12). `adoptPreset` cũng có thể re-Set một index đang Active mà không clear
+trước: từ 1.2.0 đường đó rơi vào nhánh **ramp** (không reset) **đúng khi** tần
+số/Q trong preset khớp **chính xác** giá trị đang chạy ở index đó — nạp preset
+đè lên notch đang sống thì chuyển mượt 10 ms chứ không xóa state filter; lệch
+tần số hoặc Q thì vẫn reset như cũ.
+
+Từ fix round Task 9 (`b8e3f25`), `loadPreset` cũng đọc lại trần ở chiều nạp
+(Q11): nếu file preset **có** khối `notchDefaults`, trần đó được áp cho mọi
+slot đang dùng tuning Global (slot Custom giữ trần riêng); file **không có**
+khối đó (v1, hoặc lưu trước khi tính năng này tồn tại) thì không đụng tới trần
+đang chạy — tránh áp nhầm fallback −12 dB của `PresetNotchDefaults` mỗi lần mở
+lại một file cũ không mang khối này. **Lưu ý cho tester**: một preset lưu sau
+khi vừa hú sẽ nạp lại notch ở `deepestDb` (có thể tới −24 dB) bất kể slider
+đang để bao nhiêu — cắt nhiều hơn một file lưu trên 1.1.3, nhưng luôn theo
+hướng an toàn (chỉ cắt thêm, không bao giờ khuếch đại).
 
 **Vẫn còn lệch, không phải việc của lane G:** mặc định `notchDefaults.depthDB`
 của `PresetManager` là −12 dB trong khi `NotchController::kDefaultNotchDepthDb`
@@ -482,15 +501,16 @@ của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 
 LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
 với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
 
-## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã release alpha)
+## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest, chưa đóng gói)
 
 Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
 10 ms trong `Biquad`, sự kiện `notch_retune` trong log.
 
-- Suite: **535/535 test pass** (ctest Release, MSVC) sau task cuối của lane G
-  (`af5201e`) — +81 so với 1.1.3 (454). Bốn bậc thang đo được đúng
-  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB).
+- Suite: **539/539 test pass** (ctest Release, MSVC) sau fix round Task 9 của
+  lane G (`b8e3f25`) — +85 so với 1.1.3 (454). Bốn bậc thang đo được đúng
+  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
+  `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
 - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).
 
 Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,

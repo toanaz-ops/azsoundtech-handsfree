@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
 **Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q14, đừng hỏi lại).
-**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task, suite 535/535 — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task + fix rounds, suite 539/539 tại `b8e3f25`, chưa đóng gói — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
 
 ## 1. Vấn đề
 

@@ -7,7 +7,8 @@ Windows standalone audio application for ASIO feedback elimination in live sound
 Automatic feedback elimination: FFT-2048 detection places ultra-narrow notch
 filters (16 per lane) on ringing frequencies before they howl. Three modes —
 Soundcheck, Auto, Bypass. Audio flows through 8 routing slots, each mono or
-stereo with free channel mapping (cross-routing). Current version: 1.0.3.
+stereo with free channel mapping (cross-routing). Current version: 1.1.3
+(1.2.0 in alpha gate).
 Full product description: `docs/GIOI-THIEU.md`; the anti-feedback technique:
 `docs/KY-THUAT-CHONG-HU.md`.
 
