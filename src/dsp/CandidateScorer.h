@@ -88,9 +88,14 @@ public:
         // distinguish a howl creeping up from one that jumped 12 dB in a
         // quarter second -- and that distinction is what decides whether a
         // notch starts at -6 or -12 dB. The neutral value is 1.0, meaning "no
-        // measurable rise": BOTH the no-history branch and the
-        // history-too-young branch report it, so an unknown rise can never buy
-        // a deeper starting notch.
+        // measurable rise": the no-history branch, the history-too-young
+        // branch, AND the sub-threshold early return (peakiness at or below
+        // the analyzer threshold, CandidateScorer.cpp:52-53) all leave it at
+        // this default, so an unknown rise can never buy a deeper starting
+        // notch.
+        // Unbounded above: against a near-silent reference the divisor floors
+        // at 1e-12, so this can legitimately read ~1e12. Compare it against a
+        // threshold; never scale anything by it.
         float riseRatio = 1.0f;
         float penalty = 1.0f;
         float score = 0.0f;

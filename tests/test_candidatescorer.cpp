@@ -635,8 +635,19 @@ TEST (CandidateScorer, RiseRatioIsNeutralWithoutUsableHistory)
     EXPECT_FLOAT_EQ (b.riseRatio, 1.0f);
 }
 
-// RED IF the new field changes the arithmetic. The product identity is the
-// whole contract: lane G reads one more intermediate number and moves nothing.
+// This test proves that scoreCandidate() and scoreCandidateDetailed() share
+// ONE arithmetic path -- the product at CandidateScorer.cpp:148 -- and that
+// riseRatio rides alongside it as a read-only extra output, never a fifth
+// multiplied factor. It does NOT prove "score is byte-identical to before
+// this diff": the identity checked here (score == pNorm*rNorm*mNorm*penalty)
+// holds by construction on either side of the change, so it cannot detect a
+// numeric drift in any one factor. That evidence is the pre-existing
+// 470-test regression suite with hand-computed expectations, which this
+// task leaves untouched.
+//
+// RED IF scoreCandidate() and scoreCandidateDetailed() ever diverge on the
+// same inputs, or if a later edit turns riseRatio into a fifth multiplied
+// factor instead of a read-only output.
 TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
 {
     Rig rig;
