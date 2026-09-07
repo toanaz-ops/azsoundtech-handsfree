@@ -209,6 +209,8 @@ cách máy móc là cách làm hỏng. Đọc từng chỗ gọi trước khi x�
 
 ---
 
+22. **Release từ worktree cần cả `external/asiosdk` LẪN `installer/vendor/vc_redist.x64.exe`** (cả hai gitignored). Lần đầu chạy `release-alpha.ps1 -Part minor` trong worktree: gate ctest xanh 547/547 rồi `makensis` fail "Missing vendorc_redist.x64.exe", script tự lùi version về 1.1.3. Copy từ main checkout (`installer/vendor/`), không cần `fetch-deps.ps1`. Kiểm hai thư mục này TRƯỚC khi bấm release, không phải sau 3 phút build.
+
 ## C. Còn treo sau lane G
 
 - **NaN self-heal trong `AudioEngine`** reset chuỗi filter mỗi khi output
