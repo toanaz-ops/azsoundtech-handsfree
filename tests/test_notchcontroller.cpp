@@ -1679,3 +1679,262 @@ TEST (NotchControllerRingRisk, WidthChangeInvalidatesUntilTheNextBlock)
     h.controller.copySnapshot (snap);
     EXPECT_TRUE (snap.ringRiskValid);
 }
+
+// ===========================================================================
+// Lane G (gain-aware notch), spec docs/superpowers/specs/
+// 2026-09-06-gain-aware-notch-design.md. The ladder, its clamps, and the
+// retune command path.
+// ===========================================================================
+
+// RED IF the effective ladder stops being "the rungs shallower than the
+// ceiling, then the ceiling itself" (Q13). The shipped presets/Music.json
+// asks for -10, which is not a multiple of 6: v2's quantise-to-a-rung rule
+// would have capped Music at -6, i.e. 4 dB SHALLOWER than 1.1.3, silently.
+TEST (NotchControllerLadder, TheEffectiveLadderEndsOnTheCeilingItself)
+{
+    using NC = NotchController;
+    // Ceiling -24: the whole fixed ladder.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -24.0), -12.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -24.0), -18.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-18.0, -24.0), -24.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-24.0, -24.0), -24.0);   // saturates
+
+    // Ceiling -10 (presets/Music.json): -6 -> -10, and -10 is the end.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -10.0), -10.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-10.0, -10.0), -10.0);
+
+    // Ceiling -13.7: -6 -> -12 -> -13.7.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -13.7), -12.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -13.7), -13.7);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-13.7, -13.7), -13.7);
+
+    // Ceiling -18 (presets/Speech.json): -6 -> -12 -> -18.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -18.0), -12.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -18.0), -18.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-18.0, -18.0), -18.0);
+
+    // Ceiling -6: there is no rung shallower than -6, so the ladder is one
+    // rung long and a notch there NEVER deepens.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0,  -6.0),  -6.0);
+
+    // An odd Manual depth resolves in the direction of travel, still capped.
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -3.0, -24.0),  -6.0);
+    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -9.0, -24.0), -12.0);
+}
+
+// RED IF a release step can jump more than one rung, or past -6. Q13 needs no
+// ceiling here: releasing is always toward a FIXED rung, and the two off-rung
+// depths the ladder can hold -- an odd ceiling, an odd Preset/Manual depth --
+// both resolve to the nearest fixed rung above them.
+TEST (NotchControllerLadder, NextShallowerIsExactlyOneRungAndStopsAtMinus6)
+{
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-24.0), -18.0);
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-18.0), -12.0);
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-12.0),  -6.0);
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-6.0),   -6.0);
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-13.7), -12.0);
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-10.0),  -6.0);  // Music's ceiling
+    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-9.0),   -6.0);  // odd preset depth
+}
+
+// RED IF setNotchImpl stops re-initialising the ladder fields when a slot is
+// REUSED (B-2). pushClearLocked only lowers `active`, so without this a manual
+// -6 dB notch inherits the -24 dB deepestDb of the previous tenant and gets
+// reclamped to -24 on its first reinforce.
+TEST (NotchControllerLadder, ReusingASlotResetsEveryLadderField)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+
+    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
+                                        NotchController::Origin::Manual));
+
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -6.0);
+    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0),    0.0);
+}
+
+// RED IF `activeForTest` is implemented as "depthDB < 0" (B-3). It must read
+// ModelNotch::active, because pushClearLocked lowers ONLY `active` -- the
+// Clear event reads n.depthDB, so the depth is deliberately retained on a
+// cleared slot. Every liveness probe in Tasks 5-8 is built on this accessor;
+// a depth-based one would report every slot that has ever held a notch as
+// still active, and the room-memory and ceiling tests would pass while
+// asserting nothing.
+//
+// DO NOT "fix" this by zeroing depthDB in pushClearLocked: that would empty
+// the Clear event's depth field, which lane D writes into every notch_clear.
+TEST (NotchControllerLadder, ActiveForTestReadsTheFlagNotTheRetainedDepth)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    EXPECT_TRUE (h.controller.activeForTest (0, 0));
+
+    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
+    EXPECT_FALSE (h.controller.activeForTest (0, 0));
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0)
+        << "a Clear must NOT zero depthDB -- the Clear event reads it";
+
+    EXPECT_FALSE (h.controller.activeForTest (0, 1));   // never touched
+}
+
+// RED IF the -24 clamp (Q12) is narrowed to Origin::Detector, or dropped.
+// Invariant 1 must hold for EVERY origin, or a hand-edited preset puts a
+// -40 dB cut on a PA.
+TEST (NotchControllerLadder, DepthDeeperThanMinus24IsClampedForEveryOrigin)
+{
+    const NotchController::Origin origins[] = { NotchController::Origin::Detector,
+                                                NotchController::Origin::Preset,
+                                                NotchController::Origin::Manual,
+                                                NotchController::Origin::Soundcheck };
+    for (auto origin : origins)
+    {
+        Harness h;
+        ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -40.0, origin));
+        h.controller.runOnce();
+
+        NotchCommand cmd {};
+        ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+        EXPECT_FLOAT_EQ (cmd.depthDB, -24.0f);
+        EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
+        EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
+    }
+}
+
+// RED IF adoptPreset stops clamping. A file is not a trusted source.
+TEST (NotchControllerLadder, AdoptPresetClampsADeepPresetNotch)
+{
+    Harness h;
+    PresetNotch p;
+    p.index = 0; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -40.0;
+    EXPECT_EQ (h.controller.adoptPreset ({ p }), 1);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
+}
+
+// RED IF pushRetuneLocked stops sending the STORED freq/Q (m-2). Sending the
+// live notchQ_ instead would differ by a bit whenever the operator had moved
+// the Q slider after placement, and NotchChain would take the reset path --
+// which is a click.
+TEST (NotchControllerLadder, RetuneResendsTheStoredFrequencyAndQ)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 2, 987.0, 17.5, -6.0,
+                                        NotchController::Origin::Detector));
+    h.controller.setNotchDefaults (44.0, -24.0);   // move the live defaults away
+    ASSERT_TRUE (h.controller.retuneForTest (0, 2, -12.0,
+                                             NotchController::RetuneReason::Deepen));
+    h.controller.runOnce();
+
+    NotchCommand cmd {};
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);   // the original Set
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);   // the retune
+    EXPECT_EQ (cmd.type, NotchCommandType::Set);
+    EXPECT_EQ (cmd.channel, 0);
+    EXPECT_EQ (cmd.index, 2);
+    EXPECT_FLOAT_EQ (cmd.frequency, 987.0f);
+    EXPECT_FLOAT_EQ (cmd.Q, 17.5f);
+    EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 2), -12.0);
+}
+
+// RED IF a retune overwrites lockedAtMs (B-1). lockedAtMs is the age label
+// lane D writes into every notch_clear; resetting it on each retune would make
+// a notch that lived 40 s report a 300 ms life.
+TEST (NotchControllerLadder, RetuneDoesNotResetTheNotchesAge)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
+                                        NotchController::Origin::Detector));
+
+    std::vector<float> hop (512, 0.1f);
+    for (int i = 0; i < 200; ++i) {          // 200 * 5 ms = 1 s of live time
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (5.0);
+        h.controller.runOnce();
+    }
+    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -12.0,
+                                             NotchController::RetuneReason::Deepen));
+    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -18.0,
+                                             NotchController::RetuneReason::Deepen));
+    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
+    h.controller.runOnce();
+
+    const auto clears = r.clears();
+    ASSERT_EQ (clears.size(), 1u);
+    EXPECT_GT (clears[0].ageMs, 900.0) << "age was measured from the last retune, not the placement";
+    EXPECT_FLOAT_EQ (clears[0].depthDb, -18.0f);   // the depth it was actually running
+}
+
+// RED IF a Retune event stops carrying where it came FROM, or starts
+// allocating a SpectralContext (a retune is not a placement decision).
+TEST (NotchControllerLadder, RetuneEventCarriesFromDepthReasonAndNoContext)
+{
+    Recorder r; Harness h; h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -6.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_TRUE (h.controller.retuneForTest (0, 1, -18.0,
+                                             NotchController::RetuneReason::Reclamp));
+    h.controller.runOnce();
+
+    const Ev* ret = nullptr;
+    for (const auto& e : r.events)
+        if (e.kind == Ev::Kind::Retune) { ret = &e; break; }
+    ASSERT_NE (ret, nullptr);
+    EXPECT_EQ (ret->lane, 0);
+    EXPECT_EQ (ret->index, 1);
+    EXPECT_FLOAT_EQ (ret->fromDepthDb, -6.0f);
+    EXPECT_FLOAT_EQ (ret->depthDb, -18.0f);
+    EXPECT_EQ (ret->retuneReason, NotchController::RetuneReason::Reclamp);
+    EXPECT_EQ (ret->origin, NotchController::Origin::Detector);
+    EXPECT_EQ (ret->ctx, nullptr);
+    EXPECT_FALSE (ret->hasScore);
+}
+
+// RED IF pushRetuneLocked drops any of its five validate-before-send
+// predicates, or the -24 floor. A refused retune must change NOTHING.
+TEST (NotchControllerLadder, RetuneRefusesOutOfRangeDepthAndChangesNothing)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Detector));
+    h.controller.runOnce();
+    NotchCommand drained {};
+    while (h.commands.read (&drained, 1) == 1) {}
+
+    EXPECT_FALSE (h.controller.retuneForTest (0, 0,  +3.0,
+                                              NotchController::RetuneReason::Deepen));
+    EXPECT_FALSE (h.controller.retuneForTest (0, 0, -40.0,
+                                              NotchController::RetuneReason::Deepen));
+    EXPECT_FALSE (h.controller.retuneForTest (0, 5, -18.0,   // slot not active
+                                              NotchController::RetuneReason::Deepen));
+    h.controller.runOnce();
+
+    EXPECT_EQ (h.commands.getAvailableRead(), 0u);
+    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
+}
+
+// RED IF the snapshot stops carrying deepestDb -- savePreset (Q11) reads it,
+// and a notch resting at -6 while the room needed -18 would be saved as -6.
+TEST (NotchControllerLadder, SnapshotCarriesTheDeepestDepthTheNotchEverHeld)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
+                                        NotchController::Origin::Detector));
+    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -6.0,
+                                             NotchController::RetuneReason::Release));
+
+    std::vector<float> hop (512, 0.25f);
+    h.tap.write (hop.data(), hop.size());
+    h.controller.runOnce();
+
+    NotchController::SnapshotBuffer snap;
+    h.controller.copySnapshot (snap);
+    ASSERT_EQ (snap.notchCount, 1u);
+    EXPECT_FLOAT_EQ (snap.notches[0].depthDB,   -6.0f);
+    EXPECT_FLOAT_EQ (snap.notches[0].deepestDb, -18.0f);
+    EXPECT_FALSE (snap.releaseFrozen);
+}

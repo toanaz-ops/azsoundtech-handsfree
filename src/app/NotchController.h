@@ -45,6 +45,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <utility>
 #include <vector>
 
 // private inheritance: the thread is an implementation detail; nothing
@@ -93,6 +95,68 @@ public:
     // [8, 50], depth dB in [-24, -6]; clamped on set.
     static constexpr double kDefaultNotchQ      = 30.0;
     static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
+
+    // === Lane G: the depth ladder (spec 4.9). Fixed for 1.2.0 and
+    // deliberately NOT exposed on the GUI -- these are the numbers the
+    // ladder's behaviour was reasoned about with, and a slider on any of them
+    // turns every future bug report into "which value was it on?".
+    //
+    // A Detector notch only ever STANDS on a rung. Deeper == more negative.
+    static constexpr double kDepthLadderDb[4] = { -6.0, -12.0, -18.0, -24.0 };
+    static constexpr int    kDepthLadderSize  = 4;
+    static constexpr double kDepthStepDb      = 6.0;
+    // Invariant 1: no Set this controller emits may be deeper than this, for
+    // ANY Origin (Q12). -24 dB already kills any howl this app can hear.
+    static constexpr double kMaxDepthDb       = -24.0;
+    // How long a rung must hold before the ladder buys the next one down (Q2).
+    // Measured against liveMs_, which advances once per runOnce AFTER the
+    // drain loop, so the gate cannot fire twice inside one drain.
+    static constexpr double kDeepenAfterMs    = 300.0;
+    // A candidate whose RAW rise ratio is at least this starts on the second
+    // rung (Q6). Magnitudes are amplitudes, so 2.0 == +6 dB over the rise
+    // window. rNorm cannot express this: it saturates at 1.5.
+    static constexpr float  kSteepRiseRatio   = 2.0f;
+    // Release ladder (Q3): the FIRST rung costs 30 s of quiet, every rung
+    // after it 10 s. kAutoReleaseMs keeps its name and value as the first step.
+    static constexpr double kReleaseFirstMs   = kAutoReleaseMs;
+    static constexpr double kReleaseStepMs    = 10000.0;
+    // "Room memory" (Q6/Q10): a howl returning to the SAME BIN within this
+    // window restarts at the depth it needed last time.
+    static constexpr double kMemoryTtlMs      = 300000.0;
+    static constexpr int    kMemoryEntriesPerLane = 16;
+    // Release-clock freeze (Q4). The SAME fraction the GUI's RISING band uses
+    // -- one constant, not two that can drift apart. This IS the definition:
+    // gui::SpectrumView::kRingRiskRisingFraction is changed in Task 7 to alias
+    // this name, so there is no second 0.55f literal anywhere. Frozen at
+    // score >= 0.55 x CandidateScorer::kConfirmScore = 0.385.
+    //
+    // Do not move this declaration into a .cpp or behind an accessor: the GUI
+    // header includes app/NotchController.h and needs it as a constant
+    // expression.
+    static constexpr float  kRiskFreezeFraction = 0.55f;
+
+    // Why a notch's depth moved. Lane D writes it into the session log as
+    // `reason` on a notch_retune line.
+    enum class RetuneReason : std::uint8_t { Deepen, Release, Reclamp, Ceiling };
+
+    // Ladder arithmetic. Pure and static, so it is testable without a rig.
+    //
+    // Q13: the EFFECTIVE ladder is the fixed rungs SHALLOWER than the ceiling,
+    // plus the ceiling itself as the last rung -- so ceiling -10 (the shipped
+    // presets/Music.json) gives -6 -> -10, and ceiling -6 gives a one-rung
+    // ladder that never deepens. The `ceilingRung` IS the ceiling value and
+    // may be an odd number: it is the ONLY place a Detector notch stands off a
+    // fixed rung. There is deliberately no quantisation helper -- v2 had one
+    // (`ceilingRungDb`), and quantising -10 down to -6 made Music 4 dB
+    // shallower than 1.1.3 with nothing saying so.
+    //
+    // nextDeeperRungDb: the shallowest fixed rung strictly deeper than
+    //   `currentDb`, capped at `ceilingDb`. Saturates at the ceiling.
+    // nextShallowerRungDb: the deepest fixed rung strictly shallower than
+    //   `currentDb`, saturating at -6. Needs no ceiling -- a release always
+    //   moves toward a fixed rung.
+    static double nextDeeperRungDb (double currentDb, double ceilingDb);
+    static double nextShallowerRungDb (double currentDb);
 
     NotchController (LockFreeRingBuffer<float>& tapLane0,
                      LockFreeRingBuffer<float>* tapLane1,
@@ -179,13 +243,26 @@ public:
 
     struct NotchEvent
     {
-        enum class Kind : std::uint8_t { Set, Clear };
+        // Retune: a depth change on a notch that stays where it is (lane G).
+        // Neither a Set nor a Clear -- MainComponent::notchEventToVar MUST
+        // give it its own `ev` name, or tools/logstats.py closes the notch's
+        // record at the first 300 ms deepening (B-3).
+        enum class Kind : std::uint8_t { Set, Clear, Retune };
         Kind  kind = Kind::Set;
         int   slot = 0, lane = 0, index = 0;
         float hz = 0.0f, q = 0.0f, depthDb = 0.0f;
-        Origin      origin = Origin::Detector;        // Set
-        ClearReason reason = ClearReason::Manual;     // Clear
-        double ageMs = 0.0;                           // Clear: liveMs_ - lockedAtMs
+        Origin      origin = Origin::Detector;              // Set, Retune
+        ClearReason reason = ClearReason::Manual;           // Clear
+        RetuneReason retuneReason = RetuneReason::Deepen;   // Retune
+        float        fromDepthDb  = 0.0f;                   // Retune: the depth it left
+        // Set: the RAW rise ratio the placement policy read (B-5). `rise`
+        // below is rNorm, which SATURATES at rise 1.5 -- so it cannot tell a
+        // 1.6 from a 40, and a test cannot use it to prove that a ramped
+        // fixture actually landed in the -6 band rather than merely failing to
+        // confirm. One float, filled from pc.breakdown.riseRatio, no
+        // allocation, and not written for Clear or Retune.
+        float        riseRatio    = 0.0f;
+        double ageMs = 0.0;                                 // Clear/Retune: liveMs_ - lockedAtMs
         // Detector placements only (Task 4):
         bool  hasScore = false;
         int   confirmedLane = 0;
@@ -208,6 +285,29 @@ public:
     int  pendingEventsForTest() const;
     bool modelMutexIsFreeForTest();                  // try_lock + unlock
     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
+
+    // TEST ACCESSORS ONLY (lane G). The ladder lives entirely under
+    // modelMutex_ and is otherwise observable only through emitted commands,
+    // which cannot tell "did not move" from "moved and moved back".
+    double depthDbForTest   (int channel, int index) const;
+    double deepestDbForTest (int channel, int index) const;
+    double quietMsForTest   (int channel, int index) const;
+    // B-3: ModelNotch::active, NOT "depthDB < 0". pushClearLocked lowers only
+    // `active` and leaves depthDB alone on purpose (the Clear event reads it),
+    // so a depth-based liveness probe matches every slot that has ever held a
+    // notch. Tasks 5-8 use this accessor for every "is a notch there?" check.
+    bool   activeForTest    (int channel, int index) const;
+    // Drives pushRetuneLocked the way the detector thread does, taking
+    // modelMutex_ exactly once. Tasks 5-7 call the locked helper from loops
+    // that already hold it; this seam is what lets the command path be tested
+    // before those callers exist.
+    bool   retuneForTest (int channel, int index, double newDepthDb, RetuneReason reason);
+    // Forces the pair the release freeze reads (spec 4.5 seam, M-6):
+    // {valid, score}. nullopt restores the real frameScoreValid_/frameMaxScore_.
+    // A static tone cannot hold score >= 0.385 for 30 s -- mNorm is a
+    // log-ratio against a 3 s EMA and decays to 0 within seconds -- so the
+    // freeze is untestable through audio alone.
+    void   setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override);
 
     // KD-9: detection gating (Bypass must never place notches). Snapshot
     // publication is NOT affected by this flag.
@@ -269,7 +369,12 @@ public:
     {
         float frequency = 0.0f;
         float Q         = 0.0f;
-        float depthDB   = 0.0f;
+        float depthDB   = 0.0f;   // the depth RUNNING right now
+        // Lane G (Q11): the deepest rung this notch has ever stood on.
+        // savePreset writes THIS rather than depthDB, so a preset saved while
+        // the room is quiet still records what the room NEEDED, not what the
+        // release ladder had wound back to.
+        float deepestDb = 0.0f;
         std::uint8_t channel = 0;
         std::uint8_t index   = 0;
     };
@@ -303,6 +408,14 @@ public:
         // threshold is hardcoded on the GUI side (A-R3). Score is a 0..1
         // product, so this is CandidateScorer::kConfirmScore.
         float ringRiskThreshold = 0.0f;
+
+        // Lane G (Q9): was the release clock frozen on the most recent tick?
+        // Published for the GUI and the log to use LATER -- 1.2.0 draws
+        // nothing with it. The RING RISK chip cannot stand in for it: it holds
+        // for 750 ms and follows displayedSlot_ only, so it can read RISING
+        // while the clock is running again, and a slot that is not displayed
+        // can be frozen with nothing on screen saying so (M-8).
+        bool  releaseFrozen = false;
     };
 
     void copySnapshot (SnapshotBuffer& destOwnedByCaller) const;
@@ -326,6 +439,30 @@ private:
         double lastDetectedMs = 0.0;
         Origin origin       = Origin::Detector;
         bool   active       = false;
+
+        // --- lane G ladder state (spec 4.2) -------------------------------
+        // All five are re-initialised by setNotchImpl, the ONE place a slot
+        // becomes active, for every Origin and every path (placeConfirmed,
+        // adoptPreset, the GUI's setNotch, the partial-apply unwind).
+        // pushClearLocked only lowers `active`, so a reused slot would
+        // otherwise inherit the previous tenant's ladder (B-2).
+
+        // Deepest rung held since placement -- also where a reclamp jumps to.
+        double deepestDb        = 0.0;
+        // liveMs_ at the last depth change (deepen, release, reclamp, ceiling).
+        double stageChangedAtMs = 0.0;
+        // ACCUMULATED quiet time since the last depth change or reinforce, in
+        // live ms. A counter rather than a timestamp precisely so the freeze
+        // can stop it without losing what it had banked.
+        double quietMs          = 0.0;
+        // Rungs released from deepestDb. 0 == not releasing. An integer count
+        // instead of comparing doubles (m-3).
+        int    releasedSteps    = 0;
+        // This notch's own ceiling. Preset/Manual/Soundcheck: the depth the
+        // caller asked for -- the slider must not drag a notch a human or a
+        // file set explicitly (Q8). Detector: NaN, meaning "follow the live
+        // slider", resolved by ceilingDbFor().
+        double ceilingDb        = 0.0;
     };
 
     static constexpr int slotOf (int channel, int index) { return channel * kSlots + index; }
@@ -334,6 +471,22 @@ private:
     bool setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
                        Origin origin, const NotchEvent* scored);
     void pushClearLocked (int channel, int index, ClearReason reason);
+    // modelMutex_ HELD. Re-sends `index` as a Set at a new depth, keeping the
+    // notch's stored frequency, Q, lockedAtMs, origin and lastDetectedMs.
+    // Applies the same five predicates setNotchImpl does plus the -24 floor,
+    // and returns false changing NOTHING when any fails or the slot is not
+    // active.
+    //
+    // It exists because both callers -- the reinforce loop in
+    // processSpectrumForDetection and step 3 of runOnce -- already hold
+    // modelMutex_, which is NOT recursive: calling setNotch/setNotchImpl from
+    // either would deadlock, and setNotchImpl would also stamp a fresh
+    // lockedAtMs, destroying lane D's age label (B-1).
+    bool pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason);
+    // The ceiling this notch obeys: its own, or the LIVE slider for a Detector
+    // notch (whose ceilingDb is NaN). Read fresh every tick, so lowering the
+    // slider mid-show takes effect (spec 7).
+    double ceilingDbFor (const ModelNotch& n) const;
     void pushEventLocked (NotchEvent&& event);   // modelMutex_ HELD
     // modelMutex_ NOT held when the sink runs. Returns true if it delivered
     // (or attempted to deliver, with no sink) anything -- false when the
@@ -465,6 +618,10 @@ private:
     std::vector<NotchEvent> eventScratch_;
     std::atomic<std::uint64_t> droppedEvents_ { 0 };
     std::atomic<int> failSetNotchLaneForTest_ { -1 };
+    // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the
+    // release freeze. Detector-thread state; written only with the thread
+    // stopped, like setWidth()/setEventSink().
+    std::optional<std::pair<bool, float>> ringRiskOverrideForTest_;
 
     std::atomic<std::uint64_t> retryCount_ { 0 };
 
