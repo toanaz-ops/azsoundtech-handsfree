@@ -195,6 +195,85 @@ public:
     std::uint64_t getTapDropCount (int slot) const;
     std::uint64_t getTapDropCount (int slot, int lane) const;
 
+    // ---- Lane M: active soundcheck (spec 2026-09-15 §4.1) --------------
+    //
+    // The engine's whole share of the soundcheck is these plain atomic stores
+    // plus one lock-free capture ring. NONE of them restarts the device, and
+    // the audio callback reads every one of them EXACTLY ONCE, at the top of
+    // the block beside the mode snapshot (invariant 7): a flip landing between
+    // the mute decision and the tap decision would give a callback that both
+    // injects the sweep AND taps it back into the detector.
+    //
+    // Thread: message thread (SoundcheckController) for every setter below.
+
+    // The output channel being measured, or -1 when no run is in flight. This
+    // IS the mute key: EVERY lane routed to this channel is silenced, not one
+    // (slot, lane) pair -- several slots sum onto one output channel, so
+    // muting a pair would leave that channel's feedback loop closed. Returns
+    // to -1 at every Gap, so it is NOT usable as the tap-suspension key: see
+    // setSoundcheckTapsSuspended.
+    void setSoundcheckOutputChannel (int channel);
+
+    // Input channel the raw measurement mic arrives on, or -1. Independent of
+    // the routing table: a measurement mic is normally not routed at all.
+    void setSoundcheckCaptureChannel (int channel);
+
+    // Capture gate, held across NoiseFloor + Sweep + Tail. A SEPARATE flag
+    // from the channel index so a safety property is never inferred from the
+    // sign of an index.
+    void setSoundcheckCaptureActive (bool active);
+
+    // Held for the WHOLE run (Arm to the end of the last channel's tail, or
+    // Abort), across every Gap. Keying suspension on the output channel
+    // instead would un-suspend the taps for 300 ms per channel and walk lane
+    // G's release clock down a rung.
+    void setSoundcheckTapsSuspended (bool suspended);
+
+    // Sweep sample index. NEGATIVE during the noise-floor phase, which is how
+    // "not emitting yet" is expressed without a second flag that could
+    // disagree. The audio callback OWNS this value once a run is in flight --
+    // it advances it by numSamples per block.
+    void setSoundcheckSampleIndex (std::int64_t n);
+
+    // Peak amplitude, CLAMPED to kSoundcheckMaxPeak here and again inside
+    // SoundcheckSignal.
+    void setSoundcheckPeak (float peak);
+
+    // Anchor the emergency ramp-out at the CURRENT sample index. The callback
+    // generates the envelope itself and releases the channel when it reaches
+    // zero, so no other thread has to still be alive for the sound to stop.
+    void requestSoundcheckRampOut();
+
+    [[nodiscard]] int          getSoundcheckOutputChannel() const;
+    [[nodiscard]] std::int64_t getSoundcheckSampleIndex()   const;
+    [[nodiscard]] bool         soundcheckIsEmitting()       const;   // scOutChannel_ >= 0
+
+    // Raw mic capture, before ANY DSP, written once per callback while
+    // scCaptureActive_. *** CALLER CONTRACT: read() only, one consumer
+    // thread. *** Same reasoning as getTapBuffer(): the audio callback is and
+    // must remain the sole producer.
+    LockFreeRingBuffer<float>& getMicCaptureBuffer();
+
+    // Samples the capture ring could not accept because the lane M thread fell
+    // behind. Non-zero is a self-abort condition for the run (spec §4.3): a
+    // splice in the captured signal makes the loop-gain estimate wrong in
+    // every bin, exactly as a tap drop does for the detector.
+    [[nodiscard]] std::uint64_t getMicCaptureDropCount() const;
+
+    // TEST SEAM ONLY (B-4). isRunning_ is otherwise written only by start()
+    // and audioDeviceError(); audioDeviceAboutToStart() does not touch it, so
+    // no headless test can reach a state SoundcheckController::preflight
+    // accepts. Stores the same atomic start() stores.
+    void setRunningForTest (bool running);
+
+    // TEST SEAM ONLY (B-5, F17). Multiplied into the injected sample AFTER
+    // SoundcheckSignal has clamped it. 1.0f in every shipping path. It exists
+    // because a seam on the PEAK achieves nothing -- the signal's constructor
+    // and sampleAt both clamp -- so this is the only route by which the
+    // +-1.0f output clamp can be SHOWN to still cover the sweep path
+    // (invariant 4). Same shape as lane G's setRingRiskOverrideForTest.
+    void setSoundcheckGainUnclampedForTest (float gain);
+
     // Command channel FROM the detector threads INTO the audio thread (bridge
     // design §2), one queue PER SLOT: the audio callback drains the queues
     // under ONE SHARED budget of kMaxCommandsPerCallback commands per callback
@@ -339,6 +418,47 @@ private:
     // they are only ever read for display.
     std::atomic<int> numInputChannels_  { 0 };
     std::atomic<int> numOutputChannels_ { 0 };
+
+    // ---- Lane M: active soundcheck state (spec §4.1) -------------------
+    //
+    // Seven atomics, one counter, one ring. Every one is read by the audio
+    // callback EXACTLY ONCE per block, into stack locals, beside the mode
+    // snapshot; nothing below that point reads any of them again
+    // (invariant 7).
+
+    // Output channel under measurement, -1 = no run. The MUTE key: every lane
+    // whose outputChannels[lane] equals this is silenced (Q15 relitigated).
+    // Back to -1 at every Gap -- not usable as the tap-suspension key, see
+    // scSuspendTaps_ below.
+    std::atomic<int>          scOutChannel_       { -1 };
+    // Tap suspension, held for the WHOLE run including every Gap (N3).
+    std::atomic<bool>         scSuspendTaps_      { false };
+    std::atomic<int>          scCaptureInChannel_ { -1 };
+    // Capture gate, on across NoiseFloor + Sweep + Tail (F5). Separate from
+    // scOutChannel_ so a safety property is not inferred from a sign.
+    std::atomic<bool>         scCaptureActive_    { false };
+    // Sweep sample index, NEGATIVE during NoiseFloor. Audio thread OWNS it.
+    std::atomic<std::int64_t> scSampleIndex_      { 0 };
+    // Peak amplitude, already clamped to kSoundcheckMaxPeak before storing.
+    std::atomic<float>        scPeak_             { 0.0f };
+    // Ramp-out anchor, -1 = none. Set by the message thread, CONSUMED by the
+    // callback, which clears it and scOutChannel_ when the ramp reaches zero.
+    std::atomic<std::int64_t> scRampOutAtSample_  { -1 };
+
+    // TEST SEAM (B-5): 1.0f in every shipping path. See the setter.
+    std::atomic<float>        scGainUnclampedForTest_ { 1.0f };
+
+    // Raw mic capture. NOT "how much audio the run needs" -- micCapture_ is a
+    // stream the lane M thread drains every 5 ms, exactly like the detector's
+    // taps. It is the maximum tolerable drain latency: 65536 samples = 1.37 s
+    // @ 48 kHz, 0.68 s @ 96 kHz, 0.34 s @ 192 kHz -- still 68x the drain
+    // period at the highest rate.
+    static constexpr std::size_t kCaptureCapacity = 65536;
+    LockFreeRingBuffer<float>   micCapture_      { kCaptureCapacity };
+    // Same meaning, and the same reason for existing, as tapDropCounts_: a
+    // short write leaves a SPLICE, not a gap, and a splice poisons every bin
+    // of the loop-gain estimate. Non-zero aborts the run.
+    std::atomic<std::uint64_t>  micCaptureDrops_ { 0 };
 
     // Last device error. A juce::String is reference-counted and NOT safe to
     // write on one thread while another reads it, so it takes a mutex rather
