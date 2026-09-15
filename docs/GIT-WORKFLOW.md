@@ -293,6 +293,25 @@ git push origin HEAD:<pr-branch>
 PR tự nhận commit mới và CI chạy. (`gh pr update-branch <n>` làm được việc này
 khi không có xung đột thật; có xung đột thì phải giải bằng tay như trên.)
 
+**`gh pr checks` in job bị HUỶ thành `fail`.** Nó gộp `cancelled` và `failure`
+vào cùng một chữ, nên một job bị khối `concurrency` huỷ vì có push mới trông y
+hệt một job build hỏng. Trước khi tin một dòng đỏ, hỏi lại:
+
+```bash
+gh run view <id> --json jobs -q '.jobs[]|{name,conclusion}'
+```
+
+`cancelled` **sau một push mới hơn** là `concurrency` đang làm đúng việc của nó
+— run cũ nói về một commit không còn là head của nhánh nữa — không phải lỗi, và
+không cần sửa gì. Chỉ `failure` mới là đỏ thật. Đã gặp ngay trên PR #3
+(15/09/2026): `gh pr checks` báo cả hai job `fail`, thực ra macOS `failure`
+(đúng lỗi SessionLogger) còn Windows chỉ `cancelled`.
+
+Bẫy này ăn theo hai chiều, nên đọc kỹ chiều thứ hai: quy ước ở §4 bắt người
+merge **dán output `gh pr checks`**. Nếu quen tay giải thích mọi dòng đỏ là "à,
+cái đó bị cancel thôi", thì một job đỏ thật sẽ đi qua đúng cái cổng dựng ra để
+chặn nó.
+
 **`--delete-branch` khi đang đứng trên chính nhánh đó.** `gh pr merge
 --delete-branch` cố xoá cả nhánh local; nếu CWD đang checkout đúng nhánh ấy, nó
 không xoá được, hoặc kéo theo một lần checkout ngoài ý muốn. Luôn chạy lệnh
@@ -341,6 +360,8 @@ Copy thẳng vào handoff hoặc báo cáo lane:
 [ ] docs/GIOI-THIEU.md + docs/KY-THUAT-CHONG-HU.md neu doi hanh vi user-visible
 [ ] memory/ note + index trong memory/MEMORY.md neu hoc duoc gi
 [ ] gh pr checks <n> --watch                  --> dan output xanh
+[ ]   dong "fail"? gh run view <id> --json jobs -q '.jobs[]|{name,conclusion}'
+[ ]      cancelled sau push moi = concurrency, KHONG phai loi; chi failure moi la do that
 [ ]   "no checks reported" = PR dang CONFLICTING --> merge main qua worktree MOI
 [ ]   main dang do? merge PR sua CI truoc, roi gh pr update-branch <n>
 [ ] verifier doc lap doc file that, khong doc bao cao
