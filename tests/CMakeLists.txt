@@ -43,6 +43,7 @@ add_executable(HandsFreeTests
     test_soundchecksignal.cpp
     test_loopgainestimator.cpp
     test_soundcheck_candidates.cpp
+    test_soundcheckcontroller.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
