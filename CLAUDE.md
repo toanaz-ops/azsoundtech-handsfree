@@ -131,6 +131,8 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    `config.yaml`; unused from Claude Code's side, but `.opencode/skills/openspec-*`
    wires OpenCode's `/opsx-*` commands to it — do not delete it. Verified
    2026-09-04, see `memory/docs-drift-audit-2026-08-27.md`.)
+5. `docs/GIT-WORKFLOW.md` — quy ước git: `origin/main` là sự thật, mọi lane
+   lên main qua Pull Request + CI xanh. Owner decision 2026-09-15.
 
 ## Definition of done
 
@@ -141,6 +143,10 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    and call the change out in whatever note reaches the testers.
 3. `memory/` note if the work taught something non-obvious, indexed in
    `memory/MEMORY.md`.
-4. Commit with explicit paths. Merge only if the user said "merge".
+4. Commit with explicit paths, push the branch at the FIRST commit, and open a
+   Pull Request against `origin/main`. Merge through the PR — with CI green and
+   its output pasted — and only if the user said "merge". Never merge locally
+   into `main`: local `main` moves only by `git pull --ff-only`. The full
+   convention, including the worktree-teardown traps, is `docs/GIT-WORKFLOW.md`.
 5. A change to DSP constants, topology, or user-visible behavior also updates
    `docs/GIOI-THIEU.md` and `docs/KY-THUAT-CHONG-HU.md` in the same change.
