@@ -45,7 +45,6 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "dsp/Detector.h"
-#include "dsp/SoundcheckSignal.h"
 
 #include <array>
 #include <cstddef>
@@ -81,6 +80,24 @@ public:
         float bandSnrDb    = 0.0f;
         int   noiseFrames  = 0, referenceFrames = 0, captureFrames = 0;
         bool  measured     = false;   // bandSnrDb >= kMinBandSnrDb and all three streams present
+
+        // PRECEDENCE: `measured` OVERRIDES `trusted`. A run whose band SNR never
+        // reached kMinBandSnrDb has NO trusted bins at all, whatever the per-bin
+        // SNR says -- finish() clears the whole array when measured is false.
+        // Without that, a room 10 dB above its noise floor carrying one 25 dB
+        // resonance would report measured == false and trusted[k] == true for
+        // that bin, and a consumer reading trusted[] without first checking
+        // measured would propose a notch from a run the estimator had already
+        // declared unusable. The two gates are not independent: the band gate
+        // asks whether the MEASUREMENT happened, the bin gate only ranks bins
+        // within a measurement that did.
+        //
+        // A SILENT BIN READS EXACTLY 0.0 dB, not "unity". With EY and EX both
+        // zero, hDb[k] is 10*log10(eps/eps) == 0.0 -- the same number a bin
+        // exactly at the edge of howling produces. Such a bin is always
+        // untrusted, so a consumer must gate on trusted[k] and never on
+        // hDb[k] >= 0 alone; drawing code in particular must not render a silent
+        // bin as a 0 dB howl line.
     };
 
     [[nodiscard]] Result finish() const;

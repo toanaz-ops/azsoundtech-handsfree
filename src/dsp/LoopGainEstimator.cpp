@@ -4,6 +4,10 @@
 // This file is only their arithmetic.
 #include "dsp/LoopGainEstimator.h"
 
+// Only finish() needs it, for kSweepLowHz -- the header does not, so it does not
+// pay for it.
+#include "dsp/SoundcheckSignal.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -151,6 +155,13 @@ LoopGainEstimator::Result LoopGainEstimator::finish() const
     // Both sides of this comparison are dB.
     r.measured = r.referenceFrames > 0 && r.captureFrames > 0 && r.noiseFrames > 0
               && (double) r.bandSnrDb >= kMinBandSnrDb;
+
+    // `measured` OVERRIDES `trusted` -- see the precedence note on Result. The
+    // per-bin loop above cannot apply this itself because bandSnrDb is not known
+    // until the loop that computes it has finished, so the gate lands here, on
+    // the whole array, and no bin can outlive the measurement it came from.
+    if (! r.measured)
+        r.trusted.fill (false);
 
     return r;
 }
