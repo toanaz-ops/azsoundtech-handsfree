@@ -361,6 +361,17 @@ struct NotchRig
         return s;
     }
 
+    // C-2: the per-slot ledger of what the LAST apply placed. MainComponent
+    // will own one of these per slot (Task 10); here the rig owns it, which is
+    // what makes the re-run tests read the way a real second soundcheck does.
+    SoundcheckApplyLedger ledger;
+
+    SoundcheckApplyStats apply (const std::vector<SoundcheckController::OutputResult>& results,
+                                int slot = 0)
+    {
+        return applySoundcheckResults (*controller, slot, results, ledger);
+    }
+
     int countSoundcheckNotches()
     {
         const auto snap = snapshot();
@@ -1309,7 +1320,7 @@ TEST (SoundcheckApply, ApplyRunsOnTheMessageThread)
         oneCandidate (0, 0, 1000.0, -12.0) };
 
     SoundcheckApplyStats offThread;
-    std::thread t ([&] { offThread = applySoundcheckResults (*rig.controller, results); });
+    std::thread t ([&] { offThread = rig.apply (results); });
     t.join();
 
     EXPECT_EQ (offThread.placed, 0) << "nothing may be written off the message thread";
@@ -1318,17 +1329,24 @@ TEST (SoundcheckApply, ApplyRunsOnTheMessageThread)
     EXPECT_FALSE (rig.controller->activeForTest (0, 15));
 
     // ...and the same call on the message thread does place.
-    const auto stats = applySoundcheckResults (*rig.controller, results);
+    const auto stats = rig.apply (results);
     EXPECT_EQ (stats.placed, 1);
     EXPECT_TRUE (rig.controller->activeForTest (0, 15)) << "top-down allocation starts at 15";
 }
 
-// RED IF: either half of B-1 is dropped -- the takenThisCall bitmap, or the
-// per-setNotch re-read. The bitmap is what makes six placements land on six
-// indices (the snapshot refreshes at hop cadence, ~10.7 ms, on the DETECTOR
-// thread, while this loop runs in microseconds on the message thread, so every
-// re-read returns the same frame). The re-read is what catches a detector
-// placement that landed since entry. F10, B-1.
+// RED IF: the takenThisCall bitmap is dropped. That bitmap is what makes six
+// placements land on six indices: the snapshot refreshes at hop cadence
+// (~10.7 ms) on the DETECTOR thread while this loop runs in microseconds on the
+// message thread, so every re-read inside one call returns the same frame.
+//
+// I-3, AND THE TEST NAME IS OLDER THAN THE TRUTH: this does NOT exercise the
+// per-setNotch re-read. The detector notch below is already in the ENTRY
+// snapshot, so the entry read alone would find it. The re-read exists to catch
+// a placement the DETECTOR makes on its own thread after entry, and there is no
+// harness hook that can force that interleaving -- the detector's placement
+// cadence is >= 300 ms (kDeepenAfterMs) and nothing here can drive it. The
+// re-read is therefore defence in depth with NO failing test behind it, and it
+// is listed as such in the task report rather than counted as covered. F10, B-1.
 TEST (SoundcheckApply, ApplyReReadsTheSnapshotBeforeEachSetNotch)
 {
     NotchRig rig { 1 };
@@ -1346,7 +1364,7 @@ TEST (SoundcheckApply, ApplyReReadsTheSnapshotBeforeEachSetNotch)
                                            NotchController::Origin::Detector));
     rig.pump();
 
-    const auto stats = applySoundcheckResults (*rig.controller, results);
+    const auto stats = rig.apply (results);
 
     EXPECT_EQ (stats.placed, 2);
     EXPECT_TRUE (rig.controller->activeForTest (0, 15));
@@ -1373,7 +1391,7 @@ TEST (SoundcheckApply, IndepApplyDoesNotUnwind)
     };
 
     rig.controller->failNextSetNotchOnLaneForTest (1);
-    const auto stats = applySoundcheckResults (*rig.controller, results);
+    const auto stats = rig.apply (results);
 
     EXPECT_EQ (stats.placed, 1);
     EXPECT_EQ (stats.refused, 1);
@@ -1392,7 +1410,7 @@ TEST (SoundcheckApply, PartialApplyStopsAndReportsRefused)
     r.candidates[1].hz = 2000.0f; r.candidates[1].q = 0.0f;  r.candidates[1].depthDb = -12.0f;
     r.candidates[2].hz = 3000.0f; r.candidates[2].q = 30.0f; r.candidates[2].depthDb = -12.0f;
 
-    const auto stats = applySoundcheckResults (*rig.controller, { r });
+    const auto stats = rig.apply ({ r });
 
     EXPECT_EQ (stats.placed, 1);
     EXPECT_GE (stats.refused, 1);
@@ -1416,8 +1434,7 @@ TEST (SoundcheckApply, LinkedSlotPlacesBothLanesAtOneIndex)
     const auto pre = rig.snapshot();
     ASSERT_EQ (pre.laneCount, 2u) << "pump both taps, or this test cannot fail correctly";
 
-    const auto stats = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
 
     EXPECT_EQ (stats.placed, 2);
     EXPECT_TRUE (rig.controller->activeForTest (0, 15));
@@ -1440,8 +1457,7 @@ TEST (SoundcheckApply, LinkedIsDerivedFromLaneCountNotJustTheSwitch)
     ASSERT_FALSE (snap.linked);
     ASSERT_LT (snap.laneCount, 2u);
 
-    const auto stats = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
 
     // One lane exists, so "every driven lane" is one placement -- and crucially
     // NOTHING is written to lane 1, which has no tap.
@@ -1463,17 +1479,16 @@ TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
     NotchRig      rig { 2 };
     rig.controller->setLinked (true);
     rig.controller->setEventSink (rec.sink());
-    // B-1(c) again, and this one is not only a fixture detail: SnapshotBuffer::
-    // linked is republished ONLY inside runOnce() drain loop, so the operator
-    // switch is invisible to a reader of the snapshot until a block has been
-    // drained through it (up to one hop, ~10.7 ms). Without this pump the rig
-    // still reads INDEP, applySoundcheckResults takes the INDEP branch and the
-    // unwind this test exists to prove is never reached.
-    ASSERT_TRUE (rig.snapshot().linked) << "the LINK switch has not been published yet";
+    // I-2: no pump is needed to make the LINK switch visible any more.
+    // applySoundcheckResults reads NotchController::effectiveLinked() once on
+    // the message thread rather than SnapshotBuffer::linked, which is
+    // republished only at hop cadence (~10.7 ms). Before that fix this test
+    // failed here: the snapshot still read INDEP, the INDEP branch ran, and
+    // the unwind this test exists to prove was never reached.
+    ASSERT_TRUE (rig.controller->effectiveLinked());
 
     rig.controller->failNextSetNotchOnLaneForTest (1);
-    const auto stats = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
 
     EXPECT_EQ (stats.placed, 0);
     EXPECT_GE (stats.refused, 1);
@@ -1493,13 +1508,11 @@ TEST (SoundcheckApply, ARerunReplacesItsOwnPreviousProposals)
     NotchRig      rig { 1 };
     rig.controller->setEventSink (rec.sink());
 
-    const auto first = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+    const auto first = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
     ASSERT_EQ (first.placed, 1);
     rig.pump();                                   // B-1(c)
 
-    const auto second = applySoundcheckResults (*rig.controller,
-                                                { oneCandidate (0, 0, 1200.0, -12.0) });
+    const auto second = rig.apply ({ oneCandidate (0, 0, 1200.0, -12.0) });
     rig.pump();
 
     EXPECT_EQ (second.clearedPrevious, 1);
@@ -1518,14 +1531,12 @@ TEST (SoundcheckApply, ARerunReplacesTheWholeSlotNotJustOneLane)
     NotchRig rig { 2 };
     rig.controller->setLinked (false);          // INDEP: two independent lanes
 
-    ASSERT_EQ (applySoundcheckResults (*rig.controller,
-                                       { oneCandidate (0, 0, 1000.0, -12.0),
-                                         oneCandidate (0, 1, 1500.0, -12.0) }).placed, 2);
+    ASSERT_EQ (rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0),
+                            oneCandidate (0, 1, 1500.0, -12.0) }).placed, 2);
     rig.pump();
 
     // A re-run that names only lane 0 must still clear BOTH previous proposals.
-    const auto again = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1100.0, -12.0) });
+    const auto again = rig.apply ({ oneCandidate (0, 0, 1100.0, -12.0) });
     rig.pump();
 
     EXPECT_EQ (again.clearedPrevious, 2) << "the whole slot, not just this lane";
@@ -1545,10 +1556,9 @@ TEST (SoundcheckApply, ReplacingLeavesEveryOtherOriginAlone)
                                            NotchController::Origin::Manual));
     rig.pump();
 
-    applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
+    rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
     rig.pump();
-    const auto again = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1100.0, -12.0) });
+    const auto again = rig.apply ({ oneCandidate (0, 0, 1100.0, -12.0) });
 
     EXPECT_EQ (again.clearedPrevious, 1);
     EXPECT_TRUE (rig.controller->activeForTest (0, 0));
@@ -1562,7 +1572,7 @@ TEST (SoundcheckApply, ReplacingLeavesEveryOtherOriginAlone)
 TEST (SoundcheckApply, APreventiveNotchIsItsOwnCeiling)
 {
     NotchRig rig { 1 };
-    applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
+    rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
 
     EXPECT_DOUBLE_EQ (rig.controller->rawCeilingDbForTest (0, 15), -12.0);
     EXPECT_DOUBLE_EQ (rig.controller->ceilingDbForTest (0, 15), -12.0);
@@ -1575,7 +1585,7 @@ TEST (SoundcheckApply, AnUnmeasuredResultPlacesNothing)
     auto r = oneCandidate (0, 0, 1000.0, -12.0);
     r.measured = false;
 
-    const auto stats = applySoundcheckResults (*rig.controller, { r });
+    const auto stats = rig.apply ({ r });
     EXPECT_EQ (stats.placed, 0);
     EXPECT_FALSE (rig.controller->activeForTest (0, 15));
 }
@@ -1607,7 +1617,7 @@ TEST (SoundcheckApply, AProposalWithinOneBinOfALiveNotchIsSkipped)
     r.candidates[1].q  = 30.0f;
     r.candidates[1].depthDb = -12.0f;
 
-    const auto stats = applySoundcheckResults (*rig.controller, { r });
+    const auto stats = rig.apply ({ r });
 
     EXPECT_EQ (stats.skippedLive, 1) << "the 1010 Hz proposal sits on the live notch";
     EXPECT_EQ (stats.placed, 1)      << "and the 4000 Hz one still lands";
@@ -1627,14 +1637,146 @@ TEST (SoundcheckApply, AProposalWithinOneBinOfALiveNotchIsSkipped)
 TEST (SoundcheckApply, ARerunMayRePlaceAtTheSameFrequencyItJustCleared)
 {
     NotchRig rig { 1 };
-    ASSERT_EQ (applySoundcheckResults (*rig.controller,
-                                       { oneCandidate (0, 0, 1000.0, -12.0) }).placed, 1);
+    ASSERT_EQ (rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) }).placed, 1);
     rig.pump();
 
-    const auto again = applySoundcheckResults (*rig.controller,
-                                               { oneCandidate (0, 0, 1000.0, -18.0) });
+    const auto again = rig.apply ({ oneCandidate (0, 0, 1000.0, -18.0) });
 
     EXPECT_EQ (again.clearedPrevious, 1);
     EXPECT_EQ (again.skippedLive, 0) << "a notch this call just cleared is not LIVE";
     EXPECT_EQ (again.placed, 1);
+}
+
+// RED IF: invariant 15 only looks at the SNAPSHOT. The re-read snapshot cannot
+// contain a notch this call wrote microseconds ago on the message thread, and
+// SoundcheckCandidates::pick has no mutual-separation step of its own, so two
+// adjacent-bin proposals out of ONE run would both land. Two notches over one
+// bin cascade: where the ceiling allows -24 dB each, the pair is about -48 dB.
+// C-1.
+TEST (SoundcheckApply, TwoAdjacentBinProposalsPlaceOnlyOne)
+{
+    NotchRig rig { 1 };
+
+    // 48 kHz / 2048 = 23.4375 Hz per bin. 1000 Hz is bin 43 and 1031.25 Hz is
+    // bin 44 exactly -- one bin apart, which invariant 15 forbids.
+    auto r = oneCandidate (0, 0, 1000.0, -12.0);
+    r.candidateCount = 2;
+    r.candidates[1].hz = 1031.25f; r.candidates[1].q = 30.0f; r.candidates[1].depthDb = -12.0f;
+
+    const auto stats = rig.apply ({ r });
+
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_EQ (stats.skippedLive, 1) << "the second proposal sits on the first";
+    EXPECT_TRUE  (rig.controller->activeForTest (0, 15));
+    EXPECT_FALSE (rig.controller->activeForTest (0, 14)) << "and it burns no index";
+}
+
+// RED IF: the replace pass clears by ORIGIN instead of by ledger. Origin::
+// Soundcheck has a SECOND producer -- the legacy 15 s soundcheck MODE, where
+// placeConfirmed stamps Origin::Soundcheck while soundcheckActive()
+// (NotchController.cpp:1093, turned on at MainComponent.cpp:802-803). Clearing
+// every Soundcheck-origin notch on the slot would silently delete protection
+// the operator locked in by hand, at the moment they pressed AP DUNG. C-2.
+TEST (SoundcheckApply, LegacySoundcheckModeNotchesSurviveAnApply)
+{
+    NotchRig rig { 1 };
+    // What the MODE leaves behind: Origin::Soundcheck, and in no ledger.
+    ASSERT_TRUE (rig.controller->setNotch (0, 5, 800.0, 30.0, -12.0,
+                                           NotchController::Origin::Soundcheck));
+    rig.pump();
+
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) });
+
+    EXPECT_EQ (stats.clearedPrevious, 0) << "this apply placed nothing previously";
+    EXPECT_TRUE (rig.controller->activeForTest (0, 5))
+        << "the operator's own soundcheck-mode notch must survive";
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 15));
+}
+
+// RED IF: result.slot is never compared. copyResultsForSlot() filters, but this
+// function is also reachable with copyResults(), and a leak here places one
+// slot's proposals on another slot's filters. I-1.
+TEST (SoundcheckApply, ResultsForAnotherSlotAreSkipped)
+{
+    NotchRig rig { 1 };
+
+    const auto stats = rig.apply ({ oneCandidate (1, 0, 1000.0, -12.0),
+                                    oneCandidate (0, 0, 2000.0, -12.0) }, 0);
+
+    EXPECT_EQ (stats.skippedOtherSlot, 1);
+    EXPECT_EQ (stats.placed, 1) << "only the result naming THIS slot lands";
+    EXPECT_TRUE  (rig.controller->activeForTest (0, 15));
+    EXPECT_FALSE (rig.controller->activeForTest (0, 14));
+}
+
+// RED IF: the depth frozen in RunParams at Arm is placed unclamped. Lane G's
+// M-B lesson: an operator can pull the depth slider up during the run or during
+// the 20 s results window, and APPLY would then put a notch on a live PA deeper
+// than the number the slider is showing. M-5.
+TEST (SoundcheckApply, ApplyNeverPlacesDeeperThanTheCurrentSlider)
+{
+    NotchRig rig { 1 };
+    rig.controller->setNotchDefaults (30.0, -12.0);   // the slider, moved after Arm
+
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -24.0) });
+
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_NEAR (rig.controller->depthDbForTest (0, 15), -12.0, 1.0e-9)
+        << "the slider wins over the depth frozen at Arm";
+    // ...and the clamp is one-directional: a proposal SHALLOWER than the slider
+    // is placed as proposed, never deepened to meet it.
+    NotchRig shallow { 1 };
+    shallow.controller->setNotchDefaults (30.0, -18.0);
+    ASSERT_EQ (shallow.apply ({ oneCandidate (0, 0, 1000.0, -6.0) }).placed, 1);
+    EXPECT_NEAR (shallow.controller->depthDbForTest (0, 15), -6.0, 1.0e-9);
+}
+
+// RED IF: takenThisCall is keyed by index alone. Lane 0 and lane 1 have
+// entirely separate chains, so an INDEP run of six proposals per lane needs six
+// indices, not twelve. Keying by index alone burns 12 of the 16 and leaves a
+// nearly-full chain for the detector. M-2.
+TEST (SoundcheckApply, IndepStereoKeepsOneIndexSpacePerLane)
+{
+    NotchRig rig { 2 };
+    rig.controller->setLinked (false);
+
+    auto laneResult = [] (int lane)
+    {
+        auto r = oneCandidate (0, lane, 1000.0, -12.0);
+        r.candidateCount = 6;
+        for (int i = 0; i < 6; ++i)
+        {
+            r.candidates[(std::size_t) i].hz      = (float) (1000.0 + 1000.0 * i);
+            r.candidates[(std::size_t) i].q       = 30.0f;
+            r.candidates[(std::size_t) i].depthDb = -12.0f;
+        }
+        return r;
+    };
+
+    const auto stats = rig.apply ({ laneResult (0), laneResult (1) });
+
+    EXPECT_EQ (stats.placed, 12);
+    for (int index = 15; index >= 10; --index)
+    {
+        EXPECT_TRUE (rig.controller->activeForTest (0, index)) << "lane 0 index " << index;
+        EXPECT_TRUE (rig.controller->activeForTest (1, index)) << "lane 1 index " << index;
+    }
+    EXPECT_FALSE (rig.controller->activeForTest (0, 9)) << "six per lane, not twelve";
+    EXPECT_FALSE (rig.controller->activeForTest (1, 9));
+}
+
+// RED IF: routingInvalid stops being honoured. It is NOT the same as
+// measured == false (F26): the routing was wrong, so nothing was measured on
+// the channel the operator thinks was tested. M-4.
+TEST (SoundcheckApply, ARoutingInvalidResultPlacesNothing)
+{
+    NotchRig rig { 1 };
+    auto r = oneCandidate (0, 0, 1000.0, -12.0);
+    r.measured = true;
+    r.routingInvalid = true;
+
+    const auto stats = rig.apply ({ r });
+    EXPECT_EQ (stats.placed, 0);
+    EXPECT_FALSE (rig.controller->activeForTest (0, 15));
 }

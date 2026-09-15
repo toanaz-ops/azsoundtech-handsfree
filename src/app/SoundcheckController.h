@@ -375,18 +375,54 @@ private:
 
 // MESSAGE THREAD ONLY. Defined by Task 7 -- declared here so Task 7 adds a
 // definition rather than a second surface.
+
+// C-2: a record of what the PREVIOUS apply placed on ONE slot.
+//
+// It exists because Origin::Soundcheck has TWO producers. This function is
+// one; the legacy 15 s soundcheck MODE is the other -- placeConfirmed stamps
+// Origin::Soundcheck whenever soundcheckActive() (NotchController.cpp:1093),
+// and MainComponent turns that on for Mode::Soundcheck (MainComponent.cpp:
+// 802-803). So "clear every Origin::Soundcheck notch on this slot" would
+// silently delete protection the operator locked in by hand with the mode
+// switch, at the moment they pressed AP DUNG.
+//
+// Ruling: no new Origin enumerator (Q7). The CALLER remembers instead, and
+// only what this function itself placed is ever replaced. Task 10 keeps one
+// ledger per slot in MainComponent, alive for the life of the app.
+struct SoundcheckApplyLedger
+{
+    struct Entry { int lane = 0, index = 0; float hz = 0.0f; };
+    std::vector<Entry> entries;
+};
+
 struct SoundcheckApplyStats
 {
-    int placed = 0, refused = 0, clearedPrevious = 0;
+    // LANE WRITES, not candidates (M-1): a LINKED pair at one index is 2.
+    int placed = 0;
+    // CANDIDATES that placed nothing -- one per candidate, whatever the
+    // reason. skippedLive below is a SUBSET of this, never a second total, so
+    // a GUI summary must not add the two.
+    int refused = 0;
+    // Clears this call ISSUED against ledger entries (M-3), NOT confirmed
+    // removals: clearNotch returns void, and the model only becomes observable
+    // one hop later through the next snapshot.
+    int clearedPrevious = 0;
     // Invariant 15, and it is enforced by Task 7 rather than by Task 6's call
     // into SoundcheckCandidates::pick: that call passes liveNotchHz EMPTY
     // because the lane M thread may not read a NotchController (inv 17). So
-    // the +-1 FFT bin test against the LIVE notches happens here, against the
-    // snapshot this function already reads, and a proposal dropped by it is
-    // counted BOTH in `refused` (nothing was placed for it) and here (this is
-    // WHY). Subset, not a separate total.
+    // the +-1 FFT bin test -- against the live notches AND against what this
+    // very call has already placed (C-1) -- happens here.
     int skippedLive = 0;
+    // RESULTS whose .slot named a different slot (I-1). Results, not
+    // candidates: the whole result is skipped before its candidates are read.
+    int skippedOtherSlot = 0;
 };
+
+// `slot` is the slot these results and this ledger belong to; a result naming
+// any other slot is skipped (I-1). `ledger` is read for the replace pass and
+// then OVERWRITTEN with what this call placed.
 SoundcheckApplyStats applySoundcheckResults (
     NotchController& controller,
-    const std::vector<SoundcheckController::OutputResult>& results);
+    int slot,
+    const std::vector<SoundcheckController::OutputResult>& results,
+    SoundcheckApplyLedger& ledger);

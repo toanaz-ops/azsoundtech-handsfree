@@ -1140,22 +1140,27 @@ void SoundcheckController::notifyStateChanged() const
 //==============================================================================
 namespace
 {
-// B-1's allocator. TOP-DOWN (15, 14, 13 ...) while the detector allocates
-// bottom-up (firstFreeIndexLocked scans i = 0..kSlots, NotchController.cpp:
-// 1066-1069), so the two only meet when the chain is nearly full.
+// B-1's allocator, keyed by LANE AND INDEX (M-2). Keying it by index alone
+// over-reserves across lanes: an INDEP stereo run of six proposals per lane
+// would burn twelve of the sixteen indices to place twelve notches that only
+// ever needed six, because lane 0 and lane 1 have entirely separate chains.
 //
-// `lane < 0` means "must be free on EVERY lane" -- a LINKED pair, the shape
-// firstFreeIndexAllLanesLocked (:1073-1084) produces on the detector side.
+// TOP-DOWN (15, 14, 13 ...) while the detector allocates bottom-up
+// (firstFreeIndexLocked scans i = 0..kSlots, NotchController.cpp:1066-1069),
+// so the two only meet when the chain is nearly full.
 //
-// Only ACTIVE notches enter the snapshot (NotchController.cpp:576-580), so
-// "not present in snap" is exactly "free". The brief carried a fourth
-// parameter, laneCount, unused by the scan and kept for a future per-lane
-// rule; it is dropped here rather than shipped dead -- `lane < 0` already
-// carries the whole all-lanes meaning, and the snapshot never lists a lane
-// this slot does not drive.
+// `lane < 0` means "must be free on every DRIVEN lane" -- a LINKED pair, the
+// shape firstFreeIndexAllLanesLocked (:1073-1084) produces on the detector
+// side. It is bounded by laneCount rather than kChannels: on a mono slot lane
+// 1 is never written and never marked, so scanning it would report every index
+// free and hand 15 out twice.
+//
+// Only ACTIVE notches enter the snapshot (NotchController.cpp:577), so "not
+// present in snap" is exactly "free".
 int firstFreeIndexTopDown (const NotchController::SnapshotBuffer& snap,
-                           const std::array<bool, NotchController::kSlots>& takenThisCall,
-                           int lane)
+                           const std::array<std::array<bool, NotchController::kSlots>,
+                                            NotchController::kChannels>& takenThisCall,
+                           int lane, int laneCount)
 {
     for (int index = NotchController::kSlots - 1; index >= 0; --index)
     {
@@ -1163,16 +1168,25 @@ int firstFreeIndexTopDown (const NotchController::SnapshotBuffer& snap,
         // latest_ is republished only inside runOnce()'s drain loop on the
         // DETECTOR thread, about once per hop (~10.7 ms), while this loop runs
         // in microseconds on the message thread.
-        if (takenThisCall[(std::size_t) index])
+        bool free = true;
+        if (lane < 0)
+        {
+            for (int l = 0; l < laneCount && free; ++l)
+                free = ! takenThisCall[(std::size_t) l][(std::size_t) index];
+        }
+        else
+        {
+            free = ! takenThisCall[(std::size_t) lane][(std::size_t) index];
+        }
+        if (! free)
             continue;
 
-        bool free = true;
         for (std::uint32_t i = 0; i < snap.notchCount && free; ++i)
         {
             const auto& n = snap.notches[i];
             if ((int) n.index != index)
                 continue;
-            if (lane < 0 || (int) n.channel == lane)
+            if (lane < 0 ? (int) n.channel < laneCount : (int) n.channel == lane)
                 free = false;
         }
         if (free)
@@ -1190,13 +1204,25 @@ constexpr std::size_t flatSlot (int lane, int index)
 }
 
 // Invariant 15. Two notches one bin apart are two filters doing one filter's
-// job: the second buys almost no extra attenuation and it costs a slot out of
-// sixteen that a different howl will need.
+// job: the second buys almost no extra attenuation, it costs a slot out of
+// sixteen that a different howl will need, and where the ceiling allows -24 dB
+// a pair of them cascades to about -48 dB over one bin.
 //
 // The bin ruler is LoopGainEstimator's, which is the detector's
 // (Detector::kFftSize, kNumBins) -- the same ruler SoundcheckCandidates would
 // have used had Task 6 been able to pass it a live-notch list. It cannot
 // (inv 17), so the test lives here.
+//
+// THREE populations are compared against, not one:
+//   * the live notches in the snapshot;
+//   * MINUS the ones THIS CALL has already cleared -- they are not live,
+//     however long the snapshot goes on listing them (up to one hop). Without
+//     this, a second soundcheck of the same room, which finds the same
+//     frequencies, would refuse to re-place anything it had just removed;
+//   * PLUS what THIS CALL has already placed (C-1). The re-read snapshot
+//     cannot contain a notch written microseconds ago on the message thread,
+//     and SoundcheckCandidates::pick has no mutual-separation step of its own,
+//     so two adjacent-bin proposals from one run would otherwise both land.
 //
 // A snapshot with no published sample rate cannot be measured against: hzToBin
 // answers 0 for everything at rate 0 and would collapse every proposal onto one
@@ -1205,6 +1231,7 @@ constexpr std::size_t flatSlot (int lane, int index)
 // real rate.
 bool withinOneBinOfALiveNotch (const NotchController::SnapshotBuffer& snap,
                                const std::array<bool, NotchController::kTotalSlots>& clearedThisCall,
+                               const std::vector<SoundcheckApplyLedger::Entry>& placedThisCall,
                                int lane, double hz)
 {
     if (! (snap.sampleRate > 0.0))
@@ -1212,30 +1239,35 @@ bool withinOneBinOfALiveNotch (const NotchController::SnapshotBuffer& snap,
 
     const int candidateBin = LoopGainEstimator::hzToBin (hz, snap.sampleRate);
 
+    const auto adjacent = [candidateBin, &snap] (double otherHz)
+    {
+        return std::abs (LoopGainEstimator::hzToBin (otherHz, snap.sampleRate) - candidateBin) <= 1;
+    };
+
     for (std::uint32_t i = 0; i < snap.notchCount; ++i)
     {
         const auto& n = snap.notches[i];
         if ((int) n.channel != lane)
             continue;
-        // A notch THIS CALL has already cleared is not live, however long the
-        // snapshot goes on listing it (up to one hop). Without this, a second
-        // soundcheck of the same room -- which finds the same frequencies, that
-        // being the normal case -- would refuse to re-place anything it had
-        // just removed.
         if (clearedThisCall[flatSlot ((int) n.channel, (int) n.index)])
             continue;
-
-        if (std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, snap.sampleRate)
-                      - candidateBin) <= 1)
+        if (adjacent ((double) n.frequency))
             return true;
     }
+
+    for (const auto& e : placedThisCall)
+        if (e.lane == lane && adjacent ((double) e.hz))
+            return true;
+
     return false;
 }
 } // namespace
 
 SoundcheckApplyStats applySoundcheckResults (
     NotchController& controller,
-    const std::vector<SoundcheckController::OutputResult>& results)
+    int slot,
+    const std::vector<SoundcheckController::OutputResult>& results,
+    SoundcheckApplyLedger& ledger)
 {
     SoundcheckApplyStats stats;
 
@@ -1248,62 +1280,94 @@ SoundcheckApplyStats applySoundcheckResults (
     // NOT a jassert: a Debug-only trap fires long after the damage, and this is
     // a refusal the caller can see and report. When no MessageManager exists at
     // all (a headless unit test that never created one) there is no message
-    // thread to be off, so the check does not apply.
+    // thread to be off, so the check does not apply. THE LEDGER IS NOT TOUCHED
+    // on this path -- nothing was placed, so nothing it records has changed.
     if (juce::MessageManager::getInstanceWithoutCreating() != nullptr
         && ! juce::MessageManager::existsAndIsCurrentThread())
     {
         for (const auto& result : results)
-            if (result.measured && ! result.routingInvalid)
+            if (result.slot == slot && result.measured && ! result.routingInvalid)
                 stats.refused += result.candidateCount;
         return stats;
     }
 
-    // B-1: indices THIS CALL has handed out. The snapshot cannot know about
-    // them -- latest_ is republished only inside runOnce()'s drain loop on the
-    // DETECTOR thread, about once per hop (~10.7 ms), while this loop runs in
-    // microseconds on the message thread. Without this array every re-read
-    // returns the same frame, every lookup answers 15, and five of six
-    // proposals are overwritten in silence (setNotchImpl does not check
-    // n.active, NotchController.cpp:226-245).
-    std::array<bool, NotchController::kSlots> takenThisCall {};
-    // ...and the notches this call has CLEARED, which the snapshot goes on
-    // listing for the same reason. Read by the invariant-15 test only.
-    std::array<bool, NotchController::kTotalSlots> clearedThisCall {};
+    // I-2: linkedness is the CONTROLLER's own predicate, read ONCE here on the
+    // message thread. effectiveLinked() (NotchController.h:223) is
+    // isLinked() || width_ < 2 || taps_[1] == nullptr, so it already covers
+    // both the operator's switch and the cases where independence is
+    // impossible. Deriving it from SnapshotBuffer::linked instead would read a
+    // value republished only at hop cadence (NotchController.cpp:641), so an
+    // operator who flipped LINK less than ~10.7 ms ago would have their first
+    // proposal placed in the OTHER mode.
+    const bool linkedNow = controller.effectiveLinked();
 
-    // --- (b) clear THIS SLOT previous preventive notches ----------------------
-    // Whole slot, BOTH lanes (I-12): a soundcheck measures a slot outputs
-    // together, and a LINKED placement writes both lanes at one index, so
-    // replacing one lane proposal while leaving the other behind produces a
-    // pair the operator never asked for. They never auto-release (KD-7), so
-    // skipping this drains the 16-slot chain after a few soundchecks.
+    // B-1: indices THIS CALL has handed out, per lane (M-2).
+    std::array<std::array<bool, NotchController::kSlots>, NotchController::kChannels> takenThisCall {};
+    // ...the notches this call has CLEARED, which the snapshot goes on listing
+    // for the same reason, and what it has PLACED, which the snapshot cannot
+    // know about yet. Both are read by the invariant-15 test.
+    std::array<bool, NotchController::kTotalSlots> clearedThisCall {};
+    std::vector<SoundcheckApplyLedger::Entry> placedThisCall;
+    placedThisCall.reserve (ledger.entries.size() + 4);
+
+    // The entry snapshot. laneCount comes from here and is read ONCE: it is
+    // analysedLanes() (NotchController.h:667, published at .cpp:637), which only
+    // moves on setWidth(), and setWidth() requires the detector thread stopped.
+    NotchController::SnapshotBuffer entrySnap {};
+    controller.copySnapshot (entrySnap);
+    const int laneCount = juce::jlimit (1, NotchController::kChannels, (int) entrySnap.laneCount);
+
+    // --- (b) replace THIS SLOT's previous proposals, and ONLY those (C-2) ----
+    // Origin::Soundcheck has two producers: this function, and the legacy 15 s
+    // soundcheck MODE (placeConfirmed, NotchController.cpp:1093, turned on at
+    // MainComponent.cpp:802-803). Clearing by origin alone would delete a notch
+    // the operator locked in by hand, at the moment they pressed AP DUNG. So
+    // the ledger -- what the PREVIOUS apply placed on this slot -- is the
+    // authority, and an entry only counts if the notch still sitting at that
+    // (lane, index) is still Soundcheck-origin and still within +-1 bin of the
+    // frequency the ledger recorded. Anything else at that address is somebody
+    // else's notch on a reused slot.
+    for (const auto& e : ledger.entries)
     {
-        NotchController::SnapshotBuffer snap {};
-        controller.copySnapshot (snap);
-        for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+        for (std::uint32_t i = 0; i < entrySnap.notchCount; ++i)
         {
-            const auto& n = snap.notches[i];
-            if (n.origin != NotchController::Origin::Soundcheck)
+            const auto& n = entrySnap.notches[i];
+            if ((int) n.channel != e.lane || (int) n.index != e.index)
                 continue;
-            controller.clearNotch ((int) n.channel, (int) n.index,
+            if (n.origin != NotchController::Origin::Soundcheck)
+                break;
+            if (! (entrySnap.sampleRate > 0.0)
+                || std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, entrySnap.sampleRate)
+                             - LoopGainEstimator::hzToBin ((double) e.hz, entrySnap.sampleRate)) > 1)
+                break;
+
+            controller.clearNotch (e.lane, e.index,
                                    NotchController::ClearReason::SoundcheckReplace);
             ++stats.clearedPrevious;
-            clearedThisCall[flatSlot ((int) n.channel, (int) n.index)] = true;
+            clearedThisCall[flatSlot (e.lane, e.index)] = true;
 
             // N-5: the INDEX is not marked free here, and that is deliberate.
-            //
-            // takenThisCall starts all-false, so clearing an index to false
-            // would be a no-op anyway. More importantly, an index freed HERE is
-            // NOT reusable by THIS call: the snapshot each placement re-reads
-            // still lists the cleared notch for up to ~10.7 ms, so
-            // firstFreeIndexTopDown skips it regardless. The result is
-            // conservative -- a re-run may place lower down the chain than it
-            // strictly had to -- and conservative is the right side to be on
-            // when the alternative is two writers on one index.
+            // takenThisCall starts all-false, so clearing it would be a no-op
+            // anyway; and an index freed HERE is not reusable by THIS call,
+            // because the snapshot each placement re-reads still lists the
+            // cleared notch for up to ~10.7 ms. Conservative is the right side
+            // to be on when the alternative is two writers on one index.
+            break;
         }
     }
 
     for (const auto& result : results)
     {
+        // I-1: a result belonging to another slot must never reach THIS slot's
+        // chain. copyResultsForSlot() already filters, but this function is
+        // also reachable with copyResults(), and a leak here places one slot's
+        // proposals on another's filters.
+        if (result.slot != slot)
+        {
+            ++stats.skippedOtherSlot;
+            continue;
+        }
+
         if (! result.measured || result.routingInvalid)
             continue;                        // a VALID result that places nothing (Q8, F26)
 
@@ -1311,24 +1375,15 @@ SoundcheckApplyStats applySoundcheckResults (
         {
             const auto& cand = result.candidates[(std::size_t) c];
 
-            // (a) RE-READ before EVERY setNotch. This is a GUARD against a
-            // DETECTOR placement that landed since entry -- it is NOT the
-            // allocator, because it cannot see what this call has already
-            // handed out (B-1).
+            // (a) RE-READ before EVERY setNotch. DEFENCE IN DEPTH, not the
+            // allocator (I-3): it is here to catch a DETECTOR placement that
+            // landed since entry, and the detector runs on its own thread at
+            // >= 300 ms placement cadence, so no test in this suite can force
+            // that interleaving -- there is no harness hook for it. What makes
+            // six proposals land on six indices is takenThisCall, which the
+            // snapshot cannot know about at all.
             NotchController::SnapshotBuffer snap {};
             controller.copySnapshot (snap);
-
-            // (c/N5) The BEHAVIOUR, not the switch. SnapshotBuffer::linked is
-            // the operator switch and says so (NotchController.cpp:637-641);
-            // effectiveLinked() also forces LINKED whenever independence is
-            // impossible -- width 1, or no lane-1 tap (NotchController.h:223).
-            // laneCount is analysedLanes() (:667, published at .cpp:637), so
-            // laneCount < 2 is exactly that second half. A mono slot therefore
-            // takes the linked branch and writes its ONE lane; nothing is ever
-            // written to a lane this slot does not drive.
-            const bool linkedNow = snap.linked || snap.laneCount < 2;
-            const int  laneCount = juce::jlimit (1, NotchController::kChannels,
-                                                 (int) snap.laneCount);
 
             // --- invariant 15, tested BEFORE an index is spent on it ---------
             bool sitsOnALiveNotch = false;
@@ -1336,12 +1391,14 @@ SoundcheckApplyStats applySoundcheckResults (
             {
                 for (int lane = 0; lane < laneCount && ! sitsOnALiveNotch; ++lane)
                     sitsOnALiveNotch = withinOneBinOfALiveNotch (snap, clearedThisCall,
-                                                                 lane, (double) cand.hz);
+                                                                 placedThisCall, lane,
+                                                                 (double) cand.hz);
             }
             else
             {
                 sitsOnALiveNotch = withinOneBinOfALiveNotch (snap, clearedThisCall,
-                                                             result.lane, (double) cand.hz);
+                                                             placedThisCall, result.lane,
+                                                             (double) cand.hz);
             }
 
             if (sitsOnALiveNotch)
@@ -1353,25 +1410,40 @@ SoundcheckApplyStats applySoundcheckResults (
             }
 
             const int index = firstFreeIndexTopDown (snap, takenThisCall,
-                                                     linkedNow ? -1 : result.lane);
+                                                     linkedNow ? -1 : result.lane, laneCount);
             if (index < 0) { ++stats.refused; break; }       // the chain is full
-            takenThisCall[(std::size_t) index] = true;       // B-1: before any write
+
+            // M-5, lane G's M-B lesson: RunParams froze the depth at Arm, and
+            // an operator can pull the depth slider up while the run or the
+            // 20 s results window is on screen. Placing what was frozen would
+            // then put a notch on a live PA deeper than the number the slider
+            // is showing. Clamp to the slider at the moment of placement --
+            // deeper is more negative, so std::max is the shallow direction,
+            // and nothing here can ever make a proposal DEEPER than it asked
+            // for.
+            const double depth = std::max ((double) cand.depthDb, controller.getNotchDepthDb());
 
             if (linkedNow)
             {
                 // ALL-OR-NOTHING (N4): one lane protected while the GUI claims
                 // both is worse than placing nothing -- the same reasoning
-                // placeConfirmed (NotchController.cpp:1265) and
-                // adoptPreset (:530) already follow.
+                // placeConfirmed (NotchController.cpp:1265) and adoptPreset
+                // (:530) already follow.
                 int  placedLanes = 0;
                 bool ok = true;
                 for (int lane = 0; lane < laneCount && ok; ++lane)
                 {
-                    if (controller.setNotch (lane, index, cand.hz, cand.q, cand.depthDb,
+                    if (controller.setNotch (lane, index, cand.hz, cand.q, depth,
                                              NotchController::Origin::Soundcheck))
+                    {
+                        takenThisCall[(std::size_t) lane][(std::size_t) index] = true;
+                        placedThisCall.push_back ({ lane, index, cand.hz });
                         ++placedLanes;
+                    }
                     else
+                    {
                         ok = false;
+                    }
                 }
 
                 if (! ok)
@@ -1379,6 +1451,12 @@ SoundcheckApplyStats applySoundcheckResults (
                     for (int lane = 0; lane < placedLanes; ++lane)
                         controller.clearNotch (lane, index,
                                                NotchController::ClearReason::PartialApplyUnwind);
+                    // The unwound lanes are struck from BOTH records: the index
+                    // stays reserved for this call (the snapshot cannot show it
+                    // gone yet), but a frequency that is no longer on the chain
+                    // must not go on blocking a later proposal, and it must not
+                    // reach the ledger as if it had survived.
+                    placedThisCall.resize (placedThisCall.size() - (std::size_t) placedLanes);
                     ++stats.refused;
                     break;                                   // stop this result
                 }
@@ -1386,7 +1464,7 @@ SoundcheckApplyStats applySoundcheckResults (
             }
             else
             {
-                if (! controller.setNotch (result.lane, index, cand.hz, cand.q, cand.depthDb,
+                if (! controller.setNotch (result.lane, index, cand.hz, cand.q, depth,
                                            NotchController::Origin::Soundcheck))
                 {
                     // INDEP: STOP, do NOT roll back. A notch already placed is
@@ -1395,10 +1473,17 @@ SoundcheckApplyStats applySoundcheckResults (
                     ++stats.refused;
                     break;
                 }
+                takenThisCall[(std::size_t) result.lane][(std::size_t) index] = true;
+                placedThisCall.push_back ({ result.lane, index, cand.hz });
                 ++stats.placed;
             }
         }
     }
 
+    // C-2: the ledger is what THIS call placed, replacing what the last one
+    // did. It is overwritten even when nothing was placed -- the previous
+    // entries were cleared above, so remembering them would make the NEXT
+    // apply try to clear notches that are already gone.
+    ledger.entries = std::move (placedThisCall);
     return stats;
 }
