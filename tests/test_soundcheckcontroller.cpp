@@ -635,6 +635,68 @@ TEST (SoundcheckController, SweepIsNotArmedUntilTheGateSaysQuiet)
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Sweep);
 }
 
+// RED IF: the sweep deadlines are carried forward from the noise-floor deadline
+// instead of re-stamped when the sweep is actually armed (N-1).
+//
+// After C-1 the audio starts when the GATE POLL arms it, not when the noise
+// floor was entered. A poll that is L late therefore leaves a deadline L short:
+// under 700 ms that silently under-measures the tail (a resonance whose decay
+// fell outside the window reads lower than it is -- the estimator cannot tell,
+// and the log says nothing); past 700 ms the Gap arrives while the sweep is
+// still at FULL AMPLITUDE and the bare release is a hard cut on a live PA.
+TEST (SoundcheckController, LateGatePollDoesNotShortenTheTailOrCutTheSweep)
+{
+    Rig r;                          // silent room: any non-zero output IS the sweep
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+
+    // 800 ms late -- past kTailSeconds, which is what turns the bug audible.
+    r.driveUnpolled (SoundcheckController::kNoiseFloorMs + 800.0);
+    ASSERT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
+
+    const double armedAtMs = r.clock.nowMs();
+    r.sc.runOnce();                                    // the late gate poll
+    ASSERT_EQ (r.sc.getState(), SoundcheckController::State::Sweep);
+    ASSERT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
+
+    const double perBlock = r.frames / kSr * 1000.0;
+
+    // (a) 3.0 s after ARMING -- i.e. just before the sweep audio itself ends --
+    //     the machine must still be sweeping. The old arithmetic entered Gap at
+    //     armedAt + 2.92 s, 100 ms before the audio finished.
+    while (r.clock.nowMs() < armedAtMs + 3000.0)
+    {
+        r.block(); r.clock.advance (perBlock); r.sc.runOnce();
+    }
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Sweep)
+        << "the Sweep phase ended before the sweep audio did";
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
+    EXPECT_FALSE (r.engine.isSoundcheckRampOutPending())
+        << "the sweep was cut short -- something asked for an emergency fade";
+    EXPECT_GT (r.peakOn (0), 0.0f) << "nothing is being emitted at all";
+
+    // (b) and no release by the CONTROLLER ever lands on a channel that is
+    //     still making sound, for either target.
+    float peakAtRelease = -1.0f;
+    int   releases = 0;
+    for (double t = 0.0; t < 12000.0; t += perBlock)
+    {
+        r.block();
+        const float peakThisBlock  = r.peakOn (0) + r.peakOn (1);
+        const bool  armedAfterBlock = r.engine.getSoundcheckOutputChannel() >= 0;
+        r.clock.advance (perBlock);
+        r.sc.runOnce();
+        if (armedAfterBlock && r.engine.getSoundcheckOutputChannel() < 0)
+        {
+            ++releases;
+            peakAtRelease = std::max (peakAtRelease, peakThisBlock);
+        }
+    }
+    EXPECT_GT (releases, 0) << "the run never released a channel -- a fixture problem";
+    EXPECT_FLOAT_EQ (std::max (peakAtRelease, 0.0f), 0.0f)
+        << "a channel was released while it was still playing: that is a hard "
+           "cut at whatever amplitude the sweep had reached";
+}
+
 // RED IF: the gate answers a question about the whole spectrum instead of the
 // band the sweep measures (I-2). An LED driver at 17 kHz, a switch-mode supply
 // or mains hum are narrow, permanent and outside [kSweepLowHz, kTrustedHighHz]:
@@ -658,6 +720,8 @@ TEST (SoundcheckController, GateIgnoresBinsOutsideTheSweepBand)
         in.pump (2000.0);
         EXPECT_TRUE (sawEvent (in.log, "soundcheck_abort"));
         EXPECT_EQ (abortReasonInLog (in.log), "room_ringing");
+        in.micSource.assign (4096, 0.0f);
+        expectEngineStoodDown (in);
     }
 }
 
@@ -872,6 +936,8 @@ TEST (SoundcheckController, EngineStoppedAbortReleasesTheChannelWithNoCallback)
         << "the abort waited for a fade that nothing will ever generate";
     EXPECT_FALSE (r.engine.isSoundcheckRampOutPending());
     EXPECT_TRUE (r.detectionOn);
+    r.setRunning (true);        // the helper drives blocks; put the rig back first
+    expectEngineStoodDown (r);
 }
 
 // RED IF: a device error is not an abort. getLastDeviceError() is the only
@@ -890,6 +956,7 @@ TEST (SoundcheckController, DeviceErrorAborts)
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
     EXPECT_TRUE (r.detectionOn);
     EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
+    expectEngineStoodDown (r);
 }
 
 // RED IF: micCaptureDrops_ is ignored. A drop splices sample N onto N+k, which

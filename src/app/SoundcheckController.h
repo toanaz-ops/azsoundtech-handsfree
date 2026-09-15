@@ -11,6 +11,11 @@
 //   MESSAGE THREAD   preflight(), arm(), applyRequested(), dismissRequested(),
 //                    requestStop(), abortAndJoin(), start(), stop(), and the
 //                    assignment of the three std::function members.
+//                    *** stop(), abortAndJoin() AND THE DESTRUCTOR ALSO INVOKE
+//                    ALL THREE LAMBDAS ON THE CALLING THREAD *** as the last
+//                    thing they do -- they stand a live run down, and standing
+//                    it down means restoring detection and logging the abort
+//                    (N-2). See the lifetime contract on the members below.
 //   LANE M THREAD    run() -> runOnce() in a wait(kPollMs) loop. It drains the
 //                    engine's mic-capture ring, runs LoopGainEstimator and
 //                    SoundcheckCandidates, writes the eight engine atomics and
@@ -213,7 +218,7 @@ public:
     //
     // *** AFTER THIS RETURNS THE POLL THREAD IS STOPPED. *** Task 10 must call
     // start() again once the device is back; nothing restarts it here.
-    bool  abortAndJoin();
+    [[nodiscard]] bool abortAndJoin();
 
     // --- ANY THREAD (reads) ---
     [[nodiscard]] State  getState() const;
@@ -230,13 +235,33 @@ public:
     // owner's lambda does nothing but relaxed atomic stores
     // (NotchController::setDetectionActive).
     //
-    // *** LIFETIME CONTRACT (I-10) ***
-    // All three are ASSIGNED ONCE, BEFORE start(), AND NEVER AFTER. They are
-    // invoked from the lane M thread; a std::function assigned while it is
-    // being invoked is a data race, and these are bare public members with no
-    // lock. Before any reassignment or destruction, abortAndJoin() or
-    // stop() must have RETURNED. MainComponent assigns them in its
-    // constructor (Task 10 Step 2), before the controller is ever started.
+    // *** LIFETIME CONTRACT (I-10, amended by N-2) ***
+    //
+    // ASSIGNED ONCE, BEFORE start(), AND NEVER AFTER. A std::function assigned
+    // while it is being invoked is a data race, and these are bare public
+    // members with no lock. Before any reassignment, abortAndJoin() or stop()
+    // must have RETURNED. MainComponent assigns them in its constructor
+    // (Task 10 Step 2), before the controller is ever started.
+    //
+    // THEY ARE INVOKED FROM THE LANE M THREAD *AND* FROM WHATEVER THREAD CALLS
+    // stop(), abortAndJoin() OR THE DESTRUCTOR. Those three stand a live run
+    // down after joining the poll thread, and standing a run down means
+    // setDetectionActiveOnAllSlots(true), a soundcheck_abort through logEvent
+    // and one onStateChanged -- there is no other thread left to do it on.
+    //
+    // NOT enforced with jassert(isThisTheMessageThread()). The last of those
+    // three calls is a DESTRUCTOR, which runs on whatever thread owns the
+    // object, and an assertion that holds only in Debug builds fires long after
+    // the dangling reference it is supposed to prevent has already been formed.
+    // The property that actually prevents it is DECLARATION ORDER, which is
+    // checkable by reading the owner:
+    //
+    // *** THE OWNER MUST DECLARE SoundcheckController AFTER *** its AudioEngine,
+    // its ClockSource, its SessionLogger and every GUI member these lambdas
+    // reach. Members are destroyed in reverse declaration order, so declaring
+    // it last means all of them are still alive while it stands the run down.
+    // The other way round, the destructor touches dead objects on its way out
+    // (C-3).
     std::function<void (bool)>             setDetectionActiveOnAllSlots;
     std::function<void (const juce::var&)> logEvent;      // message- or lane-M thread
     std::function<void()>                  onStateChanged;   // GUI repaint request
@@ -269,6 +294,9 @@ private:
     // reached from arm() on the message thread, before the thread exists) ---
     void enterTarget (int index);
     void enterGap();
+    // Releases scOutChannel_ -- but through the RAMP if the callback still has
+    // a non-zero sample to produce (N-1). A bare store there is a hard cut.
+    void releaseOutputChannelSafely();
     void finishRun();
     void beginAbort (AbortReason reason);
     void stopEmissionSafely();            // ramp-out while emitting, backstop while silent
@@ -316,6 +344,10 @@ private:
     std::int64_t capturedSamples_     = 0;
     std::size_t  noiseWindowFill_     = 0;
     std::int64_t sweepLeadInSamples_  = 0;
+    // Length of the sweep itself, so releaseOutputChannelSafely() can ask
+    // "could the callback still be producing a non-zero sample?" without
+    // re-deriving SoundcheckSignal's arithmetic.
+    std::int64_t sweepTotalSamples_   = 0;
 
     LoopGainEstimator estimator_ { 48000.0 };
     std::vector<float> capture_;          // drain scratch, sized once at Arm
