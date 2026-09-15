@@ -1,15 +1,35 @@
 # Sổ quyết định — Lane M: Soundcheck đo chủ động (2026-09-15)
 
 **Trạng thái: tất cả Q do điều phối chốt tạm theo phương án khuyên dùng; chờ
-owner duyệt — danh sách Q cần owner xác nhận TRƯỚC KHI phát tín hiệu ra PA
-thật: Q2 (mức phát), Q6 (tự đặt notch hay chỉ đề xuất), Q15 (tắt đường mic
-trong lúc quét).**
+owner duyệt.**
+
+**Cập nhật 2026-09-15 sau phản biện read-only vòng 1 (8 BLOCKER / 11 IMPORTANT /
+8 MINOR, không finding nào bị bác).** Bốn mục mới ở cuối file: **Q3 (lật lại)**,
+**Q15 (lật lại)**, **Q16**, **Q17**. Mục cũ giữ nguyên, không sửa — theo đúng
+`recording-design-decisions`.
+
+**Danh sách owner phải xác nhận TRƯỚC KHI phát tín hiệu ra PA thật — tám mục,
+theo kết luận của phản biện:**
+
+1. **Q2** — mức phát −20 dBFS, với cách diễn đạt trung thực ở spec §3 ("20 dB
+   dưới toàn thang ở master hiện tại", không quy ra dB SPL).
+2. **Q15 (lật lại)** — im **cả kênh ngõ ra** 4,5 s mỗi kênh, **~72 s** xấu nhất
+   cho hệ 8 slot stereo.
+3. **Q6** — chỉ đề xuất hay tự đặt. Prompt gốc của owner viết "**đặt** notch
+   phòng ngừa"; điều phối chọn "đề xuất". Đây là một chỗ lệch với chỉ thị gốc.
+4. **Q3 (lật lại)** — bộ điều kiện tự hủy còn lại, và **độ trễ dừng xấu nhất**
+   (≤ 31 ms @ buffer 64, ≤ 51 ms @ buffer 1024, cộng trễ driver/amp).
+5. **Q16** — nút `ĐO` riêng hay tái dùng `SOUNDCHECK`.
+6. **Q7 + Q9** — bất đối xứng khi nạp lại preset: notch phòng ngừa đặt thì
+   vĩnh viễn, nạp lại từ preset thì tự nhả sau 30 s.
+7. **`kResultsTimeoutMs`** — 20 s (hạ từ 60 s).
+8. **`ClearReason::SoundcheckReplace`** — thêm một giá trị vào enum của lane D.
 
 Mỗi mục là một ngả rẽ thiết kế. Ghi đủ: câu hỏi, các phương án đã đề xuất (kèm
 phương án khuyên dùng), và lựa chọn. Lật lại khi cần đổi hướng; đừng hỏi lại
 câu đã có đáp án ở đây.
 
-Spec đích: `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md`.
+Spec đích: `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (**rev 2**).
 Người hỏi: Fable (điều phối). Người quyết: **owner (ToanAZ) — chưa duyệt.**
 Owner không có mặt 2026-09-15 và đã yêu cầu giảm tối đa số câu hỏi, nên điều
 phối chốt tạm để spec viết được; mọi `Chọn` dưới đây lật lại được, chi phí là
@@ -263,6 +283,91 @@ có tín hiệu thật ra PA** (nó là một thay đổi level: một ngõ ra v
 s).
 
 ---
+
+---
+
+**Q3 và Q15 lật lại, cộng Q16, Q17 — từ phản biện read-only vòng 1 (2026-09-15).**
+Mục cũ ở trên **không bị sửa**; đây là các lựa chọn thay thế, ghi nối tiếp.
+
+## Q3 (lật lại 2026-09-15) — Bộ điều kiện tự hủy: `ringRiskScore` trong lúc chạy là một điều kiện CHẾT
+
+Phản biện (BLOCKER 1) chứng minh điều kiện tự hủy `ringRiskScore ≥
+ringRiskThreshold` **không bao giờ có thể đúng** trong lúc quét: detection tắt ⇒
+`processSpectrumForDetection` trả về ngay (`src/app/NotchController.cpp:1281-1282`)
+nên `frameScoreValid_` không bao giờ true; và tap bị treo ⇒ không block nào được
+drain ⇒ khối publish snapshot (`src/app/NotchController.cpp:617-650`) không chạy
+⇒ `copySnapshot()` trả một khung đông cứng. Cùng lúc, điều kiện "`getTapDropCount`
+tăng" cũng chết, vì thiết kế treo hẳn việc ghi tap.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Ring risk đọc ở `Preflight` và `Arm`** (lúc tap còn chạy, snapshot còn sống). Trong lúc chạy, thay bằng phép đo của **chính lane M**: RMS mic trượt 20 ms từ `micCapture_`, và peakiness của cửa sổ nền 0,5 s trước mỗi sweep vượt `CandidateScorer::kConfirmScore`. Thay `getTapDropCount` bằng `micCaptureDrops_`. Cộng: đổi sample rate / số kênh, `isRunning()` false, `getLastDeviceError()` khác rỗng | khuyên dùng |
+| 2 | Giữ ring risk trong lúc chạy bằng cách **bật lại detection giữa các kênh** để snapshot refresh: đúng số liệu hơn, nhưng detector sẽ nhìn thấy đuôi sweep và có thể đặt notch lên chính nó | |
+| 3 | Bỏ hẳn tự hủy theo mức trong lúc chạy, chỉ còn nút `DỪNG` và các điều kiện từ chối ở `Preflight` | |
+
+**Chọn: 1.** — điều phối tự chọn phương án khuyên dùng 2026-09-15, owner CHƯA
+duyệt; lật lại được trước khi release. Kèm: độ trễ dừng xấu nhất được ghi thành
+bảng trong spec §3 (≤ 31,3 ms @ buffer 64 / ≤ 51,3 ms @ buffer 1024, cộng trễ
+driver và amp), và ramp-out do **chính audio callback** sinh nên không phụ thuộc
+thread nào còn sống.
+
+## Q15 (lật lại 2026-09-15) — Tắt tiếng theo (slot, lane) KHÔNG mở được vòng hú
+
+Phản biện (BLOCKER 2): nhiều slot **cộng dồn** lên cùng một kênh ngõ ra — callback
+xoá trắng mọi kênh ra trước (`src/app/AudioEngine.cpp:565-577`) đúng để DSP cộng
+dồn `out[n] += v` (`src/app/AudioEngine.cpp:621`). Tắt một `(slot, lane)` để các
+slot khác tiếp tục bơm tiếng mic vào **cùng kênh đó**: vòng vẫn đóng, mà mọi
+detector đã bị tắt. `EY` của phép đo cũng nhiễm chương trình của slot khác trong
+khi `EX` thì không.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Tắt MỌI làn của MỌI slot có `outputChannels[lane] == scOutChannel_`.** Kênh đó chỉ mang sweep. Giá: kênh im **4,5 s** mỗi lượt, **~72 s** xấu nhất (16 kênh × 4,5 s). Phụ thu tốt: không còn nguy cơ clipping trên kênh đang đo, và `EY` sạch phần chương trình của app | khuyên dùng |
+| 2 | Giữ lựa chọn cũ (một `(slot, lane)`) — phản biện đã chứng minh nó không mở được vòng | |
+| 3 | Tắt **mọi kênh ngõ ra** trong suốt lần chạy: sạch nhất, loại luôn rủi ro "vòng qua kênh khác vẫn đóng" (spec §7.3), nhưng cả hệ câm ~72 s kể cả khu không liên quan | |
+
+**Chọn: 1.** — điều phối tự chọn phương án khuyên dùng 2026-09-15, owner CHƯA
+duyệt; lật lại được trước khi release. **Owner phải xác nhận trước khi có tín
+hiệu thật ra PA.** Nếu owner thấy "vòng qua kênh khác vẫn đóng" là không chấp
+nhận được thì PA 3 là câu trả lời, và giá của nó chỉ là sự im lặng, không phải
+code thêm.
+
+## Q16 — Nút `ĐO` riêng, hay tái dùng nút `SOUNDCHECK` đã có?
+
+Phản biện (MINOR 24): prompt gốc của owner nói **tái dùng** nút SOUNDCHECK, Q12
+lại thêm một nút mới mà không gắn cờ. Và mô tả "placeholder sweep the room"
+trong prompt **không tồn tại trong repo**: hai nút thật là
+`gui::ModeRail::soundcheckButton {"SOUNDCHECK"}` (`src/gui/ModeRail.h:81`, đang
+hiển thị) và `gui::ModeBar::soundcheckButton {"Run Soundcheck (15s)"}`
+(`src/gui/ModeBar.h:43`, `modeBar_` bị ẩn — `src/app/MainComponent.cpp:211`).
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Nút `ĐO` riêng** cạnh `SOUNDCHECK`. Hai chức năng khác hẳn nhau (chờ phòng tự hú 15 s, so với phát tín hiệu ra PA 72 s) thì phải là hai nút; một nút phát ra loa mà người vận hành có thể bấm nhầm khi định làm việc khác là chuyện không nên có trên thiết bị live-sound | khuyên dùng |
+| 2 | Tái dùng `SOUNDCHECK` như prompt gốc: bấm khi đang ở mode Soundcheck = chạy đo chủ động. Không thêm widget, nhưng một nút hai nghĩa | |
+| 3 | Nút `ĐO` riêng **và** bỏ luôn mode Soundcheck thụ động (đo chủ động thay thế hẳn nó): giao diện gọn nhất, nhưng xoá một hành vi đang chạy và phá KD-7 | |
+
+**Chọn: 1.** — điều phối tự chọn phương án khuyên dùng 2026-09-15, owner CHƯA
+duyệt; lật lại được trước khi release. **Đây là chỗ lệch với chỉ thị gốc của
+owner, nên owner phải chốt.**
+
+## Q17 — Số sửa sau phản biện
+
+Các hằng số đổi so với Q14, mỗi dòng gắn với finding đã buộc nó đổi.
+
+| Hằng | Q14 | Q17 | Vì sao |
+|---|---|---|---|
+| `kResultsTimeoutMs` | 60 000 ms | **20 000 ms** | F9: `Results` nay chạy **với detection đã bật lại**, nên đồng hồ nhả lane G chạy thật; 60 s đủ để một notch −24 mất hai bậc trong khi spec khai 0 dB |
+| `kTrustedHighHz` | (không có) | **6 000 Hz** | F19: sweep biên độ hằng gửi năng lượng tỉ lệ 1/f, nên ở 10 kHz mỗi bin thấp hơn 100 Hz đúng 20 dB và rụng dưới `kMinBinSnrDb`. 6–10 kHz vẽ nhưng **không** đề xuất |
+| `kMinUsefulCutDb` | (không có) | **3,0 dB** | F6/F22: `kCandidateMarginDb = −6` là ngưỡng **đánh dấu**; cần một ngưỡng **đề xuất** riêng, không thì một bin cần 0,1 dB vẫn ăn một notch −6 và một ô chuỗi |
+| `kRampOutMs` | (ngầm = `kRampMs`) | **30,0 ms**, hằng riêng | F8: ramp-out do **callback** sinh từ `scRampOutAtSample_`, là một hàm khác cửa vào, nên nó phải có tên riêng |
+| Công thức độ sâu | `needed = -(H_dB + 6)` | **`needed = H_dB + kTargetMarginDb`, `depth_raw = -needed`** | F6: dấu của rev 1 cho `depth_raw` **dương**, mà `setNotchImpl` từ chối `depth > 0` (`src/app/NotchController.cpp:214`). Không phải chỉnh số, là sửa lỗi |
+| Bão hoà độ sâu | (không định nghĩa) | **kẹp ở `kMaxDepthDb = −24`, báo `residualDb`** | F6: rev 1 không nói gì khi cần cắt hơn 24 dB |
+
+**Chọn: giữ** — điều phối tự chọn 2026-09-15, owner CHƯA duyệt. Riêng
+`kResultsTimeoutMs` và `ClearReason::SoundcheckReplace` nằm trong danh sách tám
+mục owner phải xác nhận ở đầu file.
+
 
 ## Ghi chú quy trình
 
