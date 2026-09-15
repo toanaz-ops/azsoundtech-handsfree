@@ -133,6 +133,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.h
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchCommand.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.h
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
 )

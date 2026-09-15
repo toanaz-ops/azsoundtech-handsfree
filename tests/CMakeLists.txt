@@ -40,6 +40,7 @@ add_executable(HandsFreeTests
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
     test_sessionlogger.cpp
+    test_soundchecksignal.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
