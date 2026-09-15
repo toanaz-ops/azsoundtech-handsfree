@@ -1555,3 +1555,15 @@ SoundcheckApplyStats applySoundcheckResults (
     ledger.entries = std::move (placedThisCall);
     return stats;
 }
+
+juce::var makeSoundcheckApplyEvent (const SoundcheckApplyStats& stats)
+{
+    auto ev = SessionLogger::makeEvent ("soundcheck_apply");
+    if (auto* o = objectOf (ev))
+    {
+        o->setProperty ("placed", stats.placed);
+        o->setProperty ("refused", stats.refused);
+        o->setProperty ("cleared_previous", stats.clearedPrevious);
+    }
+    return ev;
+}

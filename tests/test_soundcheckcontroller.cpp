@@ -9,6 +9,7 @@
 #include "app/NotchController.h"
 #include "app/SoundcheckController.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1296,6 +1297,100 @@ TEST (SoundcheckController, ResultsAreReadableWholeAndPerSlot)
         EXPECT_EQ (res.slot, 0);
 }
 
+// ======================================= TASK 8: THE FIVE LOG EVENTS =======
+//
+// The dispatch key is `ev`, never `kind` -- lane G's B-3 defect was exactly
+// this, where notchEventToVar mapped Retune onto notch_clear because a reader
+// keyed on the wrong field. The SHAPES are asserted in
+// tests/test_sessionlogger.cpp; what these three prove is that a real RUN
+// emits them, in order, carrying that run's own numbers.
+
+// RED IF: a run stops emitting one of the events, or emits them out of order.
+// The order is what makes the log readable: start, one output per channel,
+// one result.
+TEST (SoundcheckController, AFullRunEmitsTheFiveEventsInOrder)
+{
+    Rig r;                                      // B-4: the ctor already runs the engine
+    r.micSource = whiteNoise (16384, 1.0e-4f);
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    ASSERT_TRUE (r.pumpUntil (SoundcheckController::State::Results, 15000.0));
+
+    std::vector<juce::String> names;
+    for (const auto& v : r.log)
+    {
+        auto* o = v.getDynamicObject();
+        ASSERT_NE (o, nullptr);
+        names.push_back (evOf (v));
+        // No producer stamps its own "t": SessionLogger::log does, on a
+        // one-level copy of the object (SessionLogger.h:65-70). A producer
+        // that stamped one would be silently overwritten, and would read as
+        // authoritative until someone noticed.
+        EXPECT_TRUE (o->getProperty ("t").isVoid()) << names.back();
+    }
+
+    ASSERT_GE (names.size(), 4u);
+    EXPECT_EQ (names.front(), "soundcheck_start");
+    EXPECT_EQ (names.back(),  "soundcheck_result");
+    EXPECT_EQ ((int) std::count (names.begin(), names.end(),
+                                 juce::String ("soundcheck_output")), 2);
+    EXPECT_EQ ((int) std::count (names.begin(), names.end(),
+                                 juce::String ("soundcheck_abort")), 0);
+}
+
+// RED IF: soundcheck_abort stops carrying WHERE and WHEN it stopped. Both are
+// required by spec 4.7, and without them a tester's "it cut out" report cannot
+// be tied to a channel or to a moment in the run.
+TEST (SoundcheckController, AbortEventCarriesAtOutputAndElapsed)
+{
+    Rig r;
+    r.micSource = whiteNoise (4096, 1.0e-4f);
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+
+    r.pump (6000.0);                            // into the SECOND channel (4.52 s each)
+    ASSERT_EQ (r.sc.getCurrentTargetIndex(), 1);
+    r.sc.requestStop (SoundcheckController::AbortReason::UserStop);
+    r.pump (100.0);
+
+    ASSERT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+    int seen = 0;
+    for (const auto& v : r.log)
+        if (evOf (v) == "soundcheck_abort")
+        {
+            ++seen;
+            auto* o = v.getDynamicObject();
+            EXPECT_EQ ((int) o->getProperty ("at_output"), 1) << "second channel is index 1";
+            EXPECT_GT ((double) o->getProperty ("elapsed_ms"), 5000.0);
+            EXPECT_EQ (o->getProperty ("reason").toString(), "user_stop");
+        }
+    EXPECT_EQ (seen, 1) << "one abort, logged exactly once";
+}
+
+// RED IF: soundcheck_start stops carrying the numbers that let a later reader
+// reconstruct what the room was told to do -- how loud, for how long, and how
+// many channels.
+TEST (SoundcheckController, StartCarriesTheLevelAndTheDuration)
+{
+    Rig r;                                      // B-4: the ctor already runs the engine
+    r.micSource = whiteNoise (4096, 1.0e-4f);
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    r.pump (20.0);
+
+    ASSERT_FALSE (r.log.empty());
+    EXPECT_EQ (evOf (r.log.front()), "soundcheck_start");
+    auto* o = r.log.front().getDynamicObject();
+    ASSERT_NE (o, nullptr);
+    EXPECT_EQ ((int) o->getProperty ("outputs"), 2);
+    EXPECT_NEAR ((double) o->getProperty ("peak_dbfs"), -20.0, 0.1);
+    EXPECT_NEAR ((double) o->getProperty ("sweep_ms"), 3000.0, 1.0);
+    // 2 channels x kPerTargetMs, and kPerTargetMs is 4.52 s, not 4.5: the
+    // sweep lead-in is real time on the clock (C-1). Derived from the constant
+    // rather than written as a literal, so the two can never disagree.
+    EXPECT_NEAR ((double) o->getProperty ("total_ms"),
+                 2.0 * SoundcheckController::kPerTargetMs, 1.0);
+    // The mode the run interrupted -- the one the operator gets back after.
+    EXPECT_TRUE (o->getProperty ("mode_before").toString().isNotEmpty());
+}
+
 // ============================================================ TASK 7: APPLY ==
 //
 // applySoundcheckResults is the ONLY place lane M's proposals become real
@@ -1881,4 +1976,30 @@ TEST (SoundcheckApply, AResultNamingALaneThisSlotDoesNotDriveIsSkipped)
     EXPECT_EQ (stats.skippedOtherSlot, 0) << "a different fault, a different word";
     EXPECT_EQ (stats.placed, 1) << "the lane-0 result still lands";
     EXPECT_FALSE (rig.controller->activeForTest (1, 15));
+}
+
+// RED IF: soundcheck_apply loses a field, or goes out under another `ev` name.
+// It is the ONE lane M event SoundcheckController cannot emit itself:
+// placed / refused / cleared_previous exist only after applySoundcheckResults
+// has returned, on the message thread (Task 6 concern C3, inv 17). Task 10's
+// AP DUNG lambda logs exactly the var this builds, so this is where the shape
+// is pinned down.
+TEST (SoundcheckApply, TheApplyEventCarriesWhatWasPlacedAndWhatWasCleared)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    SoundcheckApplyStats stats;
+    stats.placed          = 3;
+    stats.refused         = 2;
+    stats.clearedPrevious = 4;
+
+    const auto v = makeSoundcheckApplyEvent (stats);
+    auto* o = v.getDynamicObject();
+    ASSERT_NE (o, nullptr);
+    EXPECT_EQ (o->getProperty ("ev").toString(), "soundcheck_apply");
+    EXPECT_EQ ((int) o->getProperty ("placed"), 3);
+    EXPECT_EQ ((int) o->getProperty ("refused"), 2);
+    EXPECT_EQ ((int) o->getProperty ("cleared_previous"), 4);
+    // The LOGGER stamps t, not the producer (SessionLogger.h:65-70).
+    EXPECT_TRUE (o->getProperty ("t").isVoid());
 }

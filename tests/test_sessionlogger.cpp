@@ -8,12 +8,14 @@
 #include <juce_events/juce_events.h>
 
 #include "app/SessionLogger.h"
+#include "app/SoundcheckController.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
+#include <set>
 #include <vector>
 
 namespace
@@ -402,4 +404,69 @@ TEST (SessionLogger, DestructionWithoutStopWritesSessionEnd)
     const auto lines = linesOf (file);
     ASSERT_EQ (lines.size(), 3);
     EXPECT_EQ (parsedLine (lines[2])["ev"].toString(), "session_end");
+}
+
+// ===================== LANE M: the five soundcheck_* event shapes ===========
+//
+// These do not touch the file or the thread: they are about the SHAPE of what
+// the producers hand to log(), which is the half a Python reader sees.
+
+// RED IF: a soundcheck event is written under an `ev` name logstats DOES branch
+// on (notch_set / notch_clear / notch_retune / verdict). That would close or
+// mutate a notch record with nothing to do with the soundcheck -- lane G's B-3
+// defect from the other direction -- and tests/fixtures/session-sample.jsonl
+// plus the logstats_fixture test is the other half of this proof: the seven
+// appended soundcheck_* lines move NONE of its --expect-* totals.
+TEST (SessionLoggerSoundcheck, TheFiveEventNamesAreTheirOwn)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    std::set<juce::String> seen;
+    for (const char* name : { "soundcheck_start", "soundcheck_output", "soundcheck_result",
+                              "soundcheck_apply", "soundcheck_abort" })
+    {
+        const auto v = SessionLogger::makeEvent (name);
+        auto* o = v.getDynamicObject();
+        ASSERT_NE (o, nullptr) << name;
+        // `ev`, never `kind`: tools/logstats.py:45 reads e.get("ev").
+        EXPECT_EQ (o->getProperty ("ev").toString(), name);
+        // ...and the producer does NOT stamp its own "t". SessionLogger::log
+        // does, on a one-level copy (SessionLogger.h:65-70).
+        EXPECT_TRUE (o->getProperty ("t").isVoid()) << name;
+
+        for (const char* reserved : { "notch_set", "notch_clear", "notch_retune", "verdict" })
+            EXPECT_NE (juce::String (name), juce::String (reserved));
+
+        seen.insert (juce::String (name));
+    }
+    EXPECT_EQ (seen.size(), 5u) << "two of the five share a name";
+}
+
+// RED IF: doubles reach juce::var unrounded. juce::JSON prints 18 significant
+// digits and the log stops being readable
+// (memory/data-loop-lessons-2026-09-05.md).
+//
+// I-8: the rounder is a STATIC MEMBER of SoundcheckController forwarding to the
+// file-local round3sf, and is called qualified, so this rounds with exactly the
+// function the five writers use rather than with a copy of its arithmetic.
+TEST (SessionLoggerSoundcheck, RealNumbersAreRoundedToThreeSignificantFigures)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    auto v = SessionLogger::makeEvent ("soundcheck_output");
+    auto* o = v.getDynamicObject();
+    ASSERT_NE (o, nullptr);
+    o->setProperty ("snr_db",
+        SoundcheckController::roundToThreeSignificantFiguresForTest (18.4732918273));
+
+    const juce::String json = juce::JSON::toString (v);
+    EXPECT_TRUE (json.contains ("18.5")) << json;
+    EXPECT_FALSE (json.contains ("18.4732")) << json;
+
+    // Negative, sub-unit and zero go through the same door -- a margin_db of
+    // -0.0412... and a residual of 0.0 are both ordinary lane M numbers.
+    using SC = SoundcheckController;
+    EXPECT_DOUBLE_EQ (SC::roundToThreeSignificantFiguresForTest (-4.23718), -4.24);
+    EXPECT_DOUBLE_EQ (SC::roundToThreeSignificantFiguresForTest (0.0), 0.0);
+    EXPECT_DOUBLE_EQ (SC::roundToThreeSignificantFiguresForTest (9040.0), 9040.0);
 }

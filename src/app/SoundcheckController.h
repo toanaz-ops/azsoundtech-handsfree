@@ -423,6 +423,22 @@ struct SoundcheckApplyStats
     int skippedBadLane = 0;
 };
 
+// THE FIFTH lane M log event (spec 4.7), and the only one SoundcheckController
+// cannot emit itself. `placed` / `refused` / `cleared_previous` exist only once
+// applySoundcheckResults has run on the message thread, and the controller has
+// no access to that call's return -- nor may it hold a NotchController at all
+// (inv 17, Task 6 concern C3). So the SHAPE lives here, beside the other four,
+// and Task 10's AP DUNG lambda does nothing but
+//
+//     sessionLogger_.log (makeSoundcheckApplyEvent (total));
+//
+// `ev` is the dispatch key, never `kind` (lane G B-3). Every field is an int,
+// so the 3-significant-figure rounding the other four apply has nothing to do
+// here -- and "t" is deliberately NOT set: SessionLogger::log stamps it on a
+// one-level copy (SessionLogger.h:65-70), so a producer that stamped its own
+// would be overwritten anyway and would read as authoritative in the meantime.
+[[nodiscard]] juce::var makeSoundcheckApplyEvent (const SoundcheckApplyStats& stats);
+
 // *** TWO THINGS TASK 9 MUST NOT GET WRONG ***
 //
 // 1. `clearedPrevious > 0 && placed == 0` IS A REAL OUTCOME, not a bug and not
