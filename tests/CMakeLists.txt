@@ -41,6 +41,7 @@ add_executable(HandsFreeTests
     test_presetsfirstrun.cpp
     test_sessionlogger.cpp
     test_soundchecksignal.cpp
+    test_loopgainestimator.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
