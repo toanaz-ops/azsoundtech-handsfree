@@ -4,12 +4,16 @@
 owner duyệt.**
 
 **Cập nhật 2026-09-15 sau phản biện read-only vòng 1 (8 BLOCKER / 11 IMPORTANT /
-8 MINOR, không finding nào bị bác).** Bốn mục mới ở cuối file: **Q3 (lật lại)**,
-**Q15 (lật lại)**, **Q16**, **Q17**. Mục cũ giữ nguyên, không sửa — theo đúng
-`recording-design-decisions`.
+8 MINOR).** Bốn mục mới: **Q3 (lật lại)**, **Q15 (lật lại)**, **Q16**, **Q17**.
 
-**Danh sách owner phải xác nhận TRƯỚC KHI phát tín hiệu ra PA thật — tám mục,
-theo kết luận của phản biện:**
+**Cập nhật lần 2, cùng ngày, sau phản biện vòng 2 (2 BLOCKER / 3 IMPORTANT /
+2 MINOR — cả bảy đều do chính bản viết lại sinh ra, không finding nào bị bác).**
+Một mục mới: **Q3 (lật lại lần 2)**, và bảng **Q17** được bổ sung.
+
+Mục cũ **giữ nguyên, không sửa** — theo đúng `recording-design-decisions`: lật
+lại là một mục mới, không phải một lần biên tập mục cũ.
+
+**Danh sách owner phải xác nhận TRƯỚC KHI phát tín hiệu ra PA thật — chín mục:**
 
 1. **Q2** — mức phát −20 dBFS, với cách diễn đạt trung thực ở spec §3 ("20 dB
    dưới toàn thang ở master hiện tại", không quy ra dB SPL).
@@ -24,6 +28,9 @@ theo kết luận của phản biện:**
    vĩnh viễn, nạp lại từ preset thì tự nhả sau 30 s.
 7. **`kResultsTimeoutMs`** — 20 s (hạ từ 60 s).
 8. **`ClearReason::SoundcheckReplace`** — thêm một giá trị vào enum của lane D.
+9. **Trường `Origin origin` thêm vào `SnapshotNotch`** — thay đổi cộng thêm thứ
+   hai trên `NotchController`, và là thứ duy nhất làm cho việc "dọn notch
+   soundcheck của lần chạy trước" khả thi (spec §4.6).
 
 Mỗi mục là một ngả rẽ thiết kế. Ghi đủ: câu hỏi, các phương án đã đề xuất (kèm
 phương án khuyên dùng), và lựa chọn. Lật lại khi cần đổi hướng; đừng hỏi lại
@@ -364,9 +371,53 @@ Các hằng số đổi so với Q14, mỗi dòng gắn với finding đã buộ
 | Công thức độ sâu | `needed = -(H_dB + 6)` | **`needed = H_dB + kTargetMarginDb`, `depth_raw = -needed`** | F6: dấu của rev 1 cho `depth_raw` **dương**, mà `setNotchImpl` từ chối `depth > 0` (`src/app/NotchController.cpp:214`). Không phải chỉnh số, là sửa lỗi |
 | Bão hoà độ sâu | (không định nghĩa) | **kẹp ở `kMaxDepthDb = −24`, báo `residualDb`** | F6: rev 1 không nói gì khi cần cắt hơn 24 dB |
 
+**Bổ sung sau phản biện vòng 2 (2026-09-15):**
+
+| Hằng / con số | Trước | Sau | Vì sao |
+|---|---|---|---|
+| `kNoiseFloorRingingPeakiness` | (rev 2 dùng `CandidateScorer::kConfirmScore = 0.7`) | **= `controller.getPeakinessThreshold()`** đang sống (mặc định `PeakinessAnalyzer::kDefaultThreshold = 10.0f`, dải [5, 20]) | N1: sai đơn vị. `peakinessAt` là **tỉ số không chặn trên** (nhiễu tệ nhất 7,35; tone 131,70 — `src/dsp/PeakinessAnalyzer.h:60-65`), còn `kConfirmScore` là ngưỡng của một **tích 0..1**. Ngưỡng 0,7 hủy **mọi** lần chạy ở **mọi** phòng. Lấy ngưỡng SỐNG để nó không trôi khỏi ngưỡng của detector |
+| Số atomic của đường soundcheck trong callback | 6 | **7** (thêm `scSuspendTaps_`) | N3: `scOutChannel_` về −1 ở **mỗi** `Gap`, nên khoá việc treo tap theo nó làm tap bật lại 300 ms một lần ⇒ đồng hồ nhả lane G trôi ≈ 11,5 s cho 16 kênh, **vượt `kReleaseStepMs` = 10 s**. Cờ riêng giữ suốt lần chạy đưa con số về ≤ ~0,42 s |
+| Quy tắc lượng tử độ sâu | "bậc **sâu nhất** không sâu hơn `depth_raw`" | **"bậc NÔNG NHẤT sâu ít nhất bằng `depth_raw`"** (bậc nông nhất `r` thoả `r <= depth_raw`) | N2: phát biểu của rev 2 cho −6 khi cần −8, và **tập rỗng** khi `depth_raw = −5` — mâu thuẫn với chính ví dụ và test của nó |
+
 **Chọn: giữ** — điều phối tự chọn 2026-09-15, owner CHƯA duyệt. Riêng
 `kResultsTimeoutMs` và `ClearReason::SoundcheckReplace` nằm trong danh sách tám
 mục owner phải xác nhận ở đầu file.
+
+
+---
+
+**Q3 (lật lại lần 2) — từ phản biện read-only vòng 2 (2026-09-15).** Mục
+"Q3 (lật lại)" ở trên **không bị sửa**; đây là lần lật thứ hai của cùng một câu
+hỏi, và nó chỉ đụng **một** con số trong phương án đã chọn.
+
+## Q3 (lật lại lần 2 — 2026-09-15) — Cổng "phòng đang ngân" so với ngưỡng NÀO?
+
+Q3 (lật lại) chọn phương án 1: thay ring-risk bằng phép đo của chính lane M trên
+cửa sổ nền 0,5 s. Nhưng nó viết ngưỡng so sánh là
+`CandidateScorer::kConfirmScore` — và phản biện vòng 2 (BLOCKER N1) chỉ ra đó là
+**sai đơn vị**, không phải sai hiệu chỉnh:
+
+- `PeakinessAnalyzer::peakinessAt` (`src/dsp/PeakinessAnalyzer.h:166`) trả một
+  **tỉ số không chặn trên**. Đo trên rig thật: bin nhiễu tệ nhất qua 60 seed là
+  **7,35**, tone 1 kHz là **131,70** (`src/dsp/PeakinessAnalyzer.h:60-65`).
+- `CandidateScorer::kConfirmScore = 0.7f` (`src/dsp/CandidateScorer.h:49`) là
+  ngưỡng của một **tích 0..1**.
+
+Nên cổng của rev 2 **hủy mọi lần chạy, ở mọi phòng, ngay tại kênh đầu tiên** —
+một phòng hoàn toàn im vẫn cho peakiness ~7 ≫ 0,7. Đây đúng là lỗi mà
+`memory/ring-risk-lane-r-2026-09-06.md` đã ghi cho lane R, lặp lại ở chiều
+ngược lại trong cùng dự án.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Ngưỡng = `controller.getPeakinessThreshold()` đang SỐNG** (`src/app/NotchController.h:364-366`), mặc định `PeakinessAnalyzer::kDefaultThreshold = 10.0f`, dải [5, 20]. Cùng một con số mà detector đang dùng để quyết định "bin này có phải hú không", nên cổng của lane M và detector không bao giờ trôi khỏi nhau | khuyên dùng |
+| 2 | Hằng số riêng của lane M, ví dụ 10,0 chép cứng: đơn giản, nhưng tạo ra **con số thứ hai cùng nghĩa** — đúng cái mà lane R phải đi sửa | |
+| 3 | Ngưỡng cao hơn detector (ví dụ 1,5×) để chỉ hủy khi phòng ngân rõ: ít hủy nhầm hơn, nhưng là một hằng số nữa chưa ai đo | |
+
+**Chọn: 1.** — điều phối tự chọn phương án khuyên dùng 2026-09-15, owner CHƯA
+duyệt; lật lại được trước khi release. Kèm hai test bắt buộc, vì một cổng sai
+đơn vị **không** làm test nào đỏ nếu không có chúng: cửa sổ nhiễu tổng hợp
+**không** hủy, cửa sổ có tone **có** hủy (spec §5.1).
 
 
 ## Ghi chú quy trình
