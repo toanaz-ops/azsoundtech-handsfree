@@ -212,6 +212,12 @@ public:
     // muting a pair would leave that channel's feedback loop closed. Returns
     // to -1 at every Gap, so it is NOT usable as the tap-suspension key: see
     // setSoundcheckTapsSuspended.
+    //
+    // ANY call also discards a pending ramp-out (C-2): arming a channel with a
+    // stale anchor would truncate the new run mid-sweep, and releasing one with
+    // a stale anchor leaves an anchor nothing will ever clear. This is also the
+    // controller's abort backstop -- setSoundcheckOutputChannel(-1) puts the
+    // soundcheck side of the engine back to idle in one call.
     void setSoundcheckOutputChannel (int channel);
 
     // Input channel the raw measurement mic arrives on, or -1. Independent of
@@ -220,7 +226,9 @@ public:
 
     // Capture gate, held across NoiseFloor + Sweep + Tail. A SEPARATE flag
     // from the channel index so a safety property is never inferred from the
-    // sign of an index.
+    // sign of an index. Capture happens only while this is true AND the taps
+    // are suspended -- the two live in the same branch of the callback, so an
+    // active gate with the taps running captures nothing.
     void setSoundcheckCaptureActive (bool active);
 
     // Held for the WHOLE run (Arm to the end of the last channel's tail, or
@@ -239,9 +247,17 @@ public:
     // SoundcheckSignal.
     void setSoundcheckPeak (float peak);
 
-    // Anchor the emergency ramp-out at the CURRENT sample index. The callback
-    // generates the envelope itself and releases the channel when it reaches
-    // zero, so no other thread has to still be alive for the sound to stop.
+    // Request the emergency ramp-out. This sets a FLAG only; the audio
+    // callback latches the anchor from its OWN snapshot of the sample index on
+    // the first block that sees the flag (I-2). Latching it here instead would
+    // anchor the envelope at whatever index the message thread happened to
+    // read, which is up to one buffer behind the block that first applies it:
+    // the first ramped sample would then start at 0.5*(1 + cos(pi*N/R))
+    // instead of 1.0, and for any buffer N >= R (1440 samples at 48 kHz) that
+    // is EXACTLY ZERO -- a hard cut, which is the click this ramp exists to
+    // avoid. The callback also generates the envelope and releases the channel
+    // when it reaches zero, so no other thread has to still be alive for the
+    // sound to stop.
     void requestSoundcheckRampOut();
 
     [[nodiscard]] int          getSoundcheckOutputChannel() const;
@@ -421,10 +437,17 @@ private:
 
     // ---- Lane M: active soundcheck state (spec §4.1) -------------------
     //
-    // Seven atomics, one counter, one ring. Every one is read by the audio
+    // EIGHT atomics, one counter, one ring. Every one is read by the audio
     // callback EXACTLY ONCE per block, into stack locals, beside the mode
     // snapshot; nothing below that point reads any of them again
-    // (invariant 7).
+    // (invariant 7). With the sample rate and the test gain seam that is TEN
+    // loads in the snapshot block.
+    //
+    // All eight are reset to idle in audioDeviceAboutToStart() (C-1). They are
+    // NOT owned by any device, so without that a run interrupted by a device
+    // stop would leave scOutChannel_ armed and the next device to open would
+    // emit sweep on channel N and mute every lane routed there, with the
+    // controller long since aborted and joined.
 
     // Output channel under measurement, -1 = no run. The MUTE key: every lane
     // whose outputChannels[lane] equals this is silenced (Q15 relitigated).
@@ -435,15 +458,23 @@ private:
     std::atomic<bool>         scSuspendTaps_      { false };
     std::atomic<int>          scCaptureInChannel_ { -1 };
     // Capture gate, on across NoiseFloor + Sweep + Tail (F5). Separate from
-    // scOutChannel_ so a safety property is not inferred from a sign.
+    // scOutChannel_ so a safety property is not inferred from a sign. Capture
+    // happens only while this is true AND scSuspendTaps_ is true: both live in
+    // the same branch of the callback.
     std::atomic<bool>         scCaptureActive_    { false };
     // Sweep sample index, NEGATIVE during NoiseFloor. Audio thread OWNS it.
     std::atomic<std::int64_t> scSampleIndex_      { 0 };
     // Peak amplitude, already clamped to kSoundcheckMaxPeak before storing.
     std::atomic<float>        scPeak_             { 0.0f };
-    // Ramp-out anchor, -1 = none. Set by the message thread, CONSUMED by the
-    // callback, which clears it and scOutChannel_ when the ramp reaches zero.
+    // Ramp-out anchor, -1 = none. LATCHED BY THE CALLBACK from its own
+    // snapshot (I-2), never by the message thread, so the envelope always
+    // starts at exactly 1.0 whatever the buffer size. Cleared by the callback
+    // when the ramp reaches zero, and by setSoundcheckOutputChannel().
     std::atomic<std::int64_t> scRampOutAtSample_  { -1 };
+    // The REQUEST, which is all the message thread sets (C-2). Separating the
+    // request from the anchor is what lets the anchor be latched on the audio
+    // thread, and what gives a stale request somewhere to be cleared from.
+    std::atomic<bool>         scRampOutRequested_ { false };
 
     // TEST SEAM (B-5): 1.0f in every shipping path. See the setter.
     std::atomic<float>        scGainUnclampedForTest_ { 1.0f };
