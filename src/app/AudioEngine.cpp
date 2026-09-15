@@ -343,16 +343,23 @@ void AudioEngine::setSoundcheckOutputChannel (int channel)
     // anything is the one the callback makes against its OWN channel count
     // (invariant 3).
     //
-    // A pending ramp-out is discarded FIRST, whatever the new value (C-2).
-    // Arming a channel while an anchor from the previous channel is still set
-    // would truncate the new run mid-sweep; releasing one while a request is
-    // pending leaves a request that only an emitting callback could ever
-    // clear, and after an abort there is no emitting callback. Ordering: the
-    // ramp state is cleared BEFORE the channel is published, so a callback
-    // that observes the new channel cannot still observe the old anchor.
+    // A pending ramp-out is discarded, whatever the new value (C-2). Arming a
+    // channel while an anchor from the previous channel is still set would
+    // truncate the new run mid-sweep; releasing one while a request is pending
+    // leaves a request that only an emitting callback could ever clear, and
+    // after an abort there is no emitting callback.
+    //
+    // ORDERING (N-2). Three relaxed stores to three distinct atomics carry no
+    // ordering between them in the C++ model -- "cleared first" is a statement
+    // about source order, not about what the audio thread can observe. The
+    // channel store is therefore a RELEASE and the callback's matching load is
+    // an ACQUIRE: a callback that sees this channel is then guaranteed to see
+    // the two clears above it, which is the property the comment used to claim
+    // and not have. The clears themselves stay relaxed -- the release orders
+    // them.
     scRampOutAtSample_.store  (-1,    std::memory_order_relaxed);
     scRampOutRequested_.store (false, std::memory_order_relaxed);
-    scOutChannel_.store (channel, std::memory_order_relaxed);
+    scOutChannel_.store (channel, std::memory_order_release);
 }
 
 void AudioEngine::setSoundcheckCaptureChannel (int channel)
@@ -645,7 +652,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Nothing below this point reads ANY of the ten again. That includes
     // currentSampleRate_: a rate change landing between two reads would build
     // the sweep with one T and index it with another.
-    const int          scOutChannel    = scOutChannel_.load       (std::memory_order_relaxed);
+    // ACQUIRE (N-2), matching the release stores in setSoundcheckOutputChannel
+    // and audioDeviceAboutToStart: seeing a channel value means also seeing the
+    // ramp-out state that was cleared before it was published.
+    const int          scOutChannel    = scOutChannel_.load       (std::memory_order_acquire);
     const bool         scSuspendTaps   = scSuspendTaps_.load      (std::memory_order_relaxed);
     const int          scCaptureIn     = scCaptureInChannel_.load (std::memory_order_relaxed);
     const bool         scCaptureActive = scCaptureActive_.load    (std::memory_order_relaxed);
@@ -725,23 +735,34 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // feedback loop CLOSED. A muted lane enters neither lanes[] nor
             // tapSource, so it is also not fed back to the detector.
             //
-            // The chain is RESET on every muted block (C-3). Muting by skipping
-            // the lane freezes the biquads' persistent Direct Form I state for
-            // as long as the mute lasts -- up to 4.5 s per channel -- and on
-            // un-mute that stale state discharges as a free response on top of
-            // live programme: for a high-Q notch roughly 5-6x the level at the
-            // moment of the mute, i.e. an audible click on every channel the
-            // soundcheck touches. reset() is the same allocation-free call the
-            // per-sample NaN self-heal below already makes on this thread.
+            // The chain's STATE is cleared on every muted block (C-3). Muting
+            // by skipping the lane freezes the biquads' persistent Direct Form
+            // I state for as long as the mute lasts -- up to 4.5 s per channel
+            // -- and on un-mute that stale state discharges as a free response
+            // on top of live programme: for a high-Q notch roughly 5-6x the
+            // level at the moment of the mute, i.e. an audible click on every
+            // channel the soundcheck touches.
+            //
+            // clearState(), NOT reset() (N-1). reset() also zeroes
+            // rampRemaining_, so across a mute that can last 4.5 s it would
+            // cancel an in-flight lane-G depth ramp on EVERY block -- and
+            // command draining is not suspended during a run, so a retune
+            // landing mid-mute is entirely normal. The filter would strand at
+            // the intermediate depth while NotchInfo.depthDB already read the
+            // target: the rare NaN-heal GAP turned into routine behaviour. A
+            // mute is a discontinuity in this lane's INPUT, which says nothing
+            // about a ramp that is still the right thing to finish.
+            // clearState() is equally allocation-free and lock-free.
             //
             // EXPECTED LEVEL CHANGE: mute onset = declared silence (spec §3);
             // un-mute = programme resumes with the notch chains at zero state,
-            // no free response from stale state; an in-flight lane-G depth ramp
-            // on a muted lane is stranded and self-heals on the next Set (same
-            // as the NaN heal).
+            // so no free response from stale state; NO depth ramp is stranded
+            // -- an in-flight lane-G ramp is frozen for the duration of the
+            // mute (the lane is not processed at all) and completes normally
+            // once the lane is un-muted.
             if (scOut >= 0 && outIdx == scOut)
             {
-                notchChains_[(std::size_t) slot][(std::size_t) lane].reset();
+                notchChains_[(std::size_t) slot][(std::size_t) lane].clearState();
                 continue;
             }
 
@@ -1028,12 +1049,16 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     //
     // Same precondition as every clear above: JUCE inserts the callback into
     // its dispatch list only after this function returns.
-    scOutChannel_.store       (-1,    std::memory_order_relaxed);
+    // The channel store is LAST and is a RELEASE (N-2), for the same reason as
+    // in setSoundcheckOutputChannel: it is the one value the callback gates on,
+    // so publishing it last under a release is what makes the other five
+    // visible to any callback that sees it. The rest stay relaxed.
     scRampOutAtSample_.store  (-1,    std::memory_order_relaxed);
     scRampOutRequested_.store (false, std::memory_order_relaxed);
     scCaptureActive_.store    (false, std::memory_order_relaxed);
     scSuspendTaps_.store      (false, std::memory_order_relaxed);
     scCaptureInChannel_.store (-1,    std::memory_order_relaxed);
+    scOutChannel_.store       (-1,    std::memory_order_release);
     // scSampleIndex_ and scPeak_ are deliberately NOT touched: neither can
     // produce a sample without scOutChannel_, and the controller sets both at
     // Arm. Clearing them would only add two stores nothing reads.

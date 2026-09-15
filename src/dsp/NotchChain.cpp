@@ -85,6 +85,23 @@ void NotchChain::clearNotch(int index)
     notchInfo_[index].state = NotchState::Idle;
 }
 
+void NotchChain::clearState()
+{
+    // State only -- coefficients and in-flight depth ramps survive. See the
+    // header for why this is NOT reset().
+    for (int i = 0; i < MAX_NOTCHES; ++i)
+    {
+        filters_[i].clearState();
+    }
+}
+
+const Biquad& NotchChain::getFilterForTest(int index) const
+{
+    const int clamped = (index < 0) ? 0
+                      : (index >= MAX_NOTCHES) ? (MAX_NOTCHES - 1) : index;
+    return filters_[static_cast<std::size_t>(clamped)];
+}
+
 void NotchChain::reset()
 {
     // GAP (spec 4.7, m-5): this cancels every in-flight depth ramp and does

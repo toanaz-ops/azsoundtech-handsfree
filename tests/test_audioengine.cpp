@@ -1958,3 +1958,157 @@ TEST (AudioEngineSoundcheck, UnmuteResumesFromZeroFilterState)
             << "sample " << n << " is the free response of stale filter state -- "
                "on a PA that is a click on every channel the soundcheck touched";
 }
+
+// ===================================================================
+// Review round 2 additions.
+// ===================================================================
+
+// RED IF: a muted lane's chain is reset() instead of clearState() (N-1).
+// reset() also zeroes rampRemaining_, so on a mute that can last 4.5 s it
+// cancels an in-flight lane-G depth ramp on EVERY block -- and command draining
+// is NOT suspended during a run, so a retune landing mid-mute is entirely
+// normal. The filter would strand at the intermediate depth while
+// NotchInfo.depthDB already reads the target: the rare NaN-heal GAP turned into
+// routine behaviour.
+TEST (AudioEngineSoundcheck, MuteDoesNotCancelAnInFlightDepthRamp)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Auto);   // Bypass would skip the chain
+    routeMono (engine, 0, 0, 0);
+
+    auto& q = engine.getCommandQueue();
+    const NotchCommand place { NotchCommandType::Set, 0, 0, 1000.0f, 8.0f, -6.0f, 0 };
+    ASSERT_EQ (q.write (&place, 1), 1u);
+
+    MultiDriver d { 2, 64 };
+    d (engine);                     // the notch is placed
+
+    // A depth-only retune of the SAME notch (same freq, same Q): NotchChain
+    // ::setNotch takes the rampNotchDepth path, kRampMs = 10 ms = 480 samples
+    // at 48 kHz.
+    const NotchCommand deepen { NotchCommandType::Set, 0, 0, 1000.0f, 8.0f, -18.0f, 0 };
+    ASSERT_EQ (q.write (&deepen, 1), 1u);
+    d (engine);                     // 64 of the 480 ramp samples are spent
+
+    const NotchChain& chain = engine.getNotchChainForTest (0, 0);
+    const int remainingBeforeMute = chain.getFilterForTest (0).rampRemainingForTest();
+    ASSERT_EQ (remainingBeforeMute, 480 - 64)
+        << "the retune did not start a depth ramp, so this test proves nothing";
+
+    // Mute the lane for a while. A negative sweep index keeps the soundcheck in
+    // its noise-floor phase, so the channel is silent rather than swept.
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-48000);
+    engine.setSoundcheckOutputChannel (0);
+    for (int i = 0; i < 20; ++i) d (engine);
+
+    EXPECT_EQ (chain.getFilterForTest (0).rampRemainingForTest(), remainingBeforeMute)
+        << "the mute cancelled the in-flight depth ramp -- reset() was called "
+           "where clearState() belongs";
+
+    // Un-mute and let the ramp finish: 416 samples left, 8 blocks of 64.
+    engine.setSoundcheckOutputChannel (-1);
+    engine.setSoundcheckTapsSuspended (false);
+    for (int i = 0; i < 8; ++i) d (engine);
+
+    EXPECT_EQ (chain.getFilterForTest (0).rampRemainingForTest(), 0)
+        << "the ramp did not finish after the un-mute";
+
+    // ...and it landed on the TARGET design, not on an intermediate one.
+    Biquad target;
+    ASSERT_TRUE (target.setNotchFilter (1000.0, 8.0, 48000.0, -18.0));
+    const Biquad::Coeffs want = target.coeffsForTest();
+    const Biquad::Coeffs got  = chain.getFilterForTest (0).coeffsForTest();
+    EXPECT_DOUBLE_EQ (got.b0, want.b0);
+    EXPECT_DOUBLE_EQ (got.b1, want.b1);
+    EXPECT_DOUBLE_EQ (got.b2, want.b2);
+    EXPECT_DOUBLE_EQ (got.a1, want.a1);
+    EXPECT_DOUBLE_EQ (got.a2, want.a2);
+}
+
+// Pins what an abort requested during the NOISE-FLOOR phase actually does,
+// because it is not what anyone reading the callback assumes at first glance.
+//
+// The sweep index is NEGATIVE during the noise floor, so the anchor the
+// callback latches is negative too -- and -1 is also the "no anchor" sentinel,
+// so `rampAt >= 0` is false: the envelope is neither applied nor completed, and
+// the request is simply re-latched on each block until the index reaches 0.
+// Nothing is EMITTED in the meantime (sampleAt returns 0 for a negative index),
+// but the channel stays muted and the taps stay suspended for the rest of the
+// noise floor -- up to ~0.5 s.
+//
+// That is why the controller's abort backstop is setSoundcheckOutputChannel(-1)
+// and not requestSoundcheckRampOut() alone. This test exists so the comment on
+// the atomics cannot drift away from the code.
+TEST (AudioEngineSoundcheck, AbortDuringTheNoiseFloorIsDeferredUntilTheSweepStarts)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-24000);   // 0.5 s of noise floor still to run
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 2, 256 };
+    d (engine);                                 // index -> -23744
+    ASSERT_TRUE (engine.soundcheckIsEmitting());
+
+    engine.requestSoundcheckRampOut();
+
+    // 50 blocks = 12800 samples: still 10944 samples of noise floor to go.
+    for (int i = 0; i < 50; ++i) d (engine);
+    EXPECT_TRUE (engine.soundcheckIsEmitting())
+        << "the deferral this test documents is gone -- if the negative-anchor "
+           "case was fixed, replace this test with the immediate-abort one";
+    EXPECT_EQ (d.peakOn (1), 0.0f) << "the noise-floor phase emitted";
+
+    int blocks = 0;
+    while (engine.soundcheckIsEmitting() && blocks < 400)
+    {
+        d (engine);
+        ++blocks;
+    }
+
+    EXPECT_FALSE (engine.soundcheckIsEmitting()) << "the abort was never honoured";
+    // 10944 samples of noise floor = 43 blocks of 256, then the anchor latches
+    // at the first non-negative index and one ramp length (kRampOutMs = 30 ms =
+    // 1440 samples = 6 blocks) finishes it. A couple of blocks of slack.
+    EXPECT_LE (blocks, 43 + 8)
+        << "the abort took longer than the remaining noise floor plus one ramp";
+}
+
+// The backstop that makes the deferral above harmless: one store puts the
+// soundcheck side of the engine back to idle, with no callback needed.
+TEST (AudioEngineSoundcheck, SettingTheChannelToMinusOneIsTheAbortBackstop)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Bypass);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-24000);
+    engine.setSoundcheckOutputChannel (0);
+
+    MultiDriver d { 2, 256, 0.3f };
+    d (engine);
+    ASSERT_TRUE (engine.soundcheckIsEmitting());
+    ASSERT_EQ (d.peakOn (0), 0.0f) << "the lane should be muted here";
+
+    engine.requestSoundcheckRampOut();
+    engine.setSoundcheckOutputChannel (-1);     // the backstop
+
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+
+    d (engine);
+    for (int n = 0; n < 256; ++n)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
+            << "sample " << n << " -- the lane is still muted after the abort";
+}

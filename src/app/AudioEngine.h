@@ -443,6 +443,18 @@ private:
     // (invariant 7). With the sample rate and the test gain seam that is TEN
     // loads in the snapshot block.
     //
+    // An abort request raised while scSampleIndex_ < 0 (NoiseFloor) is honoured
+    // only when the index reaches 0 -- the controller's backstop is
+    // setSoundcheckOutputChannel(-1). The reason is that the anchor the callback
+    // latches during the noise floor is itself negative, and -1 is also the "no
+    // anchor" sentinel, so the envelope is neither applied nor completed until
+    // the index turns non-negative. Nothing is EMITTED in the meantime, but the
+    // channel stays muted and the taps stay suspended, so the backstop is what
+    // an abort path must actually call.
+    // (tests/test_audioengine.cpp: AbortDuringTheNoiseFloorIsDeferredUntilThe-
+    // SweepStarts pins this, and SettingTheChannelToMinusOneIsTheAbortBackstop
+    // pins the way out.)
+    //
     // All eight are reset to idle in audioDeviceAboutToStart() (C-1). They are
     // NOT owned by any device, so without that a run interrupted by a device
     // stop would leave scOutChannel_ armed and the next device to open would
