@@ -41,8 +41,8 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
     // Minor 3: a failed start() below must not leave currentFile()/
     // directory_ reporting the PREVIOUS session -- clear both up front so
     // every early-return branch already reflects "no active file".
-    file_      = {};
-    directory_ = {};
+    file_      = juce::File();
+    directory_ = juce::File();
 
     if (directory.existsAsFile())
         return false;
@@ -69,8 +69,8 @@ bool SessionLogger::start (const juce::File& directory, const juce::var& session
     if (! stream_->openedOk())
     {
         stream_.reset();
-        file_      = {};
-        directory_ = {};
+        file_      = juce::File();
+        directory_ = juce::File();
         return false;
     }
 
