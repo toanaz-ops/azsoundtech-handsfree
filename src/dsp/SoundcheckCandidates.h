@@ -75,6 +75,12 @@ public:
     // The whole depth rule, on one H_dB value. Public so the six worked
     // examples of spec §4.4 can be asserted directly instead of inferred from
     // a full pick() run.
+    //
+    // Returns the mark-only Depth {0, 0, false} -- "no proposal" -- for an
+    // empty ladder and for a non-finite ceilingDb, as well as for a bin that
+    // needs less than kMinUsefulCutDb. A direct caller gets no channel for the
+    // distinction (pick() has Output::ceilingMissing); what it does get is a
+    // refusal rather than a plausible-looking cut derived from a NaN.
     [[nodiscard]] static Depth depthFor (double hDb, double ceilingDb, const Ladder& ladder);
 
     struct Input

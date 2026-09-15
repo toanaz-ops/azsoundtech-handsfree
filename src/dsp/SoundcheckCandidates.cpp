@@ -23,6 +23,15 @@ SoundcheckCandidates::depthFor (double hDb, double ceilingDb, const Ladder& ladd
     if (ladder.rungsDb == nullptr || ladder.count <= 0)
         return out;
 
+    // The same refusal for a ceiling that is not a number, and for the same
+    // reason: std::max is (a < b) ? b : a, so std::max (rung, NaN) compares
+    // `rung < NaN` -- false -- and hands back the RAW RUNG. A direct caller
+    // would get a fully formed -12 dB proposal with saturated == false out of
+    // an Input nobody filled in. pick() raises Output::ceilingMissing for its
+    // own callers; depthFor is public and has no such channel, so it refuses.
+    if (! std::isfinite (ceilingDb))
+        return out;
+
     // Both sides dB. needed_dB > 0 means "this many dB must come out".
     const double needed = hDb + kTargetMarginDb;
     if (needed < kMinUsefulCutDb)
@@ -91,9 +100,11 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
 {
     Output out;
 
-    if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
-        return out;
-
+    // Computed BEFORE the null-input return below, so a caller always gets a
+    // truthful ceilingMissing. A controller that forgot the ceiling has most
+    // likely forgotten the buffers too, and reporting "no proposals, ceiling
+    // fine" on the way out of that would point the investigation at the room.
+    //
     // Neither of these stops the MARKS: the operator is still shown the room,
     // and a caller bug must not silently look like a quiet stage. Both stop
     // every PROPOSAL, because the depth of a cut cannot be decided without a
@@ -108,6 +119,9 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
     const bool ladderMissing  = (in.ladder.rungsDb == nullptr || in.ladder.count <= 0);
     const bool ceilingMissing = ! std::isfinite (in.ceilingDb);
     out.ceilingMissing = ceilingMissing;
+
+    if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
+        return out;
 
     // Step 4 up front: the prominence test in step 5 needs the smoothed curve,
     // and smoothing is over the WHOLE array -- a bin outside the trusted band

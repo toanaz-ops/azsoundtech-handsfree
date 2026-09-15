@@ -349,6 +349,17 @@ TEST (SoundcheckCandidates, UnsetCeilingIsDetectedAndRefused)
     EXPECT_FALSE (zero.ceilingMissing);
     EXPECT_EQ (zero.candidateCount, 0);
     EXPECT_GT (zero.markedCount, 0);
+
+    // RED IF: the flag is computed after the null-input early return. A
+    // controller that forgot the ceiling has most likely forgotten the buffers
+    // too, and "no proposals, ceiling fine" would send the investigation to the
+    // room instead of to the caller.
+    SoundcheckCandidates::Input blank;
+    ASSERT_EQ (blank.hDb, nullptr);
+    const auto nothing = SoundcheckCandidates::pick (blank);
+    EXPECT_TRUE (nothing.ceilingMissing);
+    EXPECT_EQ (nothing.candidateCount, 0);
+    EXPECT_EQ (nothing.markedCount, 0);
 }
 
 // RED IF: a non-finite hDb reaches step 5. `NaN < x` is FALSE for every x, so a
@@ -386,4 +397,27 @@ TEST (SoundcheckCandidates, NonFiniteLoopGainIsNeverMarked)
     const auto inf = SoundcheckCandidates::pick (g.input());
     EXPECT_EQ (inf.markedCount, 0);
     EXPECT_EQ (inf.candidateCount, 0);
+}
+
+// RED IF: depthFor uses a non-finite ceiling instead of refusing it.
+// std::max is `(a < b) ? b : a`, so std::max (rung, NaN) evaluates
+// `rung < NaN` -- false -- and returns the RAW RUNG. A direct caller would get
+// a fully formed -12 dB proposal, saturated == false, out of an Input nobody
+// filled in. pick() raises Output::ceilingMissing for its own callers; depthFor
+// is public, has no such channel, and must refuse. Review I-3 residual.
+TEST (SoundcheckCandidates, DepthForRefusesANonFiniteCeiling)
+{
+    // Control: the same H_dB with a real ceiling IS a -12 dB proposal, so the
+    // zeroes below are the guard and not a dead fixture.
+    ASSERT_DOUBLE_EQ (SoundcheckCandidates::depthFor (2.0, -24.0, shippedLadder()).depthDb, -12.0);
+
+    for (const double bad : { std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity(),
+                              -std::numeric_limits<double>::infinity() })
+    {
+        const auto d = SoundcheckCandidates::depthFor (2.0, bad, shippedLadder());
+        EXPECT_DOUBLE_EQ (d.depthDb, 0.0)    << "ceilingDb=" << bad;
+        EXPECT_DOUBLE_EQ (d.residualDb, 0.0) << "ceilingDb=" << bad;
+        EXPECT_FALSE (d.saturated)           << "ceilingDb=" << bad;
+    }
 }
