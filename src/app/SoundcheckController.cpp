@@ -1132,7 +1132,7 @@ void SoundcheckController::notifyStateChanged() const
 // MESSAGE THREAD ONLY (spec 4.6e, invariant 17).
 //
 // setNotch/clearNotch are policy entry points declared message-thread
-// (NotchController.h:219-224), and setNotchImpl additionally reads width_
+// (NotchController.h:225-230), and setNotchImpl additionally reads width_
 // (NotchController.cpp:199) and the detector's sample rate (:209) OUTSIDE
 // modelMutex_. This is a FREE FUNCTION rather than a SoundcheckController
 // method so that no route exists by which the lane M thread could reach it:
@@ -1142,10 +1142,10 @@ namespace
 {
 // B-1's allocator. TOP-DOWN (15, 14, 13 ...) while the detector allocates
 // bottom-up (firstFreeIndexLocked scans i = 0..kSlots, NotchController.cpp:
-// 1066-1068), so the two only meet when the chain is nearly full.
+// 1066-1069), so the two only meet when the chain is nearly full.
 //
 // `lane < 0` means "must be free on EVERY lane" -- a LINKED pair, the shape
-// firstFreeIndexAllLanesLocked (:1072-1083) produces on the detector side.
+// firstFreeIndexAllLanesLocked (:1073-1084) produces on the detector side.
 //
 // Only ACTIVE notches enter the snapshot (NotchController.cpp:576-580), so
 // "not present in snap" is exactly "free". The brief carried a fourth
@@ -1319,10 +1319,10 @@ SoundcheckApplyStats applySoundcheckResults (
             controller.copySnapshot (snap);
 
             // (c/N5) The BEHAVIOUR, not the switch. SnapshotBuffer::linked is
-            // the operator switch and says so (NotchController.cpp:637-640);
+            // the operator switch and says so (NotchController.cpp:637-641);
             // effectiveLinked() also forces LINKED whenever independence is
-            // impossible -- width 1, or no lane-1 tap (NotchController.h:217).
-            // laneCount is analysedLanes() (:655, published at .cpp:636), so
+            // impossible -- width 1, or no lane-1 tap (NotchController.h:223).
+            // laneCount is analysedLanes() (:667, published at .cpp:637), so
             // laneCount < 2 is exactly that second half. A mono slot therefore
             // takes the linked branch and writes its ONE lane; nothing is ever
             // written to a lane this slot does not drive.
@@ -1361,8 +1361,8 @@ SoundcheckApplyStats applySoundcheckResults (
             {
                 // ALL-OR-NOTHING (N4): one lane protected while the GUI claims
                 // both is worse than placing nothing -- the same reasoning
-                // placeConfirmed (NotchController.cpp:1262-1264) and
-                // adoptPreset (:528-530) already follow.
+                // placeConfirmed (NotchController.cpp:1265) and
+                // adoptPreset (:530) already follow.
                 int  placedLanes = 0;
                 bool ok = true;
                 for (int lane = 0; lane < laneCount && ok; ++lane)

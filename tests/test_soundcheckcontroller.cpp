@@ -1401,7 +1401,7 @@ TEST (SoundcheckApply, PartialApplyStopsAndReportsRefused)
 
 // RED IF: a linked slot gets one lane only, or two different indices. The
 // detector's LINKED path (firstFreeIndexAllLanesLocked, NotchController.cpp:
-// 1072-1083) would then never find an index free on both lanes and would
+// 1073-1084) would then never find an index free on both lanes and would
 // silently slip. F16.
 TEST (SoundcheckApply, LinkedSlotPlacesBothLanesAtOneIndex)
 {
@@ -1428,7 +1428,8 @@ TEST (SoundcheckApply, LinkedSlotPlacesBothLanesAtOneIndex)
 
 // RED IF: linkedness is read from SnapshotBuffer::linked alone. That field is
 // the operator's SWITCH, not the behaviour (NotchController.cpp:637-640): a
-// mono slot is FORCED linked by effectiveLinked() while the switch still reads
+// mono slot is FORCED linked by effectiveLinked() (NotchController.h:223) while
+// the switch still reads
 // INDEP. N5.
 TEST (SoundcheckApply, LinkedIsDerivedFromLaneCountNotJustTheSwitch)
 {
@@ -1484,7 +1485,7 @@ TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
 }
 
 // RED IF: the previous run's preventive notches are left in place. They never
-// auto-release (KD-7, NotchController.cpp:729), so the 16-slot chain drains
+// auto-release (KD-7, NotchController.cpp:730-731), so the 16-slot chain drains
 // after a few soundchecks. Spec 4.6b.
 TEST (SoundcheckApply, ARerunReplacesItsOwnPreviousProposals)
 {
