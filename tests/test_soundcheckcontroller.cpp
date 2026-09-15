@@ -280,6 +280,109 @@ juce::String abortReasonInLog (const std::vector<juce::var>& log)
             return v.getDynamicObject()->getProperty ("reason").toString();
     return {};
 }
+
+// ======================= TASK 7 HELPERS: applySoundcheckResults =============
+//
+// B-2: tests/test_notchcontroller.cpp's Recorder lives in THAT translation
+// unit's anonymous namespace and is invisible here, it has no operator() (the
+// sink comes from sink()), and it must outlive the controller it is wired to,
+// because the controller's destructor flushes through the sink.
+//
+// N-1: and that is not only about where the two TYPES are defined. In EVERY
+// TEST BODY that wires a recorder to a rig, the `EventRecorder` OBJECT must be
+// declared before the `NotchRig` OBJECT. Locals are destroyed in reverse
+// declaration order, so `NotchRig rig; EventRecorder rec;` puts the flush from
+// ~NotchController into a vector that has already gone. The bug is silent in a
+// passing run and shows up as a heap corruption somewhere else.
+//
+// It is not promoted into tests/test_gui_helpers.h: that header is GUI-only
+// (namespace gui_test, and its only include is juce_gui_basics), so putting a
+// NotchController::NotchEvent recorder in it would drag app/NotchController.h
+// into every GUI test TU.
+struct EventRecorder
+{
+    std::vector<NotchController::NotchEvent> events;
+
+    NotchController::EventSink sink()
+    {
+        return [this] (const NotchController::NotchEvent& e) { events.push_back (e); };
+    }
+
+    bool sawClearWithReason (NotchController::ClearReason r) const
+    {
+        for (const auto& e : events)
+            if (e.kind == NotchController::NotchEvent::Kind::Clear && e.reason == r)
+                return true;
+        return false;
+    }
+};
+
+// A NotchController wired the way MainComponent wires one, with the width and
+// the lane-1 tap set EXPLICITLY. Lane G lesson 18: a mono harness left at
+// width_ == 2 turns effectiveLinked() on and writes a dead lane-1 entry that
+// poisons the NEXT test in the same file. Never rely on the default.
+//
+// B-1(c): pump() exists because latest_ is published only inside runOnce()'s
+// drain loop, and that loop body runs only when a block was actually drained
+// off a tap (NotchController.cpp:550-560). Without it copySnapshot() returns an
+// empty buffer forever, every snapshot-reading assertion passes vacuously, and
+// laneCount keeps its default of 1 (NotchController.h:412). Precedent:
+// tests/test_gui_wiring.cpp:1033-1035.
+struct NotchRig
+{
+    LockFreeRingBuffer<float> tapL { 8192 }, tapR { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    FakeClock clock;
+    int lanes = 1;
+    std::unique_ptr<NotchController> controller;
+
+    explicit NotchRig (int laneCount) : lanes (laneCount)
+    {
+        if (lanes == 2) controller = std::make_unique<NotchController> (tapL, &tapR, cmds, clock);
+        else            controller = std::make_unique<NotchController> (tapL, cmds, clock);
+        controller->setWidth (lanes);
+        pump();                       // so the FIRST snapshot is a real one
+    }
+
+    void pump()
+    {
+        const std::vector<float> block (512, 0.0f);   // exactly one Detector hop
+        tapL.write (block.data(), block.size());
+        if (lanes == 2)
+            tapR.write (block.data(), block.size());  // B-1(b): laneCount needs BOTH
+        controller->runOnce();
+    }
+
+    NotchController::SnapshotBuffer snapshot()
+    {
+        pump();
+        NotchController::SnapshotBuffer s {};
+        controller->copySnapshot (s);
+        return s;
+    }
+
+    int countSoundcheckNotches()
+    {
+        const auto snap = snapshot();
+        int n = 0;
+        for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+            if (snap.notches[i].origin == NotchController::Origin::Soundcheck)
+                ++n;
+        return n;
+    }
+};
+
+SoundcheckController::OutputResult oneCandidate (int slot, int lane, double hz, double depthDb)
+{
+    SoundcheckController::OutputResult r;
+    r.slot = slot; r.lane = lane; r.measured = true;
+    r.candidateCount = 1;
+    r.candidates[0].hz       = (float) hz;
+    r.candidates[0].q        = 30.0f;
+    r.candidates[0].depthDb  = (float) depthDb;
+    r.candidates[0].marginDb = -9.0f;
+    return r;
+}
 } // namespace
 
 // ------------------------------------------------------------- REFUSALS ----
@@ -1180,4 +1283,357 @@ TEST (SoundcheckController, ResultsAreReadableWholeAndPerSlot)
     EXPECT_EQ ((int) r.sc.copyResultsForSlot (1).size(), 0);
     for (const auto& res : r.sc.copyResultsForSlot (0))
         EXPECT_EQ (res.slot, 0);
+}
+
+// ============================================================ TASK 7: APPLY ==
+//
+// applySoundcheckResults is the ONLY place lane M's proposals become real
+// notches, and it is MESSAGE THREAD ONLY (spec 4.6e, inv 17).
+
+// RED IF: applySoundcheckResults stops refusing to run off the message thread.
+// setNotchImpl reads width_ (NotchController.cpp:199) and the detector's sample
+// rate (:209) OUTSIDE modelMutex_, so setNotch/clearNotch are message-thread by
+// contract (NotchController.h:219-224). inv 17, F27.
+//
+// The brief's version of this test only compared this_thread::get_id() with
+// itself before and after the call -- a tautology that cannot fail whatever the
+// implementation does. This one actually calls it from ANOTHER thread and
+// asserts nothing was written; drop the guard and it goes red.
+TEST (SoundcheckApply, ApplyRunsOnTheMessageThread)
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;   // the MessageManager is THIS thread's
+    ASSERT_TRUE (juce::MessageManager::existsAndIsCurrentThread());
+
+    NotchRig rig { 1 };
+    const std::vector<SoundcheckController::OutputResult> results {
+        oneCandidate (0, 0, 1000.0, -12.0) };
+
+    SoundcheckApplyStats offThread;
+    std::thread t ([&] { offThread = applySoundcheckResults (*rig.controller, results); });
+    t.join();
+
+    EXPECT_EQ (offThread.placed, 0) << "nothing may be written off the message thread";
+    EXPECT_EQ (offThread.clearedPrevious, 0);
+    EXPECT_GE (offThread.refused, 1) << "and the refusal is REPORTED, not silent";
+    EXPECT_FALSE (rig.controller->activeForTest (0, 15));
+
+    // ...and the same call on the message thread does place.
+    const auto stats = applySoundcheckResults (*rig.controller, results);
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 15)) << "top-down allocation starts at 15";
+}
+
+// RED IF: either half of B-1 is dropped -- the takenThisCall bitmap, or the
+// per-setNotch re-read. The bitmap is what makes six placements land on six
+// indices (the snapshot refreshes at hop cadence, ~10.7 ms, on the DETECTOR
+// thread, while this loop runs in microseconds on the message thread, so every
+// re-read returns the same frame). The re-read is what catches a detector
+// placement that landed since entry. F10, B-1.
+TEST (SoundcheckApply, ApplyReReadsTheSnapshotBeforeEachSetNotch)
+{
+    NotchRig rig { 1 };
+
+    std::vector<SoundcheckController::OutputResult> results;
+    auto r = oneCandidate (0, 0, 1000.0, -12.0);
+    r.candidateCount = 2;
+    r.candidates[1].hz = 2000.0f; r.candidates[1].q = 30.0f; r.candidates[1].depthDb = -12.0f;
+    results.push_back (r);
+
+    // Occupy index 14 with a DETECTOR notch before the call, so the re-read has
+    // something real to catch. The takenThisCall bitmap handles 15; the re-read
+    // handles 14. Both halves are exercised by this one test.
+    ASSERT_TRUE (rig.controller->setNotch (0, 14, 5000.0, 30.0, -12.0,
+                                           NotchController::Origin::Detector));
+    rig.pump();
+
+    const auto stats = applySoundcheckResults (*rig.controller, results);
+
+    EXPECT_EQ (stats.placed, 2);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 15));
+    EXPECT_TRUE (rig.controller->activeForTest (0, 14)) << "the detector's notch is still here";
+    EXPECT_TRUE (rig.controller->activeForTest (0, 13))
+        << "14 was taken by the detector, and 15 by THIS call -- 13 is next. "
+           "Without takenThisCall (B-1) the second placement lands on 15 again "
+           "and overwrites the first, because the snapshot cannot have refreshed "
+           "in the microseconds between the two setNotch calls.";
+    EXPECT_NEAR (rig.controller->depthDbForTest (0, 14), -12.0, 1.0e-9);
+}
+
+// RED IF: an INDEP failure rolls back. Each INDEP notch stands alone, so a notch
+// that WAS placed is real protection and pulling it because the next one failed
+// is strictly worse. N4.
+TEST (SoundcheckApply, IndepApplyDoesNotUnwind)
+{
+    NotchRig rig { 2 };
+    rig.controller->setLinked (false);
+
+    std::vector<SoundcheckController::OutputResult> results {
+        oneCandidate (0, 0, 1000.0, -12.0),
+        oneCandidate (0, 1, 1500.0, -12.0)
+    };
+
+    rig.controller->failNextSetNotchOnLaneForTest (1);
+    const auto stats = applySoundcheckResults (*rig.controller, results);
+
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_EQ (stats.refused, 1);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 15)) << "the lane-0 notch STAYS";
+}
+
+// RED IF: an INDEP failure keeps going and silently loses count. Stop at the
+// first false, and report it. F10.
+TEST (SoundcheckApply, PartialApplyStopsAndReportsRefused)
+{
+    NotchRig rig { 1 };
+
+    auto r = oneCandidate (0, 0, 1000.0, -12.0);
+    r.candidateCount = 3;
+    // An invalid Q makes setNotchImpl refuse at NotchController.cpp:211.
+    r.candidates[1].hz = 2000.0f; r.candidates[1].q = 0.0f;  r.candidates[1].depthDb = -12.0f;
+    r.candidates[2].hz = 3000.0f; r.candidates[2].q = 30.0f; r.candidates[2].depthDb = -12.0f;
+
+    const auto stats = applySoundcheckResults (*rig.controller, { r });
+
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_GE (stats.refused, 1);
+    EXPECT_FALSE (rig.controller->activeForTest (0, 13)) << "it must STOP, not skip and carry on";
+}
+
+// RED IF: a linked slot gets one lane only, or two different indices. The
+// detector's LINKED path (firstFreeIndexAllLanesLocked, NotchController.cpp:
+// 1072-1083) would then never find an index free on both lanes and would
+// silently slip. F16.
+TEST (SoundcheckApply, LinkedSlotPlacesBothLanesAtOneIndex)
+{
+    NotchRig rig { 2 };                   // width 2 AND a real lane-1 tap
+    rig.controller->setLinked (true);
+
+    // B-1(b): laneCount is published from analysedLanes() and defaults to 1.
+    // If the snapshot has never refreshed -- or refreshed without a lane-1
+    // block -- lane M reads laneCount == 1 and places ONE lane on a LINKED
+    // slot. NotchRig::pump() writes BOTH taps; assert the precondition rather
+    // than assuming it.
+    const auto pre = rig.snapshot();
+    ASSERT_EQ (pre.laneCount, 2u) << "pump both taps, or this test cannot fail correctly";
+
+    const auto stats = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+
+    EXPECT_EQ (stats.placed, 2);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 15));
+    EXPECT_TRUE (rig.controller->activeForTest (1, 15));
+    EXPECT_NEAR (rig.controller->depthDbForTest (0, 15),
+                 rig.controller->depthDbForTest (1, 15), 1.0e-9);
+}
+
+// RED IF: linkedness is read from SnapshotBuffer::linked alone. That field is
+// the operator's SWITCH, not the behaviour (NotchController.cpp:637-640): a
+// mono slot is FORCED linked by effectiveLinked() while the switch still reads
+// INDEP. N5.
+TEST (SoundcheckApply, LinkedIsDerivedFromLaneCountNotJustTheSwitch)
+{
+    NotchRig rig { 1 };                   // mono: laneCount == 1, linked switch OFF
+    rig.controller->setLinked (false);
+
+    const auto snap = rig.snapshot();
+    ASSERT_FALSE (snap.linked);
+    ASSERT_LT (snap.laneCount, 2u);
+
+    const auto stats = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+
+    // One lane exists, so "every driven lane" is one placement -- and crucially
+    // NOTHING is written to lane 1, which has no tap.
+    EXPECT_EQ (stats.placed, 1);
+    EXPECT_TRUE  (rig.controller->activeForTest (0, 15));
+    EXPECT_FALSE (rig.controller->activeForTest (1, 15));
+}
+
+// RED IF: a linked pair is left half-placed. One lane protected while the GUI
+// claims both is worse than placing nothing -- the same reasoning
+// placeConfirmed and adoptPreset already follow. N4.
+TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
+{
+    // N-1: the RECORDER FIRST. Destruction runs in reverse declaration order,
+    // so a recorder declared after the rig is already gone when
+    // ~NotchController runs stop() and flushes its remaining events through the
+    // sink -- a write into a destroyed vector.
+    EventRecorder rec;
+    NotchRig      rig { 2 };
+    rig.controller->setLinked (true);
+    rig.controller->setEventSink (rec.sink());
+    // B-1(c) again, and this one is not only a fixture detail: SnapshotBuffer::
+    // linked is republished ONLY inside runOnce() drain loop, so the operator
+    // switch is invisible to a reader of the snapshot until a block has been
+    // drained through it (up to one hop, ~10.7 ms). Without this pump the rig
+    // still reads INDEP, applySoundcheckResults takes the INDEP branch and the
+    // unwind this test exists to prove is never reached.
+    ASSERT_TRUE (rig.snapshot().linked) << "the LINK switch has not been published yet";
+
+    rig.controller->failNextSetNotchOnLaneForTest (1);
+    const auto stats = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+
+    EXPECT_EQ (stats.placed, 0);
+    EXPECT_GE (stats.refused, 1);
+    EXPECT_FALSE (rig.controller->activeForTest (0, 15)) << "lane 0 must be unwound";
+
+    rig.pump();
+    EXPECT_TRUE (rec.sawClearWithReason (NotchController::ClearReason::PartialApplyUnwind))
+        << "and with THAT reason, not Manual";
+}
+
+// RED IF: the previous run's preventive notches are left in place. They never
+// auto-release (KD-7, NotchController.cpp:729), so the 16-slot chain drains
+// after a few soundchecks. Spec 4.6b.
+TEST (SoundcheckApply, ARerunReplacesItsOwnPreviousProposals)
+{
+    EventRecorder rec;                    // N-1: the RECORDER FIRST
+    NotchRig      rig { 1 };
+    rig.controller->setEventSink (rec.sink());
+
+    const auto first = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1000.0, -12.0) });
+    ASSERT_EQ (first.placed, 1);
+    rig.pump();                                   // B-1(c)
+
+    const auto second = applySoundcheckResults (*rig.controller,
+                                                { oneCandidate (0, 0, 1200.0, -12.0) });
+    rig.pump();
+
+    EXPECT_EQ (second.clearedPrevious, 1);
+    EXPECT_EQ (second.placed, 1);
+    EXPECT_TRUE (rec.sawClearWithReason (NotchController::ClearReason::SoundcheckReplace));
+    EXPECT_EQ (rig.countSoundcheckNotches(), 1) << "exactly ONE preventive notch survives";
+}
+
+// RED IF: a re-run leaves the OTHER lane's stale proposal behind. I-12's
+// ruling: a re-run replaces the whole SLOT, not one lane. A soundcheck measures
+// a slot's outputs together and a LINKED placement writes both lanes at one
+// index, so half-replacing produces a pair the operator never asked for. The
+// mono test above cannot tell the difference; this one can.
+TEST (SoundcheckApply, ARerunReplacesTheWholeSlotNotJustOneLane)
+{
+    NotchRig rig { 2 };
+    rig.controller->setLinked (false);          // INDEP: two independent lanes
+
+    ASSERT_EQ (applySoundcheckResults (*rig.controller,
+                                       { oneCandidate (0, 0, 1000.0, -12.0),
+                                         oneCandidate (0, 1, 1500.0, -12.0) }).placed, 2);
+    rig.pump();
+
+    // A re-run that names only lane 0 must still clear BOTH previous proposals.
+    const auto again = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1100.0, -12.0) });
+    rig.pump();
+
+    EXPECT_EQ (again.clearedPrevious, 2) << "the whole slot, not just this lane";
+    EXPECT_EQ (rig.countSoundcheckNotches(), 1);
+}
+
+// RED IF: a Detector or Preset notch is cleared by the replace pass. Only lane
+// M own previous proposals go.
+TEST (SoundcheckApply, ReplacingLeavesEveryOtherOriginAlone)
+{
+    NotchRig rig { 1 };
+    ASSERT_TRUE (rig.controller->setNotch (0, 0, 500.0, 30.0, -12.0,
+                                           NotchController::Origin::Detector));
+    ASSERT_TRUE (rig.controller->setNotch (0, 1, 700.0, 30.0, -12.0,
+                                           NotchController::Origin::Preset));
+    ASSERT_TRUE (rig.controller->setNotch (0, 2, 900.0, 30.0, -12.0,
+                                           NotchController::Origin::Manual));
+    rig.pump();
+
+    applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
+    rig.pump();
+    const auto again = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1100.0, -12.0) });
+
+    EXPECT_EQ (again.clearedPrevious, 1);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 0));
+    EXPECT_TRUE (rig.controller->activeForTest (0, 1));
+    EXPECT_TRUE (rig.controller->activeForTest (0, 2));
+}
+
+// RED IF: the ternary at NotchController.cpp:243-245 changes and a preventive
+// notch stops being its own ceiling. It is implicit behaviour, so it gets an
+// explicit test. Spec 4.6d.
+TEST (SoundcheckApply, APreventiveNotchIsItsOwnCeiling)
+{
+    NotchRig rig { 1 };
+    applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
+
+    EXPECT_DOUBLE_EQ (rig.controller->rawCeilingDbForTest (0, 15), -12.0);
+    EXPECT_DOUBLE_EQ (rig.controller->ceilingDbForTest (0, 15), -12.0);
+}
+
+// RED IF: a result that could not be measured still places something. inv 13.
+TEST (SoundcheckApply, AnUnmeasuredResultPlacesNothing)
+{
+    NotchRig rig { 1 };
+    auto r = oneCandidate (0, 0, 1000.0, -12.0);
+    r.measured = false;
+
+    const auto stats = applySoundcheckResults (*rig.controller, { r });
+    EXPECT_EQ (stats.placed, 0);
+    EXPECT_FALSE (rig.controller->activeForTest (0, 15));
+}
+
+// ----------------------------------------------- invariant 15: +-1 FFT bin ---
+//
+// Task 6 hands SoundcheckCandidates::pick an EMPTY liveNotchHz list on purpose
+// (inv 17: the lane M thread may not read a NotchController). So the whole of
+// inv 15 -- "a proposal must never land within +-1 bin of a live notch on that
+// lane" -- is enforced HERE, on the message thread, against the snapshot this
+// function is already reading.
+//
+// RED IF: the +-1-bin skip is dropped. Two notches one bin apart are two
+// filters doing one filter's job: the second buys almost no extra attenuation,
+// and it costs a slot out of sixteen that a different howl will need. At 48 kHz
+// with a 2048-point transform a bin is 23.44 Hz, so 1000 Hz and 1010 Hz are the
+// SAME bin (43).
+TEST (SoundcheckApply, AProposalWithinOneBinOfALiveNotchIsSkipped)
+{
+    NotchRig rig { 1 };
+    ASSERT_TRUE (rig.controller->setNotch (0, 10, 1000.0, 30.0, -12.0,
+                                           NotchController::Origin::Detector));
+    rig.pump();
+    ASSERT_GT (rig.snapshot().sampleRate, 0.0) << "hzToBin needs the published rate";
+
+    auto r = oneCandidate (0, 0, 1010.0, -12.0);     // bin 43, same as the live notch
+    r.candidateCount = 2;
+    r.candidates[1].hz = 4000.0f;                    // bin 171 -- nowhere near
+    r.candidates[1].q  = 30.0f;
+    r.candidates[1].depthDb = -12.0f;
+
+    const auto stats = applySoundcheckResults (*rig.controller, { r });
+
+    EXPECT_EQ (stats.skippedLive, 1) << "the 1010 Hz proposal sits on the live notch";
+    EXPECT_EQ (stats.placed, 1)      << "and the 4000 Hz one still lands";
+    EXPECT_TRUE  (rig.controller->activeForTest (0, 15));
+    EXPECT_FALSE (rig.controller->activeForTest (0, 14))
+        << "a skipped proposal must not burn an index either";
+    EXPECT_NEAR (rig.controller->depthDbForTest (0, 10), -12.0, 1.0e-9)
+        << "and the live notch itself is untouched";
+}
+
+// RED IF: the skip is applied to notches THIS CALL has just cleared. A second
+// soundcheck of the same room finds the same frequencies -- that is the normal
+// case, not the odd one. The entry snapshot still lists a cleared notch for up
+// to one hop (~10.7 ms), so without excluding what this call cleared, every
+// re-run would refuse to re-place anything and the operator would be told the
+// room had changed when nothing had.
+TEST (SoundcheckApply, ARerunMayRePlaceAtTheSameFrequencyItJustCleared)
+{
+    NotchRig rig { 1 };
+    ASSERT_EQ (applySoundcheckResults (*rig.controller,
+                                       { oneCandidate (0, 0, 1000.0, -12.0) }).placed, 1);
+    rig.pump();
+
+    const auto again = applySoundcheckResults (*rig.controller,
+                                               { oneCandidate (0, 0, 1000.0, -18.0) });
+
+    EXPECT_EQ (again.clearedPrevious, 1);
+    EXPECT_EQ (again.skippedLive, 0) << "a notch this call just cleared is not LIVE";
+    EXPECT_EQ (again.placed, 1);
 }

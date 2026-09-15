@@ -375,7 +375,18 @@ private:
 
 // MESSAGE THREAD ONLY. Defined by Task 7 -- declared here so Task 7 adds a
 // definition rather than a second surface.
-struct SoundcheckApplyStats { int placed = 0, refused = 0, clearedPrevious = 0; };
+struct SoundcheckApplyStats
+{
+    int placed = 0, refused = 0, clearedPrevious = 0;
+    // Invariant 15, and it is enforced by Task 7 rather than by Task 6's call
+    // into SoundcheckCandidates::pick: that call passes liveNotchHz EMPTY
+    // because the lane M thread may not read a NotchController (inv 17). So
+    // the +-1 FFT bin test against the LIVE notches happens here, against the
+    // snapshot this function already reads, and a proposal dropped by it is
+    // counted BOTH in `refused` (nothing was placed for it) and here (this is
+    // WHY). Subset, not a separate total.
+    int skippedLive = 0;
+};
 SoundcheckApplyStats applySoundcheckResults (
     NotchController& controller,
     const std::vector<SoundcheckController::OutputResult>& results);
