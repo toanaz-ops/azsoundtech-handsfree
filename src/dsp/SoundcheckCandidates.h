@@ -47,6 +47,7 @@
 #include "dsp/LoopGainEstimator.h"
 
 #include <array>
+#include <limits>
 
 class SoundcheckCandidates
 {
@@ -79,9 +80,25 @@ public:
     struct Input
     {
         const float* hDb        = nullptr;      // kNumBins, from LoopGainEstimator
-        const bool*  trusted    = nullptr;      // kNumBins
+        // kNumBins. Pass LoopGainEstimator::Result::trusted VERBATIM: pick()
+        // has no `measured` input and cannot re-derive that gate, and Result
+        // documents that `measured` OVERRIDES `trusted` -- finish() has already
+        // cleared the whole array when the run was unusable. A caller that
+        // rebuilds this array from per-bin SNR instead reintroduces exactly the
+        // hole Task 2's review closed.
+        const bool*  trusted    = nullptr;
         double sampleRate       = 0.0;
-        double ceilingDb        = 0.0;          // the running preset's ceiling, <= 0
+        // THREE DISTINCT STATES, and the difference decides whether a PA gets
+        // cut at all:
+        //   NaN  = UNSET. A controller bug, not a preset. pick() computes marks,
+        //          proposes NOTHING, and raises Output::ceilingMissing.
+        //   0.0  = no cut authorised by this preset. Marks only, silently and
+        //          legitimately.
+        //   < 0  = the running preset's ceiling, the shallowest cut allowed.
+        // SoundcheckController MUST write this from the running preset. The
+        // default is NaN rather than 0.0 so a forgotten assignment is
+        // DETECTABLE instead of looking like a preset that allows no cut.
+        double ceilingDb        = std::numeric_limits<double>::quiet_NaN();
         double notchQ           = 0.0;
         const float* liveNotchHz = nullptr;     // frequencies of notches already live on this lane
         int    liveNotchCount    = 0;
@@ -98,6 +115,11 @@ public:
     {
         std::array<Candidate, kMaxPreventivePerLane> candidates {};
         int candidateCount = 0, markedCount = 0, saturatedBins = 0;
+        // Input::ceilingDb was not finite -- see that field. The run produced
+        // marks and no proposals, and the reason is a BUG in the caller, not a
+        // quiet room: Task 6 must surface it rather than showing an empty
+        // proposal list as a clean result.
+        bool ceilingMissing = false;
         std::array<bool, kNumBins> marked {};
     };
 
@@ -109,6 +131,15 @@ public:
     //   5. MARK when hDb >= kCandidateMarginDb AND hDb - smoothed >= kMinProminenceDb;
     //   6. PROPOSE only a marked bin whose depthFor() returned a proposal;
     //   7. sort by hDb DESCENDING, keep at most kMaxPreventivePerLane.
+    //
+    // THREE WAYS pick() REFUSES TO PROPOSE WHILE STILL MARKING. Each is a
+    // caller error that must not be allowed to become a wrong cut, and in each
+    // the operator still gets to SEE the room:
+    //   - Input::ladder has no rungs (rungsDb == nullptr or count <= 0) -- with
+    //     no ladder every proposal would silently land on maxDepthDb;
+    //   - Input::ceilingDb is not finite -- see that field; Output::ceilingMissing;
+    //   - hDb[k] is not finite -- a NaN passes every `<` comparison, so it is
+    //     rejected explicitly before step 5 rather than reaching depthFor.
     [[nodiscard]] static Output pick (const Input& in);
 
     // 1/3-octave moving average of hDb. Public so a later lane can reuse it;
@@ -124,7 +155,17 @@ public:
     //     and would still get zero); the tests that catch it are the ones that
     //     require a candidate to EXIST -- MarginIsTheNegativeOfLoopGain,
     //     AtMostSixPerLaneAndTheHottestSurvive, UntrustedBinIsNeverACandidate,
-    //     SaturatesAtMinusTwentyFourAndReportsResidual and
-    //     MarkedButNotProposedBelowMinUsefulCut.
+    //     SaturatesAtMinusTwentyFourAndReportsResidual,
+    //     MarkedButNotProposedBelowMinUsefulCut and the control half of
+    //     AboveTheTrustedBandIsNeverACandidate.
+    //
+    // THE WINDOW IS ONE-SIDED IN THE TOP SIXTH OF AN OCTAVE. `hi` is clamped to
+    // numBins - 1, so for a bin above Nyquist / 2^(1/6) the average is taken
+    // over a window that extends below the centre and not above it, and the
+    // result is biased by the local slope. That is harmless as used here --
+    // step 1 has already dropped everything above kTrustedHighHz (6 kHz, far
+    // below the clamp at any supported rate) -- but a later lane that calls
+    // smooth() for its own purposes must treat the result as meaningful only
+    // BELOW kTrustedHighHz.
     static void smooth (const float* hDb, float* out, int numBins, double sampleRate);
 };

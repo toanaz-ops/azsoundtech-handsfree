@@ -15,6 +15,14 @@ SoundcheckCandidates::depthFor (double hDb, double ceilingDb, const Ladder& ladd
 {
     Depth out;
 
+    // An empty or null ladder is a CALLER BUG, and the silent failure it would
+    // otherwise cause is the dangerous kind: the rung loop would run zero
+    // times, `found` would stay false, and every proposal would land on
+    // maxDepthDb -- a full -24 dB cut on every bin, from a struct nobody
+    // filled in. Refuse instead, with the rule's own "no proposal" Depth.
+    if (ladder.rungsDb == nullptr || ladder.count <= 0)
+        return out;
+
     // Both sides dB. needed_dB > 0 means "this many dB must come out".
     const double needed = hDb + kTargetMarginDb;
     if (needed < kMinUsefulCutDb)
@@ -86,6 +94,21 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
     if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
         return out;
 
+    // Neither of these stops the MARKS: the operator is still shown the room,
+    // and a caller bug must not silently look like a quiet stage. Both stop
+    // every PROPOSAL, because the depth of a cut cannot be decided without a
+    // ladder to quantise onto or a ceiling to clamp against.
+    //
+    // DELIBERATELY REDUNDANT with depthFor's own guard: while both stand, no
+    // test can tell them apart (measured 2026-09-16 -- neutering either one
+    // alone leaves the suite green; removing BOTH turns
+    // EmptyLadderMarksButProposesNothing red). Keep both anyway. depthFor is
+    // public and a later lane may call it directly, and this one states the
+    // refusal where the marks/proposals split actually happens.
+    const bool ladderMissing  = (in.ladder.rungsDb == nullptr || in.ladder.count <= 0);
+    const bool ceilingMissing = ! std::isfinite (in.ceilingDb);
+    out.ceilingMissing = ceilingMissing;
+
     // Step 4 up front: the prominence test in step 5 needs the smoothed curve,
     // and smoothing is over the WHOLE array -- a bin outside the trusted band
     // still contributes to the average of a bin inside it.
@@ -102,7 +125,13 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
         const auto i  = (std::size_t) k;
         const double hz = LoopGainEstimator::binToHz (k, in.sampleRate);
 
-        // Step 1: both sides Hz.
+        // Step 1: both sides Hz. Note the low edge is `hz < kSweepLowHz`, so
+        // at 48 kHz bin 4 (93.75 Hz) is EXCLUDED here, while the estimator's
+        // band-SNR window starts at hzToBin(kSweepLowHz) == bin 4 and INCLUDES
+        // it. The two are different things -- an aggregate SNR figure versus a
+        // per-bin proposal gate -- and the one-bin difference has no functional
+        // consequence: see AboveTheTrustedBandIsNeverACandidate on why a bin
+        // that low can never pass step 5 anyway.
         if (hz < SoundcheckSignal::kSweepLowHz || hz > LoopGainEstimator::kTrustedHighHz)
             continue;
 
@@ -132,11 +161,31 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
 
         const double h = (double) in.hDb[i];
 
+        // A NaN passes EVERY `<` comparison below -- `NaN < x` is false, so a
+        // NaN bin would survive both step 5 gates untouched and reach depthFor,
+        // where `needed < kMinUsefulCutDb` is false too: it would be proposed
+        // at maxDepthDb with saturated == false. Reject it explicitly.
+        //
+        // Also deliberately redundant with the NaN-safe prominence gate below
+        // (a NaN in hDb makes prom NaN too, and that gate rejects it). Removing
+        // EITHER alone leaves the suite green; removing both turns
+        // NonFiniteLoopGainIsNeverMarked red. This one is the explicit,
+        // readable statement of the rule and does not depend on how the
+        // prominence comparison happens to be spelled.
+        if (! std::isfinite (h))
+            continue;
+
         // Step 5: hot enough to show the operator, AND a peak rather than a
         // slope. Both sides of both comparisons are dB.
         if (h < kCandidateMarginDb)
             continue;
-        if (h - (double) hs[i] < kMinProminenceDb)
+
+        // Written as `! (prom >= k)` and not `prom < k` so that a NaN REJECTS
+        // the bin. hs[i] is NaN whenever a non-finite bin fell inside this
+        // bin's 1/3-octave window, and with `prom < k` that comparison would be
+        // false and the bin would pass the prominence gate it never satisfied.
+        const double prom = h - (double) hs[i];
+        if (! (prom >= kMinProminenceDb))
             continue;
 
         out.marked[i] = true;
@@ -146,6 +195,9 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
         // depthDb == 0 is the rule's "no proposal" -- it covers both the
         // below-kMinUsefulCutDb case and a preset whose ceiling allows no cut
         // at all, and neither may become a 0 dB notch in a chain slot.
+        if (ladderMissing || ceilingMissing)
+            continue;
+
         const Depth d = depthFor (h, in.ceilingDb, in.ladder);
         if (! (d.depthDb < 0.0))
             continue;

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace
@@ -249,10 +250,18 @@ TEST (SoundcheckCandidates, MarginIsTheNegativeOfLoopGain)
 // caller's invariant, and this fixture is the only one that sets trusted == true
 // on a bin the sweep never trusted.
 //
-// The LOW half of the band test (below kSweepLowHz) is not asserted because it
-// is unreachable: at 48 kHz a bin below 100 Hz sits at index <= 4, and a
-// +-2^(1/6) window around it rounds to that single bin, so its prominence is
-// exactly 0 and step 5 rejects it before step 1 could matter.
+// The LOW half of the band test (below kSweepLowHz) is not asserted here
+// because at THIS sample rate it is unreachable -- and that is a property of
+// the rate, not of the rule:
+//
+//   at sampleRate >= 40.96 kHz every bin below 100 Hz has index <= 4, and a
+//   +-2^(1/6) window around such a bin rounds to that single bin, so its
+//   prominence is exactly 0 and step 5 rejects it before step 1 could matter;
+//
+//   BELOW 40.96 kHz it does not. At 32 kHz the bin spacing is 15.625 Hz, so
+//   93.75 Hz is bin 6, its 1/3-octave window spans bins 5..7, and a real
+//   prominence can be computed there. The low half of step 1 is LOAD-BEARING
+//   at 32 kHz and must not be removed on the strength of this test's silence.
 TEST (SoundcheckCandidates, AboveTheTrustedBandIsNeverACandidate)
 {
     Field f;
@@ -268,4 +277,113 @@ TEST (SoundcheckCandidates, AboveTheTrustedBandIsNeverACandidate)
     Field g;
     g.poke (2000.0, 25.0f);
     EXPECT_EQ (SoundcheckCandidates::pick (g.input()).candidateCount, 1);
+}
+
+// RED IF: the Ladder is used without being validated (review I-1). With no
+// rungs the quantiser loop runs zero times, `found` stays false, and EVERY
+// proposal lands on maxDepthDb -- a full -24 dB cut on every bin of a PA,
+// decided by a struct nobody filled in. The marks must survive: a caller bug
+// may not look like a quiet stage.
+TEST (SoundcheckCandidates, EmptyLadderMarksButProposesNothing)
+{
+    const SoundcheckCandidates::Ladder none {};
+    const auto d = SoundcheckCandidates::depthFor (2.0, -24.0, none);
+    EXPECT_DOUBLE_EQ (d.depthDb, 0.0);
+    EXPECT_DOUBLE_EQ (d.residualDb, 0.0);
+    EXPECT_FALSE (d.saturated);
+
+    // A count with no array must be refused BEFORE the loop dereferences it.
+    SoundcheckCandidates::Ladder countOnly {};
+    countOnly.count = 4;
+    EXPECT_DOUBLE_EQ (SoundcheckCandidates::depthFor (2.0, -24.0, countOnly).depthDb, 0.0);
+
+    Field f;
+    f.poke (1000.0, 9.0f);
+    auto in = f.input();
+    in.ladder = SoundcheckCandidates::Ladder {};
+
+    const auto out = SoundcheckCandidates::pick (in);
+    EXPECT_GT (out.markedCount, 0);
+    EXPECT_EQ (out.candidateCount, 0);
+    EXPECT_EQ (out.saturatedBins, 0);
+}
+
+// RED IF: step 6's sentinel (`depthDb >= 0` means no proposal) is widened into
+// a rejection of every off-ladder depth. A ceiling of -2 dB is not a rung and
+// not zero: it is a real, shallow, legitimate cut, and it must be PROPOSED --
+// with the 3 dB it leaves on the table reported. Review I-2.
+TEST (SoundcheckCandidates, ShallowOffLadderCeilingStillCuts)
+{
+    Field f;
+    f.poke (1000.0, -1.0f);                  // needed = 5 dB, rung -6, ceiling -2 wins
+
+    const auto out = SoundcheckCandidates::pick (f.input (-2.0));
+
+    ASSERT_EQ (out.candidateCount, 1);
+    EXPECT_FLOAT_EQ (out.candidates[0].depthDb, -2.0f);
+    EXPECT_FLOAT_EQ (out.candidates[0].residualDb, 3.0f);
+    EXPECT_EQ (out.saturatedBins, 1);
+    EXPECT_FALSE (out.ceilingMissing);
+}
+
+// RED IF: an UNSET ceiling becomes indistinguishable from a preset that
+// authorises no cut. Both produce zero proposals, but one is a controller bug
+// and the other is a valid configuration, and Task 6 has to tell them apart.
+// Review I-3.
+TEST (SoundcheckCandidates, UnsetCeilingIsDetectedAndRefused)
+{
+    Field f;
+    f.poke (1000.0, 9.0f);
+
+    auto in = f.input();
+    in.ceilingDb = SoundcheckCandidates::Input {}.ceilingDb;   // the NaN default
+    ASSERT_FALSE (std::isfinite (in.ceilingDb));
+
+    const auto missing = SoundcheckCandidates::pick (in);
+    EXPECT_TRUE (missing.ceilingMissing);
+    EXPECT_EQ (missing.candidateCount, 0);
+    EXPECT_GT (missing.markedCount, 0);
+
+    // 0.0 is the OTHER state: no cut authorised, and not a bug.
+    const auto zero = SoundcheckCandidates::pick (f.input (0.0));
+    EXPECT_FALSE (zero.ceilingMissing);
+    EXPECT_EQ (zero.candidateCount, 0);
+    EXPECT_GT (zero.markedCount, 0);
+}
+
+// RED IF: a non-finite hDb reaches step 5. `NaN < x` is FALSE for every x, so a
+// NaN bin passes both step 5 gates untouched and then passes
+// `needed < kMinUsefulCutDb` too -- it would be proposed at -24 dB with
+// saturated == false, the single most dangerous output this class can produce.
+// Review M-2.
+//
+// The 1050 Hz bin is the second half of the check: it sits INSIDE the NaN bin's
+// 1/3-octave window, so its smoothed value is NaN as well. The prominence gate
+// is written `! (prom >= k)` precisely so that NaN rejects it; written
+// `prom < k` the comparison is false and the bin sails through a gate it never
+// satisfied.
+TEST (SoundcheckCandidates, NonFiniteLoopGainIsNeverMarked)
+{
+    Field f;
+    f.poke (1000.0, std::numeric_limits<float>::quiet_NaN());
+    f.poke (1050.0, -5.0f);    // inside the NaN's smoothing window
+    f.poke (2000.0,  9.0f);    // outside it -- must be unaffected
+
+    const auto out = SoundcheckCandidates::pick (f.input());
+
+    EXPECT_FALSE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (1000.0, kSr)]);
+    EXPECT_FALSE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (1050.0, kSr)]);
+
+    // Exactly one mark and one proposal survive, and they are the 2 kHz mode.
+    EXPECT_EQ (out.markedCount, 1);
+    ASSERT_EQ (out.candidateCount, 1);
+    EXPECT_NEAR (out.candidates[0].hz, 2000.0f, (float) (kSr / Detector::kFftSize));
+    EXPECT_TRUE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (2000.0, kSr)]);
+
+    // Infinity takes the same path.
+    Field g;
+    g.poke (1000.0, std::numeric_limits<float>::infinity());
+    const auto inf = SoundcheckCandidates::pick (g.input());
+    EXPECT_EQ (inf.markedCount, 0);
+    EXPECT_EQ (inf.candidateCount, 0);
 }
