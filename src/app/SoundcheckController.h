@@ -78,20 +78,19 @@ public:
     static constexpr double kResultsTimeoutMs = 20000.0;
     static constexpr double kPollMs           = 5.0;
 
-    // NOT IN THE BRIEF -- added here, and it is a safety property, not a
-    // convenience. The noise-floor GATE has to decide BEFORE the first sample
-    // leaves, and the callback starts the sweep the instant scSampleIndex_
-    // reaches 0 with nothing else to ask. If the index were set to exactly
-    // -(kNoiseFloorMs worth), the controller's gate poll would land at index
-    // ~0 and a ringing room could get one buffer of sweep before the abort.
-    // The index therefore starts one guard EARLIER, and the gate is evaluated
-    // at kNoiseFloorMs -- so the decision is always at least kNoiseFloorGuardMs
-    // of SILENCE ahead of the first sample. 20 ms covers one poll (5 ms) plus
-    // a 512-sample buffer at 44.1 kHz (11.6 ms).
+    // THE SWEEP LEAD-IN, and it is NOT a safety margin (review C-1). The
+    // output channel is not armed during the noise floor at all: scOutChannel_
+    // stays -1 until the gate has said the room is quiet, so there is no audio
+    // clock running toward zero for a late poll to lose a race with. Once the
+    // gate passes, scSampleIndex_ is published at -(this many milliseconds) and
+    // THEN the channel is armed, which gives the callback a short silent run-up
+    // -- so the first emitted sample is index 0, at the start of the
+    // raised-cosine ramp-in, whatever buffer size the device hands us, instead
+    // of the first armed block landing part-way through it.
     //
     // Cost: the declared 0.5 s of silence per channel becomes 0.52 s, i.e.
     // 4.52 s per channel instead of 4.5 s (+0.3 s over 16 channels).
-    static constexpr double kNoiseFloorGuardMs = 20.0;
+    static constexpr double kSweepLeadInMs = 20.0;
 
     // Aliases -- one definition each, no second literal (lane G m-D):
     static constexpr double kSweepLowHz        = SoundcheckSignal::kSweepLowHz;
@@ -114,15 +113,24 @@ public:
     // the phase constants above so the Confirm dialog's "~72 s" and the
     // machine's own deadlines can never disagree.
     static constexpr double kPerTargetMs =
-        kNoiseFloorMs + kNoiseFloorGuardMs + kSweepSeconds * 1000.0
+        kNoiseFloorMs + kSweepLeadInMs + kSweepSeconds * 1000.0
         + kTailSeconds * 1000.0 + kGapMs;
 
+    // Preflight, Confirm and Arm are GUI-OWNED: THIS MACHINE NEVER ENTERS
+    // THEM. getState() goes Idle -> NoiseFloor directly, because the dialog and
+    // the operator OK live entirely on the message thread and arm() is what
+    // ends them. Task 9 must drive the dialog from its own state, not from
+    // getState(); the three enumerators exist so a GUI state variable can share
+    // one vocabulary with this one.
     enum class State  { Idle, Preflight, Confirm, Arm, NoiseFloor, Sweep, Tail,
                         Analyse, Gap, Results, Abort };
+    // APPENDED ONLY (lane G convention): a reader keyed on the numeric value
+    // must not be re-pointed by an insertion. The last three are arm()-only.
     enum class Refusal { None, EngineNotRunning, NoChannels, SlotDisabled,
-                         InvalidChannelPair, RingRiskRising };
+                         InvalidChannelPair, RingRiskRising,
+                         InvalidParams, AlreadyRunning, RampOutPending };
     enum class AbortReason { UserStop, Esc, EngineStopped, DeviceError, DeviceChanged,
-                             MicHot, RoomRinging, CaptureDrop };
+                             MicHot, RoomRinging, CaptureDrop, NoiseFloorUnmeasured };
 
     struct Target { int slot = 0, lane = 0, outChannel = 0, inChannel = 0; };
 
@@ -150,6 +158,13 @@ public:
         // pick() something it could not propose from, and the operator must be
         // told that rather than shown an empty proposal list (Task 3 I-3).
         bool  ceilingMissing = false;
+        // A TAUTOLOGY TODAY, kept deliberately and said out loud: the ladder is
+        // built here from NotchController::kDepthLadderDb / kDepthLadderSize,
+        // a non-empty compile-time array, so this can only ever be false. It is
+        // reported anyway because the GUI two "no proposals, and it is not the
+        // room" branches should be driven by data rather than by one flag plus
+        // an assumption -- and because the day the ladder becomes a preset
+        // field, the flag is already wired.
         bool  ladderMissing  = false;
         float snrDb = 0.0f;
         std::array<float, LoopGainEstimator::kNumBins> marginDb {};   // = -H_dB
@@ -170,14 +185,35 @@ public:
     // --- MESSAGE THREAD ---
     [[nodiscard]] Refusal preflight (const std::vector<Target>& targets,
                                      const NotchController::SnapshotBuffer& risk) const;
-    // Returns false without touching the engine when params are unusable
-    // (no targets, sampleRate <= 0, non-finite ceiling) or a run is already in
-    // flight. A refusal here emits NOT ONE SAMPLE (inv 19).
-    bool  arm (std::vector<Target> targets, const RunParams& params);
+    // Arm takes its OWN risk snapshot (S-1): preflight runs before the Confirm
+    // dialog, and a room can start ringing while the operator reads it. The
+    // refusal identity is the one preflight uses, evaluated again here on the
+    // message thread with the snapshot still alive -- and it is THIS read that
+    // soundcheck_start logs, never a cached one.
+    //
+    // It re-validates the targets too (I-4): a slot can be disabled, or its
+    // routing changed, during that same dialog.
+    //
+    // Returns Refusal::None on success. Any other value means NOT ONE SAMPLE
+    // was emitted and the state is still Idle (inv 19); Task 9 shows the
+    // reason, which is why this returns a Refusal and not a bool.
+    [[nodiscard]] Refusal arm (std::vector<Target> targets, const RunParams& params,
+                               const NotchController::SnapshotBuffer& risk);
     void  applyRequested();          // Results -> Idle, after Task 7 has placed
     void  dismissRequested();        // BO
+    // Stops the SOUND on the calling thread and lifts the tap suspension --
+    // both in the safe direction, neither waiting for a poll. The state machine
+    // catches up at its next runOnce(), which is what restores detection.
     void  requestStop (AbortReason reason);
-    void  abortAndJoin();            // device restart path; blocks until Idle
+    // The device-restart path (Task 10). IT JOINS THE POLL THREAD FIRST, then
+    // runs the abort on the CALLER thread: the other order leaves two threads
+    // inside the machine, and a poll thread sitting in Gap can enterTarget()
+    // after the abort and emit a whole sweep with the taps live (C-2). Returns
+    // true when the machine reached Idle.
+    //
+    // *** AFTER THIS RETURNS THE POLL THREAD IS STOPPED. *** Task 10 must call
+    // start() again once the device is back; nothing restarts it here.
+    bool  abortAndJoin();
 
     // --- ANY THREAD (reads) ---
     [[nodiscard]] State  getState() const;
@@ -210,10 +246,15 @@ public:
     void runOnce();
 
     void start();
+    // Stands the RUN down, not just the thread (C-3): stopping the poll thread
+    // while the engine is armed leaves a sweep going into a PA with nobody left
+    // to lift the tap suspension or re-arm detection. It joins, then finishes
+    // the abort synchronously on the caller thread.
     void stop (int timeoutMs);
 
     // TEST ACCESSORS ONLY.
     [[nodiscard]] float worstPeakinessForTest() const;   // last noise window's max
+    [[nodiscard]] bool  isPollThreadRunningForTest() const { return isThreadRunning(); }
     // I-7: the enum -> string mapper, so a test can loop the ENUMERATORS
     // instead of asserting that eight string literals differ.
     [[nodiscard]] static const char* abortReasonNameForTest (AbortReason r);
@@ -233,9 +274,12 @@ private:
     void stopEmissionSafely();            // ramp-out while emitting, backstop while silent
     bool checkDeviceUnchanged() const;     // sample rate + channel counts vs RunParams
     bool micIsHot();                       // advances the hold timer, so NOT const
+    void armSweepForCurrentTarget();       // gate passed: publish the index, THEN the channel
+    [[nodiscard]] Refusal validateTargets (const std::vector<Target>& targets) const;
+    [[nodiscard]] Refusal refuseOnRingRisk (const NotchController::SnapshotBuffer& r) const;
     bool noiseWindowIsRinging() const;     // peakinessAt vs params_.noiseFloorGate
     void drainCapture();
-    void computeNoiseSpectrum();
+    bool computeNoiseSpectrum();   // false == no frames: the floor was never measured
     void analyseCurrentTarget();
     bool serviceEmittingPhase();           // the common abort checks; false == aborted
     void notifyStateChanged() const;
@@ -261,17 +305,17 @@ private:
     std::atomic<bool> stopRequested_ { false };
     std::atomic<AbortReason> stopReason_ { AbortReason::UserStop };
 
-    // What RING RISK said at the LAST preflight(). arm() takes no snapshot --
-    // by design, the message thread calls preflight() again immediately before
-    // arming -- so this is how the number reaches soundcheck_start. `valid`
-    // false is logged as null, never as 0.0 (R3-2).
-    mutable std::atomic<bool>  lastRiskValid_ { false };
-    mutable std::atomic<float> lastRiskScore_ { 0.0f };
 
     // Sample bookkeeping for the CURRENT target, lane M thread only.
-    std::int64_t noiseFloorSamples_ = 0;   // includes kNoiseFloorGuardMs
-    std::int64_t capturedSamples_   = 0;
-    std::size_t  noiseWindowFill_   = 0;
+    //
+    // The noise floor is no longer delimited by the sweep index (C-1): the
+    // sweep does not exist until the gate has passed. noiseFloorEndSample_ is
+    // INT64_MAX until then -- everything captured is noise -- and is stamped
+    // with capturedSamples_ at the moment the gate says quiet.
+    std::int64_t noiseFloorEndSample_ = 0;
+    std::int64_t capturedSamples_     = 0;
+    std::size_t  noiseWindowFill_     = 0;
+    std::int64_t sweepLeadInSamples_  = 0;
 
     LoopGainEstimator estimator_ { 48000.0 };
     std::vector<float> capture_;          // drain scratch, sized once at Arm

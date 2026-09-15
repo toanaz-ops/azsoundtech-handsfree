@@ -10,8 +10,12 @@
 #include "app/SoundcheckController.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
 #include <vector>
 
@@ -19,14 +23,28 @@ namespace
 {
 constexpr double kSr = 48000.0;
 
+// std::atomic because AbortAndJoinJoinsBeforeItRuns advances it from the test
+// thread while the REAL poll thread reads it; a plain double there is a data
+// race, and a race in the fixture is a flaky test nobody can explain later.
 class FakeClock : public ClockSource
 {
 public:
-    double nowMs() const override { return ms_; }
-    void advance (double m) { ms_ += m; }
+    double nowMs() const override { return ms_.load (std::memory_order_relaxed); }
+    void advance (double m) { ms_.store (ms_.load (std::memory_order_relaxed) + m,
+                                         std::memory_order_relaxed); }
 private:
-    double ms_ = 1000.0;
+    std::atomic<double> ms_ { 1000.0 };
 };
+
+// Declared before Rig so Rig::armWith can default to it.
+NotchController::SnapshotBuffer risk (bool valid, float score)
+{
+    NotchController::SnapshotBuffer s {};
+    s.ringRiskValid     = valid;
+    s.ringRiskScore     = score;
+    s.ringRiskThreshold = 0.7f;      // what NotchController.cpp:648 publishes
+    return s;
+}
 
 // Drives `ms` of audio through the engine while polling the controller, so the
 // sample index and the wall clock stay consistent. 256-sample blocks at 48 kHz
@@ -45,6 +63,14 @@ struct Rig
     std::vector<float> micSource;        // what the "room" feeds back, looped
     std::size_t micPos = 0;
     int detectionCalls = 0; bool detectionOn = true;
+    // I-1. Sampling detectionOn after runOnce() returns cannot see the ORDER of
+    // two statements inside finishRun(); swapping them leaves that assertion
+    // green. What inv 12 actually forbids is detection being restored once
+    // Results is already published, so the restore itself records the state it
+    // ran in.
+    bool detectionEverRestored = false;
+    SoundcheckController::State stateWhenDetectionRestored
+        = SoundcheckController::State::Idle;
     std::vector<juce::var> log;
 
     explicit Rig (int chans = 2) : channels (chans)
@@ -54,7 +80,16 @@ struct Rig
         for (auto& v : in)  inPtr.push_back (v.data());
         for (auto& v : out) outPtr.push_back (v.data());
 
-        sc.setDetectionActiveOnAllSlots = [this] (bool on) { detectionOn = on; ++detectionCalls; };
+        sc.setDetectionActiveOnAllSlots = [this] (bool on)
+        {
+            detectionOn = on;
+            ++detectionCalls;
+            if (on)
+            {
+                detectionEverRestored     = true;
+                stateWhenDetectionRestored = sc.getState();
+            }
+        };
         sc.logEvent = [this] (const juce::var& v) { log.push_back (v); };
 
         SlotConfig c; c.enabled = true; c.width = 2;
@@ -77,6 +112,28 @@ struct Rig
 
     // Split out so RefusesWhenEngineNotRunning can leave it false.
     void setRunning (bool running) { engine.setRunningForTest (running); }
+
+    // arm() takes its own risk snapshot (S-1). Most fixtures do not care what
+    // it says, so they get the "nothing scored yet" snapshot -- the state the
+    // app is in every time it opens.
+    SoundcheckController::Refusal
+    armWith (const SoundcheckController::RunParams& p,
+             const NotchController::SnapshotBuffer& snap = risk (false, 0.0f))
+    {
+        return sc.arm (stereoTargets(), p, snap);
+    }
+
+    // Drives blocks and the clock WITHOUT polling -- the device keeps running
+    // while the lane M thread is asleep.
+    void driveUnpolled (double ms)
+    {
+        const double perBlock = frames / kSr * 1000.0;
+        for (double t = 0.0; t < ms; t += perBlock)
+        {
+            block();
+            clock.advance (perBlock);
+        }
+    }
 
     void block()
     {
@@ -150,15 +207,6 @@ struct Rig
     }
 };
 
-NotchController::SnapshotBuffer risk (bool valid, float score)
-{
-    NotchController::SnapshotBuffer s {};
-    s.ringRiskValid     = valid;
-    s.ringRiskScore     = score;
-    s.ringRiskThreshold = 0.7f;      // what NotchController.cpp:648 publishes
-    return s;
-}
-
 std::vector<float> whiteNoise (std::size_t n, float sigma, unsigned seed = 3)
 {
     std::mt19937 rng { seed };
@@ -190,6 +238,39 @@ bool sawEvent (const std::vector<juce::var>& log, const char* name)
     for (const auto& v : log)
         if (evOf (v) == name) return true;
     return false;
+}
+
+// S-2/I-3. EVERY abort test asserts the same thing about the ENGINE, because
+// "the log said it aborted" is a statement about the controller and says
+// nothing about whether a PA is still being driven.
+//
+// The blocks are load-bearing: an abort while the sweep is audible hands the
+// fade to the CALLBACK (inv 9), so the channel is released a ramp later, not
+// at the instant of the abort. Driving them is what lets this assert the end
+// state rather than the intent.
+void expectEngineStoodDown (Rig& r)
+{
+    for (int i = 0; i < 16; ++i) r.block();      // let any fade finish
+
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1) << "still armed";
+    EXPECT_FALSE (r.engine.soundcheckIsEmitting());
+    EXPECT_FALSE (r.engine.isSoundcheckRampOutPending()) << "a fade left pending";
+
+    // The capture gate is shut: driving the device adds nothing to the ring.
+    auto& mic = r.engine.getMicCaptureBuffer();
+    std::vector<float> sink (mic.getAvailableRead() + 1u, 0.0f);
+    while (mic.read (sink.data(), sink.size()) > 0) {}
+    r.block();
+    EXPECT_EQ (r.engine.getMicCaptureBuffer().getAvailableRead(), 0u)
+        << "capture is still active after the abort";
+
+    // ...and the taps are live again, which is the half that can actually hurt:
+    // a suspended tap is a deaf feedback killer.
+    auto& tap = r.engine.getTapBuffer (0, 0);
+    std::vector<float> drain (8192, 0.0f);
+    while (tap.read (drain.data(), drain.size()) > 0) {}
+    r.block();
+    EXPECT_GT (tap.getAvailableRead(), 0u) << "the taps are still suspended";
 }
 
 juce::String abortReasonInLog (const std::vector<juce::var>& log)
@@ -286,7 +367,8 @@ TEST (SoundcheckController, RefusesWhenRingRiskIsRising)
     // LAST preflight saw is what soundcheck_start carries: arm() takes no
     // snapshot of its own (the message thread re-runs preflight immediately
     // before arming), so this is the only route the number has into the log.
-    ASSERT_TRUE (r.sc.arm (targets, r.params()));
+    ASSERT_EQ (r.sc.arm (targets, r.params(), risk (false, 0.9f)),
+               SoundcheckController::Refusal::None);
     r.pump (20.0);
     bool sawNullRisk = false;
     for (const auto& v : r.log)
@@ -304,18 +386,19 @@ TEST (SoundcheckController, ArmRefusesAnUnsetCeilingOrAnUnsetGate)
 {
     Rig r;
 
+    using R = SoundcheckController::Refusal;
+
     auto noCeiling = r.params();
     noCeiling.ceilingDb = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_FALSE (r.sc.arm (r.stereoTargets(), noCeiling));
+    EXPECT_EQ (r.armWith (noCeiling), R::InvalidParams);
 
-    auto noGate = r.params (0.0f);
-    EXPECT_FALSE (r.sc.arm (r.stereoTargets(), noGate));
+    EXPECT_EQ (r.armWith (r.params (0.0f)), R::InvalidParams);
 
     auto noRate = r.params();
     noRate.sampleRate = 0.0;
-    EXPECT_FALSE (r.sc.arm (r.stereoTargets(), noRate));
+    EXPECT_EQ (r.armWith (noRate), R::InvalidParams);
 
-    EXPECT_FALSE (r.sc.arm ({}, r.params()));
+    EXPECT_EQ (r.sc.arm ({}, r.params(), risk (false, 0.0f)), R::NoChannels);
 
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
     r.pump (1000.0);
@@ -336,7 +419,7 @@ TEST (SoundcheckController, ArmRefusesAnUnsetCeilingOrAnUnsetGate)
 TEST (SoundcheckController, SequencesOneOutputChannelAtATime)
 {
     Rig r;                                   // micSource empty == digital silence
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
 
     bool everBoth = false;
     const double perBlock = r.frames / kSr * 1000.0;
@@ -360,7 +443,7 @@ TEST (SoundcheckController, NoNotchCommandIsEmittedDuringARun)
     for (int s = 0; s < kMaxSlots; ++s)
         before[(std::size_t) s] = r.engine.getCommandQueue (s).getAvailableRead();
 
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     r.pump (12000.0);
 
     for (int s = 0; s < kMaxSlots; ++s)
@@ -390,7 +473,7 @@ TEST (SoundcheckController, DetectionIsRestoredBeforeResults)
 {
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     EXPECT_FALSE (r.detectionOn) << "Arm must disarm detection";
 
     const double perBlock = r.frames / kSr * 1000.0;
@@ -405,6 +488,16 @@ TEST (SoundcheckController, DetectionIsRestoredBeforeResults)
     }
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Results);
     EXPECT_TRUE (r.detectionOn);
+
+    // I-1, and THIS is the assertion that has teeth. The poll-and-look above
+    // samples after runOnce() has returned, so swapping the two statements
+    // inside finishRun() leaves it green. inv 12 is about ORDER: detection must
+    // already be back when Results is published, so the restore records the
+    // state it ran in and that state must not be Results.
+    ASSERT_TRUE (r.detectionEverRestored);
+    EXPECT_NE (r.stateWhenDetectionRestored, SoundcheckController::State::Results)
+        << "detection was restored AFTER Results was published -- a GUI polling "
+           "getState() would see a results screen over a disarmed detector";
 }
 
 // RED IF: kResultsTimeoutMs drifts back up. 20 s is the number lane G's release
@@ -415,7 +508,7 @@ TEST (SoundcheckController, ResultsTimeoutIsTwentySeconds)
 
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
 
     // I-1, corrected: the deadline is measured FROM the moment Results is
     // entered. Pumping a fixed 12000 ms first would already have spent ~3 s of
@@ -436,7 +529,7 @@ TEST (SoundcheckController, NothingIsPlacedWithoutApply)
 {
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     r.pump (12000.0);
     ASSERT_EQ (r.sc.getState(), SoundcheckController::State::Results);
 
@@ -461,7 +554,7 @@ TEST (SoundcheckController, NoiseFloorOfAQuietRoomDoesNotAbort)
     Rig r;
     r.micSource = whiteNoise (16384, 1.0e-3f);
 
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params (10.0f)));
+    ASSERT_EQ (r.armWith (r.params (10.0f)), SoundcheckController::Refusal::None);
     r.pump (2000.0);
 
     // FLAKE GUARD, and it must come FIRST.
@@ -492,29 +585,98 @@ TEST (SoundcheckController, NoiseFloorWithARingingToneAborts)
     Rig r;
     r.micSource = noisePlusTone (16384, 1.0e-3f, 1000.0, 0.05f);
 
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params (10.0f)));
+    ASSERT_EQ (r.armWith (r.params (10.0f)), SoundcheckController::Refusal::None);
 
     const double perBlock = r.frames / kSr * 1000.0;
-    float loudest = 0.0f;
+    bool everArmed = false;
     for (double t = 0.0; t < 2000.0; t += perBlock)
     {
-        r.block(); r.clock.advance (perBlock);
-        // ONLY while the channel is still armed. Once the abort releases it the
-        // lane is un-muted again and out[0] carries the room's own tone -- which
-        // is the fixture, not the sweep, and measuring it would fail the test
-        // for the very behaviour it exists to prove.
+        r.block(); r.clock.advance (perBlock); r.sc.runOnce();
         if (r.engine.getSoundcheckOutputChannel() >= 0)
-            loudest = std::max (loudest, r.peakOn (0));
-        r.sc.runOnce();
+            everArmed = true;
         if (r.sc.getState() == SoundcheckController::State::Idle)
             break;
     }
 
     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
     EXPECT_EQ (abortReasonInLog (r.log), "room_ringing");
-    EXPECT_EQ (loudest, 0.0f)
-        << "the gate decided AFTER the sweep had already started -- "
-           "kNoiseFloorGuardMs is what keeps the decision ahead of the sound";
+    // C-1: the channel is the whole assertion. A peak of zero could just mean
+    // the ramp had not opened yet; scOutChannel_ never leaving -1 means the
+    // sweep was never armed, so there was no audio clock for the gate to race.
+    EXPECT_FALSE (everArmed)
+        << "the sweep was armed before the gate had said the room was quiet";
+    expectEngineStoodDown (r);
+}
+
+// RED IF: the sweep is armed on a timer rather than on the gate's answer (C-1).
+// The poll that makes the decision can be arbitrarily late -- a loaded message
+// thread, a stall, a debugger -- and if scOutChannel_ were published at the
+// start of the noise floor the callback would reach sample 0 on its own and
+// sweep a room nobody has scored yet.
+TEST (SoundcheckController, SweepIsNotArmedUntilTheGateSaysQuiet)
+{
+    Rig r;                              // silent room: zero really means zero
+    ASSERT_EQ (r.armWith (r.params (10.0f)), SoundcheckController::Refusal::None);
+
+    // The DEVICE keeps running; the lane M thread does not poll at all, for
+    // 200 ms longer than the whole noise floor.
+    r.driveUnpolled (SoundcheckController::kNoiseFloorMs + 200.0);
+
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1)
+        << "armed without a gate decision";
+    EXPECT_FALSE (r.engine.soundcheckIsEmitting());
+    EXPECT_EQ (r.peakOn (0), 0.0f);
+    EXPECT_EQ (r.peakOn (1), 0.0f);
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::NoiseFloor);
+
+    // ...and one poll later, with the room scored quiet, it arms.
+    r.pump (20.0);
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Sweep);
+}
+
+// RED IF: the gate answers a question about the whole spectrum instead of the
+// band the sweep measures (I-2). An LED driver at 17 kHz, a switch-mode supply
+// or mains hum are narrow, permanent and outside [kSweepLowHz, kTrustedHighHz]:
+// scoring them refuses every run in the venue and says nothing about whether the
+// room rings where the measurement is going.
+TEST (SoundcheckController, GateIgnoresBinsOutsideTheSweepBand)
+{
+    {
+        Rig out;
+        out.micSource = noisePlusTone (16384, 1.0e-3f, 17000.0, 0.05f);
+        ASSERT_EQ (out.armWith (out.params (10.0f)), SoundcheckController::Refusal::None);
+        out.pump (2000.0);
+        EXPECT_FALSE (sawEvent (out.log, "soundcheck_abort"))
+            << "a 17 kHz whine, outside the swept band, refused the run";
+        EXPECT_NE (out.sc.getState(), SoundcheckController::State::Idle);
+    }
+    {
+        Rig in;                                     // the control, in-band
+        in.micSource = noisePlusTone (16384, 1.0e-3f, 1000.0, 0.05f);
+        ASSERT_EQ (in.armWith (in.params (10.0f)), SoundcheckController::Refusal::None);
+        in.pump (2000.0);
+        EXPECT_TRUE (sawEvent (in.log, "soundcheck_abort"));
+        EXPECT_EQ (abortReasonInLog (in.log), "room_ringing");
+    }
+}
+
+// RED IF: an unmeasured noise floor is read as a quiet one. No frames means the
+// device delivered nothing at all -- and "we heard nothing" is not "the room is
+// silent", it is "we were not listening". The gate FAILS CLOSED.
+TEST (SoundcheckController, AnUnmeasurableNoiseFloorFailsClosed)
+{
+    Rig r;
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+
+    // The clock runs past the gate deadline without a single callback.
+    r.clock.advance (SoundcheckController::kNoiseFloorMs + 50.0);
+    r.sc.runOnce();
+
+    EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+    EXPECT_EQ (abortReasonInLog (r.log), "noise_floor_unmeasured");
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    expectEngineStoodDown (r);
 }
 
 // RED IF: the gate is hard-coded instead of read from the detector's live
@@ -541,7 +703,7 @@ TEST (SoundcheckController, NoiseFloorGateIsReadAtArm)
         //   100 = 1 + 295.5 * rho^2  ->  rho = 0.579  ->  A = 5.8e-4 at sigma 1e-3.
         r.micSource = noisePlusTone (16384, 1.0e-3f, 1000.0, 5.8e-4f);
 
-        ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params (gate)));
+        ASSERT_EQ (r.armWith (r.params (gate)), SoundcheckController::Refusal::None);
         r.pump (2000.0);
 
         const float measured = r.sc.worstPeakinessForTest();
@@ -553,23 +715,6 @@ TEST (SoundcheckController, NoiseFloorGateIsReadAtArm)
         else
             EXPECT_FALSE (sawEvent (r.log, "soundcheck_abort")) << "gate 20 must not";
     }
-}
-
-// RED IF: the gate is re-read per channel instead of frozen in RunParams.
-// Channel 1 and channel 2 of one measurement would then be scored on two
-// different rulers, with nothing in the log saying so. Round 3, R3-1.
-TEST (SoundcheckController, NoiseFloorGateIsStableWithinARun)
-{
-    Rig r;
-    r.micSource = whiteNoise (16384, 1.0e-3f);
-
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params (20.0f)));
-    r.pump (5000.0);                       // well into the second channel
-
-    // Whatever an owner does to the detector's threshold now, this run keeps 20.
-    r.pump (7000.0);
-    EXPECT_FALSE (sawEvent (r.log, "soundcheck_abort"));
-    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Results);
 }
 
 // ---------------------------------------------------------------- ABORTS ---
@@ -584,7 +729,7 @@ TEST (SoundcheckController, NoiseFloorGateIsStableWithinARun)
 TEST (SoundcheckController, AbortRampsDownInTheCallbackAlone)
 {
     Rig r;
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     r.pump (1500.0);                                   // mid-sweep
     ASSERT_GT (r.peakOn (0), 0.0f);
 
@@ -592,6 +737,158 @@ TEST (SoundcheckController, AbortRampsDownInTheCallbackAlone)
 
     for (int i = 0; i < 40; ++i) r.block();            // NO runOnce()
     EXPECT_FLOAT_EQ (r.peakOn (0), 0.0f);
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
+
+    // I-5, and this has to be sampled BEFORE the first poll: beginAbort() lifts
+    // the taps as well, so anything measured after a runOnce() cannot tell
+    // "requestStop did it" from "the poll did it".
+    {
+        auto& tap = r.engine.getTapBuffer (0, 0);
+        std::vector<float> drain (8192, 0.0f);
+        while (tap.read (drain.data(), drain.size()) > 0) {}
+        r.block();
+        EXPECT_GT (tap.getAvailableRead(), 0u)
+            << "requestStop() left the taps suspended -- a deaf feedback killer "
+               "for as long as it takes the lane M thread to notice";
+    }
+
+    // I-5: requestStop() also lifted the tap suspension itself -- the safe
+    // direction, and it must not wait for a poll, because a suspended tap is a
+    // deaf feedback killer. Detection is re-armed on the lane M thread, so it
+    // takes the one runOnce() the machine has been denied so far.
+    r.sc.runOnce();
+    EXPECT_TRUE (r.detectionOn);
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    expectEngineStoodDown (r);
+}
+
+// RED IF: arming is allowed on top of a fade that is still running. Arming
+// calls setSoundcheckOutputChannel(), which DISCARDS a pending ramp-out (C-2) --
+// so a fast re-arm turns the previous abort into the hard cut the ramp exists
+// to prevent.
+TEST (SoundcheckController, ArmRefusesWhileAFadeIsStillRunning)
+{
+    Rig r;
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    r.pump (1500.0);                                   // mid-sweep
+    ASSERT_TRUE (r.engine.soundcheckIsEmitting());
+
+    r.sc.requestStop (SoundcheckController::AbortReason::UserStop);
+    r.sc.runOnce();
+    ASSERT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    ASSERT_TRUE (r.engine.isSoundcheckRampOutPending())
+        << "nothing is fading, so this test proves nothing";
+
+    EXPECT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::RampOutPending);
+
+    // Once the callback has finished the fade, the next run may start.
+    for (int i = 0; i < 16; ++i) r.block();
+    EXPECT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+}
+
+// RED IF: abortAndJoin() runs the abort BEFORE it joins (C-2). Two threads in
+// one state machine, and a poll thread sitting in Gap calls enterTarget() right
+// after the caller has torn the run down -- arming a whole fresh sweep with the
+// taps suspended and detection off, with nobody left watching.
+//
+// This is also the ONLY test that drives the real poll thread, so it is what
+// covers start()/run()/stop() at all.
+TEST (SoundcheckController, AbortAndJoinJoinsBeforeItRuns)
+{
+    Rig r;
+    r.micSource = whiteNoise (4096, 1.0e-4f);
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+
+    r.sc.start();
+    ASSERT_TRUE (r.sc.isPollThreadRunningForTest());
+
+    // Let the REAL poll thread take the machine into the sweep. It wakes every
+    // kPollMs of WALL time; the fake clock only moves when this thread moves
+    // it, so the two have to be interleaved by hand.
+    const double perBlock = r.frames / kSr * 1000.0;
+    for (int i = 0; i < 120 && ! r.engine.soundcheckIsEmitting(); ++i)
+    {
+        for (int b = 0; b < 4; ++b) { r.block(); r.clock.advance (perBlock); }
+        std::this_thread::sleep_for (std::chrono::milliseconds (2));
+    }
+    ASSERT_TRUE (r.engine.soundcheckIsEmitting())
+        << "the poll thread never armed the sweep -- the fixture, not the code";
+
+    EXPECT_TRUE (r.sc.abortAndJoin());
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (r.sc.isPollThreadRunningForTest())
+        << "abortAndJoin() must leave the poll thread stopped; Task 10 restarts it";
+    EXPECT_TRUE (r.detectionOn);
+    expectEngineStoodDown (r);
+}
+
+// RED IF: destroying the controller mid-run leaves the engine armed (C-3).
+// Stopping the THREAD is not stopping the RUN: the PA would keep the sweep
+// until the callback ran out of signal, the taps would stay suspended and the
+// feedback killer would never wake up again -- with the only object that could
+// undo any of it already gone.
+TEST (SoundcheckController, DestroyingMidRunStandsTheEngineDown)
+{
+    Rig r;                       // r.sc stays Idle; the run under test is its own
+    bool detection = true;
+    {
+        SoundcheckController extra { r.engine, r.clock };
+        extra.setDetectionActiveOnAllSlots = [&detection] (bool on) { detection = on; };
+        ASSERT_EQ (extra.arm (r.stereoTargets(), r.params(), risk (false, 0.0f)),
+                   SoundcheckController::Refusal::None);
+        ASSERT_FALSE (detection) << "arm must disarm detection";
+
+        const double perBlock = r.frames / kSr * 1000.0;
+        for (double t = 0.0; t < 1500.0; t += perBlock)
+        {
+            r.block(); r.clock.advance (perBlock); extra.runOnce();
+        }
+        ASSERT_TRUE (r.engine.soundcheckIsEmitting()) << "not mid-sweep";
+    }   // <-- the destructor is the code under test
+
+    EXPECT_TRUE (detection) << "the destructor left the detector disarmed";
+    expectEngineStoodDown (r);
+}
+
+// RED IF: an abort with a dead callback hands the stop to the callback (S-2).
+// requestSoundcheckRampOut() only sets a flag; with the device stopped no block
+// will ever read it, so the channel stays armed for ever and the NEXT device to
+// open inherits an armed soundcheck. There is nothing to click either, so the
+// backstop is free here -- and it is the only thing that works.
+TEST (SoundcheckController, EngineStoppedAbortReleasesTheChannelWithNoCallback)
+{
+    Rig r;
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    r.pump (1500.0);                                   // mid-sweep
+    ASSERT_TRUE (r.engine.soundcheckIsEmitting());
+
+    r.setRunning (false);
+    r.sc.runOnce();
+
+    EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+    EXPECT_EQ (abortReasonInLog (r.log), "engine_stopped");
+    // NOT ONE further callback has run, and the channel is already released.
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1)
+        << "the abort waited for a fade that nothing will ever generate";
+    EXPECT_FALSE (r.engine.isSoundcheckRampOutPending());
+    EXPECT_TRUE (r.detectionOn);
+}
+
+// RED IF: a device error is not an abort. getLastDeviceError() is the only
+// channel through which a driver failure reaches this thread at all.
+TEST (SoundcheckController, DeviceErrorAborts)
+{
+    Rig r;
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    r.pump (200.0);
+    ASSERT_FALSE (sawEvent (r.log, "soundcheck_abort"));
+
+    r.engine.audioDeviceError ("the interface fell over");
+    r.sc.runOnce();
+
+    EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_TRUE (r.detectionOn);
     EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
 }
 
@@ -602,7 +899,7 @@ TEST (SoundcheckController, CaptureDropAborts)
 {
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
 
     // Fill the capture ring by driving the callback without ever polling.
     for (int i = 0; i < 400; ++i)
@@ -615,6 +912,8 @@ TEST (SoundcheckController, CaptureDropAborts)
     r.sc.runOnce();
     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
     EXPECT_EQ (abortReasonInLog (r.log), "capture_drop");
+    EXPECT_TRUE (r.detectionOn);
+    expectEngineStoodDown (r);
 }
 
 // RED IF: the sample rate recorded at Preflight is not re-checked. A rate change
@@ -625,12 +924,14 @@ TEST (SoundcheckController, SampleRateChangeAborts)
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
     auto p = r.params(); p.sampleRate = 44100.0;       // NOT the engine's rate
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), p));
+    ASSERT_EQ (r.armWith (p), SoundcheckController::Refusal::None);
 
     r.pump (50.0);
     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
     EXPECT_EQ (abortReasonInLog (r.log), "device_changed");
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_TRUE (r.detectionOn);
+    expectEngineStoodDown (r);
 }
 
 // RED IF: the channel counts recorded at Preflight are not re-checked. A restart
@@ -642,12 +943,14 @@ TEST (SoundcheckController, ChannelCountChangeAborts)
     Rig r { 4 };
     r.micSource = whiteNoise (4096, 1.0e-4f);
     auto p = r.params(); p.numOutputChannels = 8;      // claims more than the callback delivers
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), p));
+    ASSERT_EQ (r.armWith (p), SoundcheckController::Refusal::None);
 
     r.pump (50.0);
     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
     EXPECT_EQ (abortReasonInLog (r.log), "device_changed");
     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_TRUE (r.detectionOn);
+    expectEngineStoodDown (r);
 }
 
 // RED IF: the hot-mic abort is dropped or its hold time is not enforced. A
@@ -657,7 +960,7 @@ TEST (SoundcheckController, HotMicAbortsOnlyAfterTheHold)
 {
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     r.pump (600.0);
     ASSERT_FALSE (sawEvent (r.log, "soundcheck_abort"));
 
@@ -678,6 +981,76 @@ TEST (SoundcheckController, HotMicAbortsOnlyAfterTheHold)
 
     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
     EXPECT_EQ (abortReasonInLog (r.log), "mic_hot");
+    EXPECT_TRUE (r.detectionOn);
+    // The room is still screaming at 0.9 here; what must be true is that the
+    // soundcheck side of the engine has let go of it.
+    r.micSource.assign (4096, 0.0f);
+    expectEngineStoodDown (r);
+}
+
+// RED IF: ring risk is only read before the Confirm dialog (S-1). Preflight can
+// be minutes old by the time the operator presses OK, and a room that started
+// ringing in between is exactly the room that must not be swept.
+TEST (SoundcheckController, ArmRefusesWhenRingRiskRoseDuringConfirm)
+{
+    Rig r;
+    ASSERT_EQ (r.sc.preflight (r.stereoTargets(), risk (true, 0.3f)),
+               SoundcheckController::Refusal::None);
+
+    // 0.55 * 0.7 = 0.385, and the room crossed it while the dialog was up.
+    EXPECT_EQ (r.armWith (r.params(), risk (true, 0.4f)),
+               SoundcheckController::Refusal::RingRiskRising);
+
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (sawEvent (r.log, "soundcheck_start"));
+    r.pump (1000.0);
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
+}
+
+// RED IF: arm() trusts preflight's view of the routing (I-4). A slot can be
+// switched off, or re-patched, while the Confirm dialog is on screen.
+TEST (SoundcheckController, ArmRefusesATargetDisabledDuringConfirm)
+{
+    Rig r;
+    ASSERT_EQ (r.sc.preflight (r.stereoTargets(), risk (false, 0.0f)),
+               SoundcheckController::Refusal::None);
+
+    SlotConfig c = r.engine.getSlotConfig (0); c.enabled = false;
+    r.engine.setSlotConfig (0, c);
+
+    EXPECT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::SlotDisabled);
+    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (sawEvent (r.log, "soundcheck_start"));
+    r.pump (1000.0);
+    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
+}
+
+// RED IF: the progress readouts stop tracking the run. They are the only thing
+// standing between the operator and 72 s of a progress bar that says nothing,
+// and a remaining-time that runs backwards is worse than none.
+TEST (SoundcheckController, ProgressReadsTrackTheRun)
+{
+    Rig r;
+    EXPECT_EQ (r.sc.getElapsedMsInRun(), 0.0);
+
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+    EXPECT_EQ (r.sc.getTargetCount(), 2);
+    EXPECT_EQ (r.sc.getCurrentTargetIndex(), 0);
+
+    r.pump (1000.0);                       // inside the FIRST channel
+    EXPECT_EQ (r.sc.getCurrentTargetIndex(), 0);
+    const double earlyElapsed   = r.sc.getElapsedMsInRun();
+    const double earlyRemaining = r.sc.getRemainingMsInRun();
+    EXPECT_GT (earlyElapsed, 900.0);
+    EXPECT_LT (earlyRemaining, 2.0 * SoundcheckController::kPerTargetMs);
+
+    r.pump (SoundcheckController::kPerTargetMs);    // into the SECOND
+    EXPECT_EQ (r.sc.getCurrentTargetIndex(), 1);
+    EXPECT_GT (r.sc.getElapsedMsInRun(), earlyElapsed);
+    EXPECT_LT (r.sc.getRemainingMsInRun(), earlyRemaining);
+
+    ASSERT_TRUE (r.pumpUntil (SoundcheckController::State::Results, 15000.0));
+    EXPECT_EQ (r.sc.getRemainingMsInRun(), 0.0);
 }
 
 // RED IF: two abort reasons collapse onto one string. The log is the only place
@@ -687,7 +1060,8 @@ TEST (SoundcheckController, EveryAbortReasonHasItsOwnName)
 {
     using A = SoundcheckController::AbortReason;
     const A all[] { A::UserStop, A::Esc, A::EngineStopped, A::DeviceError,
-                    A::DeviceChanged, A::MicHot, A::RoomRinging, A::CaptureDrop };
+                    A::DeviceChanged, A::MicHot, A::RoomRinging, A::CaptureDrop,
+                    A::NoiseFloorUnmeasured };
 
     for (const A a : all)
     {
@@ -709,7 +1083,7 @@ TEST (SoundcheckController, UnmeasurableChannelIsAValidResultNotAFlatLine)
 {
     Rig r;
     r.micSource.assign (4096, 0.0f);            // dead mic: nothing comes back
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     r.pump (12000.0);
 
     const auto results = r.sc.copyResults();
@@ -731,7 +1105,7 @@ TEST (SoundcheckController, ResultsAreReadableWholeAndPerSlot)
 {
     Rig r;
     r.micSource = whiteNoise (4096, 1.0e-4f);
-    ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
     ASSERT_TRUE (r.pumpUntil (SoundcheckController::State::Results, 15000.0));
 
     EXPECT_EQ ((int) r.sc.copyResults().size(), 2);

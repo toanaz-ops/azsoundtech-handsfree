@@ -264,6 +264,14 @@ public:
     [[nodiscard]] std::int64_t getSoundcheckSampleIndex()   const;
     [[nodiscard]] bool         soundcheckIsEmitting()       const;   // scOutChannel_ >= 0
 
+    // A ramp-out is requested, or its anchor has been latched and the envelope
+    // has not yet reached zero. Exists so SoundcheckController can REFUSE to
+    // arm on top of a fade that is still running: arming calls
+    // setSoundcheckOutputChannel(), which discards a pending ramp-out (C-2),
+    // and a fade discarded halfway is the hard cut the ramp exists to prevent.
+    // Reads the two atomics the callback owns; no ordering dependency.
+    [[nodiscard]] bool         isSoundcheckRampOutPending()  const;
+
     // Raw mic capture, before ANY DSP, written once per callback while
     // scCaptureActive_. *** CALLER CONTRACT: read() only, one consumer
     // thread. *** Same reasoning as getTapBuffer(): the audio callback is and

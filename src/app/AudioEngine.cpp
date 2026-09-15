@@ -423,6 +423,12 @@ bool AudioEngine::soundcheckIsEmitting() const
     return scOutChannel_.load (std::memory_order_relaxed) >= 0;
 }
 
+bool AudioEngine::isSoundcheckRampOutPending() const
+{
+    return scRampOutRequested_.load (std::memory_order_relaxed)
+           || scRampOutAtSample_.load (std::memory_order_relaxed) >= 0;
+}
+
 LockFreeRingBuffer<float>& AudioEngine::getMicCaptureBuffer()
 {
     return micCapture_;
