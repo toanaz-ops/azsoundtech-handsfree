@@ -137,6 +137,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.h
     ${CMAKE_SOURCE_DIR}/src/dsp/LoopGainEstimator.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/LoopGainEstimator.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckCandidates.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckCandidates.h
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
 )
