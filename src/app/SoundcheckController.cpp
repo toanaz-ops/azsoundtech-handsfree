@@ -1116,6 +1116,12 @@ void SoundcheckController::logAbort (AbortReason reason) const
     if (auto* o = objectOf (ev))
     {
         o->setProperty ("reason", abortReasonNameForTest (reason));
+        // THE OUTPUT THE RUN WAS ON WHEN IT STOPPED -- the one in progress,
+        // NOT the last one finished. targetIndex_ is advanced by enterTarget()
+        // before that channel emits a sample, so a run aborted anywhere inside
+        // channel 1 (noise floor, sweep, tail or gap) logs at_output 1 even
+        // though only channel 0 produced a result. A reader that treats this as
+        // "channels measured" is off by one on every abort.
         o->setProperty ("at_output", targetIndex_.load (std::memory_order_relaxed));
         o->setProperty ("elapsed_ms", round3sf (getElapsedMsInRun()));
     }
@@ -1564,6 +1570,14 @@ juce::var makeSoundcheckApplyEvent (const SoundcheckApplyStats& stats)
         o->setProperty ("placed", stats.placed);
         o->setProperty ("refused", stats.refused);
         o->setProperty ("cleared_previous", stats.clearedPrevious);
+        // The two FAULTS, kept out of the three headline counts. Both mean a
+        // result was addressed somewhere it does not belong -- a different
+        // slot, or a lane this slot does not drive -- and neither is visible
+        // anywhere but the GUI without these. skipped_live is deliberately NOT
+        // here: it is a SUBSET of refused (SoundcheckController.h), so logging
+        // it beside the totals would invite a reader to add it to them.
+        o->setProperty ("skipped_other_slot", stats.skippedOtherSlot);
+        o->setProperty ("skipped_bad_lane", stats.skippedBadLane);
     }
     return ev;
 }

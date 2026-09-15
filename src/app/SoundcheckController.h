@@ -432,6 +432,12 @@ struct SoundcheckApplyStats
 //
 //     sessionLogger_.log (makeSoundcheckApplyEvent (total));
 //
+// It carries the three headline counts plus `skipped_other_slot` and
+// `skipped_bad_lane` -- two FAULTS (a result addressed to another slot, or
+// naming a lane this slot does not drive) that otherwise reach the GUI and
+// nothing else. `skippedLive` is deliberately NOT logged: it is a SUBSET of
+// `refused`, and a number beside the totals invites being added to them.
+//
 // `ev` is the dispatch key, never `kind` (lane G B-3). Every field is an int,
 // so the 3-significant-figure rounding the other four apply has nothing to do
 // here -- and "t" is deliberately NOT set: SessionLogger::log stamps it on a

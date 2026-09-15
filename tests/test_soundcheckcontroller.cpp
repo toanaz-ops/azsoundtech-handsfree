@@ -1989,9 +1989,12 @@ TEST (SoundcheckApply, TheApplyEventCarriesWhatWasPlacedAndWhatWasCleared)
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
     SoundcheckApplyStats stats;
-    stats.placed          = 3;
-    stats.refused         = 2;
-    stats.clearedPrevious = 4;
+    stats.placed           = 3;
+    stats.refused          = 2;
+    stats.clearedPrevious  = 4;
+    stats.skippedLive      = 1;      // a SUBSET of refused -- must NOT be logged
+    stats.skippedOtherSlot = 5;
+    stats.skippedBadLane   = 6;
 
     const auto v = makeSoundcheckApplyEvent (stats);
     auto* o = v.getDynamicObject();
@@ -2000,6 +2003,15 @@ TEST (SoundcheckApply, TheApplyEventCarriesWhatWasPlacedAndWhatWasCleared)
     EXPECT_EQ ((int) o->getProperty ("placed"), 3);
     EXPECT_EQ ((int) o->getProperty ("refused"), 2);
     EXPECT_EQ ((int) o->getProperty ("cleared_previous"), 4);
+    // The two FAULTS. A result addressed to another slot, or naming a lane this
+    // slot does not drive, reaches the GUI and nothing else without these -- and
+    // they are DISTINCT values here, so swapping the two writes goes red.
+    EXPECT_EQ ((int) o->getProperty ("skipped_other_slot"), 5);
+    EXPECT_EQ ((int) o->getProperty ("skipped_bad_lane"), 6);
+    // skippedLive is a SUBSET of refused: logging it beside the totals invites a
+    // reader to add it to them. It must stay out of the line entirely.
+    EXPECT_TRUE (o->getProperty ("skipped_live").isVoid())
+        << "skipped_live is a subset of refused and must not be logged";
     // The LOGGER stamps t, not the producer (SessionLogger.h:65-70).
     EXPECT_TRUE (o->getProperty ("t").isVoid());
 }
