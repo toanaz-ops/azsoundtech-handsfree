@@ -74,6 +74,21 @@ Content: `tools/snapshot.cpp` has no scene registry — `main()` (`:156`) is a l
 - **`NoiseFloorOfAQuietRoomDoesNotAbort` was a flake.** The 7.35 figure is a 60-seed **one-shot** maximum; dense sampling crossed 10.0 once at **13.99** (`memory/peakiness-sweep-2048-2026-09-04.md`). Taking a max over ~1023 bins of a looped 16384-sample buffer will eventually exceed a gate of 10. The test now pins `ASSERT_LT (worstPeakinessForTest(), 10.0f)` **first**, so a fixture that drifts fails as a fixture problem instead of as a false gate failure.
 - **`HotMicAbortsOnlyAfterTheHold` never proved the hold.** It now drives one 5.33 ms block at 0.9 followed by quiet and asserts **no** abort, before the long burst that must abort.
 
+### Revision 3, 2026-09-15 — six residuals from the scoped re-check
+
+The cross-check's own re-check of rev 2 scored **17 ADDRESSED / 5 PARTIAL / 0 NOT**, accepted both of the deviations recorded below, and accepted the m-4 rebuttal (cite **both** `:1116` and `:1169`). Six residuals remained; all six are applied.
+
+| ID | Defect | Fix |
+|---|---|---|
+| **N-1** | **BLOCKING.** `LinkedPairUnwindsWhenTheSecondLaneFails` and `ARerunReplacesItsOwnPreviousProposals` declared `NotchRig rig;` **before** `EventRecorder rec;`. Locals are destroyed in reverse declaration order, so `~NotchController` runs `stop()` and flushes its remaining events through the sink into a vector that is already gone. Rev 2 fixed the *type* definition order and missed the *object* order in two test bodies — which is the same defect `tests/test_notchcontroller.cpp:1466-1470` was written to warn about | Both bodies are `EventRecorder rec; NotchRig rig {…};`. The `EventRecorder` struct comment now says outright that the rule is about the **object** order in every test body, not only where the two types are defined |
+| **N-2** | Two stale `r.engine.audioDeviceAboutToStart (nullptr)` lines survived in Task 8's tests. B-4 established that this call does not set `isRunning_`, so both runs would have aborted `engine_stopped` | Deleted. `Rig`'s constructor already calls `setRunningForTest(true)` and drives one block. The one remaining call, in Task 5's `DeviceRestartDrainsTheCaptureRing`, is the **subject** of that test and stays |
+| **N-3** | Task 2's Step 5 prose still carried the old derivation — `T60 = 2.0 s`, `1 − 10^(−3 × 0.7/2.0 × 2)` — while the test's block comment had been corrected to `T60 = 8.0 s` and 2.62 dB. An implementer reading the step rather than the comment would have "corrected" the test back | The prose now carries the same chain as the comment, and states the 2.0 s number explicitly as the defect (0.0035 dB, unmeasurable) so nobody re-derives their way back into it |
+| **N-4** | Task 6's Files list and `git add` named only `tests/test_soundcheckcontroller.cpp`, but `APreventiveNotchNeitherWritesNorConsumesRoomMemory` lives in `tests/test_notchcontroller.cpp` — it needs `Harness`, `NoiseSource` and `probeMemoryAt` from that TU's anonymous namespace. The commit would have left the test uncommitted | Both the Files list and the `git add` line name `tests/test_notchcontroller.cpp`, with the reason |
+| **N-5** | `takenThisCall[n.index] = false;` in the replace pass is a **no-op** — the array starts all-false — and the comment beside it claimed the cleared slot was reusable by this call, which it is not: the re-read snapshot still lists the cleared notch for ~10.7 ms | The line is deleted and the comment says what actually happens: an index cleared by this call stays skipped by this call, the result is conservative, and conservative is the right side when the alternative is two writers on one index |
+| **N-6** | Task 5's snapshot block comment still said "the **SEVEN** soundcheck atomics… nothing below this point reads the atomics again" while nine values are snapshotted — contradicting invariant 7's own amended wording two hundred lines above it | "NINE values… the seven soundcheck atomics, the sample rate (I-9) and the test-only gain seam (B-5)", and "nothing below reads **any of the nine** again", naming `currentSampleRate_` as the one rev 1 got wrong |
+
+---
+
 ### Where this plan departs from the cross-check, and why
 
 - **B-2, the recorder's home.** `tests/test_gui_helpers.h` **does** exist, so the coordinator's ruling was to promote `Recorder` into it. Opening it changes the answer: it is a **GUI-only** header — `namespace gui_test`, and its only include is `<juce_gui_basics/juce_gui_basics.h>`. Promoting a `NotchController::NotchEvent` recorder into it would pull `app/NotchController.h` into every GUI test TU that includes it and would require editing `tests/test_notchcontroller.cpp` to consume the promoted copy — a refactor with no benefit to lane M and a real chance of disturbing 122 existing tests. **This plan takes B-2's own stated alternative** ("define a local recorder there, before `NotchRig`"). Flagged here so the coordinator can overrule cheaply.
@@ -1272,7 +1287,7 @@ cd build && ctest -C Release -R LoopGainEstimator --output-on-failure
 ```
 Expected: `100% tests passed` (8 tests).
 
-**If `DecayLongerThanTheTailIsUnderRead`'s 3.0 dB is not what the synthetic room produces, do NOT edit the number to match.** Derive it: with a per-sample decay `r` and a T60 of 2.0 s, the fraction of the resonator's energy captured inside a 0.7 s tail is `1 - 10^(-3 * 0.7/2.0 * 2)`, and the shortfall is `-10*log10` of it. Put the derivation in the comment beside the number, as lane G's B-4 lesson requires ("write the arithmetic in the comment or it drifts").
+**If `DecayLongerThanTheTailIsUnderRead`'s 2.62 dB is not what the synthetic room produces, do NOT edit the number to match** — re-derive it from the block comment in that test, which is the authority. The chain is: the sweep reaches 1 kHz at `t_1k = kSweepSeconds · ln(1000/100) / ln(10000/100) = 3.0 × 0.5 = 1.5 s`, so the short window keeps `(3.0 − 1.5) + 0.7 = 2.2 s` of the ring-out; with `T60 = 8.0 s` the captured energy fraction is `1 − 10^(−6 × 2.2 / 8.0) = 0.5477`, and the shortfall is `−10·log10(0.5477) = 2.62 dB`. **Do not use the earlier 2.0 s figure**: at `T60 = 2.0` the same arithmetic gives `1 − 10^(−6 × 2.2 / 2.0) = 0.99921`, a shortfall of 0.0035 dB, which no test can measure — that was plan rev 1's defect (I-2). Keep the derivation in the comment beside the number, as lane G's B-4 lesson requires ("write the arithmetic in the comment or it drifts").
 
 - [ ] **Step 6: Full gate and commit**
 
@@ -2554,11 +2569,17 @@ void AudioEngine::setRunningForTest (bool running)
 At `src/app/AudioEngine.cpp:514`, directly under the existing `const bool bypass = ...` line and under its existing comment:
 
 ```cpp
-    // Lane M (spec §4.1, invariant 7): the SEVEN soundcheck atomics are read
-    // HERE, once, for the same reason the mode and the mapping are -- a flip
+    // Lane M (spec §4.1, invariant 7): NINE values are read HERE, once -- the
+    // seven soundcheck atomics, the sample rate (I-9) and the test-only gain
+    // seam (B-5) -- for the same reason the mode and the mapping are: a flip
     // mid-callback between the mute decision (point 2) and the tap decision
     // (point 4) would produce a block that BOTH injects the sweep and taps it
-    // back into the detector. Nothing below this point reads the atomics again.
+    // back into the detector.
+    //
+    // Nothing below this point reads ANY of the nine again. That includes
+    // currentSampleRate_, which plan rev 1 re-read down at point 3 (I-9): a rate
+    // change landing between the two reads would build the sweep with one T and
+    // index it with another.
     const int          scOutChannel      = scOutChannel_.load       (std::memory_order_relaxed);
     const bool         scSuspendTaps     = scSuspendTaps_.load      (std::memory_order_relaxed);
     const int          scCaptureIn       = scCaptureInChannel_.load (std::memory_order_relaxed);
@@ -2798,6 +2819,7 @@ Abort  ← from any emitting phase: set scRampOutAtSample_ (the callback does th
 **Files:**
 - Create: `src/app/SoundcheckController.h`, `src/app/SoundcheckController.cpp`
 - Create: `tests/test_soundcheckcontroller.cpp`
+- Modify: **`tests/test_notchcontroller.cpp`** — N-4. `APreventiveNotchNeitherWritesNorConsumesRoomMemory` lands **here**, not in the new file, because it needs `Harness`, `NoiseSource` and `probeMemoryAt` (`tests/test_notchcontroller.cpp:20`, `:335`, `:400`), all of which live in that TU's anonymous namespace. Append it after the last anonymous namespace closes (lane G m-E)
 - Modify: `CMakeLists.txt` (`HANDSFREE_CORE_SOURCES`), `tests/CMakeLists.txt`
 
 **Interfaces:**
@@ -3804,7 +3826,7 @@ Expected: `100% tests passed (608)` — 587 + 21. ESTIMATE.
 rm -f .superpowers/sdd/.gitignore
 ```
 ```bash
-git add src/app/SoundcheckController.h src/app/SoundcheckController.cpp tests/test_soundcheckcontroller.cpp CMakeLists.txt tests/CMakeLists.txt
+git add src/app/SoundcheckController.h src/app/SoundcheckController.cpp tests/test_soundcheckcontroller.cpp tests/test_notchcontroller.cpp CMakeLists.txt tests/CMakeLists.txt
 ```
 ```bash
 git commit -m "feat(lane-m): SoundcheckController -- state machine, refusals, self-aborts on a fake clock"
@@ -3886,6 +3908,14 @@ Append to `tests/test_soundcheckcontroller.cpp`. Helper first, next to the other
 // (tests/test_notchcontroller.cpp:1466-1486).
 //
 // So this TU defines its own, DECLARED BEFORE NotchRig for that lifetime reason.
+//
+// N-1: and that is not only about where the two TYPES are defined. In EVERY TEST
+// BODY that wires a recorder to a rig, the `EventRecorder` OBJECT must be
+// declared before the `NotchRig` OBJECT. Locals are destroyed in reverse
+// declaration order, so `NotchRig rig; EventRecorder rec;` puts the flush from
+// ~NotchController into a vector that has already gone. The bug is silent in a
+// passing run and shows up as a heap corruption somewhere else.
+//
 // It is not promoted into tests/test_gui_helpers.h: that header is GUI-only
 // (namespace gui_test, and its only include is juce_gui_basics), so putting a
 // NotchController::NotchEvent recorder in it would drag app/NotchController.h
@@ -4118,10 +4148,14 @@ TEST (SoundcheckApply, LinkedIsDerivedFromLaneCountNotJustTheSwitch)
 // placeConfirmed (:1262-1264) and adoptPreset (:528-530) already follow. N4.
 TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
 {
-    NotchRig rig { 2 };
-    rig.controller->setLinked (true);
-
+    // N-1: the RECORDER FIRST. Destruction runs in reverse declaration order, so
+    // a recorder declared after the rig is already gone when ~NotchController
+    // runs stop() and flushes its remaining events through the sink -- a write
+    // into a destroyed vector. Same rule, same reason, as
+    // tests/test_notchcontroller.cpp:1466-1470.
     EventRecorder rec;
+    NotchRig      rig { 2 };
+    rig.controller->setLinked (true);
     rig.controller->setEventSink (rec.sink());
 
     rig.controller->failNextSetNotchOnLaneForTest (1);
@@ -4142,8 +4176,9 @@ TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
 // few soundchecks. §4.6b.
 TEST (SoundcheckApply, ARerunReplacesItsOwnPreviousProposals)
 {
-    NotchRig rig { 1 };
+    // N-1: the RECORDER FIRST -- see LinkedPairUnwindsWhenTheSecondLaneFails.
     EventRecorder rec;
+    NotchRig      rig { 1 };
     rig.controller->setEventSink (rec.sink());
 
     auto first = applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
@@ -4299,9 +4334,17 @@ SoundcheckApplyStats applySoundcheckResults (
             controller.clearNotch ((int) n.channel, (int) n.index,
                                    NotchController::ClearReason::SoundcheckReplace);
             ++stats.clearedPrevious;
-            // The cleared slot is free for THIS call to reuse, and the snapshot
-            // will not say so for another ~10.7 ms.
-            takenThisCall[(std::size_t) n.index] = false;
+            // N-5: nothing is marked free here, and that is deliberate.
+            //
+            // takenThisCall starts all-false, so clearing an index to false
+            // would be a no-op anyway. More importantly, an index freed HERE is
+            // NOT reusable by THIS call: the snapshot each placement re-reads
+            // still lists the cleared notch for up to ~10.7 ms (latest_ is
+            // republished only inside runOnce()'s drain loop on the detector
+            // thread), so firstFreeIndexTopDown skips it regardless. The result
+            // is conservative -- a re-run may place lower down the chain than it
+            // strictly had to -- and conservative is the right side to be on
+            // when the alternative is two writers on one index.
         }
     }
 
@@ -4554,8 +4597,7 @@ Append to `tests/test_soundcheckcontroller.cpp`:
 // channel, one result.
 TEST (SoundcheckController, AFullRunEmitsTheFiveEventsInOrder)
 {
-    Rig r;
-    r.engine.audioDeviceAboutToStart (nullptr);
+    Rig r;                                 // B-4: the ctor already runs the engine
     r.micSource = whiteNoise (16384, 1.0e-4f);
     ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
     r.pump (12000.0);
@@ -4599,8 +4641,7 @@ TEST (SoundcheckController, AbortEventCarriesAtOutputAndElapsed)
 // reconstruct what the room was told to do.
 TEST (SoundcheckController, StartCarriesTheLevelAndTheDuration)
 {
-    Rig r;
-    r.engine.audioDeviceAboutToStart (nullptr);
+    Rig r;                                 // B-4: the ctor already runs the engine
     r.micSource = whiteNoise (4096, 1.0e-4f);
     ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
     r.pump (20.0);
