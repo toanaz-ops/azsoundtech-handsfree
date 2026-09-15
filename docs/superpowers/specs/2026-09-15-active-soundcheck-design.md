@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-09-15. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane M, cần S — S đã hạ cánh; main `a6be099`, 1.2.0 alpha, suite 547/547).
 **Sổ quyết định:** [`../decisions/2026-09-15-lane-m-active-soundcheck.md`](../decisions/2026-09-15-lane-m-active-soundcheck.md) (Q1–Q17, kèm Q3 lật lại lần 2).
-**Trạng thái:** **rev 3, 2026-09-15** — sau phản biện read-only độc lập **vòng 2** (2 BLOCKER / 3 IMPORTANT / 2 MINOR, **tất cả đều do chính bản viết lại rev 2 sinh ra**). Vòng 1 (8 BLOCKER / 11 IMPORTANT / 8 MINOR) đã hấp thụ ở rev 2. Bảng đối chiếu cả hai vòng ở §8. **CHƯA owner duyệt.** Rev 1 và rev 2 đều **không** được dùng làm cơ sở cho plan.
+**Trạng thái:** **rev 4, 2026-09-15** — vòng 3 kết luận **SẴN SÀNG CHO PLAN, không blocker**; rev 4 chỉ là ba chỗ chỉnh nhỏ cộng một khe hở vòng 3 chỉ ra (§8). Trước đó: **rev 3** — sau phản biện read-only độc lập **vòng 2** (2 BLOCKER / 3 IMPORTANT / 2 MINOR, **tất cả đều do chính bản viết lại rev 2 sinh ra**). Vòng 1 (8 BLOCKER / 11 IMPORTANT / 8 MINOR) đã hấp thụ ở rev 2. Bảng đối chiếu cả hai vòng ở §8. **CHƯA owner duyệt.** Rev 1 và rev 2 đều **không** được dùng làm cơ sở cho plan.
 **Đụng audio path:** **có, và nặng nhất từ trước tới nay** — lần đầu app **tự sinh tín hiệu và phát ra PA**. **Release:** 1.3.0 (`-Part minor`), không gộp với lane nào khác.
 
 > **Owner phải xác nhận chín mục trước khi có một dòng code:** Q2 (mức phát, với
@@ -181,7 +181,7 @@ không phụ thuộc thread nào khác còn sống.
 | Ramp | 30 ms raised-cosine vào và ra; ramp-out do callback tự sinh (invariant 9) |
 | Dừng khẩn | Nút `DỪNG` là **đường chính**; `Esc` là đường phụ, best-effort (F14) |
 | Tự hủy | Mic RMS > −6 dBFS giữ > 20 ms, **tính trên thread lane M từ `micCapture_`**; peakiness của cửa sổ nền vượt **ngưỡng peakiness đang sống của detector** (`getPeakinessThreshold()`, mặc định 10,0 — **không** phải `kConfirmScore`, xem §4.3); `micCaptureDrops_` tăng; sample rate hoặc số kênh đổi; `isRunning()` hoá false; `getLastDeviceError()` khác rỗng |
-| Từ chối chạy | Engine chưa `isRunning()`; cặp (in, out) của slot không hợp lệ với số kênh **thật** của callback; slot disable; RING RISK ≥ RISING (đọc lúc snapshot còn sống) |
+| Từ chối chạy | Engine chưa `isRunning()`; cặp (in, out) của slot không hợp lệ với số kênh **thật** của callback; slot disable; **RING RISK ở băng RISING trở lên**, nghĩa là `ringRiskValid && ringRiskScore >= kRiskFreezeFraction × ringRiskThreshold` = 0,55 × 0,7 = **0,385** (§4.3). `ringRiskValid == false` **KHÔNG** từ chối |
 | Không detector nào phản ứng với sweep | Detection tắt trên **mọi** slot từ `Arm` đến hết đuôi của kênh cuối (Q12) |
 | Bounds check | `scOutChannel_` và kênh thu kiểm lại **mỗi callback** với số kênh của chính callback đó (invariant 3) |
 | Chết an toàn | Trạng thái nghỉ phát 0.0f; `scOutChannel_ == -1` là giá trị khởi tạo |
@@ -334,6 +334,7 @@ Idle
  └─(yêu cầu)→ Preflight   kiểm điều kiện từ chối; GHI LẠI sampleRate + số kênh in/out
       └─→ Confirm         hộp thoại "HẠ MASTER TRƯỚC" + tổng thời lượng (~72 s xấu nhất)
            └─(OK)→ Arm    KIỂM RING RISK LẦN CUỐI (snapshot còn sống ở đây);
+                          ĐỌC ngưỡng cổng nền -> RunParams.noiseFloorGate;
                           scSuspendTaps_ = true  (GIỮ tới hết kênh CUỐI);
                           tắt detection MỌI slot; khoá control (§4.9);
                           log soundcheck_start
@@ -361,6 +362,26 @@ Abort  ← từ bất kỳ pha phát nào: đặt scRampOutAtSample_ (callback l
        mở khoá, log soundcheck_abort → Idle
 ```
 
+**Tham số của một lần chạy (`RunParams`), đọc MỘT LẦN ở `Arm` trên message
+thread rồi trao cho `SoundcheckController`:**
+
+```cpp
+struct RunParams
+{
+    float  noiseFloorGate = 0.0f;   // = controller.getPeakinessThreshold() lúc Arm
+    float  peak           = 0.0f;   // đã kẹp <= kSoundcheckMaxPeak
+    double sampleRate     = 0.0;    // ghi ở Preflight, dùng để phát hiện đổi rate
+    int    numInputChannels = 0, numOutputChannels = 0;
+    double ceilingDb      = 0.0;    // trần preset đang chạy
+    double notchQ         = 0.0;    // = controller.getNotchQ()
+};
+```
+
+Mọi trường ở đây **bất biến trong suốt lần chạy**. Đó là chủ ý: một ngưỡng đổi
+giữa chừng sẽ làm kênh 1 và kênh 9 của **cùng một lần đo** bị chấm theo hai
+thước khác nhau, và người đọc log không có cách nào biết. Đổi ngưỡng giữa chừng
+cũng không xảy ra được trong thực tế, vì §4.9 khoá các control từ `Arm`.
+
 **Bốn thay đổi so với rev 1, mỗi cái sửa một finding:**
 
 1. **`Results` chạy VỚI detection đã bật lại** (F9). Rev 1 giữ detection tắt tới
@@ -379,7 +400,32 @@ Abort  ← từ bất kỳ pha phát nào: đặt scRampOutAtSample_ (callback l
    (`src/app/NotchController.cpp:1281-1282`) ⇒ `frameScoreValid_` không bao giờ
    true; và tap treo ⇒ không block nào được drain ⇒ snapshot không refresh
    (`:617-650`). Nên: **ring risk đọc ở `Preflight` và lần nữa ở `Arm`**, khi tap
-   còn chạy. Phép "phòng có đang ngân không" **giữa lúc chạy** được thay bằng một
+   còn chạy.
+
+   **Danh tính của "≥ RISING", viết ra để không ai phải đoán** (vòng 3). Từ chối
+   chạy khi, và chỉ khi:
+
+   ```
+   snapshot.ringRiskValid
+     && snapshot.ringRiskScore >= NotchController::kRiskFreezeFraction
+                                  * snapshot.ringRiskThreshold
+   ```
+
+   `kRiskFreezeFraction = 0.55f` (`src/app/NotchController.h:140`) và
+   `ringRiskThreshold` được publish bằng `CandidateScorer::kConfirmScore`
+   (`src/app/NotchController.h:436`, gán ở `src/app/NotchController.cpp:648`),
+   nên ngưỡng thực tế là **0,55 × 0,7 = 0,385**. Lấy tích từ **snapshot** chứ
+   không chép 0,385: đó là cùng một hằng số mà băng RISING của GUI dùng
+   (`gui::SpectrumView::kRingRiskRisingFraction` alias chính `kRiskFreezeFraction`),
+   nên chip trên màn hình và cổng của lane M không thể trôi khỏi nhau.
+
+   **`ringRiskValid == false` KHÔNG từ chối.** Nó có nghĩa là "chưa chấm được
+   khung nào" — luôn đúng trong Bypass, và đúng sau mỗi lần reset cho tới khi
+   scorer có lịch sử. Từ chối ở đó sẽ khoá chính cái trường hợp thường gặp nhất:
+   mở app, chưa chạy gì, muốn đo phòng. Thay vào đó nó được **ghi lại**:
+   `soundcheck_start` mang `ring_risk: null` khi không hợp lệ, và mang con số khi
+   hợp lệ — nên khi một lần đo về sau hoá ra sai, người đọc log biết được lúc bấm
+   nút phòng đang ở đâu. Phép "phòng có đang ngân không" **giữa lúc chạy** được thay bằng một
    phép đo của chính lane M: cửa sổ nền 0,5 s trước mỗi sweep đưa qua
    `PeakinessAnalyzer::peakinessAt`, và **bin peaky nhất** được so với
    `kNoiseFloorRingingPeakiness`; vượt ⇒ Abort(`room_ringing`). Cùng một câu hỏi,
@@ -673,6 +719,15 @@ Vì vậy: **`SoundcheckController` (thread riêng) không bao giờ gọi
 `NotchController`.** Nó chỉ đặt cờ và công bố `OutputResult`; toàn bộ `ÁP DỤNG` /
 `BỎ` chạy trên **message thread**, từ lambda của nút.
 
+Điều đó bao gồm cả **ngưỡng cổng nền**. §4.3 nói cổng so với
+`controller.getPeakinessThreshold()`; nếu thread lane M tự gọi hàm đó thì nó vừa
+phá quy tắc vừa phá invariant 17 — `getPeakinessThreshold()` là một accessor
+chính sách, cùng họ với những hàm mà header khai là message-thread
+(`src/app/NotchController.h:13-14`). Nên: **message thread đọc ngưỡng đúng một
+lần ở `Arm`** và trao nó vào qua `RunParams::noiseFloorGate` (§4.3). Thread lane
+M chỉ so sánh với một `float` mà nó đã được đưa, và **không cầm con trỏ tới
+`NotchController` nào cả**.
+
 **f) Không đụng "phòng nhớ".** Lane G đã có cổng không cho Soundcheck tiêu ký ức
 (`src/app/NotchController.cpp:1116`). Lane M không ghi và không tiêu ký ức
 phòng; §5 có test.
@@ -765,7 +820,6 @@ Theo CLAUDE.md, mọi task đổi hình kết thúc bằng ảnh render
 | `kSoundcheckMinPeak` | 0.01f (−40 dBFS) | Q2 |
 | `kMicAbortDbfs` | −6.0 | Q3 |
 | `kMicAbortHoldMs` | 20.0 | Q3 |
-| `kNoiseFloorRingingPeakiness` | **= ngưỡng peakiness đang sống của detector**: `controller.getPeakinessThreshold()` (`src/app/NotchController.h:364-366`), mặc định `PeakinessAnalyzer::kDefaultThreshold = 10.0f` (`src/dsp/PeakinessAnalyzer.h:124`), dải [5, 20]. **Không** phải một hằng số chép cứng, và tuyệt đối **không** phải `kConfirmScore` | Q3 lật lại lần 2 (N1) |
 | `kMinBandSnrDb` | 12.0 | Q8 |
 | `kMinBinSnrDb` | 6.0 | Q8 |
 | `kCandidateMarginDb` | −6.0 (ngưỡng **đánh dấu**) | Q14 |
@@ -778,13 +832,23 @@ Theo CLAUDE.md, mọi task đổi hình kết thúc bằng ảnh render
 Cố định cho 1.3.0, **không lên GUI** — một slider trên bất kỳ số nào ở đây biến
 mọi báo cáo lỗi thành "lúc đó nó đang ở giá trị nào?".
 
+**Một giá trị KHÔNG thuộc bảng trên, và phải đứng riêng vì thế:**
+
+| Giá trị | Nó là gì | Nguồn |
+|---|---|---|
+| `RunParams::noiseFloorGate` | **Sống, không phải hằng số.** = `controller.getPeakinessThreshold()` (`src/app/NotchController.h:364-366`) đọc **một lần ở `Arm`** trên message thread rồi bất biến suốt lần chạy. Mặc định `PeakinessAnalyzer::kDefaultThreshold = 10.0f` (`src/dsp/PeakinessAnalyzer.h:124`), người vận hành chỉnh được trong [5, 20]. Tuyệt đối **không** phải `kConfirmScore` — xem N1 | Q3 lật lại lần 2 |
+
+Nó nằm ngoài bảng hằng số một cách có chủ ý: xếp nó chung sẽ ngụ ý "cố định cho
+1.3.0, không lên GUI", mà nó **đã** trên GUI — dưới tên ngưỡng peakiness của
+detector — và chính chỗ đó là lý do nó phải là giá trị sống.
+
 ### 4.11 Invariant an toàn
 
 Mỗi dòng dưới đây là một phát biểu **test được**, và §5 có ít nhất một test cho
 mỗi dòng — **trừ đúng một ngoại lệ, invariant 16**, thứ không phải một hành vi
 quan sát được từ ngoài mà là một tính chất của mã nguồn ("không lock, không cấp
 phát, không log"). Nó được **reviewer cưỡng chế**, không phải test cưỡng chế, và
-§5.3 ghi nó thành một dòng trong checklist của reviewer SDD. Rev 2 nói "có test
+§5.2 ghi nó thành một dòng trong checklist của reviewer SDD. Rev 2 nói "có test
 cho **mỗi** dòng" và câu đó không đúng (N6).
 
 1. Mẫu nào rời `SoundcheckSignal` cũng có `|x| <= kSoundcheckMaxPeak`, với **mọi**
@@ -824,9 +888,12 @@ cho **mỗi** dòng" và câu đó không đúng (N6).
     của 6 (ví dụ `presets/Music.json` mang −10).
 15. Không notch phòng ngừa nào đặt lên bin đã có notch sống trong ±1 bin.
 16. Callback chỉ đụng **bảy atomic + một bộ đếm + một ring**; không lock, không
-    cấp phát, không log. **(Cưỡng chế bằng review, không bằng test — §5.3.)**
+    cấp phát, không log. **(Cưỡng chế bằng review, không bằng test — §5.2.)**
 17. `SoundcheckController` (thread riêng) **không bao giờ** gọi `NotchController`;
-    mọi `setNotch`/`clearNotch` chạy trên message thread.
+    mọi `setNotch`/`clearNotch` chạy trên message thread. Ngưỡng cổng nền cũng
+    vậy: message thread đọc `getPeakinessThreshold()` ở `Arm` và trao vào qua
+    `RunParams::noiseFloorGate`; thread lane M không cầm con trỏ tới
+    `NotchController` nào.
 18. Lane M không ghi và không tiêu "phòng nhớ" của lane G.
 19. `Preflight` thất bại ⇒ **không** mẫu nào được phát, trạng thái về `Idle`.
 20. Sample rate hoặc số kênh đổi giữa chừng ⇒ abort trong ≤ một vòng poll (5 ms)
@@ -875,9 +942,13 @@ cho **mỗi** dòng" và câu đó không đúng (N6).
 
 **`test_soundcheckcontroller`** — đồng hồ giả:
 - `RefusesWhenEngineNotRunning`, `RefusesWithZeroChannels`,
-  `RefusesWhenSlotDisabled`, `RefusesOnInvalidChannelPair` *(F26)*,
-  `RefusesWhenRingRiskIsRising` — mỗi cái khẳng định **không mẫu nào được phát**
-  và về `Idle`. *(inv 19)*
+  `RefusesWhenSlotDisabled`, `RefusesOnInvalidChannelPair` *(F26)* — mỗi cái
+  khẳng định **không mẫu nào được phát** và về `Idle`. *(inv 19)*
+- `RefusesWhenRingRiskIsRising` — ba trường hợp trên cùng một
+  `ringRiskThreshold = 0.7`: `valid=true, score=0.4` (> 0,385) ⇒ **từ chối**;
+  `valid=true, score=0.3` (< 0,385) ⇒ **chạy**; `valid=false, score=0.9` ⇒
+  **chạy**, và `soundcheck_start` ghi `ring_risk: null`. Trường hợp thứ ba là
+  cái dễ bị hiện thực sai nhất. *(§4.3, vòng 3)*
 - `AbortRampsDownInTheCallbackAlone` — thread lane M bị treo (không poll) sau khi
   đặt cờ; chỉ chạy callback ⇒ biên độ vẫn về 0 và `scOutChannel_ == -1`.
   *(inv 9, F8)*
@@ -907,8 +978,12 @@ cho **mỗi** dòng" và câu đó không đúng (N6).
   và đó là toàn bộ điểm của nó. *(N1)*
 - `NoiseFloorWithARingingToneAborts` — cùng cửa sổ, cộng một tone
   (peakiness ≫ 10) ⇒ `Abort(room_ringing)`. *(N1)*
-- `NoiseFloorGateFollowsTheLiveThreshold` — `setPeakinessThreshold(5)` rồi
-  `setPeakinessThreshold(20)`, khẳng định cổng đổi theo, không chép cứng. *(N1)*
+- `NoiseFloorGateIsReadAtArm` — `setPeakinessThreshold(5)`, chạy, khẳng định cổng
+  dùng 5; rồi `setPeakinessThreshold(20)`, chạy lại, khẳng định cổng dùng 20. Tức
+  ngưỡng **đi theo detector giữa các lần chạy**, không chép cứng. *(N1)*
+- `NoiseFloorGateIsStableWithinARun` — đổi `setPeakinessThreshold` **giữa** kênh
+  1 và kênh 2 của một lần chạy; cả hai kênh vẫn chấm theo giá trị đọc lúc `Arm`.
+  *(RunParams, vòng 3)*
 - `RoomMemoryIsUntouched` — đặt notch phòng ngừa, clear, rồi một howl detector ở
   bin đó phải khởi từ thang (−6/−12), **không** từ độ sâu đã nhớ. *(inv 18, F20)*
 - `CaptureDropAborts` — ép ring thu đầy. *(F20)*
@@ -1098,9 +1173,30 @@ chứng lại (và trích dẫn `NotchController.cpp:1116` của reviewer đúng
 | N6 | MINOR | Lời mở §4.11 nói quá về độ phủ: invariant 16 nay ghi rõ **cưỡng chế bằng review** và có §5.2 là một dòng checklist cho reviewer SDD; khôi phục `SweepTouchesOnlyTheMeasuredChannel` (inv 5, rev 2 làm rơi mất); thêm khẳng định "nghỉ thì không làn nào bị tắt" vào `IdleEngineEmitsNoSweep` (inv 6 nửa sau) | §4.11, §5.1, §5.2 |
 | N7 | MINOR | Dòng cổng "phòng nhớ" là `src/app/NotchController.cpp:1116`, không phải `1105-1113` | §4.6(f), §6 |
 
-**Vòng 3 — để trống.** Reviewer read-only độc lập thứ ba điền vào đây, đọc file
-thật chứ không đọc spec này như một bản báo cáo. Bốn chỗ đáng bắn trước: cuộc
-đua `index` còn lại ở §4.6(a); lập luận "tổng năng lượng ⇒ không cần bù trễ" ở
-§4.4 cùng test biên của nó; liệu tắt theo **kênh ngõ ra** đã đủ chưa hay phải đi
-thẳng tới Q15 PA 3; và — sau bài học của vòng 2 — **mọi đơn vị đo xuất hiện
-trong một phép so sánh**, vì lane này đã sai đúng kiểu đó một lần.
+---
+
+### Vòng 3 — 2026-09-15, trên bản rev 3
+
+**Kết luận: SẴN SÀNG CHO PLAN, không blocker.** Ba mục chỉnh nhỏ cộng một khe hở
+thật mà hai vòng trước đi qua. Cả bốn đã hấp thụ ở rev 4; không mục nào hoãn,
+không mục nào bị bác.
+
+| # | Mức | Đã làm gì | Ở đâu |
+|---|---|---|---|
+| R3-1 | Khe hở | §4.3 bảo cổng nền so với `controller.getPeakinessThreshold()`, nhưng **ai gọi hàm đó** thì không nói — và nếu thread lane M tự gọi thì nó phá chính invariant 17. Nay: **message thread đọc một lần ở `Arm`** và trao vào qua `RunParams::noiseFloorGate`; thread lane M chỉ so với một `float` đã được đưa và **không cầm con trỏ tới `NotchController`**. Invariant 17 giữ nguyên câu "không bao giờ gọi `NotchController`". Thêm `RunParams` (mọi trường bất biến trong một lần chạy) và đổi test: `NoiseFloorGateIsReadAtArm` + `NoiseFloorGateIsStableWithinARun` | §4.3, §4.6(e), §4.10, §4.11 inv 17, §5.1 |
+| R3-2 | Chỉnh | "≥ RISING" nay viết ra thành **danh tính**: từ chối khi `ringRiskValid && ringRiskScore >= kRiskFreezeFraction × ringRiskThreshold` = 0,55 × 0,7 = **0,385** (`src/app/NotchController.h:140`, `:436`, gán ở `src/app/NotchController.cpp:648`) — lấy tích từ snapshot, không chép 0,385. Và nói rõ `ringRiskValid == false` (luôn đúng trong Bypass, hoặc chưa có lịch sử kể từ lần reset) **KHÔNG** từ chối, chỉ được ghi vào `soundcheck_start` là `ring_risk: null`. Test ba nhánh: 0,4 từ chối / 0,3 chạy / `valid=false` chạy | §3, §4.3, §5.1 |
+| R3-3 | Chỉnh | `kNoiseFloorRingingPeakiness` gỡ khỏi bảng "Cố định cho 1.3.0, không lên GUI" — nó **không** cố định và nó **đã** trên GUI (dưới tên ngưỡng peakiness của detector). Nay đứng riêng thành `RunParams::noiseFloorGate`, ghi rõ "sống, = ngưỡng detector đọc lúc `Arm`" | §4.10 |
+| R3-4 | Chỉnh | Tham chiếu chéo sai sau khi rev 3 chèn thêm một mục: §4.11 và invariant 16 trỏ "§5.3", đúng phải là **§5.2** | §4.11 |
+
+**Vòng 4 — để trống.** Spec này đã qua ba vòng phản biện độc lập và vòng 3 kết
+luận sẵn sàng cho plan, nên vòng tiếp theo **không nên là một vòng đọc spec
+nữa**: nó nên là người đối chiếu **plan** với code thật trước khi dispatch (bài
+học lane G mục 16: một plan chưa được kiểm chứng cho tới khi có người MỞ file nó
+trích dẫn — ba helper mà plan lane G dựa vào không tồn tại ở đâu trong repo).
+
+Bốn chỗ vẫn đáng bắn, và chúng là rủi ro **thiết kế**, không phải lỗi văn bản:
+cuộc đua `index` còn lại ở §4.6(a); lập luận "tổng năng lượng ⇒ không cần bù
+trễ" ở §4.4 cùng test biên của nó; liệu tắt theo **kênh ngõ ra** đã đủ chưa hay
+phải đi thẳng tới Q15 PA 3; và — bài học đắt nhất của lane này — **mọi đơn vị đo
+xuất hiện trong một phép so sánh**, vì lane M đã sai đúng kiểu đó một lần
+(N1) và lane R đã sai đúng kiểu đó trước nó.
