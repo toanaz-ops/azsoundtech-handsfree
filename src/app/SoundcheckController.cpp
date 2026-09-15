@@ -1317,6 +1317,13 @@ SoundcheckApplyStats applySoundcheckResults (
     controller.copySnapshot (entrySnap);
     const int laneCount = juce::jlimit (1, NotchController::kChannels, (int) entrySnap.laneCount);
 
+    // The two halves of "how many lanes, and together or apart?" come from
+    // DIFFERENT clocks, deliberately: linkedNow is LIVE (the controller's own
+    // predicate, read microseconds ago) while laneCount is SNAPSHOT-SOURCED and
+    // may be up to one hop old. That asymmetry is safe only because laneCount
+    // moves solely on setWidth(), which requires the detector thread stopped --
+    // so it cannot change under this call the way the atomic LINK switch can.
+
     // --- (b) replace THIS SLOT's previous proposals, and ONLY those (C-2) ----
     // Origin::Soundcheck has two producers: this function, and the legacy 15 s
     // soundcheck MODE (placeConfirmed, NotchController.cpp:1093, turned on at
@@ -1327,8 +1334,11 @@ SoundcheckApplyStats applySoundcheckResults (
     // (lane, index) is still Soundcheck-origin and still within +-1 bin of the
     // frequency the ledger recorded. Anything else at that address is somebody
     // else's notch on a reused slot.
+    std::vector<SoundcheckApplyLedger::Entry> carriedForward;
+
     for (const auto& e : ledger.entries)
     {
+        bool matched = false;
         for (std::uint32_t i = 0; i < entrySnap.notchCount; ++i)
         {
             const auto& n = entrySnap.notches[i];
@@ -1336,8 +1346,22 @@ SoundcheckApplyStats applySoundcheckResults (
                 continue;
             if (n.origin != NotchController::Origin::Soundcheck)
                 break;
-            if (! (entrySnap.sampleRate > 0.0)
-                || std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, entrySnap.sampleRate)
+            // N-1(a): the address and the origin are the STRONG half of the
+            // match; the frequency is the tie-breaker that catches a slot
+            // reused by another soundcheck-origin notch. So when the rate is
+            // unknown the tie-breaker is treated as PASSED rather than as
+            // failed -- refusing to clear on a missing rate would strand a
+            // preventive notch that never auto-releases (KD-7), which is the
+            // very chain drain this ledger exists to prevent.
+            //
+            // Unreachable today and kept anyway: Detector::setSampleRate
+            // refuses a non-positive rate (Detector.cpp:29-32), so a PUBLISHED
+            // snapshot always carries a positive one, and an unpublished
+            // snapshot carries no notches for the address match to find. There
+            // is therefore no test behind this branch; see the task report.
+            const bool rateKnown = entrySnap.sampleRate > 0.0;
+            if (rateKnown
+                && std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, entrySnap.sampleRate)
                              - LoopGainEstimator::hzToBin ((double) e.hz, entrySnap.sampleRate)) > 1)
                 break;
 
@@ -1345,6 +1369,7 @@ SoundcheckApplyStats applySoundcheckResults (
                                    NotchController::ClearReason::SoundcheckReplace);
             ++stats.clearedPrevious;
             clearedThisCall[flatSlot (e.lane, e.index)] = true;
+            matched = true;
 
             // N-5: the INDEX is not marked free here, and that is deliberate.
             // takenThisCall starts all-false, so clearing it would be a no-op
@@ -1354,6 +1379,18 @@ SoundcheckApplyStats applySoundcheckResults (
             // to be on when the alternative is two writers on one index.
             break;
         }
+
+        // N-1(b): an entry this pass could not match is NOT dropped. The
+        // commonest reason it fails to match is that the snapshot is one hop
+        // stale -- press AP DUNG twice inside ~10.7 ms and the first run's
+        // notches are not in it yet. Dropping the entry there would orphan a
+        // preventive notch that never auto-releases, with nothing left that
+        // knows its address: the chain drains one soundcheck at a time. Carried
+        // forward, a later apply reclaims it. If it is unmatched because the
+        // notch really is gone (CLEAR ALL, a width change), carrying it costs
+        // one struct and it simply never matches again.
+        if (! matched)
+            carriedForward.push_back (e);
     }
 
     for (const auto& result : results)
@@ -1365,6 +1402,18 @@ SoundcheckApplyStats applySoundcheckResults (
         if (result.slot != slot)
         {
             ++stats.skippedOtherSlot;
+            continue;
+        }
+
+        // result.lane is about to index takenThisCall and reach setNotch, and
+        // it arrives from a Target the GUI built -- so it is checked here
+        // rather than trusted. setNotch would itself refuse a lane >= width_
+        // (NotchController.cpp:199), but takenThisCall is indexed BEFORE that,
+        // and a lane 1 result on a mono slot is a routing fault worth naming
+        // rather than a silent no-op.
+        if (result.lane < 0 || result.lane >= laneCount)
+        {
+            ++stats.skippedBadLane;
             continue;
         }
 
@@ -1478,6 +1527,25 @@ SoundcheckApplyStats applySoundcheckResults (
                 ++stats.placed;
             }
         }
+    }
+
+    // N-1(b): the entries this call could not match join what it placed. They
+    // are appended HERE, after the placement loop, and never earlier:
+    // placedThisCall doubles as invariant 15's "already placed on this lane"
+    // list, and a carried entry may name a notch that is no longer on the
+    // chain at all -- letting it block a proposal would be refusing to protect
+    // the room on the strength of a notch nobody can find.
+    //
+    // An entry whose (lane, index) THIS call has just reused is dropped: two
+    // ledger rows for one address would have the next apply clear it twice and
+    // report the second as a real removal.
+    for (const auto& e : carriedForward)
+    {
+        bool reused = false;
+        for (const auto& p : placedThisCall)
+            reused = reused || (p.lane == e.lane && p.index == e.index);
+        if (! reused)
+            placedThisCall.push_back (e);
     }
 
     // C-2: the ledger is what THIS call placed, replacing what the last one

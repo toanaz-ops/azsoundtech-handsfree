@@ -416,7 +416,26 @@ struct SoundcheckApplyStats
     // RESULTS whose .slot named a different slot (I-1). Results, not
     // candidates: the whole result is skipped before its candidates are read.
     int skippedOtherSlot = 0;
+    // RESULTS naming a lane this slot does not drive -- lane 1 on a mono slot,
+    // or anything outside [0, laneCount). Kept apart from skippedOtherSlot
+    // because it is a different fault with different words on screen: "these
+    // results are not for this slot" versus "this slot has no such output".
+    int skippedBadLane = 0;
 };
+
+// *** TWO THINGS TASK 9 MUST NOT GET WRONG ***
+//
+// 1. `clearedPrevious > 0 && placed == 0` IS A REAL OUTCOME, not a bug and not
+//    a success. It is what a re-run on an already-full chain looks like: the
+//    previous proposals went, and there was no room to put the new ones back.
+//    The operator is LESS protected than before they pressed the button, and
+//    the GUI has to say so.
+// 2. CLEAR ALL DOES NOT RESET A LEDGER, and nothing makes it. That is
+//    harmless: the next apply looks for each entry at its (lane, index), finds
+//    nothing active there, matches nothing and clears nothing -- the entries
+//    are then carried forward and quietly stop matching for good. It is called
+//    out because "the ledger can name notches that no longer exist" is a
+//    property of the design, not a leak to be fixed.
 
 // `slot` is the slot these results and this ledger belong to; a result naming
 // any other slot is skipped (I-1). `ledger` is read for the replace pass and

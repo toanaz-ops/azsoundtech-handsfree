@@ -1780,3 +1780,105 @@ TEST (SoundcheckApply, ARoutingInvalidResultPlacesNothing)
     EXPECT_EQ (stats.placed, 0);
     EXPECT_FALSE (rig.controller->activeForTest (0, 15));
 }
+
+// RED IF: an unmatched ledger entry is dropped. N-1(b). The commonest way an
+// entry fails to match is not exotic at all -- the entry snapshot is one hop
+// stale, so a second AP DUNG inside ~10.7 ms cannot see the first one's
+// notches. Dropping the entry there orphans a preventive notch that never
+// auto-releases (KD-7) with nothing left that knows its address, and the
+// 16-slot chain drains one soundcheck at a time. This test never pumps between
+// the first two applies, which is exactly that window.
+TEST (SoundcheckApply, UnmatchedLedgerEntriesAreCarriedForward)
+{
+    NotchRig rig { 1 };
+
+    ASSERT_EQ (rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) }).placed, 1);
+    ASSERT_EQ (rig.ledger.entries.size(), 1u);
+
+    // A second AP DUNG before the snapshot has caught up, and this one has
+    // nothing to place -- a re-run whose mic went dead (Q8). NO pump, so the
+    // ledger entry cannot be matched: the notch is in the model but not yet in
+    // any published frame. Nothing reuses its address either, which is what
+    // makes this the pure carry-forward case.
+    auto dead = oneCandidate (0, 0, 2000.0, -12.0);
+    dead.measured = false;
+    const auto second = rig.apply ({ dead });
+    EXPECT_EQ (second.clearedPrevious, 0) << "it is genuinely unmatchable here";
+    EXPECT_EQ (second.placed, 0);
+    ASSERT_EQ (rig.ledger.entries.size(), 1u)
+        << "the unmatched entry is carried forward, not dropped";
+
+    // Now let the snapshot catch up. The next apply must be able to reclaim
+    // it -- which it can only do if the entry survived the call above.
+    rig.pump();
+    const auto third = rig.apply ({ oneCandidate (0, 0, 3000.0, -12.0) });
+    EXPECT_EQ (third.clearedPrevious, 1)
+        << "without the carry-forward the 1000 Hz notch is orphaned for good";
+    EXPECT_EQ (rig.countSoundcheckNotches(), 1)
+        << "and the chain drains by one notch per soundcheck instead";
+}
+
+// RED IF: the linked unwind does not strike its entries out of placedThisCall.
+// N-2. The index stays reserved -- the snapshot cannot show it gone yet -- but
+// the LEDGER must not record a pair that was rolled back, or the next apply
+// spends a clear on a notch that was never there.
+TEST (SoundcheckApply, LinkedUnwindDoesNotBlockLaterProposals)
+{
+    NotchRig rig { 2 };
+    rig.controller->setLinked (true);
+    ASSERT_TRUE (rig.controller->effectiveLinked());
+
+    // Two RESULTS, not two candidates: a linked failure stops the result it is
+    // in (N4), so the second proposal has to arrive in a result of its own.
+    // 1000 Hz is bin 43 and 2000 Hz is bin 85 -- far apart, so nothing here
+    // depends on the frequency test.
+    rig.controller->failNextSetNotchOnLaneForTest (1);
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0),
+                                    oneCandidate (0, 0, 2000.0, -12.0) });
+
+    EXPECT_EQ (stats.placed, 2) << "the second pair still lands";
+    EXPECT_GE (stats.refused, 1);
+    EXPECT_FALSE (rig.controller->activeForTest (0, 15)) << "the first pair was unwound";
+    EXPECT_TRUE  (rig.controller->activeForTest (0, 14));
+    EXPECT_TRUE  (rig.controller->activeForTest (1, 14));
+    EXPECT_EQ (rig.ledger.entries.size(), 2u)
+        << "the ledger holds the surviving pair ONLY -- the unwound lane-0 "
+           "write must not be remembered as placed";
+    for (const auto& e : rig.ledger.entries)
+        EXPECT_EQ (e.index, 14);
+}
+
+// RED IF: the unwind frees the INDEX but not the FREQUENCY. The same strike
+// covers both, and this is the half that reaches a PA: a proposal refused
+// because an identical notch is "already there" when that notch was rolled
+// back leaves the room unprotected at exactly the frequency it was howling at.
+TEST (SoundcheckApply, LinkedUnwindFreesTheFrequencyItPlacedOn)
+{
+    NotchRig rig { 2 };
+    rig.controller->setLinked (true);
+
+    rig.controller->failNextSetNotchOnLaneForTest (1);
+    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0),
+                                    oneCandidate (0, 0, 1000.0, -12.0) });
+
+    EXPECT_EQ (stats.skippedLive, 0) << "the unwound 1000 Hz is not a live notch";
+    EXPECT_EQ (stats.placed, 2);
+    EXPECT_TRUE (rig.controller->activeForTest (0, 14));
+    EXPECT_TRUE (rig.controller->activeForTest (1, 14));
+}
+
+// RED IF: result.lane is trusted. It indexes takenThisCall before setNotch ever
+// sees it, and a lane 1 result on a mono slot is a routing fault the operator
+// should be told about rather than a silent no-op.
+TEST (SoundcheckApply, AResultNamingALaneThisSlotDoesNotDriveIsSkipped)
+{
+    NotchRig rig { 1 };                       // mono: lane 1 does not exist here
+
+    const auto stats = rig.apply ({ oneCandidate (0, 1, 1000.0, -12.0),
+                                    oneCandidate (0, 0, 2000.0, -12.0) });
+
+    EXPECT_EQ (stats.skippedBadLane, 1);
+    EXPECT_EQ (stats.skippedOtherSlot, 0) << "a different fault, a different word";
+    EXPECT_EQ (stats.placed, 1) << "the lane-0 result still lands";
+    EXPECT_FALSE (rig.controller->activeForTest (1, 15));
+}
