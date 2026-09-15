@@ -66,7 +66,13 @@ public:
     // PartialApplyUnwind rather than hide behind the Manual default.
     enum class ClearReason : std::uint8_t
     {
-        Manual, ClearAll, AutoRelease, WidthChange, VerdictFalse, PartialApplyUnwind
+        Manual, ClearAll, AutoRelease, WidthChange, VerdictFalse, PartialApplyUnwind,
+        // Lane M: the active soundcheck replacing its OWN previous proposal on
+        // this slot. A separate value because the alternative -- reusing Manual
+        // -- makes an automatic cleanup indistinguishable from an operator
+        // pulling a notch by hand, in the one file lane D built to tell them
+        // apart (spec 4.6b, F21).
+        SoundcheckReplace
     };
 
     static constexpr int kChannels   = 2;
@@ -401,6 +407,12 @@ public:
         // the room is quiet still records what the room NEEDED, not what the
         // release ladder had wound back to.
         float deepestDb = 0.0f;
+        // Lane M (spec 4.6, F7): which policy placed this notch. model_ is
+        // private and SnapshotNotch is the only view outward, so without this
+        // field nothing can find the preventive notches of a previous
+        // soundcheck run in order to replace them -- and they never
+        // auto-release (NotchController.cpp:729), so the chain drains.
+        Origin origin = Origin::Detector;
         std::uint8_t channel = 0;
         std::uint8_t index   = 0;
     };

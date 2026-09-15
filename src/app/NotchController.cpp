@@ -577,6 +577,7 @@ void NotchController::runOnce()
                     if (! n.active) continue;
                     notchList[notchCount++] = { (float) n.frequency, (float) n.Q,
                                                 (float) n.depthDB, (float) n.deepestDb,
+                                                n.origin,
                                                 (std::uint8_t) c, (std::uint8_t) i };
                 }
         }

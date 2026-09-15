@@ -109,6 +109,12 @@ def summarise(events: list[dict]) -> dict:
         "verdicts": len(judged), "false": false_count,
         "unjudged": len(notches) - len(judged),
         "retunes": sum(n["retunes"] for n in notches),
+        # Lane M: how many notches this session's soundchecks replaced with
+        # their own next proposal. Counted here rather than left to the reason
+        # column because "the soundcheck keeps replacing its own work" is a
+        # pattern worth seeing at a glance, and because a fixture can then pin
+        # that the reason name survives the whole C++ -> JSON -> reader path.
+        "soundcheck_replaced": sum(1 for n in notches if n["reason"] == "soundcheck_replace"),
         "dropped": end.get("dropped_events"),
     }
 
@@ -143,6 +149,8 @@ def print_report(s: dict) -> None:
     print(f"notches {total}  retunes {s['retunes']}  judged {v}  false {s['false']}"
           f"  false-rate {(s['false'] / v * 100 if v else 0):.0f}%"
           f"  unjudged {s['unjudged']} ({(s['unjudged'] / total * 100 if total else 0):.0f}%)")
+    if s["soundcheck_replaced"]:
+        print(f"soundcheck replaced {s['soundcheck_replaced']} notch(es) from an earlier run")
     if s["dropped"]:
         print(f"WARNING: logger dropped {s['dropped']} event(s)")
 
@@ -155,6 +163,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-false", type=int)
     ap.add_argument("--expect-recurrence-max", type=int)
     ap.add_argument("--expect-retunes", type=int)
+    ap.add_argument("--expect-soundcheck-replaced", type=int)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -173,6 +182,10 @@ def main(argv: list[str]) -> int:
         failures.append(f"false {s['false']} != {args.expect_false}")
     if args.expect_retunes is not None and s["retunes"] != args.expect_retunes:
         failures.append(f"retunes {s['retunes']} != {args.expect_retunes}")
+    if (args.expect_soundcheck_replaced is not None
+            and s["soundcheck_replaced"] != args.expect_soundcheck_replaced):
+        failures.append(
+            f"soundcheck-replaced {s['soundcheck_replaced']} != {args.expect_soundcheck_replaced}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

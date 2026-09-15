@@ -1368,6 +1368,36 @@ TEST (GuiWiring, SetAndClearKeepTheirOwnEventNames)
     EXPECT_FALSE (cv.getDynamicObject()->hasProperty ("from_db"));
 }
 
+// RED IF: reasonName gains no case for SoundcheckReplace. It falls through to
+// "unknown" and the tester's log says nothing useful -- the same class of defect
+// as lane G's retuneReasonName fallthrough (Task 9 review I2).
+//
+// B-3: this lives HERE because MainComponent::notchEventToVarForTest
+// (MainComponent.h:194) is used from nowhere else in the suite
+// (test_gui_wiring.cpp:1337, 1360, 1365, 1383), and the event is built INLINE --
+// the makeClearEvent helper plan rev 1 assumed does not exist anywhere in the
+// repo.
+TEST (GuiWiring, SoundcheckReplaceReachesTheLogAsItsOwnReason)
+{
+    NotchController::NotchEvent clear;
+    clear.kind   = NotchController::NotchEvent::Kind::Clear;
+    clear.slot   = 0;
+    clear.lane   = 0;
+    clear.index  = 2;
+    clear.hz     = 1000.0f;
+    clear.q      = 30.0f;
+    clear.depthDb = -12.0f;
+    clear.origin = NotchController::Origin::Soundcheck;
+    clear.reason = NotchController::ClearReason::SoundcheckReplace;
+
+    const juce::var v = MainComponent::notchEventToVarForTest (clear);
+
+    EXPECT_EQ (v["ev"].toString(), "notch_clear");
+    EXPECT_EQ (v["reason"].toString(), "soundcheck_replace");
+    EXPECT_NE (v["reason"].toString(), "manual");
+    EXPECT_NE (v["reason"].toString(), "unknown");
+}
+
 // RED IF a reason name is dropped or renamed -- logstats.py and the tester
 // notes both read these four strings.
 TEST (GuiWiring, EveryRetuneReasonHasItsOwnName)

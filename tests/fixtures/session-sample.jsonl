@@ -12,4 +12,6 @@
 {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
 {"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
 {"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
+{"ev":"notch_set","t":50000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"q":30,"depth_db":-9,"origin":"soundcheck"}
+{"ev":"notch_clear","t":52000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"origin":"soundcheck","reason":"soundcheck_replace","age_ms":2000.0}
 {"ev":"session_end","t":60000.0,"dropped_events":0}

@@ -3749,3 +3749,90 @@ TEST (NotchControllerLadder, TheMemoryRingReclaimsAConsumedSlotBeforeEvictingALi
     EXPECT_DOUBLE_EQ (probeMemoryAt (h, quiet, 61.0 * binHz), -18.0)
         << "the 18th write did not land anywhere findable";
 }
+
+// ===========================================================================
+// Lane M (active soundcheck): the two ADDITIVE NotchController changes.
+// Appended at file scope -- the anonymous namespaces above have all closed, so
+// Harness (:20) and Recorder (:1471) are both visible here, and nothing lands
+// inside a namespace that already ended (lane G m-E).
+// ===========================================================================
+
+// RED IF: SnapshotNotch loses `origin`, or the aggregate initialiser at
+// NotchController.cpp:578-580 is not updated alongside the struct -- brace
+// elision would then silently shift channel/index by one field. Without this
+// field lane M cannot find the previous run's preventive notches to clear, and
+// they never auto-release (NotchController.cpp:729), so the 16-slot chain
+// drains after a few soundchecks. F7.
+TEST (NotchControllerSoundcheck, SnapshotCarriesOrigin)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 3, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Soundcheck));
+    ASSERT_TRUE (h.controller.setNotch (0, 4, 2000.0, 30.0, -12.0,
+                                        NotchController::Origin::Manual));
+
+    // B-1(c): latest_ is written ONLY inside runOnce()'s drain loop, and the
+    // loop body runs only when a block was actually drained off the tap.
+    // Without this the snapshot stays empty forever and the whole test passes
+    // vacuously. Precedent: tests/test_gui_wiring.cpp:1033-1035, and
+    // memory/preset-save-roundtrip-2026-09-05.md.
+    const std::vector<float> block (512, 0.0f);
+    h.tap.write (block.data(), block.size());
+
+    NotchController::SnapshotBuffer snap {};
+    h.controller.runOnce();
+    h.controller.copySnapshot (snap);
+    ASSERT_GT (snap.notchCount, 0u) << "the snapshot never refreshed -- pump the tap";
+
+    bool sawSoundcheck = false, sawManual = false;
+    for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+    {
+        const auto& n = snap.notches[i];
+        if (n.index == 3)
+        {
+            EXPECT_EQ (n.origin, NotchController::Origin::Soundcheck);
+            EXPECT_NEAR (n.frequency, 1000.0f, 0.5f);   // the fields after `origin` still line up
+            EXPECT_EQ ((int) n.channel, 0);
+            sawSoundcheck = true;
+        }
+        if (n.index == 4)
+        {
+            EXPECT_EQ (n.origin, NotchController::Origin::Manual);
+            EXPECT_NEAR (n.frequency, 2000.0f, 0.5f);
+            sawManual = true;
+        }
+    }
+    EXPECT_TRUE (sawSoundcheck);
+    EXPECT_TRUE (sawManual);
+}
+
+// RED IF: SoundcheckReplace is folded into Manual. The log could then not tell
+// "the soundcheck replaced its own previous proposal" from "a human removed a
+// notch" -- the exact mislabelling lane D exists to prevent. F21.
+TEST (NotchControllerSoundcheck, SoundcheckReplaceIsItsOwnClearReason)
+{
+    // B-2, from Recorder's own comment at tests/test_notchcontroller.cpp:1466:
+    //   1. Recorder has NO operator(). The sink comes from rec.sink().
+    //   2. The Recorder must be declared BEFORE the Harness it is wired to. The
+    //      controller's destructor calls stop(), which flushes the remaining
+    //      events through the sink -- into this object. Declaration order is the
+    //      reverse of destruction order.
+    Recorder rec;
+    Harness  h;
+    h.controller.setEventSink (rec.sink());
+
+    ASSERT_TRUE (h.controller.setNotch (0, 2, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Soundcheck));
+    h.controller.clearNotch (0, 2, NotchController::ClearReason::SoundcheckReplace);
+
+    const std::vector<float> block (512, 0.0f);   // B-1(c)
+    h.tap.write (block.data(), block.size());
+    h.controller.runOnce();
+
+    ASSERT_FALSE (rec.events.empty());
+    const auto& last = rec.events.back();
+    EXPECT_EQ (last.kind, NotchController::NotchEvent::Kind::Clear);
+    EXPECT_EQ (last.reason, NotchController::ClearReason::SoundcheckReplace);
+    EXPECT_NE (last.reason, NotchController::ClearReason::Manual);
+    EXPECT_FALSE (h.controller.activeForTest (0, 2));   // B-3: `active`, never depth < 0
+}
