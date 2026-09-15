@@ -1,0 +1,1041 @@
+# Review package: d892b3c..HEAD
+
+## Commits
+cc2e77f feat(app): NotchController depth ladder — model fields, −24 clamp, pushRetuneLocked, Retune event
+
+## Files changed
+ src/app/NotchController.cpp    | 184 ++++++++++++++++++++++++++++-
+ src/app/NotchController.h      | 167 +++++++++++++++++++++++++-
+ tests/test_notchcontroller.cpp | 259 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 599 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index 68a35a0..f908bb8 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -1,15 +1,17 @@
+ #include "app/NotchController.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+ #include <limits>
++#include <optional>
++#include <utility>
+ 
+ NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
+                                   LockFreeRingBuffer<float>* tapLane1,
+                                   LockFreeRingBuffer<NotchCommand>& commands,
+                                   ClockSource& clock, int slotId)
+     : juce::Thread ("AZNotchDetector")
+     , commands_ (commands), clock_ (clock), slotId_ (slotId)
+     , lastPollMs_ (clock.nowMs())
+ {
+     taps_[0] = &tapLane0;
+@@ -109,20 +111,61 @@ void NotchController::setWidth (int lanes)
+     // change (DevicePanel::onBeforeRestart/onAfterRestart) -- so this covers
+     // the device/SR case even though nothing outside tests calls
+     // setSampleRate(). Unconditional for that reason: a restart that keeps
+     // the same width still invalidated the scorer's view of the room. A brief
+     // N/A on the chip is honest; a stale number is not. Readout only -- the
+     // scorer, the persistence streaks and the model are untouched here.
+     for (auto& l : lanes_)
+         l.blocksSinceReset = 0;
+ }
+ 
++// --- Lane G ladder arithmetic (spec 4.1, Q13). Pure: no state, no locks. ---
++
++double NotchController::nextDeeperRungDb (double currentDb, double ceilingDb)
++{
++    // The shallowest FIXED rung strictly deeper than `currentDb` ...
++    double next = kDepthLadderDb[kDepthLadderSize - 1];
++    for (int i = 0; i < kDepthLadderSize; ++i)
++        if (kDepthLadderDb[i] < currentDb)
++        {
++            next = kDepthLadderDb[i];
++            break;
++        }
++    // ... capped at the ceiling, which is the effective ladder's LAST rung
++    // (Q13). std::max picks the SHALLOWER of the two, because deeper is more
++    // negative: ceiling -10 turns "-6 -> -12" into "-6 -> -10".
++    //
++    // A caller must already have established `currentDb > ceilingDb` -- at or
++    // past the ceiling this returns `currentDb` unchanged, which every caller
++    // treats as "nothing to do" rather than as a step.
++    return std::max (next, ceilingDb);
++}
++
++double NotchController::nextShallowerRungDb (double currentDb)
++{
++    // The deepest rung strictly shallower than `currentDb`, saturating at the
++    // ladder top. An odd Preset/Manual depth resolves upward.
++    for (int i = kDepthLadderSize - 1; i >= 0; --i)
++        if (kDepthLadderDb[i] > currentDb)
++            return kDepthLadderDb[i];
++    return kDepthLadderDb[0];
++}
++
++// The `ceilingRung` of spec 4.1 -- under Q13 that IS the ceiling value, so
++// there is nothing to quantise. A Detector notch (ceilingDb == NaN) follows
++// the LIVE slider; everything else carries its own (Q8).
++double NotchController::ceilingDbFor (const ModelNotch& n) const
++{
++    return std::isnan (n.ceilingDb) ? notchDepthDb_.load (std::memory_order_relaxed)
++                                    : n.ceilingDb;
++}
++
+ void NotchController::run()
+ {
+     while (! threadShouldExit())
+     {
+         runOnce();
+         wait (5);
+     }
+ }
+ 
+ bool NotchController::setNotch (int channel, int index,
+@@ -132,55 +175,70 @@ bool NotchController::setNotch (int channel, int index,
+     return setNotchImpl (channel, index, frequency, Q, depthDB, origin, nullptr);
+ }
+ 
+ bool NotchController::setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
+                                     Origin origin, const NotchEvent* scored)
+ {
+     // width gates the policy surface; internal fan-out loops never exceed it.
+     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
+         return false;
+ 
++    // Q12 / invariant 1: nothing deeper than the ladder floor leaves this
++    // controller, whatever asked for it -- a preset file is not a trusted
++    // source, and -24 dB already kills any howl this app can hear. Applied
++    // BEFORE validation, so a positive depth is still refused below.
++    const double depth = std::max (depthDB, kMaxDepthDb);
++
+     // Same predicates Biquad::setNotchFilter applies (see header comment).
+     const double sampleRate = lanes_[0].detector.getSampleRate();
+     if (! (sampleRate > 0.0))                       return false;
+     if (! (Q > 0.0))                                return false;
+     if (! (frequency > 0.0 && frequency < sampleRate * 0.5))
+                                                     return false;
+-    if (! (depthDB <= 0.0))                         return false;  // positive depth would BOOST
++    if (! (depth <= 0.0))                           return false;  // positive depth would BOOST
+ 
+     if (failSetNotchLaneForTest_.load (std::memory_order_relaxed) == channel)
+     {
+         failSetNotchLaneForTest_.store (-1, std::memory_order_relaxed);
+         return false;   // TEST ONLY: forces the partial-apply unwind path
+     }
+ 
+     const NotchCommand cmd { NotchCommandType::Set,
+                              (std::uint8_t) channel, (std::uint8_t) index,
+-                             (float) frequency, (float) Q, (float) depthDB,
++                             (float) frequency, (float) Q, (float) depth,
+                              slotId_ };
+ 
+     {
+         const std::lock_guard<std::mutex> lock (modelMutex_);
+         auto& n = model_[slotOf (channel, index)];
+         n.frequency      = frequency;
+         n.Q              = Q;
+-        n.depthDB        = depthDB;
++        n.depthDB        = depth;
+         n.origin         = origin;
+         n.active         = true;
+         n.lockedAtMs     = liveMs_;
+         n.lastDetectedMs = liveMs_;
++        // Lane G (B-2): the one place a slot becomes active is the one place
++        // the ladder can be trusted to start clean.
++        n.deepestDb        = depth;
++        n.stageChangedAtMs = liveMs_;
++        n.quietMs          = 0.0;
++        n.releasedSteps    = 0;
++        n.ceilingDb        = (origin == Origin::Detector)
++                                 ? std::numeric_limits<double>::quiet_NaN()
++                                 : depth;
+         outbox_.push_back (cmd);
+ 
+         NotchEvent ev = scored != nullptr ? *scored : NotchEvent {};
+         ev.kind = NotchEvent::Kind::Set;
+         ev.slot = slotId_; ev.lane = channel; ev.index = index;
+-        ev.hz = (float) frequency; ev.q = (float) Q; ev.depthDb = (float) depthDB;
++        ev.hz = (float) frequency; ev.q = (float) Q; ev.depthDb = (float) depth;
+         ev.origin = origin;
+         pushEventLocked (std::move (ev));
+     }
+     return true;
+ }
+ 
+ void NotchController::pushEventLocked (NotchEvent&& event)
+ {
+     if (eventSink_ == nullptr)
+         return;   // no sink: nothing is ever queued (spec test 10)
+@@ -204,65 +262,130 @@ void NotchController::pushClearLocked (int channel, int index, ClearReason reaso
+ 
+     NotchEvent ev;
+     ev.kind = NotchEvent::Kind::Clear;
+     ev.slot = slotId_; ev.lane = channel; ev.index = index;
+     ev.hz = (float) n.frequency; ev.q = (float) n.Q; ev.depthDb = (float) n.depthDB;
+     ev.origin = n.origin; ev.reason = reason;
+     ev.ageMs = liveMs_ - n.lockedAtMs;
+     pushEventLocked (std::move (ev));
+ }
+ 
++bool NotchController::pushRetuneLocked (int channel, int index, double newDepthDb,
++                                        RetuneReason reason)
++{
++    auto& n = model_[slotOf (channel, index)];
++    if (! n.active)
++        return false;
++
++    // Validate-before-send: the same five predicates as setNotchImpl plus the
++    // ladder floor (spec 4.4). Nothing is touched when any of them fails -- a
++    // refused retune leaves the model AND the chain on the depth they already
++    // agreed on, which is the only state where they cannot disagree.
++    const double sampleRate = lanes_[0].detector.getSampleRate();
++    if (! (sampleRate > 0.0))                                    return false;
++    if (! (n.Q > 0.0))                                           return false;
++    if (! (n.frequency > 0.0 && n.frequency < sampleRate * 0.5)) return false;
++    if (! (newDepthDb <= 0.0))                                   return false;
++    if (! (newDepthDb >= kMaxDepthDb))                           return false;
++
++    // freq and Q come from the STORED notch, never from notchQ_ (m-2): a Q
++    // differing by one bit sends NotchChain::setNotch down the reset path, and
++    // a reset mid-signal is the click this whole lane exists to avoid.
++    outbox_.push_back ({ NotchCommandType::Set,
++                         (std::uint8_t) channel, (std::uint8_t) index,
++                         (float) n.frequency, (float) n.Q, (float) newDepthDb,
++                         slotId_ });
++
++    NotchEvent ev;
++    ev.kind = NotchEvent::Kind::Retune;
++    ev.slot = slotId_; ev.lane = channel; ev.index = index;
++    ev.hz = (float) n.frequency; ev.q = (float) n.Q;
++    ev.fromDepthDb = (float) n.depthDB;
++    ev.depthDb     = (float) newDepthDb;
++    ev.origin = n.origin;
++    ev.retuneReason = reason;
++    // Age from PLACEMENT, like a Clear's. lockedAtMs, origin and
++    // lastDetectedMs are deliberately left alone: this is the same notch, and
++    // lane D's labels are keyed to when it was placed (B-1).
++    ev.ageMs = liveMs_ - n.lockedAtMs;
++    pushEventLocked (std::move (ev));
++
++    n.depthDB = newDepthDb;
++    return true;
++}
++
+ void NotchController::clearNotch (int channel, int index, ClearReason reason)
+ {
+     // width gates the policy surface; internal fan-out loops never exceed it.
+     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
+         return;
+     const std::lock_guard<std::mutex> lock (modelMutex_);
+     pushClearLocked (channel, index, reason);
+ }
+ 
+ void NotchController::clearAll (ClearReason reason)
+ {
+     const std::lock_guard<std::mutex> lock (modelMutex_);
+     for (int c = 0; c < kChannels; ++c)
+         for (int i = 0; i < kSlots; ++i)
+             pushClearLocked (c, i, reason);
+ }
+ 
+ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches, int* skippedOut)
+ {
+-    int adopted = 0, skipped = 0;
++    int adopted = 0, skipped = 0, clamped = 0;
+     for (const auto& p : notches)
+     {
+         // S-8: the file's index, always. A named lane lands on that lane; an
+         // unnamed one lands on every lane, all-or-nothing, whatever linked_ says
+         // (linked_ only steers where the DETECTOR places new notches -- it has
+         // no say over what a preset file explicitly names).
+         const int firstLane = (p.lane < 0) ? 0 : p.lane;
+         const int lastLane  = (p.lane < 0) ? width_ - 1 : p.lane;
+         if (firstLane >= width_)
+         {
+             ++skipped;   // lane 1 named on a mono slot: not adoptable here
+             continue;
+         }
+ 
+         int applied = 0;
+         for (int lane = firstLane; lane <= lastLane; ++lane)
+             if (setNotch (lane, p.index, p.freq, p.Q, p.depthDB, Origin::Preset))
++            {
+                 ++applied;
++                // Q12: setNotchImpl does the clamping; count it HERE so the
++                // operator is told a hand-edited file asked for more than the
++                // app allows, instead of quietly getting a different filter
++                // than the file names.
++                //
++                // M-5: counted only when the notch was ACTUALLY adopted and
++                // the clamp actually moved the value. Counting at the top of
++                // the loop body -- above the `firstLane >= width_` skip and
++                // above setNotchImpl's own validation -- reports clamps on
++                // notches that were never applied at all: a lane-1 notch on a
++                // mono slot, a freq past Nyquist, a positive depth.
++                // `lane == firstLane` makes it one count per PresetNotch, not
++                // one per lane of a mirrored stereo pair.
++                if (lane == firstLane && p.depthDB < kMaxDepthDb)
++                    ++clamped;
++            }
+         const int wanted = lastLane - firstLane + 1;
+         if (applied == wanted)
+             ++adopted;
+         else if (applied > 0)
+             for (int lane = firstLane; lane <= lastLane; ++lane)
+                 clearNotch (lane, p.index, ClearReason::PartialApplyUnwind);
+     }
++    if (clamped > 0)
++        juce::Logger::writeToLog ("preset: clamped " + juce::String (clamped)
++                                  + " notch depth(s) to " + juce::String (kMaxDepthDb, 1)
++                                  + " dB (slot " + juce::String (slotId_) + ")");
+     if (skippedOut != nullptr)
+         *skippedOut = skipped;
+     return adopted;
+ }
+ 
+ void NotchController::runOnce()
+ {
+     // 1. Drain every block the tap already holds, so a large audio callback
+     //    delivering several hops at once never leaves the detector behind.
+     //    Each fresh block is published to the GUI snapshot IMMEDIATELY,
+@@ -291,21 +414,22 @@ void NotchController::runOnce()
+         std::array<SnapshotNotch, kTotalSlots> notchList {};
+         std::uint32_t notchCount = 0;
+         {
+             const std::lock_guard<std::mutex> lock (modelMutex_);
+             lastDataMs_ = now;
+             for (int c = 0; c < kChannels; ++c)
+                 for (int i = 0; i < kSlots; ++i)
+                 {
+                     const auto& n = model_[slotOf (c, i)];
+                     if (! n.active) continue;
+-                    notchList[notchCount++] = { (float) n.frequency, (float) n.Q, (float) n.depthDB,
++                    notchList[notchCount++] = { (float) n.frequency, (float) n.Q,
++                                                (float) n.depthDB, (float) n.deepestDb,
+                                                 (std::uint8_t) c, (std::uint8_t) i };
+                 }
+         }
+ 
+         // One tick per lockstep drain iteration, BEFORE the per-lane dispatch
+         // below, so every lane processed in this pass reads the same number.
+         // Skipping 0 on wrap keeps the never-placed sentinel in
+         // linkedPlacedAt_ unambiguous (the wrap is ~1.4 years of continuous
+         // 10.7 ms drains away, but a stale stamp matching costs a missed
+         // notch, so it is not left to luck).
+@@ -419,20 +543,67 @@ void NotchController::runOnce()
+     flushOutbox();
+     flushEventOutbox();
+ }
+ 
+ double NotchController::liveMsForTest() const
+ {
+     const std::lock_guard<std::mutex> lock (modelMutex_);
+     return liveMs_;
+ }
+ 
++double NotchController::depthDbForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].depthDB;
++}
++
++double NotchController::deepestDbForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].deepestDb;
++}
++
++double NotchController::quietMsForTest (int channel, int index) const
++{
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].quietMs;
++}
++
++bool NotchController::activeForTest (int channel, int index) const
++{
++    // B-3: the FLAG. pushClearLocked lowers `active` and leaves
++    // frequency/Q/depthDB standing -- the Clear event reads n.depthDB -- so
++    // `depthDB < 0` is true for every slot that has ever held a notch.
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return model_[slotOf (std::clamp (channel, 0, kChannels - 1),
++                          std::clamp (index, 0, kSlots - 1))].active;
++}
++
++bool NotchController::retuneForTest (int channel, int index, double newDepthDb,
++                                     RetuneReason reason)
++{
++    if (channel < 0 || channel >= kChannels || index < 0 || index >= kSlots)
++        return false;
++    const std::lock_guard<std::mutex> lock (modelMutex_);
++    return pushRetuneLocked (channel, index, newDepthDb, reason);
++}
++
++void NotchController::setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override)
++{
++    // Detector-thread state, written from the test thread with the detector
++    // STOPPED -- same precondition as setWidth() and setEventSink().
++    ringRiskOverrideForTest_ = override;
++}
++
+ void NotchController::setDetectionActive (bool active)
+ {
+     detectionActive_.store (active, std::memory_order_relaxed);
+ }
+ 
+ // --- Detection tuning (brief 2026-08-24). Message thread; atomics relaxed. --
+ 
+ void NotchController::setRiseReferenceMs (double ms)
+ {
+     for (auto& l : lanes_)
+@@ -616,20 +787,21 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
+         ctx->hasOther = true;
+         std::copy_n (pc.other, Detector::kNumBins, ctx->other.begin());
+     }
+ 
+     NotchEvent scored;
+     scored.hasScore = true;
+     scored.confirmedLane = lane;
+     scored.score = pc.finalScore; scored.peakiness = pc.breakdown.rawPeakiness;
+     scored.pNorm = pc.breakdown.pNorm; scored.rise = pc.breakdown.rNorm;
+     scored.novelty = pc.breakdown.mNorm; scored.penalty = pc.breakdown.penalty;
++    scored.riseRatio = pc.breakdown.riseRatio;   // B-5: the RAW ratio, not rNorm
+     scored.asymmetry = pc.asymmetry; scored.persistNeeded = pc.persistNeeded; scored.thr = pc.thr;
+     scored.ctx = ctx;
+ 
+     int applied = 0;
+     for (int l = firstLane; l <= lastLane; ++l)
+         if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
+             ++applied;
+ 
+     // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
+     // lane 1 keep independent persistence counters per bin (§4.3 --
+diff --git a/src/app/NotchController.h b/src/app/NotchController.h
+index 6286070..f406793 100644
+--- a/src/app/NotchController.h
++++ b/src/app/NotchController.h
+@@ -38,20 +38,22 @@
+ #include "dsp/PeakinessAnalyzer.h"
+ 
+ #include <juce_events/juce_events.h>
+ 
+ #include <array>
+ #include <atomic>
+ #include <cstdint>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
++#include <optional>
++#include <utility>
+ #include <vector>
+ 
+ // private inheritance: the thread is an implementation detail; nothing
+ // external should see Thread's interface.
+ class NotchController : private juce::Thread
+ {
+ public:
+     // Recorded because D-05's rejected alternative ("detector leaves preset
+     // notches alone") becomes a one-line policy change if origin is kept,
+     // and impossible to add later if it is not.
+@@ -87,20 +89,82 @@ public:
+     // before a Set is emitted (~30 ms at a 10.67 ms hop). Runtime-tunable
+     // (brief 2026-08-24); kPersistenceBlocks is only the DEFAULT.
+     static constexpr int kPersistenceBlocks       = 3;
+     static constexpr int kMinPersistenceBlocks    = 1;
+     static constexpr int kMaxPersistenceBlocks    = 10;
+     // Automatic-notch defaults (KD-5), runtime-tunable per the brief. Q in
+     // [8, 50], depth dB in [-24, -6]; clamped on set.
+     static constexpr double kDefaultNotchQ      = 30.0;
+     static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
+ 
++    // === Lane G: the depth ladder (spec 4.9). Fixed for 1.2.0 and
++    // deliberately NOT exposed on the GUI -- these are the numbers the
++    // ladder's behaviour was reasoned about with, and a slider on any of them
++    // turns every future bug report into "which value was it on?".
++    //
++    // A Detector notch only ever STANDS on a rung. Deeper == more negative.
++    static constexpr double kDepthLadderDb[4] = { -6.0, -12.0, -18.0, -24.0 };
++    static constexpr int    kDepthLadderSize  = 4;
++    static constexpr double kDepthStepDb      = 6.0;
++    // Invariant 1: no Set this controller emits may be deeper than this, for
++    // ANY Origin (Q12). -24 dB already kills any howl this app can hear.
++    static constexpr double kMaxDepthDb       = -24.0;
++    // How long a rung must hold before the ladder buys the next one down (Q2).
++    // Measured against liveMs_, which advances once per runOnce AFTER the
++    // drain loop, so the gate cannot fire twice inside one drain.
++    static constexpr double kDeepenAfterMs    = 300.0;
++    // A candidate whose RAW rise ratio is at least this starts on the second
++    // rung (Q6). Magnitudes are amplitudes, so 2.0 == +6 dB over the rise
++    // window. rNorm cannot express this: it saturates at 1.5.
++    static constexpr float  kSteepRiseRatio   = 2.0f;
++    // Release ladder (Q3): the FIRST rung costs 30 s of quiet, every rung
++    // after it 10 s. kAutoReleaseMs keeps its name and value as the first step.
++    static constexpr double kReleaseFirstMs   = kAutoReleaseMs;
++    static constexpr double kReleaseStepMs    = 10000.0;
++    // "Room memory" (Q6/Q10): a howl returning to the SAME BIN within this
++    // window restarts at the depth it needed last time.
++    static constexpr double kMemoryTtlMs      = 300000.0;
++    static constexpr int    kMemoryEntriesPerLane = 16;
++    // Release-clock freeze (Q4). The SAME fraction the GUI's RISING band uses
++    // -- one constant, not two that can drift apart. This IS the definition:
++    // gui::SpectrumView::kRingRiskRisingFraction is changed in Task 7 to alias
++    // this name, so there is no second 0.55f literal anywhere. Frozen at
++    // score >= 0.55 x CandidateScorer::kConfirmScore = 0.385.
++    //
++    // Do not move this declaration into a .cpp or behind an accessor: the GUI
++    // header includes app/NotchController.h and needs it as a constant
++    // expression.
++    static constexpr float  kRiskFreezeFraction = 0.55f;
++
++    // Why a notch's depth moved. Lane D writes it into the session log as
++    // `reason` on a notch_retune line.
++    enum class RetuneReason : std::uint8_t { Deepen, Release, Reclamp, Ceiling };
++
++    // Ladder arithmetic. Pure and static, so it is testable without a rig.
++    //
++    // Q13: the EFFECTIVE ladder is the fixed rungs SHALLOWER than the ceiling,
++    // plus the ceiling itself as the last rung -- so ceiling -10 (the shipped
++    // presets/Music.json) gives -6 -> -10, and ceiling -6 gives a one-rung
++    // ladder that never deepens. The `ceilingRung` IS the ceiling value and
++    // may be an odd number: it is the ONLY place a Detector notch stands off a
++    // fixed rung. There is deliberately no quantisation helper -- v2 had one
++    // (`ceilingRungDb`), and quantising -10 down to -6 made Music 4 dB
++    // shallower than 1.1.3 with nothing saying so.
++    //
++    // nextDeeperRungDb: the shallowest fixed rung strictly deeper than
++    //   `currentDb`, capped at `ceilingDb`. Saturates at the ceiling.
++    // nextShallowerRungDb: the deepest fixed rung strictly shallower than
++    //   `currentDb`, saturating at -6. Needs no ceiling -- a release always
++    //   moves toward a fixed rung.
++    static double nextDeeperRungDb (double currentDb, double ceilingDb);
++    static double nextShallowerRungDb (double currentDb);
++
+     NotchController (LockFreeRingBuffer<float>& tapLane0,
+                      LockFreeRingBuffer<float>* tapLane1,
+                      LockFreeRingBuffer<NotchCommand>& commands,
+                      ClockSource& clock,
+                      int slotId = 0);
+     // Legacy shape: one tap. Behaves LINKED whatever setLinked() says (S-6):
+     // with no lane-1 spectrum there is nothing to be independent about.
+     NotchController (LockFreeRingBuffer<float>& tap,
+                      LockFreeRingBuffer<NotchCommand>& commands,
+                      ClockSource& clock,
+@@ -172,27 +236,40 @@ public:
+     {
+         int    bins = Detector::kNumBins;
+         double binHz = 0.0;
+         double refAgeMs = 0.0;
+         bool   hasRef = false, hasOther = false;
+         std::array<float, Detector::kNumBins> now {}, ref {}, other {};
+     };
+ 
+     struct NotchEvent
+     {
+-        enum class Kind : std::uint8_t { Set, Clear };
++        // Retune: a depth change on a notch that stays where it is (lane G).
++        // Neither a Set nor a Clear -- MainComponent::notchEventToVar MUST
++        // give it its own `ev` name, or tools/logstats.py closes the notch's
++        // record at the first 300 ms deepening (B-3).
++        enum class Kind : std::uint8_t { Set, Clear, Retune };
+         Kind  kind = Kind::Set;
+         int   slot = 0, lane = 0, index = 0;
+         float hz = 0.0f, q = 0.0f, depthDb = 0.0f;
+-        Origin      origin = Origin::Detector;        // Set
+-        ClearReason reason = ClearReason::Manual;     // Clear
+-        double ageMs = 0.0;                           // Clear: liveMs_ - lockedAtMs
++        Origin      origin = Origin::Detector;              // Set, Retune
++        ClearReason reason = ClearReason::Manual;           // Clear
++        RetuneReason retuneReason = RetuneReason::Deepen;   // Retune
++        float        fromDepthDb  = 0.0f;                   // Retune: the depth it left
++        // Set: the RAW rise ratio the placement policy read (B-5). `rise`
++        // below is rNorm, which SATURATES at rise 1.5 -- so it cannot tell a
++        // 1.6 from a 40, and a test cannot use it to prove that a ramped
++        // fixture actually landed in the -6 band rather than merely failing to
++        // confirm. One float, filled from pc.breakdown.riseRatio, no
++        // allocation, and not written for Clear or Retune.
++        float        riseRatio    = 0.0f;
++        double ageMs = 0.0;                                 // Clear/Retune: liveMs_ - lockedAtMs
+         // Detector placements only (Task 4):
+         bool  hasScore = false;
+         int   confirmedLane = 0;
+         float score = 0.0f, peakiness = 0.0f, pNorm = 0.0f, rise = 0.0f, novelty = 0.0f,
+               penalty = 1.0f, asymmetry = 1.0f, thr = 0.0f;
+         int   persistNeeded = 0;
+         std::shared_ptr<const SpectralContext> ctx;   // null unless hasScore
+     };
+     using EventSink = std::function<void (const NotchEvent&)>;
+ 
+@@ -202,20 +279,43 @@ public:
+     // that captures `this` in the sink must call stop() on the controller
+     // before its own members are destroyed, or call setEventSink(nullptr)
+     // after that join.
+     void setEventSink (EventSink sink);              // detector thread STOPPED; nullptr = off
+     std::uint64_t droppedEvents() const;
+     // TEST ACCESSORS ONLY
+     int  pendingEventsForTest() const;
+     bool modelMutexIsFreeForTest();                  // try_lock + unlock
+     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
+ 
++    // TEST ACCESSORS ONLY (lane G). The ladder lives entirely under
++    // modelMutex_ and is otherwise observable only through emitted commands,
++    // which cannot tell "did not move" from "moved and moved back".
++    double depthDbForTest   (int channel, int index) const;
++    double deepestDbForTest (int channel, int index) const;
++    double quietMsForTest   (int channel, int index) const;
++    // B-3: ModelNotch::active, NOT "depthDB < 0". pushClearLocked lowers only
++    // `active` and leaves depthDB alone on purpose (the Clear event reads it),
++    // so a depth-based liveness probe matches every slot that has ever held a
++    // notch. Tasks 5-8 use this accessor for every "is a notch there?" check.
++    bool   activeForTest    (int channel, int index) const;
++    // Drives pushRetuneLocked the way the detector thread does, taking
++    // modelMutex_ exactly once. Tasks 5-7 call the locked helper from loops
++    // that already hold it; this seam is what lets the command path be tested
++    // before those callers exist.
++    bool   retuneForTest (int channel, int index, double newDepthDb, RetuneReason reason);
++    // Forces the pair the release freeze reads (spec 4.5 seam, M-6):
++    // {valid, score}. nullopt restores the real frameScoreValid_/frameMaxScore_.
++    // A static tone cannot hold score >= 0.385 for 30 s -- mNorm is a
++    // log-ratio against a 3 s EMA and decays to 0 within seconds -- so the
++    // freeze is untestable through audio alone.
++    void   setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override);
++
+     // KD-9: detection gating (Bypass must never place notches). Snapshot
+     // publication is NOT affected by this flag.
+     void setDetectionActive (bool active);
+ 
+     // Spec 5.3: soundcheck detects for 15 s of LIVE time and its notches do
+     // not auto-release. Sets detection active for the duration.
+     void startSoundcheck();
+     bool soundcheckActive() const;
+     double getSoundcheckRemainingMs() const;   // 0 when inactive
+ 
+@@ -262,21 +362,26 @@ public:
+     bool detectionActiveForTest() const
+         { return detectionActive_.load (std::memory_order_relaxed); }
+ 
+     // One consistent frame for the GUI: the spectrum and the notch list are
+     // captured under one lock at one instant (bridge design §5). Caller owns
+     // the destination -- returning a container would allocate every paint.
+     struct SnapshotNotch
+     {
+         float frequency = 0.0f;
+         float Q         = 0.0f;
+-        float depthDB   = 0.0f;
++        float depthDB   = 0.0f;   // the depth RUNNING right now
++        // Lane G (Q11): the deepest rung this notch has ever stood on.
++        // savePreset writes THIS rather than depthDB, so a preset saved while
++        // the room is quiet still records what the room NEEDED, not what the
++        // release ladder had wound back to.
++        float deepestDb = 0.0f;
+         std::uint8_t channel = 0;
+         std::uint8_t index   = 0;
+     };
+ 
+     struct SnapshotBuffer
+     {
+         std::array<std::array<float, Detector::kNumBins>, kChannels> magnitudes {};
+         std::uint32_t magnitudeCount = 0;
+         std::uint32_t laneCount = 1;
+         bool          linked = false;
+@@ -296,20 +401,28 @@ public:
+         // False until the detector actually scored this frame: detection
+         // disarmed, or no lane had committed history to score against. The
+         // GUI renders Unavailable while this is false rather than rendering
+         // 0.0 as "low" -- an unwired indicator reading "low" is worse than
+         // one reading "n/a", because a soundman would act on it.
+         bool  ringRiskValid = false;
+         // The live band line the GUI compares ringRiskScore against, so no
+         // threshold is hardcoded on the GUI side (A-R3). Score is a 0..1
+         // product, so this is CandidateScorer::kConfirmScore.
+         float ringRiskThreshold = 0.0f;
++
++        // Lane G (Q9): was the release clock frozen on the most recent tick?
++        // Published for the GUI and the log to use LATER -- 1.2.0 draws
++        // nothing with it. The RING RISK chip cannot stand in for it: it holds
++        // for 750 ms and follows displayedSlot_ only, so it can read RISING
++        // while the clock is running again, and a slot that is not displayed
++        // can be frozen with nothing on screen saying so (M-8).
++        bool  releaseFrozen = false;
+     };
+ 
+     void copySnapshot (SnapshotBuffer& destOwnedByCaller) const;
+ 
+     // Commands that had to be retried because the command ring was full.
+     // Sustained growth means the audio callback stopped draining -- a real
+     // fault the UI should be able to surface.
+     std::uint64_t retryCount() const;
+ 
+     void setSampleRate (double sampleRate);
+@@ -319,28 +432,68 @@ private:
+ 
+     struct ModelNotch
+     {
+         double frequency    = 0.0;
+         double Q            = 0.0;
+         double depthDB      = 0.0;
+         double lockedAtMs   = 0.0;
+         double lastDetectedMs = 0.0;
+         Origin origin       = Origin::Detector;
+         bool   active       = false;
++
++        // --- lane G ladder state (spec 4.2) -------------------------------
++        // All five are re-initialised by setNotchImpl, the ONE place a slot
++        // becomes active, for every Origin and every path (placeConfirmed,
++        // adoptPreset, the GUI's setNotch, the partial-apply unwind).
++        // pushClearLocked only lowers `active`, so a reused slot would
++        // otherwise inherit the previous tenant's ladder (B-2).
++
++        // Deepest rung held since placement -- also where a reclamp jumps to.
++        double deepestDb        = 0.0;
++        // liveMs_ at the last depth change (deepen, release, reclamp, ceiling).
++        double stageChangedAtMs = 0.0;
++        // ACCUMULATED quiet time since the last depth change or reinforce, in
++        // live ms. A counter rather than a timestamp precisely so the freeze
++        // can stop it without losing what it had banked.
++        double quietMs          = 0.0;
++        // Rungs released from deepestDb. 0 == not releasing. An integer count
++        // instead of comparing doubles (m-3).
++        int    releasedSteps    = 0;
++        // This notch's own ceiling. Preset/Manual/Soundcheck: the depth the
++        // caller asked for -- the slider must not drag a notch a human or a
++        // file set explicitly (Q8). Detector: NaN, meaning "follow the live
++        // slider", resolved by ceilingDbFor().
++        double ceilingDb        = 0.0;
+     };
+ 
+     static constexpr int slotOf (int channel, int index) { return channel * kSlots + index; }
+ 
+     void flushOutbox();
+     bool setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
+                        Origin origin, const NotchEvent* scored);
+     void pushClearLocked (int channel, int index, ClearReason reason);
++    // modelMutex_ HELD. Re-sends `index` as a Set at a new depth, keeping the
++    // notch's stored frequency, Q, lockedAtMs, origin and lastDetectedMs.
++    // Applies the same five predicates setNotchImpl does plus the -24 floor,
++    // and returns false changing NOTHING when any fails or the slot is not
++    // active.
++    //
++    // It exists because both callers -- the reinforce loop in
++    // processSpectrumForDetection and step 3 of runOnce -- already hold
++    // modelMutex_, which is NOT recursive: calling setNotch/setNotchImpl from
++    // either would deadlock, and setNotchImpl would also stamp a fresh
++    // lockedAtMs, destroying lane D's age label (B-1).
++    bool pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason);
++    // The ceiling this notch obeys: its own, or the LIVE slider for a Detector
++    // notch (whose ceilingDb is NaN). Read fresh every tick, so lowering the
++    // slider mid-show takes effect (spec 7).
++    double ceilingDbFor (const ModelNotch& n) const;
+     void pushEventLocked (NotchEvent&& event);   // modelMutex_ HELD
+     // modelMutex_ NOT held when the sink runs. Returns true if it delivered
+     // (or attempted to deliver, with no sink) anything -- false when the
+     // outbox was already empty. stop() loops on this so a sink re-entering
+     // clearNotch()/setNotch() during the flush still gets drained.
+     bool flushEventOutbox();
+ 
+     // `otherLaneMagnitudes` is the opposite lane's spectrum, at most one hop
+     // apart from `block` (runOnce()'s per-lane drain invariant), or nullptr
+     // when only one lane produced a block this iteration.
+@@ -458,20 +611,24 @@ private:
+     // only (flushEventOutbox swaps them so the reserve() survives). eventSink_
+     // is read under modelMutex_ by producers (pushEventLocked) and again,
+     // unlocked, by flushEventOutbox() on the detector thread; it is written
+     // ONLY by setEventSink() with the thread stopped, so both reads are a
+     // benign same-value race and need no second mutex.
+     EventSink eventSink_;
+     std::vector<NotchEvent> eventOutbox_;
+     std::vector<NotchEvent> eventScratch_;
+     std::atomic<std::uint64_t> droppedEvents_ { 0 };
+     std::atomic<int> failSetNotchLaneForTest_ { -1 };
++    // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the
++    // release freeze. Detector-thread state; written only with the thread
++    // stopped, like setWidth()/setEventSink().
++    std::optional<std::pair<bool, float>> ringRiskOverrideForTest_;
+ 
+     std::atomic<std::uint64_t> retryCount_ { 0 };
+ 
+     // Live-clock state, all under modelMutex_. liveMs_ advances only while
+     // the tap is alive; EVERY spec timer (30 ms candidate persistence,
+     // 15 s soundcheck, 30 s auto-release) reads liveMs_, never the wall clock.
+     double liveMs_     = 0.0;
+     double lastPollMs_ = 0.0;
+     // Sentinel far below any real time: "the tap has never delivered".
+     double lastDataMs_ = -1.0e9;
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index 9562118..e4dd1b2 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -1672,10 +1672,269 @@ TEST (NotchControllerRingRisk, WidthChangeInvalidatesUntilTheNextBlock)
+ 
+     pump (h, quiet.hop());
+     h.controller.copySnapshot (snap);
+     EXPECT_FALSE (snap.ringRiskValid);
+     EXPECT_FLOAT_EQ (snap.ringRiskScore, 0.0f);
+ 
+     pump (h, quiet.hop());
+     h.controller.copySnapshot (snap);
+     EXPECT_TRUE (snap.ringRiskValid);
+ }
++
++// ===========================================================================
++// Lane G (gain-aware notch), spec docs/superpowers/specs/
++// 2026-09-06-gain-aware-notch-design.md. The ladder, its clamps, and the
++// retune command path.
++// ===========================================================================
++
++// RED IF the effective ladder stops being "the rungs shallower than the
++// ceiling, then the ceiling itself" (Q13). The shipped presets/Music.json
++// asks for -10, which is not a multiple of 6: v2's quantise-to-a-rung rule
++// would have capped Music at -6, i.e. 4 dB SHALLOWER than 1.1.3, silently.
++TEST (NotchControllerLadder, TheEffectiveLadderEndsOnTheCeilingItself)
++{
++    using NC = NotchController;
++    // Ceiling -24: the whole fixed ladder.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -24.0), -12.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -24.0), -18.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-18.0, -24.0), -24.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-24.0, -24.0), -24.0);   // saturates
++
++    // Ceiling -10 (presets/Music.json): -6 -> -10, and -10 is the end.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -10.0), -10.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-10.0, -10.0), -10.0);
++
++    // Ceiling -13.7: -6 -> -12 -> -13.7.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -13.7), -12.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -13.7), -13.7);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-13.7, -13.7), -13.7);
++
++    // Ceiling -18 (presets/Speech.json): -6 -> -12 -> -18.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0, -18.0), -12.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-12.0, -18.0), -18.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb (-18.0, -18.0), -18.0);
++
++    // Ceiling -6: there is no rung shallower than -6, so the ladder is one
++    // rung long and a notch there NEVER deepens.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -6.0,  -6.0),  -6.0);
++
++    // An odd Manual depth resolves in the direction of travel, still capped.
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -3.0, -24.0),  -6.0);
++    EXPECT_DOUBLE_EQ (NC::nextDeeperRungDb ( -9.0, -24.0), -12.0);
++}
++
++// RED IF a release step can jump more than one rung, or past -6. Q13 needs no
++// ceiling here: releasing is always toward a FIXED rung, and the two off-rung
++// depths the ladder can hold -- an odd ceiling, an odd Preset/Manual depth --
++// both resolve to the nearest fixed rung above them.
++TEST (NotchControllerLadder, NextShallowerIsExactlyOneRungAndStopsAtMinus6)
++{
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-24.0), -18.0);
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-18.0), -12.0);
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-12.0),  -6.0);
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-6.0),   -6.0);
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-13.7), -12.0);
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-10.0),  -6.0);  // Music's ceiling
++    EXPECT_DOUBLE_EQ (NotchController::nextShallowerRungDb (-9.0),   -6.0);  // odd preset depth
++}
++
++// RED IF setNotchImpl stops re-initialising the ladder fields when a slot is
++// REUSED (B-2). pushClearLocked only lowers `active`, so without this a manual
++// -6 dB notch inherits the -24 dB deepestDb of the previous tenant and gets
++// reclamped to -24 on its first reinforce.
++TEST (NotchControllerLadder, ReusingASlotResetsEveryLadderField)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -24.0,
++                                        NotchController::Origin::Detector));
++    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
++
++    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
++                                        NotchController::Origin::Manual));
++
++    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0),   -6.0);
++    EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -6.0);
++    EXPECT_DOUBLE_EQ (h.controller.quietMsForTest (0, 0),    0.0);
++}
++
++// RED IF `activeForTest` is implemented as "depthDB < 0" (B-3). It must read
++// ModelNotch::active, because pushClearLocked lowers ONLY `active` -- the
++// Clear event reads n.depthDB, so the depth is deliberately retained on a
++// cleared slot. Every liveness probe in Tasks 5-8 is built on this accessor;
++// a depth-based one would report every slot that has ever held a notch as
++// still active, and the room-memory and ceiling tests would pass while
++// asserting nothing.
++//
++// DO NOT "fix" this by zeroing depthDB in pushClearLocked: that would empty
++// the Clear event's depth field, which lane D writes into every notch_clear.
++TEST (NotchControllerLadder, ActiveForTestReadsTheFlagNotTheRetainedDepth)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++    EXPECT_TRUE (h.controller.activeForTest (0, 0));
++
++    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
++    EXPECT_FALSE (h.controller.activeForTest (0, 0));
++    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -18.0)
++        << "a Clear must NOT zero depthDB -- the Clear event reads it";
++
++    EXPECT_FALSE (h.controller.activeForTest (0, 1));   // never touched
++}
++
++// RED IF the -24 clamp (Q12) is narrowed to Origin::Detector, or dropped.
++// Invariant 1 must hold for EVERY origin, or a hand-edited preset puts a
++// -40 dB cut on a PA.
++TEST (NotchControllerLadder, DepthDeeperThanMinus24IsClampedForEveryOrigin)
++{
++    const NotchController::Origin origins[] = { NotchController::Origin::Detector,
++                                                NotchController::Origin::Preset,
++                                                NotchController::Origin::Manual,
++                                                NotchController::Origin::Soundcheck };
++    for (auto origin : origins)
++    {
++        Harness h;
++        ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -40.0, origin));
++        h.controller.runOnce();
++
++        NotchCommand cmd {};
++        ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
++        EXPECT_FLOAT_EQ (cmd.depthDB, -24.0f);
++        EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
++        EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, 0), -24.0);
++    }
++}
++
++// RED IF adoptPreset stops clamping. A file is not a trusted source.
++TEST (NotchControllerLadder, AdoptPresetClampsADeepPresetNotch)
++{
++    Harness h;
++    PresetNotch p;
++    p.index = 0; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -40.0;
++    EXPECT_EQ (h.controller.adoptPreset ({ p }), 1);
++    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
++}
++
++// RED IF pushRetuneLocked stops sending the STORED freq/Q (m-2). Sending the
++// live notchQ_ instead would differ by a bit whenever the operator had moved
++// the Q slider after placement, and NotchChain would take the reset path --
++// which is a click.
++TEST (NotchControllerLadder, RetuneResendsTheStoredFrequencyAndQ)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 2, 987.0, 17.5, -6.0,
++                                        NotchController::Origin::Detector));
++    h.controller.setNotchDefaults (44.0, -24.0);   // move the live defaults away
++    ASSERT_TRUE (h.controller.retuneForTest (0, 2, -12.0,
++                                             NotchController::RetuneReason::Deepen));
++    h.controller.runOnce();
++
++    NotchCommand cmd {};
++    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);   // the original Set
++    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);   // the retune
++    EXPECT_EQ (cmd.type, NotchCommandType::Set);
++    EXPECT_EQ (cmd.channel, 0);
++    EXPECT_EQ (cmd.index, 2);
++    EXPECT_FLOAT_EQ (cmd.frequency, 987.0f);
++    EXPECT_FLOAT_EQ (cmd.Q, 17.5f);
++    EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
++    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 2), -12.0);
++}
++
++// RED IF a retune overwrites lockedAtMs (B-1). lockedAtMs is the age label
++// lane D writes into every notch_clear; resetting it on each retune would make
++// a notch that lived 40 s report a 300 ms life.
++TEST (NotchControllerLadder, RetuneDoesNotResetTheNotchesAge)
++{
++    Recorder r; Harness h; h.controller.setEventSink (r.sink());
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0,
++                                        NotchController::Origin::Detector));
++
++    std::vector<float> hop (512, 0.1f);
++    for (int i = 0; i < 200; ++i) {          // 200 * 5 ms = 1 s of live time
++        h.tap.write (hop.data(), hop.size());
++        h.clock.advance (5.0);
++        h.controller.runOnce();
++    }
++    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -12.0,
++                                             NotchController::RetuneReason::Deepen));
++    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -18.0,
++                                             NotchController::RetuneReason::Deepen));
++    h.controller.clearNotch (0, 0, NotchController::ClearReason::Manual);
++    h.controller.runOnce();
++
++    const auto clears = r.clears();
++    ASSERT_EQ (clears.size(), 1u);
++    EXPECT_GT (clears[0].ageMs, 900.0) << "age was measured from the last retune, not the placement";
++    EXPECT_FLOAT_EQ (clears[0].depthDb, -18.0f);   // the depth it was actually running
++}
++
++// RED IF a Retune event stops carrying where it came FROM, or starts
++// allocating a SpectralContext (a retune is not a placement decision).
++TEST (NotchControllerLadder, RetuneEventCarriesFromDepthReasonAndNoContext)
++{
++    Recorder r; Harness h; h.controller.setEventSink (r.sink());
++    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -6.0,
++                                        NotchController::Origin::Detector));
++    ASSERT_TRUE (h.controller.retuneForTest (0, 1, -18.0,
++                                             NotchController::RetuneReason::Reclamp));
++    h.controller.runOnce();
++
++    const Ev* ret = nullptr;
++    for (const auto& e : r.events)
++        if (e.kind == Ev::Kind::Retune) { ret = &e; break; }
++    ASSERT_NE (ret, nullptr);
++    EXPECT_EQ (ret->lane, 0);
++    EXPECT_EQ (ret->index, 1);
++    EXPECT_FLOAT_EQ (ret->fromDepthDb, -6.0f);
++    EXPECT_FLOAT_EQ (ret->depthDb, -18.0f);
++    EXPECT_EQ (ret->retuneReason, NotchController::RetuneReason::Reclamp);
++    EXPECT_EQ (ret->origin, NotchController::Origin::Detector);
++    EXPECT_EQ (ret->ctx, nullptr);
++    EXPECT_FALSE (ret->hasScore);
++}
++
++// RED IF pushRetuneLocked drops any of its five validate-before-send
++// predicates, or the -24 floor. A refused retune must change NOTHING.
++TEST (NotchControllerLadder, RetuneRefusesOutOfRangeDepthAndChangesNothing)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0,
++                                        NotchController::Origin::Detector));
++    h.controller.runOnce();
++    NotchCommand drained {};
++    while (h.commands.read (&drained, 1) == 1) {}
++
++    EXPECT_FALSE (h.controller.retuneForTest (0, 0,  +3.0,
++                                              NotchController::RetuneReason::Deepen));
++    EXPECT_FALSE (h.controller.retuneForTest (0, 0, -40.0,
++                                              NotchController::RetuneReason::Deepen));
++    EXPECT_FALSE (h.controller.retuneForTest (0, 5, -18.0,   // slot not active
++                                              NotchController::RetuneReason::Deepen));
++    h.controller.runOnce();
++
++    EXPECT_EQ (h.commands.getAvailableRead(), 0u);
++    EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -12.0);
++}
++
++// RED IF the snapshot stops carrying deepestDb -- savePreset (Q11) reads it,
++// and a notch resting at -6 while the room needed -18 would be saved as -6.
++TEST (NotchControllerLadder, SnapshotCarriesTheDeepestDepthTheNotchEverHeld)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -6.0,
++                                             NotchController::RetuneReason::Release));
++
++    std::vector<float> hop (512, 0.25f);
++    h.tap.write (hop.data(), hop.size());
++    h.controller.runOnce();
++
++    NotchController::SnapshotBuffer snap;
++    h.controller.copySnapshot (snap);
++    ASSERT_EQ (snap.notchCount, 1u);
++    EXPECT_FLOAT_EQ (snap.notches[0].depthDB,   -6.0f);
++    EXPECT_FLOAT_EQ (snap.notches[0].deepestDb, -18.0f);
++    EXPECT_FALSE (snap.releaseFrozen);
++}

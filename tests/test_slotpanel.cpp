@@ -340,3 +340,80 @@ TEST (SlotPanel, OnlyOneDetailRowIsOpenAtATime)
     EXPECT_EQ (2, panel.getRowForTest (0).tune.getSelectedId());
     EXPECT_EQ (2, panel.getRowForTest (3).tune.getSelectedId());
 }
+
+//==============================================================================
+// Off-list values (fix round 2 of task 9). SlotPanel's detail editor shares
+// TuningPanel's fixed rung lists AND its idForX helpers, so it inherits the
+// same trap: a slot whose controller holds a preset's off-list ceiling (Q 25 /
+// -10 dB, presets/Music.json) would seed two blank combos, and the next edit
+// would report Q 10 / -6 dB back for that slot.
+
+namespace
+{
+gui::SlotPanel::SlotTuning makeOffListTuning()
+{
+    gui::SlotPanel::SlotTuning t;
+    t.usesGlobal = true;
+    t.riseMs  = 250.0;   // combo id 2
+    t.persist = 3;
+    t.depthDb = -10.0;   // NOT a rung
+    t.q       =  25.0;   // NOT a rung
+    t.thr     =  10.0;   // combo id 3
+    return t;
+}
+} // namespace
+
+TEST (SlotPanel, AnOffListSlotTuningIsSeededAsTextRatherThanBlankingTheCombos)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeOffListTuning(); };
+
+    gui::SlotPanel::SlotTuning reported;
+    panel.onSlotTuningChanged = [&reported] (int, const gui::SlotPanel::SlotTuning& t)
+    { reported = t; };
+
+    panel.getRowForTest (0).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+
+    EXPECT_EQ (panel.getDetailForTest (0).depth.getText(), juce::String ("-10 dB"));
+    EXPECT_EQ (panel.getDetailForTest (0).q.getText(),     juce::String ("25"));
+
+    // The very first report -- the one openDetailFor sends -- must already
+    // carry the slot's real values, not the first rung of each list.
+    EXPECT_FALSE (reported.usesGlobal);
+    EXPECT_DOUBLE_EQ (reported.depthDb, -10.0);
+    EXPECT_DOUBLE_EQ (reported.q,        25.0);
+}
+
+TEST (SlotPanel, EditingOneDetailComboKeepsTheOffListOnesUnchanged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    gui::SlotPanel panel (engine);
+    panel.setSize (520, 260);
+
+    panel.slotTuningProvider = [] (int) { return makeOffListTuning(); };
+
+    gui::SlotPanel::SlotTuning reported;
+    panel.onSlotTuningChanged = [&reported] (int, const gui::SlotPanel::SlotTuning& t)
+    { reported = t; };
+
+    panel.getRowForTest (0).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
+
+    // Rise 250 -> 100 ms. Depth and Q are still off-list and must ride along.
+    panel.getDetailForTest (0).rise.setSelectedId (1, juce::sendNotificationSync);
+
+    EXPECT_DOUBLE_EQ (reported.riseMs,  100.0);
+    EXPECT_DOUBLE_EQ (reported.depthDb, -10.0);
+    EXPECT_DOUBLE_EQ (reported.q,        25.0);
+
+    // Picking a real rung still applies that rung.
+    panel.getDetailForTest (0).depth.setSelectedId (2, juce::sendNotificationSync);   // -12 dB
+    EXPECT_DOUBLE_EQ (reported.depthDb, -12.0);
+    EXPECT_DOUBLE_EQ (reported.q,        25.0);
+}

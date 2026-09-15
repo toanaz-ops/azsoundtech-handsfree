@@ -32,6 +32,17 @@ class NotchChain
 public:
     static constexpr int MAX_NOTCHES = 16;
 
+    // kRampMs: a depth-only retune walks its coefficients over 10 ms --
+    // 441 samples at 44.1 kHz, 480 at 48 kHz, 960 at 96 kHz. The ramp is
+    // per-sample, so how it lands on callback boundaries does not matter:
+    // at a 1024-sample buffer or larger it starts and finishes inside one
+    // callback at every rate above; at a 64-sample buffer it straddles
+    // about 7 callbacks at 44.1/48 kHz and 15 at 96 kHz. 10 ms is chosen so
+    // a 6 dB rung moves at most 0.6 dB/ms (spec 4.7); nothing in NotchChain
+    // enforces that bound -- the controller's ladder must not send a
+    // multi-rung step in the deep direction.
+    static constexpr double kRampMs = 10.0;
+
     enum class NotchState
     {
         Idle,
@@ -53,6 +64,21 @@ public:
     // Installs a notch in `index`. If the biquad rejects the parameters
     // (sampleRate <= 0, Q <= 0, freq <= 0, or freq >= sampleRate/2 -- see
     // Biquad.h) the slot is left untouched and stays whatever it was.
+    //
+    // DEPTH-ONLY RETUNE (spec 4.7): when the slot is already Active and both
+    // `freq` and `Q` compare EQUAL to the stored NotchInfo, only the depth is
+    // moving, so the filter state is still meaningful and clearing it would be
+    // a step discontinuity into the PA. That case routes to
+    // Biquad::rampNotchDepth and interpolates over kRampMs instead. Everything
+    // else -- an Idle slot, a new frequency, a new Q -- keeps taking the
+    // setNotchFilter + reset path exactly as before.
+    //
+    // The comparison is a plain `==` on doubles ON PURPOSE: the caller
+    // (NotchController::pushRetuneLocked) resends the freq and Q it stored
+    // when the notch was placed, so the values are bit-identical by
+    // construction. A near-miss falls through to the reset path, which is the
+    // SAFE direction to fail in -- an audible click, never a filter running
+    // one design while claiming another.
     void   setNotch(int index, double freq, double Q, double depthDB);
     void   clearNotch(int index);
     void   reset();

@@ -83,6 +83,20 @@ public:
     {
         float rawPeakiness = 0.0f;
         float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+        // Lane G (spec 4.2): the RAW rise ratio mag_now / mag_ref, before any
+        // normalisation. rNorm above saturates at rise 1.5, so it cannot
+        // distinguish a howl creeping up from one that jumped 12 dB in a
+        // quarter second -- and that distinction is what decides whether a
+        // notch starts at -6 or -12 dB. The neutral value is 1.0, meaning "no
+        // measurable rise": the no-history branch, the history-too-young
+        // branch, AND the sub-threshold early return (peakiness at or below
+        // the analyzer threshold, CandidateScorer.cpp:52-53) all leave it at
+        // this default, so an unknown rise can never buy a deeper starting
+        // notch.
+        // Unbounded above: against a near-silent reference the divisor floors
+        // at 1e-12, so this can legitimately read ~1e12. Compare it against a
+        // threshold; never scale anything by it.
+        float riseRatio = 1.0f;
         float penalty = 1.0f;
         float score = 0.0f;
         const float* refFrame = nullptr;

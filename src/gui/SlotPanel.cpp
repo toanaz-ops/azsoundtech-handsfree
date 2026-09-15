@@ -60,6 +60,19 @@ void fillChannelCombo (juce::ComboBox& box, const juce::StringArray& names, int 
     if (juce::isPositiveAndBelow (selectedChannel, names.size()))
         box.setSelectedId (selectedChannel + 1, juce::dontSendNotification);
 }
+
+// Select item `id`, or -- when there is none (id 0, the value is not one of
+// the fixed rungs) -- SHOW the value as text. setSelectedId(0) empties the
+// combo instead, which is what a preset's off-list ceiling used to produce.
+// ComboBox::setText matches an existing item by text first, so an on-list
+// value can never end up as a text-only label by this route.
+void selectOrShow (juce::ComboBox& box, int id, const juce::String& text)
+{
+    if (id != 0)
+        box.setSelectedId (id, juce::dontSendNotification);
+    else
+        box.setText (text, juce::dontSendNotification);
+}
 } // namespace
 
 //==============================================================================
@@ -370,19 +383,32 @@ void SlotPanel::seedDetailFrom (int slotIndex)
                              ? slotTuningProvider (slotIndex)
                              : SlotTuning();
 
+    // Remember the whole snapshot: currentTuning() reports these values back
+    // for any combo an off-list value left without a list selection.
+    seeded_ = t;
+
     auto& d = details_[(std::size_t) slotIndex];
 
     // dontSendNotification: seeding is reflection -- a notification would
     // report the values straight back as if the user had typed them.
-    d.rise  .setSelectedId (TuningPanel::idForRiseMs ((int) t.riseMs),
-                            juce::dontSendNotification);
-    d.persist.setSelectedId (t.persist, juce::dontSendNotification);
-    d.depth .setSelectedId (TuningPanel::idForDepthDb ((int) t.depthDb),
-                            juce::dontSendNotification);
-    d.q     .setSelectedId (TuningPanel::idForQ ((int) t.q),
-                            juce::dontSendNotification);
-    d.thr   .setSelectedId (TuningPanel::idForThreshold ((float) t.thr),
-                            juce::dontSendNotification);
+    //
+    // selectOrShow rather than setSelectedId: idForX returns 0 for a value
+    // that is not one of the fixed rungs, and setSelectedId(0) leaves the
+    // combo BLANK -- an editor that cannot say what the slot is tuned to.
+    selectOrShow (d.rise, TuningPanel::idForRiseMs ((int) t.riseMs),
+                  juce::String ((int) t.riseMs) + " ms");
+    selectOrShow (d.depth, TuningPanel::idForDepthDb ((int) t.depthDb),
+                  juce::String ((int) t.depthDb) + " dB");
+    selectOrShow (d.q, TuningPanel::idForQ ((int) t.q),
+                  juce::String ((int) t.q));
+    selectOrShow (d.thr, TuningPanel::idForThreshold ((float) t.thr),
+                  juce::String ((float) t.thr, 1));
+
+    // Persist's item id IS its value (1..6): no choices array to look through.
+    if (t.persist >= 1 && t.persist <= 6)
+        d.persist.setSelectedId (t.persist, juce::dontSendNotification);
+    else
+        d.persist.setText (juce::String (t.persist), juce::dontSendNotification);
 }
 
 SlotPanel::SlotTuning SlotPanel::currentTuning() const
@@ -394,12 +420,26 @@ SlotPanel::SlotTuning SlotPanel::currentTuning() const
 
     const auto& d = details_[(std::size_t) openDetailSlot_];
 
+    // Start from what the editor was SEEDED with, not from the choice lists.
+    // A combo with no list selection is showing an off-list value as text, and
+    // TuningPanel::valueForId would turn that id 0 into the first rung. One
+    // edit reports all five values, so editing RISE would otherwise drag this
+    // slot's ceiling to Q 10 / -6 dB. A combo that DOES have a selection still
+    // wins below.
+    t = seeded_;
     t.usesGlobal = false;
-    t.riseMs  = TuningPanel::riseMsForId (d.rise.getSelectedId());
-    t.persist = d.persist.getSelectedId();
-    t.depthDb = TuningPanel::depthDbForId (d.depth.getSelectedId());
-    t.q       = TuningPanel::qForId (d.q.getSelectedId());
-    t.thr     = TuningPanel::thresholdForId (d.thr.getSelectedId());
+
+    if (const int id = d.rise.getSelectedId(); id != 0)
+        t.riseMs = TuningPanel::riseMsForId (id);
+    if (const int id = d.persist.getSelectedId(); id != 0)
+        t.persist = id;
+    if (const int id = d.depth.getSelectedId(); id != 0)
+        t.depthDb = TuningPanel::depthDbForId (id);
+    if (const int id = d.q.getSelectedId(); id != 0)
+        t.q = TuningPanel::qForId (id);
+    if (const int id = d.thr.getSelectedId(); id != 0)
+        t.thr = TuningPanel::thresholdForId (id);
+
     return t;
 }
 

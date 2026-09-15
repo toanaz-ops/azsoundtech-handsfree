@@ -1,0 +1,817 @@
+# Review package: 97521aa..HEAD
+
+## Commits
+fba2626 fix(gui,app): off-list ceiling from a preset shows its real value and survives a combo touch; preset_load logs the applied ceiling
+
+## Files changed
+ src/app/MainComponent.cpp  | 71 ++++++++++++++++++++++++++++++----
+ src/gui/SlotPanel.cpp      | 68 ++++++++++++++++++++++++++-------
+ src/gui/SlotPanel.h        |  9 +++++
+ src/gui/TuningPanel.cpp    | 76 +++++++++++++++++++++++++++++++------
+ src/gui/TuningPanel.h      |  8 ++++
+ tests/test_gui_wiring.cpp  | 78 +++++++++++++++++++++++++++++++++++++
+ tests/test_slotpanel.cpp   | 77 +++++++++++++++++++++++++++++++++++++
+ tests/test_tuningpanel.cpp | 95 ++++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 448 insertions(+), 34 deletions(-)
+
+## Diff
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index 1afab0c..d002074 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -932,54 +932,108 @@ bool MainComponent::loadPreset (const juce::File& file)
+     // false for a v1 preset and for anything written before the ceiling was
+     // saved at all, and PresetNotchDefaults' -12 dB fallback must not be
+     // mistaken for an operator's choice -- applying it would walk a rig tuned
+     // at -18 back two rungs every time an old file was opened.
+     //
+     // Routing mirrors the TuningPanel handler above (the Global strip): every
+     // slot on Global tuning follows, a slot switched to Custom keeps its own
+     // values until its Tune combo goes back to G. The preset format carries
+     // ONE global pair, so there is nothing per-slot to restore.
+     //
+-    // Expected level change: 0 dB right here. The ceiling caps FUTURE
+-    // deepening only; the notches this load installed were adopted at their
+-    // own file depth by adoptPreset above.
++    // EXPECTED LEVEL CHANGE -- this is NOT 0 dB, and the round-1 note that
++    // said it was has been corrected here.
++    //
++    // A Detector notch carries no ceiling of its own (ModelNotch::ceilingDb is
++    // NaN, so ceilingDbFor() reads the LIVE value this line writes). The
++    // detection pass re-tunes any such notch standing DEEPER than the new
++    // ceiling up to it on the very next tick -- NotchController.cpp, the
++    // `n.depthDB < ceiling` branch -- as one ramped step of 10 ms. Loading a
++    // shallower ceiling over a live -24 dB notch under Music.json's -10 dB is
++    // therefore +14 dB at a bin that was ringing. Loading a DEEPER ceiling is
++    // 0 dB now and only allows deeper rungs later. Preset, Manual and
++    // Soundcheck notches carry their own ceiling (Q8) and are untouched either
++    // way, as are the notches this load just adopted at their file depth.
++    //
++    // The pull itself is by design (Q1/Q8) and is not changed here; what is
++    // added is that the load now SAYS it moved the ceiling, in the
++    // `preset_load` event below.
++    bool   ceilingApplied = false;
++    double appliedQ       = 0.0;
++    double appliedDepthDb = 0.0;
++
+     if (result.preset.hasNotchDefaults)
+     {
+         for (int i = 0; i < kMaxSlots; ++i)
+         {
+             if (! slotUsesGlobalTuning_[(std::size_t) i])
+                 continue;
+ 
+             // setNotchDefaults clamps to Q 8..50 / -24..-6 dB, so a file
+             // carrying a legal-but-extreme pair cannot push the controller
+             // outside the range the panels can reach.
+-            notchControllers_[(std::size_t) i]->setNotchDefaults (
+-                result.preset.notchDefaults.Q, result.preset.notchDefaults.depthDB);
++            auto& controller = *notchControllers_[(std::size_t) i];
++            controller.setNotchDefaults (result.preset.notchDefaults.Q,
++                                         result.preset.notchDefaults.depthDB);
++
++            // Read BACK, so the log carries the ceiling that is actually
++            // standing rather than the number the file asked for. They differ
++            // whenever the clamp above bit. Also: with every slot on Custom
++            // this loop never runs, and the load really did apply nothing.
++            if (! ceilingApplied)
++            {
++                ceilingApplied = true;
++                appliedQ       = controller.getNotchQ();
++                appliedDepthDb = controller.getNotchDepthDb();
++            }
+         }
+ 
+         // The strip re-reads slot 0 through paramsProvider, so the Q and depth
+         // combos show what the file just installed rather than the value the
+-        // operator left them on.
++        // operator left them on. A ceiling need not sit on a combo rung (Q13);
++        // TuningPanel::refresh shows such a value as text.
+         tuningPanel_.refresh();
+     }
+ 
+     // M-4: the mono-skip count had nowhere to go but a Logger line and a test
+     // accessor. It belongs in the session log next to the notches the load
+     // DID install -- a preset that silently loses half its notches on a mono
+     // rig is exactly the kind of thing a show log has to be able to explain.
+     // File NAME only: the full path can carry the operator's own name.
+     {
+         auto v = SessionLogger::makeEvent ("preset_load");
+         auto* o = v.getDynamicObject();
+         o->setProperty ("file", file.getFileName());
+         o->setProperty ("adopted", adoptedTotal);
+         o->setProperty ("skipped", lastLoadSkipped_);
++
++        // The ceiling this load moved, if it moved one (fix round 2).
++        //
++        // A load that LOWERS the ceiling is NOT level-neutral: the controller
++        // re-tunes every live detector notch deeper than the new ceiling up to
++        // it on the next tick, which is a real level rise at a bin that was
++        // ringing (a -24 dB notch under Music.json's -10 dB ceiling comes up
++        // 14 dB, ramped over 10 ms). That has to be readable afterwards, so
++        // the log says whether a ceiling was applied and which one.
++        //
++        // `ceiling_applied` is always written -- a reader must be able to tell
++        // "this load moved nothing" from "the field is new" -- but q /
++        // depth_db only when there is a ceiling to report. The names and the
++        // double type match the `tuning` event's, so logstats reads one column
++        // for both.
++        o->setProperty ("ceiling_applied", ceilingApplied);
++
++        if (ceilingApplied)
++        {
++            o->setProperty ("q",        appliedQ);
++            o->setProperty ("depth_db", appliedDepthDb);
++        }
++
+         sessionLogger_.log (v);
+     }
+ 
+     slotPanel_.refresh();   // the routing table shows what the file just changed (lane S loose end)
+ 
+     return true;
+ }
+ 
+ bool MainComponent::savePreset (const juce::File& file)
+ {
+@@ -1065,22 +1119,23 @@ bool MainComponent::savePreset (const juce::File& file)
+ 
+     // Q11: the CEILING is written here and read back by loadPreset(), which
+     // applies it to every slot on Global tuning. Both halves are needed: a
+     // preset whose ceiling is only WRITTEN reloads onto whatever the tuning
+     // strip was left on, and one that is neither written nor read falls back
+     // to PresetNotchDefaults' -12 dB (PresetManager.h), capping every detector
+     // notch two rungs shallower than the show was tuned at.
+     //
+     // Slot 0 is the source because notchDefaults is a single global pair in
+     // the format and every Global slot carries the same values. A slot on
+-    // Custom tuning is not represented in the file at all -- see the note in
+-    // the task-9 report if per-slot ceilings ever arrive.
++    // Custom tuning is not represented in the file at all -- see
++    // docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md 4.8 / Q11
++    // if per-slot ceilings ever arrive.
+     preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
+     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
+ 
+     juce::StringArray errors;
+     const bool ok = PresetManager::saveToFile (preset, file, errors);
+ 
+     if (! ok)
+         juce::Logger::writeToLog (
+             "savePreset \"" + file.getFileName() + "\" refused: " + errors.joinIntoString ("; "));
+ 
+diff --git a/src/gui/SlotPanel.cpp b/src/gui/SlotPanel.cpp
+index 31eab8f..66789ec 100644
+--- a/src/gui/SlotPanel.cpp
++++ b/src/gui/SlotPanel.cpp
+@@ -53,20 +53,33 @@ constexpr int kDetailLabelWidth = 46;
+ void fillChannelCombo (juce::ComboBox& box, const juce::StringArray& names, int selectedChannel)
+ {
+     box.clear (juce::dontSendNotification);
+ 
+     for (int i = 0; i < names.size(); ++i)
+         box.addItem (names[i], i + 1);
+ 
+     if (juce::isPositiveAndBelow (selectedChannel, names.size()))
+         box.setSelectedId (selectedChannel + 1, juce::dontSendNotification);
+ }
++
++// Select item `id`, or -- when there is none (id 0, the value is not one of
++// the fixed rungs) -- SHOW the value as text. setSelectedId(0) empties the
++// combo instead, which is what a preset's off-list ceiling used to produce.
++// ComboBox::setText matches an existing item by text first, so an on-list
++// value can never end up as a text-only label by this route.
++void selectOrShow (juce::ComboBox& box, int id, const juce::String& text)
++{
++    if (id != 0)
++        box.setSelectedId (id, juce::dontSendNotification);
++    else
++        box.setText (text, juce::dontSendNotification);
++}
+ } // namespace
+ 
+ //==============================================================================
+ // Row LED.
+ 
+ void SlotPanel::Row::Led::paint (juce::Graphics& g)
+ {
+     using namespace az::theme;
+ 
+     // A lit LED and a dark one, not a green dot and a grey dot: the OFF state
+@@ -363,50 +376,77 @@ void SlotPanel::handleRowChanged (int slotIndex)
+ 
+ //==============================================================================
+ // Per-slot tuning (brief 2026-08-24).
+ 
+ void SlotPanel::seedDetailFrom (int slotIndex)
+ {
+     const SlotTuning t = slotTuningProvider != nullptr
+                              ? slotTuningProvider (slotIndex)
+                              : SlotTuning();
+ 
++    // Remember the whole snapshot: currentTuning() reports these values back
++    // for any combo an off-list value left without a list selection.
++    seeded_ = t;
++
+     auto& d = details_[(std::size_t) slotIndex];
+ 
+     // dontSendNotification: seeding is reflection -- a notification would
+     // report the values straight back as if the user had typed them.
+-    d.rise  .setSelectedId (TuningPanel::idForRiseMs ((int) t.riseMs),
+-                            juce::dontSendNotification);
+-    d.persist.setSelectedId (t.persist, juce::dontSendNotification);
+-    d.depth .setSelectedId (TuningPanel::idForDepthDb ((int) t.depthDb),
+-                            juce::dontSendNotification);
+-    d.q     .setSelectedId (TuningPanel::idForQ ((int) t.q),
+-                            juce::dontSendNotification);
+-    d.thr   .setSelectedId (TuningPanel::idForThreshold ((float) t.thr),
+-                            juce::dontSendNotification);
++    //
++    // selectOrShow rather than setSelectedId: idForX returns 0 for a value
++    // that is not one of the fixed rungs, and setSelectedId(0) leaves the
++    // combo BLANK -- an editor that cannot say what the slot is tuned to.
++    selectOrShow (d.rise, TuningPanel::idForRiseMs ((int) t.riseMs),
++                  juce::String ((int) t.riseMs) + " ms");
++    selectOrShow (d.depth, TuningPanel::idForDepthDb ((int) t.depthDb),
++                  juce::String ((int) t.depthDb) + " dB");
++    selectOrShow (d.q, TuningPanel::idForQ ((int) t.q),
++                  juce::String ((int) t.q));
++    selectOrShow (d.thr, TuningPanel::idForThreshold ((float) t.thr),
++                  juce::String ((float) t.thr, 1));
++
++    // Persist's item id IS its value (1..6): no choices array to look through.
++    if (t.persist >= 1 && t.persist <= 6)
++        d.persist.setSelectedId (t.persist, juce::dontSendNotification);
++    else
++        d.persist.setText (juce::String (t.persist), juce::dontSendNotification);
+ }
+ 
+ SlotPanel::SlotTuning SlotPanel::currentTuning() const
+ {
+     SlotTuning t;
+ 
+     if (openDetailSlot_ < 0)
+         return t;
+ 
+     const auto& d = details_[(std::size_t) openDetailSlot_];
+ 
++    // Start from what the editor was SEEDED with, not from the choice lists.
++    // A combo with no list selection is showing an off-list value as text, and
++    // TuningPanel::valueForId would turn that id 0 into the first rung. One
++    // edit reports all five values, so editing RISE would otherwise drag this
++    // slot's ceiling to Q 10 / -6 dB. A combo that DOES have a selection still
++    // wins below.
++    t = seeded_;
+     t.usesGlobal = false;
+-    t.riseMs  = TuningPanel::riseMsForId (d.rise.getSelectedId());
+-    t.persist = d.persist.getSelectedId();
+-    t.depthDb = TuningPanel::depthDbForId (d.depth.getSelectedId());
+-    t.q       = TuningPanel::qForId (d.q.getSelectedId());
+-    t.thr     = TuningPanel::thresholdForId (d.thr.getSelectedId());
++
++    if (const int id = d.rise.getSelectedId(); id != 0)
++        t.riseMs = TuningPanel::riseMsForId (id);
++    if (const int id = d.persist.getSelectedId(); id != 0)
++        t.persist = id;
++    if (const int id = d.depth.getSelectedId(); id != 0)
++        t.depthDb = TuningPanel::depthDbForId (id);
++    if (const int id = d.q.getSelectedId(); id != 0)
++        t.q = TuningPanel::qForId (id);
++    if (const int id = d.thr.getSelectedId(); id != 0)
++        t.thr = TuningPanel::thresholdForId (id);
++
+     return t;
+ }
+ 
+ void SlotPanel::handleDetailChanged()
+ {
+     if (onSlotTuningChanged == nullptr || openDetailSlot_ < 0)
+         return;
+ 
+     onSlotTuningChanged (openDetailSlot_, currentTuning());
+ }
+diff --git a/src/gui/SlotPanel.h b/src/gui/SlotPanel.h
+index 024408b..edf3b97 100644
+--- a/src/gui/SlotPanel.h
++++ b/src/gui/SlotPanel.h
+@@ -192,20 +192,29 @@ private:
+     AudioEngine& engine_;
+ 
+     int visibleRows_ = 2;
+     std::array<Row, kMaxSlots> rows_;
+     std::array<DetailRow, kMaxSlots> details_;
+ 
+     // The one slot whose detail editor is open; -1 when none is. The slot
+     // itself stays Custom when its editor is closed by another slot opening.
+     int openDetailSlot_ = -1;
+ 
++    // What seedDetailFrom() last read out of slotTuningProvider, for the slot
++    // whose editor is open. The five mini combos hold FIXED rungs but a
++    // controller's values need not sit on one -- a preset's notch ceiling is
++    // kept at its exact value (Q13), and presets/Music.json carries Q 25 /
++    // -10 dB. Such a value is seeded as TEXT, leaving that combo with no list
++    // selection, and currentTuning() reports it back from here rather than
++    // snapping to the first item. Same trap, and same fix, as TuningPanel.
++    SlotTuning seeded_;
++
+     // Sits in the row slot after the last visible one while any row is
+     // hidden; reveals one more row per click.
+     // NOTE the empty first argument: TextButton's two-argument constructor is
+     // (buttonName, TOOLTIP) -- not (name, text) the way Label's is. Written
+     // this way the button had no label at all, which the old flat styling hid
+     // and the rebuilt outline made obvious. The text is set in the ctor.
+     juce::TextButton addButton_;
+ 
+     juce::Label widthCaption_ { {}, "Width" };
+     juce::Label inACaption_   { {}, "In A" };
+diff --git a/src/gui/TuningPanel.cpp b/src/gui/TuningPanel.cpp
+index 91a6ae6..9dc940d 100644
+--- a/src/gui/TuningPanel.cpp
++++ b/src/gui/TuningPanel.cpp
+@@ -29,20 +29,40 @@ int idForValue (const T (&choices)[N], const T& value)
+ }
+ 
+ template <typename T, std::size_t N>
+ T valueForId (const T (&choices)[N], int id)
+ {
+     if (id >= 1 && id <= (int) N)
+         return choices[(std::size_t) (id - 1)];
+     return choices[0];   // no selection -> first item
+ }
+ 
++// Select `value`'s item, or -- when it is not on the list -- SHOW it as text.
++//
++// setSelectedId(0) empties the combo, which is what an off-list value used to
++// produce: a strip that could not say what the notch ceiling was. Off-list
++// values are reachable since loadPreset started installing a file's ceiling
++// (Q13 keeps the exact number; presets/Music.json carries Q 25 / -10 dB).
++// ComboBox::setText matches an existing item by text first, so a value that
++// IS on the list can never end up as a text-only label by this route.
++template <typename T, std::size_t N>
++void selectOrShow (juce::ComboBox& box, const T (&choices)[N], const T& value,
++                   const juce::String& text)
++{
++    const int id = idForValue (choices, value);
++
++    if (id != 0)
++        box.setSelectedId (id, juce::dontSendNotification);
++    else
++        box.setText (text, juce::dontSendNotification);
++}
++
+ // RESPONSE preset table (brief 2026-08-24): item id == array position + 1.
+ constexpr TuningPanel::Params kPresets[] = {
+     { 500, 4, -12, 40, 12.0f },   // 1 SAFE
+     { 250, 3, -18, 30, 10.0f },   // 2 BALANCED (matches the param defaults)
+     { 100, 1, -24, 20,  8.0f },   // 3 AGGRESSIVE
+ };
+ 
+ bool paramsEqual (const TuningPanel::Params& a, const TuningPanel::Params& b)
+ {
+     return a.riseReferenceMs   == b.riseReferenceMs
+@@ -178,20 +198,24 @@ void TuningPanel::setSelectedPresetId (const int presetId,
+     if (curated && notification != juce::dontSendNotification)
+         applyPreset (presetId);
+     else
+         repaint();
+ }
+ 
+ void TuningPanel::applyPreset (const int presetId)
+ {
+     const Params p = kPresets[(std::size_t) (presetId - 1)];
+ 
++    // A curated preset is entirely on-list, so it also becomes what the panel
++    // was last handed -- keeping provided_ from outliving the values on screen.
++    provided_ = p;
++
+     // Applied silently: the segment click is the user gesture, the five combos
+     // just follow it -- otherwise each would loop back through the manual-edit
+     // handler and knock the panel straight back to CUSTOM.
+     rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
+     persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
+     depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
+     q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
+     thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
+                             juce::dontSendNotification);
+ 
+@@ -203,52 +227,80 @@ void TuningPanel::applyPreset (const int presetId)
+ 
+     repaint();
+ }
+ 
+ //==============================================================================
+ 
+ void TuningPanel::refresh()
+ {
+     const Params p = paramsProvider != nullptr ? paramsProvider() : Params();
+ 
+-    rise_.setSelectedId    (idForRiseMs (p.riseReferenceMs), juce::dontSendNotification);
+-    persist_.setSelectedId (p.persistenceBlocks,             juce::dontSendNotification);
+-    depth_.setSelectedId   (idForDepthDb (p.depthDb),        juce::dontSendNotification);
+-    q_.setSelectedId       (idForQ (p.q),                    juce::dontSendNotification);
+-    thr_.setSelectedId     (idForThreshold (p.peakinessThreshold),
+-                            juce::dontSendNotification);
++    // Remember the whole snapshot: currentParams() reports these values back
++    // for any combo an off-list value left without a list selection.
++    provided_ = p;
++
++    selectOrShow (rise_,  kRiseChoices,  p.riseReferenceMs,
++                  juce::String (p.riseReferenceMs) + " ms");
++    selectOrShow (depth_, kDepthChoices, p.depthDb,
++                  juce::String (p.depthDb) + " dB");
++    selectOrShow (q_,     kQChoices,     p.q,
++                  juce::String (p.q));
++    selectOrShow (thr_,   kThrChoices,   p.peakinessThreshold,
++                  juce::String (p.peakinessThreshold, 1));
++
++    // HOLD's item id IS its value (1..6), so it has no choices array to look
++    // through -- the same off-list guard, written out.
++    if (p.persistenceBlocks >= 1 && p.persistenceBlocks <= 6)
++        persist_.setSelectedId (p.persistenceBlocks, juce::dontSendNotification);
++    else
++        persist_.setText (juce::String (p.persistenceBlocks), juce::dontSendNotification);
+ 
+     updatePresetFor (p);
+ }
+ 
+ void TuningPanel::updatePresetFor (const Params& p)
+ {
+     for (int i = 0; i < (int) std::size (kPresets); ++i)
+         if (paramsEqual (p, kPresets[i]))
+         {
+             presetId_ = i + 1;
+             reflectPresetButtons();
+             return;
+         }
+ 
+     presetId_ = kPresetCustomId;
+     reflectPresetButtons();
+ }
+ 
+ TuningPanel::Params TuningPanel::currentParams() const
+ {
+-    Params p;
+-    p.riseReferenceMs    = riseMsForId (rise_.getSelectedId());
+-    p.persistenceBlocks  = persist_.getSelectedId();
+-    p.depthDb            = depthDbForId (depth_.getSelectedId());
+-    p.q                  = qForId (q_.getSelectedId());
+-    p.peakinessThreshold = thresholdForId (thr_.getSelectedId());
++    // Start from what the panel was last HANDED, not from the choice lists.
++    //
++    // A combo with no list selection is showing an off-list value as text (see
++    // refresh()), and valueForId would turn that id 0 into choices[0]. Every
++    // combo reports the complete snapshot, so a touch on RISE would then push
++    // Q 10 / -6 dB onto every Global slot -- a ceiling change nobody asked
++    // for, on a live rig. Re-report the value instead; a combo that DOES have
++    // a selection still wins below.
++    Params p = provided_;
++
++    if (const int id = rise_.getSelectedId(); id != 0)
++        p.riseReferenceMs = riseMsForId (id);
++    if (const int id = persist_.getSelectedId(); id != 0)
++        p.persistenceBlocks = id;
++    if (const int id = depth_.getSelectedId(); id != 0)
++        p.depthDb = depthDbForId (id);
++    if (const int id = q_.getSelectedId(); id != 0)
++        p.q = qForId (id);
++    if (const int id = thr_.getSelectedId(); id != 0)
++        p.peakinessThreshold = thresholdForId (id);
++
+     return p;
+ }
+ 
+ void TuningPanel::handleChanged()
+ {
+     if (onTuningChanged != nullptr)
+         onTuningChanged (currentParams());
+ }
+ 
+ //==============================================================================
+diff --git a/src/gui/TuningPanel.h b/src/gui/TuningPanel.h
+index 4b572a5..c4fc031 100644
+--- a/src/gui/TuningPanel.h
++++ b/src/gui/TuningPanel.h
+@@ -130,20 +130,28 @@ public:
+ private:
+     void handleChanged();
+     void applyPreset (int presetId);
+     void updatePresetFor (const Params& p);
+     void reflectPresetButtons();
+ 
+     Params currentParams() const;
+ 
+     int presetId_ = kPresetBalancedId;
+ 
++    // What refresh() last read out of paramsProvider. The five combos hold
++    // FIXED rungs, but the values handed to this panel need not sit on one --
++    // a preset's notch ceiling is kept at its exact value (Q13), and
++    // presets/Music.json ships Q 25 / -10 dB. refresh() shows such a value as
++    // text, which leaves that combo with no list selection; currentParams()
++    // then reports it back from here rather than snapping to the first item.
++    Params provided_;
++
+     juce::Label responseLabel_ { {}, "Response" };
+     juce::Label notchLabel_    { {}, "Notch" };
+     juce::Label triggerLabel_  { {}, "Trigger" };
+ 
+     juce::Label riseLabel_    { {}, "Rise" };
+     juce::Label persistLabel_ { {}, "Hold" };
+     juce::Label depthLabel_   { {}, "Depth" };
+     juce::Label qLabel_       { {}, "Q" };
+     juce::Label thrLabel_     { {}, "Thr" };
+ 
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index ab9a6ab..50e7537 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -1681,10 +1681,88 @@ TEST (GuiWiring, LoadPresetCountsNotchesSkippedByAMonoSlot)
+         R"({"version":"1.0","device":"","sampleRate":48000,"bufferSize":256,)"
+         R"("slots":[{"index":0,"enabled":true,"width":1,"inputChannels":[0,1],"outputChannels":[0,1]}],)"
+         R"("notches":[{"slot":0,"lane":1,"index":0,"freq":482.0,"Q":30.0,"depth":-12.0},)"
+         R"({"slot":0,"lane":0,"index":1,"freq":982.0,"Q":30.0,"depth":-12.0}]})";
+     auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("az-handsfree-d-skipped.json");
+     ASSERT_TRUE (presetFile.replaceWithText (json));
+     ASSERT_TRUE (app.loadPreset (presetFile));
+     presetFile.deleteFile();
+     EXPECT_EQ (app.lastLoadSkippedNotchesForTest(), 1);
+ }
++
++// Fix round 2 of task 9. The ceiling a preset installs is NOT level-neutral:
++// NotchController re-tunes any LIVE detector notch deeper than the new ceiling
++// up to it on the next tick (NotchController.cpp, the ceiling clamp), so
++// loading a shallower ceiling over a -24 dB notch is a real +14 dB at that bin.
++// A load that moves the ceiling therefore has to say so in the session log.
++//
++// Red if `preset_load` stops carrying ceiling_applied / q / depth_db.
++TEST (GuiWiring, PresetLoadLogsTheCeilingItApplied)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++
++    auto* c0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (c0, nullptr);
++    c0->setSampleRate (48000.0);
++    c0->setNotchDefaults (30.0, -18.0);
++    ASSERT_TRUE (c0->setNotch (0, 0, 1000.0, 30.0, -18.0,
++                               NotchController::Origin::Detector));
++
++    std::vector<float> hop (512, 0.25f);
++    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
++    c0->runOnce();
++
++    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                          .getChildFile ("az-handsfree-r2-ceiling-log.json");
++    presetFile.deleteFile();
++    ASSERT_TRUE (app.savePreset (presetFile));
++
++    const auto dir = freshLogDir ("ceiling-load");
++    ASSERT_TRUE (app.startSessionLog (dir));
++    const auto file = app.sessionLogFileForTest();
++
++    ASSERT_TRUE (app.loadPreset (presetFile));
++    presetFile.deleteFile();
++
++    app.stopSessionLog();
++    const auto events = parsedLines (file);
++
++    const auto* load = firstEvent (events, "preset_load");
++    ASSERT_NE (load, nullptr) << "no preset_load line in the session log";
++    EXPECT_TRUE ((bool) (*load)["ceiling_applied"]);
++    EXPECT_NEAR ((double) (*load)["q"],        30.0,  1e-9);
++    EXPECT_NEAR ((double) (*load)["depth_db"], -18.0, 1e-9);
++}
++
++// The other half: a file with no notchDefaults block moves no ceiling, and the
++// log must not claim it did. Red if ceiling_applied is written unconditionally
++// or the q / depth_db pair is emitted for a load that applied nothing.
++TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    MainComponent app;
++
++    auto presetFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                          .getChildFile ("az-handsfree-r2-no-ceiling-log.json");
++    presetFile.deleteFile();
++    ASSERT_TRUE (presetFile.replaceWithText (
++        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
++        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
++
++    const auto dir = freshLogDir ("no-ceiling-load");
++    ASSERT_TRUE (app.startSessionLog (dir));
++    const auto file = app.sessionLogFileForTest();
++
++    ASSERT_TRUE (app.loadPreset (presetFile));
++    presetFile.deleteFile();
++
++    app.stopSessionLog();
++    const auto events = parsedLines (file);
++
++    const auto* load = firstEvent (events, "preset_load");
++    ASSERT_NE (load, nullptr);
++    EXPECT_FALSE ((bool) (*load)["ceiling_applied"]);
++    EXPECT_TRUE (load->getDynamicObject()->hasProperty ("ceiling_applied"));
++    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
++    EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
++}
+diff --git a/tests/test_slotpanel.cpp b/tests/test_slotpanel.cpp
+index d84c0bb..adb54ca 100644
+--- a/tests/test_slotpanel.cpp
++++ b/tests/test_slotpanel.cpp
+@@ -333,10 +333,87 @@ TEST (SlotPanel, OnlyOneDetailRowIsOpenAtATime)
+     // Slot 3 took over the single detail row; slot 0's collapsed. Both stay
+     // CUSTOM (their tune combos keep showing C) -- only the editor moved.
+     EXPECT_TRUE  (panel.isDetailOpenForTest (3));
+     EXPECT_FALSE (panel.isDetailOpenForTest (0));
+     EXPECT_TRUE  (panel.getDetailForTest (0).rise.getBounds().isEmpty());
+     EXPECT_FALSE (panel.getDetailForTest (3).rise.getBounds().isEmpty());
+     // Slot 0 stays Custom even though its editor collapsed.
+     EXPECT_EQ (2, panel.getRowForTest (0).tune.getSelectedId());
+     EXPECT_EQ (2, panel.getRowForTest (3).tune.getSelectedId());
+ }
++
++//==============================================================================
++// Off-list values (fix round 2 of task 9). SlotPanel's detail editor shares
++// TuningPanel's fixed rung lists AND its idForX helpers, so it inherits the
++// same trap: a slot whose controller holds a preset's off-list ceiling (Q 25 /
++// -10 dB, presets/Music.json) would seed two blank combos, and the next edit
++// would report Q 10 / -6 dB back for that slot.
++
++namespace
++{
++gui::SlotPanel::SlotTuning makeOffListTuning()
++{
++    gui::SlotPanel::SlotTuning t;
++    t.usesGlobal = true;
++    t.riseMs  = 250.0;   // combo id 2
++    t.persist = 3;
++    t.depthDb = -10.0;   // NOT a rung
++    t.q       =  25.0;   // NOT a rung
++    t.thr     =  10.0;   // combo id 3
++    return t;
++}
++} // namespace
++
++TEST (SlotPanel, AnOffListSlotTuningIsSeededAsTextRatherThanBlankingTheCombos)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    AudioEngine engine;
++    gui::SlotPanel panel (engine);
++    panel.setSize (520, 260);
++
++    panel.slotTuningProvider = [] (int) { return makeOffListTuning(); };
++
++    gui::SlotPanel::SlotTuning reported;
++    panel.onSlotTuningChanged = [&reported] (int, const gui::SlotPanel::SlotTuning& t)
++    { reported = t; };
++
++    panel.getRowForTest (0).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
++
++    EXPECT_EQ (panel.getDetailForTest (0).depth.getText(), juce::String ("-10 dB"));
++    EXPECT_EQ (panel.getDetailForTest (0).q.getText(),     juce::String ("25"));
++
++    // The very first report -- the one openDetailFor sends -- must already
++    // carry the slot's real values, not the first rung of each list.
++    EXPECT_FALSE (reported.usesGlobal);
++    EXPECT_DOUBLE_EQ (reported.depthDb, -10.0);
++    EXPECT_DOUBLE_EQ (reported.q,        25.0);
++}
++
++TEST (SlotPanel, EditingOneDetailComboKeepsTheOffListOnesUnchanged)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    AudioEngine engine;
++    gui::SlotPanel panel (engine);
++    panel.setSize (520, 260);
++
++    panel.slotTuningProvider = [] (int) { return makeOffListTuning(); };
++
++    gui::SlotPanel::SlotTuning reported;
++    panel.onSlotTuningChanged = [&reported] (int, const gui::SlotPanel::SlotTuning& t)
++    { reported = t; };
++
++    panel.getRowForTest (0).tune.setSelectedId (2 /* C */, juce::sendNotificationSync);
++
++    // Rise 250 -> 100 ms. Depth and Q are still off-list and must ride along.
++    panel.getDetailForTest (0).rise.setSelectedId (1, juce::sendNotificationSync);
++
++    EXPECT_DOUBLE_EQ (reported.riseMs,  100.0);
++    EXPECT_DOUBLE_EQ (reported.depthDb, -10.0);
++    EXPECT_DOUBLE_EQ (reported.q,        25.0);
++
++    // Picking a real rung still applies that rung.
++    panel.getDetailForTest (0).depth.setSelectedId (2, juce::sendNotificationSync);   // -12 dB
++    EXPECT_DOUBLE_EQ (reported.depthDb, -12.0);
++    EXPECT_DOUBLE_EQ (reported.q,        25.0);
++}
+diff --git a/tests/test_tuningpanel.cpp b/tests/test_tuningpanel.cpp
+index d3605c5..a3ed6a9 100644
+--- a/tests/test_tuningpanel.cpp
++++ b/tests/test_tuningpanel.cpp
+@@ -172,10 +172,105 @@ TEST (TuningPanel, ManualParamEditSwitchesOneKnobToCustom)
+     panel.setSize (720, gui::TuningPanel::kPanelHeight);
+ 
+     panel.onTuningChanged = [] (const gui::TuningPanel::Params&) {};
+ 
+     EXPECT_EQ (panel.getSelectedPresetId(), kOneKnobBalanced);
+ 
+     panel.getDepthComboForTest().setSelectedId (2, juce::sendNotificationSync);   // -12 dB
+ 
+     EXPECT_EQ (panel.getSelectedPresetId(), kOneKnobCustom);
+ }
++
++//==============================================================================
++// Off-list values (fix round 2 of task 9).
++//
++// The strip's five combos hold fixed rungs -- depth -6/-12/-18/-24, Q
++// 10/20/30/40/50. A preset file's ceiling does NOT have to sit on one: Q13
++// lets the model keep the exact value it was given, and presets/Music.json
++// ships notchDefaults { Q 25, depth -10 }. Since fix round 1 loadPreset
++// installs that ceiling on every Global slot, so the strip is now handed
++// off-list values for the first time and has to cope with them.
++
++TEST (TuningPanel, AnOffListCeilingIsShownAsTextRatherThanBlankingTheCombo)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    gui::TuningPanel panel;
++    panel.setSize (720, gui::TuningPanel::kPanelHeight);
++
++    panel.paramsProvider = []
++    {
++        gui::TuningPanel::Params p;   // Music.json's ceiling
++        p.depthDb = -10;
++        p.q       = 25;
++        return p;
++    };
++    panel.refresh();
++
++    // setSelectedId(0) would leave both labels EMPTY -- the operator would be
++    // looking at a strip that cannot say what the notch ceiling is.
++    EXPECT_EQ (panel.getDepthComboForTest().getText(), juce::String ("-10 dB"));
++    EXPECT_EQ (panel.getQComboForTest().getText(),     juce::String ("25"));
++
++    // The on-list three still select normally.
++    EXPECT_EQ (gui::TuningPanel::riseMsForId (panel.getRiseComboForTest().getSelectedId()), 250);
++    EXPECT_EQ (panel.getPersistComboForTest().getSelectedId(), 3);
++    EXPECT_FLOAT_EQ (gui::TuningPanel::thresholdForId (panel.getThrComboForTest().getSelectedId()),
++                     10.0f);
++}
++
++TEST (TuningPanel, TouchingAnotherComboReSendsTheOffListCeilingUnchanged)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    gui::TuningPanel panel;
++    panel.setSize (720, gui::TuningPanel::kPanelHeight);
++
++    panel.paramsProvider = []
++    {
++        gui::TuningPanel::Params p;
++        p.depthDb = -10;
++        p.q       = 25;
++        return p;
++    };
++    panel.refresh();
++
++    int calls = 0;
++    gui::TuningPanel::Params reported;
++    panel.onTuningChanged = [&] (const gui::TuningPanel::Params& p) { ++calls; reported = p; };
++
++    // A touch on RISE must carry the SAME ceiling out. Reading a blank combo
++    // as "id 0 -> first item" would push Q 10 / -6 dB to every Global slot --
++    // a ceiling change nobody asked for, on a live rig.
++    panel.getRiseComboForTest().setSelectedId (1, juce::sendNotificationSync);   // 100 ms
++
++    ASSERT_EQ (calls, 1);
++    EXPECT_EQ (reported.riseReferenceMs, 100);
++    EXPECT_EQ (reported.depthDb,         -10);
++    EXPECT_EQ (reported.q,                25);
++}
++
++TEST (TuningPanel, PickingARungFromAnOffListCeilingAppliesThatRung)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    gui::TuningPanel panel;
++    panel.setSize (720, gui::TuningPanel::kPanelHeight);
++
++    panel.paramsProvider = []
++    {
++        gui::TuningPanel::Params p;
++        p.depthDb = -10;
++        p.q       = 25;
++        return p;
++    };
++    panel.refresh();
++
++    gui::TuningPanel::Params reported;
++    panel.onTuningChanged = [&] (const gui::TuningPanel::Params& p) { reported = p; };
++
++    panel.getDepthComboForTest().setSelectedId (2, juce::sendNotificationSync);   // -12 dB
++
++    // The edited combo wins; the still-off-list one rides along untouched.
++    EXPECT_EQ (reported.depthDb, -12);
++    EXPECT_EQ (reported.q,        25);
++}

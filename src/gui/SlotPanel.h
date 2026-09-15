@@ -199,6 +199,15 @@ private:
     // itself stays Custom when its editor is closed by another slot opening.
     int openDetailSlot_ = -1;
 
+    // What seedDetailFrom() last read out of slotTuningProvider, for the slot
+    // whose editor is open. The five mini combos hold FIXED rungs but a
+    // controller's values need not sit on one -- a preset's notch ceiling is
+    // kept at its exact value (Q13), and presets/Music.json carries Q 25 /
+    // -10 dB. Such a value is seeded as TEXT, leaving that combo with no list
+    // selection, and currentTuning() reports it back from here rather than
+    // snapping to the first item. Same trap, and same fix, as TuningPanel.
+    SlotTuning seeded_;
+
     // Sits in the row slot after the last visible one while any row is
     // hidden; reveals one more row per click.
     // NOTE the empty first argument: TextButton's two-argument constructor is

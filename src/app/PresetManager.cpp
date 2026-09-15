@@ -727,6 +727,12 @@ bool parsePresetText (const juce::String& text,
                         preset.notchDefaults.Q);
             readNumber (*defaultsObject, "depth", "notchDefaults: ", errors,
                         preset.notchDefaults.depthDB);
+
+            // The FILE said so -- see Preset::hasNotchDefaults. Set only on
+            // the branch that actually read numbers out of a block: a
+            // malformed "notchDefaults" leaves the struct's fallback in place
+            // and must not be reported as a ceiling the operator chose.
+            preset.hasNotchDefaults = true;
         }
         else
         {

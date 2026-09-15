@@ -25,7 +25,7 @@ Micro ──► Mixer (Wing/iD14...) ──► [Hands-free] ──► Loa/PA
                                         │
                             phát hiện tần số hú trong ~1 giây
                             tự đặt filter notch siêu hẹp đúng chỗ
-                            tự nhả filter khi hết hú
+                            nhả dần từng bậc khi hết hú
 ```
 
 App cắm vào đường tín hiệu như một thiết bị insert: lấy audio từ bất kỳ audio
@@ -38,16 +38,17 @@ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng ch
 | | |
 |---|---|
 | **Phát hiện tự động** | FFT 2048 điểm, chấm điểm "độ nhọn" của đỉnh phổ — phân biệt tiếng hú (một gai duy nhất nhô lên) với nhạc (nhiều đỉnh tự nhiên). Thời gian khóa mục tiêu trong ~1 giây kể từ khi hú đạt ngưỡng |
-| **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30), độ sâu −6 đến −24 dB (mặc định −18 dB). Chỉ mất đúng vài Hz quanh tần số hú |
+| **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30). Độ sâu −6 đến −24 dB (mặc định −18) nay là **TRẦN**: notch đặt ở −6 dB (hoặc −12 nếu đỉnh lên dốc) rồi chỉ đào sâu thêm 6 dB mỗi 300 ms chừng nào bin đó còn hú, không bao giờ quá trần. Chỉ mất đúng vài Hz quanh tần số hú |
 | **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra bất kỳ của interface — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật |
 | **Stereo độc lập** | Mic hú qua loa trái thì chỉ cắt cánh trái; nút LINK mỗi slot để cắt cả hai bên như trước |
 | **Chấm notch để app học** | Mỗi dòng ACTIVE NOTCHES có nút **GOOD** / **FALSE**. FALSE xóa notch ngay và ghi nhãn "cắt oan"; GOOD ghi nhãn "cắt đúng". Nhãn + phổ lúc quyết định vào log session trên máy (không audio) — dữ liệu cho bộ phân loại ở bản sau |
-| **Tự nhả sau 30 giây** | Hết hú là filter tự nhả — không tích tụ vết cắt vô nghĩa suốt buổi show |
+| **Nhả dần theo bậc** | Hết hú 30 giây → nông đi 6 dB; mỗi 10 giây yên tiếp theo nông thêm một bậc; tới trần thì nhả hẳn (**30–60 giây** tùy trần đang đứng: trần −6 là 30 s vì đã ở đáy, −12/−10 là 40 s, −18 là 50 s, −24 là 60 s). Hú quay lại là kẹp ngay về bậc sâu nhất đã từng đứng. Phòng đang căng (chip RING RISK ≥ RISING) thì đồng hồ **đứng yên** — mọi notch của slot đó giữ nguyên bậc chừng nào phòng còn căng |
+| **Nhớ phòng 5 phút** | Hú quay lại đúng bin cũ trong 5 phút sau khi nhả hẳn → đặt lại thẳng ở độ sâu đã từng cần, không dò lại từ −6 dB. Bộ nhớ chỉ **làm sâu hơn**, không bao giờ làm nông đi, và **dùng một lần** |
 | **Chống báo nhầm harmonic** | Nếu đã khóa tần số F thì bậc harmonics 1.4F–4.1F bị trừ điểm, tránh cắt oan bội số của nốt nhạc |
 | **3 chế độ** | **Bypass** (thông tuyến thuần), **Auto** (chạy liên tục), **Soundcheck** (nghe 15 giây đầu show, khóa mọi đỉnh tìm thấy, không tự nhả; hết 15 giây detector tự ngừng dò — bấm **Auto** để chạy tiếp) |
 | **Chỉnh độ nhạy một nút** | ONE-KNOB RESPONSE: **SAFE** / **BALANCED** / **AGGRESSIVE** (tự chuyển **CUSTOM** khi chỉnh tay); mỗi slot chọn theo tuning **Global** chung hoặc **Custom** riêng |
 | **Chọn device trực quan** | Chọn driver/device/sample rate/buffer ngay trong app; hiện latency và trạng thái theo thời gian thực |
-| **Preset có sẵn** | `Speech` (Q=40, −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). |
+| **Preset có sẵn** | `Speech` (Q=40, trần −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, trần −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Trần −10 của Music **tới được**: theo Q13 thang hiệu lực là −6 → −10, bậc cuối chính là trần, nên Music vẫn cắt đủ 10 dB như 1.1.3 chứ không bị lượng tử về −6. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). Từ 1.2.0 file lưu ra mang **độ sâu phòng đã cần** (`deepestDb`) và mang cả trần trong `notchDefaults`, nên nạp lại đúng như lúc lưu — nạp một file **có** khối `notchDefaults` đặt lại trần đó cho mọi slot đang dùng tuning Global (slot Custom giữ trần riêng), file **không có** khối đó thì không đụng tới trần đang chạy. **Lưu ý**: một preset lưu sau khi vừa hú sẽ nạp lại notch ở `deepestDb` (có thể tới −24 dB) bất kể slider đang để bao nhiêu — cắt nhiều hơn một file lưu trên 1.1.3, nhưng luôn theo hướng an toàn (chỉ cắt thêm). **⚠️ Cảnh báo, đọc trước khi LOAD trên dàn thật**: nạp một file mà trần NÔNG hơn trần đang chạy (ví dụ `Music.json` trần −10 trong khi rig đang đứng ở −18/−24) kéo mọi notch Detector đang sâu hơn lên ngay ở lượt dò kế tiếp — tới **+14 dB** năng lượng quay lại đúng tần số vừa hú, ramp 10 ms không có tiếng "cạch" nhưng vẫn là một cú tăng mức thật; trần SÂU hơn thì 0 dB ngay lúc nạp. Mở âm lượng thấp trước khi LOAD, đừng LOAD giữa bài. |
 | **An toàn theo thiết kế** | Không cấp phát bộ nhớ hay khóa mutex trên đường audio real-time; từ chối độ sâu dương (điều gì sẽ xảy ra nếu một lỗi đánh dấu biến notch thành máy khuếch đại hú?); tự vô hiệu notch khi đổi sample rate khiến notch vượt Nyquist |
 
 ## Thông số nhanh

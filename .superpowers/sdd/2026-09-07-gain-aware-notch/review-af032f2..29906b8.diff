@@ -1,0 +1,2111 @@
+# Review package: af032f2..HEAD
+
+## Commits
+29906b8 docs: lane G final review — detector-only bug criterion, reclamp exemption in invariant 3, 30–60 s window, citations, plan ticks
+63c1759 refactor(app): pushRetuneLocked stamps stageChangedAtMs itself; snapshot tool renders the Music-preset off-list strip
+
+## Files changed
+ .claude/skills/juce-component-snapshot/SKILL.md    |   7 +-
+ README.md                                          |   4 +-
+ docs/KY-THUAT-CHONG-HU.md                          |  21 ++-
+ docs/release-notes/1.2.0-alpha.md                  |  10 +-
+ .../plans/2026-09-07-gain-aware-notch.md           | 155 +++++++++++----------
+ .../specs/2026-09-04-anti-feedback-v2-roadmap.md   |   2 +-
+ .../specs/2026-09-06-gain-aware-notch-design.md    |  43 ++++--
+ installer/TESTER-NOTES.md                          |  17 ++-
+ memory/gain-aware-notch-lane-g-2026-09-07.md       |  23 ++-
+ src/app/NotchController.cpp                        |  37 +++--
+ src/app/NotchController.h                          |   3 +
+ tests/test_notchcontroller.cpp                     |  44 ++++++
+ tools/snapshot.cpp                                 |  46 +++++-
+ 13 files changed, 296 insertions(+), 116 deletions(-)
+
+## Diff
+diff --git a/.claude/skills/juce-component-snapshot/SKILL.md b/.claude/skills/juce-component-snapshot/SKILL.md
+index 64e0bd8..47a86b3 100644
+--- a/.claude/skills/juce-component-snapshot/SKILL.md
++++ b/.claude/skills/juce-component-snapshot/SKILL.md
+@@ -22,22 +22,25 @@ The tool already exists. Build it and run it:
+ ```bash
+ cmake --build build --config Release --target HandsFreeSnapshot
+ ```
+ 
+ ```bash
+ build/tools/Release/HandsFreeSnapshot.exe shots 1280 880 --fast
+ ```
+ 
+ Source: [tools/snapshot.cpp](tools/snapshot.cpp), wired up in
+ [tools/CMakeLists.txt](tools/CMakeLists.txt). It writes `console-idle.png`
+-(the state the app opens in) and `console-live.png` (a real published
+-spectrum with notches placed in it).
++(the state the app opens in), `console-live.png` (a real published spectrum
++with notches placed in it) and `console-preset-music.png` (that same live
++frame with the notch defaults set to `presets/Music.json`'s off-list pair,
++Q 25 / −10 dB, so the tuning strip renders a value that sits on no combo
++rung).
+ 
+ `--fast` skips the real-time waits that age the notches. Drop it when the
+ sodium-to-ice age ramp has to be visible: the full run takes ~23 s because a
+ notch cools over ~22 s of wall time, and there is no way to fake that without
+ faking the clock the ramp reads.
+ 
+ Extend that file rather than writing a new one — a second tool that renders
+ the same component differently is a second thing to keep in step.
+ 
+ ## The pattern
+diff --git a/README.md b/README.md
+index 812fd65..400ad1b 100644
+--- a/README.md
++++ b/README.md
+@@ -68,21 +68,23 @@ cd build && ctest -C Release
+ 
+ ## Reviewing a GUI change
+ 
+ `HandsFreeSnapshot` renders the console to PNG with no window and no screen
+ capture, using `juce::Component::createComponentSnapshot()`:
+ 
+ ```bash
+ build/tools/Release/HandsFreeSnapshot.exe shots 1440 920 --fast
+ ```
+ 
+-It writes `console-idle.png` and `console-live.png` into `shots/`. Drop
++It writes `console-idle.png`, `console-live.png` and
++`console-preset-music.png` (the live frame with `presets/Music.json`'s off-list
++Q 25 / −10 dB ceiling in the tuning strip) into `shots/`. Drop
+ `--fast` when the notch age ramp has to be visible — the full run takes about
+ 23 seconds, because a notch cools from sodium to ice over ~22 seconds of wall
+ time and there is no way to show that without spending it.
+ 
+ Prefer this over screen-capturing the running app: a capture picks up whatever
+ window drifts in front of it, the desktop's DPI scaling rescales the result,
+ and the running binary holds a lock on its own `.exe` so the next build cannot
+ link. See `.claude/skills/juce-component-snapshot/SKILL.md`.
+ 
+ ## Releasing an alpha build
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index d9e9010..08325ef 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -1,15 +1,15 @@
+ # Kỹ thuật chống hú — AZ Soundtech Hands-free
+ 
+ > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
+ > đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
+-> ctest, **546/546** tại `fba2626`; **chưa đóng gói** — `release-alpha.ps1` sẽ
++> ctest, **547/547** tại `63c1759`; **chưa đóng gói** — `release-alpha.ps1` sẽ
+ > chạy sau final review, SHA-256/kích thước cập nhật khi đó; 1.2.0 = lane G,
+ > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
+ > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
+ 
+ ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
+ 
+ Nguyên tắc nền tảng của real-time audio: **luồng audio không bao giờ được chờ
+ ai**. Mọi allocation, mutex hay I/O trên luồng đó là một cơn dropout tiềm ẩn.
+ Vì thế hệ thống tách làm hai luồng, trao đổi nhau qua hai kênh lock-free
+ (SPSC — single-producer single-consumer), và mọi thứ còn lại dùng mutex thoải mái:
+@@ -112,21 +112,24 @@ nên `|H| ≤ 1` ở **mọi** tần số — ramp không thể khuếch đại
+ đang nhắm — và bán kính cực `sqrt((1 − α/A_d)/(1 + α/A_d)) < 1` nên không phân
+ kỳ. Đo 06/09/2026: gain lớn nhất 1,9e-15 dB trên 3 sample rate × 5 tần số × 3 Q
+ × 7 cặp độ sâu × 101 điểm, và 20 000 tổ hợp lồi ngẫu nhiên × 400 tần số (ramp
+ khởi từ một biquad identity chưa cấu hình: −3,5e-11 dB, vẫn không khuếch đại).
+ Test `Biquad.RampMidpointsNeverBoostAnyFrequency` chốt điều này bằng cách đọc
+ hệ số **đang chạy** giữa ramp rồi tính `|H|` giải tích.
+ 
+ Suy giảm đo được tại f0 sau khi ramp xong, từng bậc, sai số ±0,5 dB — test
+ `NotchChain.MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel` in ra
+ `−6,000000 / −12,000000 / −18,000000 / −24,000000 dB` (chạy lại 07/09/2026
+-trên binary Release ở `af5201e`).
++trên binary Release ở `fba2626`). Con số đo được không phụ thuộc commit nào
++trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (và
++`cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
++nay cho cùng bốn số này.
+ 
+ **Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
+ non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
+ không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
+ khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
+ cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
+ 
+ ## 3. Phát hiện hú — từ mẫu đến điểm số
+ 
+ ```mermaid
+@@ -243,21 +246,24 @@ lượng tử trần −10 xuống −6 sẽ làm Music nông hơn 1.1.3 4 dB m
+   6 dB: trần −10 thì bước cuối là 4 dB). Tiêu chí đào và tiêu chí "còn hú" là
+   **cùng một phép thử trên phổ SAU notch**, nên thang dừng ở bậc đầu tiên làm
+   bin hết vượt ngưỡng — có thể là −6 hoặc −12 suốt đời notch. Đó là chủ ý (Q7):
+   độ sâu theo nhu cầu, không theo mặc định. **Không test nào trong suite chứng
+   minh được điều này** (M-3): harness ghi tone THÔ vào `h.tap`
+   (`tests/test_notchcontroller.cpp:350-355`) nên analyser không bao giờ thấy
+   phổ đã bị notch, và trong test thang luôn leo tới trần. Chỉ dàn thật kiểm
+   chứng được — nêu trong tester notes, đừng dựng test giả cho nó.
+ - **Nhả**: `quietMs` tích lũy khi bin im; ≥ `kReleaseFirstMs` = 30 s ⇒ nông
+   một bậc, mỗi `kReleaseStepMs` = 10 s tiếp theo một bậc nữa, tới −6 thì
+-  `Clear(AutoRelease)` — tổng 40 s từ −12, 50 s từ −18, 60 s từ −24. Đồng hồ
++  `Clear(AutoRelease)` — **30–60 s** tùy bậc đang đứng lúc bin im: 30 s từ −6
++  (đã ở bậc nông nhất, hết 30 s là `Clear` luôn, không có bậc nào để nhả),
++  40 s từ −12 (và từ −10 của `Music.json`: `nextShallowerRungDb(−10) = −6`),
++  50 s từ −18, 60 s từ −24. Đồng hồ
+   **đóng băng** khi `frameScoreValid_ && frameMaxScore_ ≥ kRiskFreezeFraction`
+   (= 0.55) `× kConfirmScore` (băng RISING của chip), không có trần thời gian
+   (Q9), và đóng băng là **theo slot**: một bin đang căng giữ **mọi** notch của
+   slot đó ở nguyên bậc. Cờ `SnapshotBuffer::releaseFrozen` publish ra nhưng
+   1.2.0 chưa vẽ.
+ - **Kẹp lại**: bin hú lại khi đang nhả ⇒ về `deepestDb` **ngay trong frame
+   đó**, không chờ 300 ms — nhưng **luôn kẹp bởi trần đang có hiệu lực**
+   (`max(deepestDb, ceilingDbFor(n))`, M-B). Trần đọc sống, nên nếu người vận
+   hành kéo slider nông đi trong lúc notch đang nhả, lần kẹp lại KHÔNG được
+   vượt giá trị mới. Song song, `deepestDb` của notch Detector bị kẹp về trần
+@@ -421,22 +427,23 @@ khối đó (v1, hoặc lưu trước khi tính năng này tồn tại) thì kh
+ đang chạy — tránh áp nhầm fallback −12 dB của `PresetNotchDefaults` mỗi lần mở
+ lại một file cũ không mang khối này. **Lưu ý cho tester**: một preset lưu sau
+ khi vừa hú sẽ nạp lại notch ở `deepestDb` (có thể tới −24 dB) bất kể slider
+ đang để bao nhiêu — cắt nhiều hơn một file lưu trên 1.1.3, nhưng luôn theo
+ hướng an toàn (chỉ cắt thêm, không bao giờ khuếch đại).
+ 
+ **⚠️ Cảnh báo trần NÔNG hơn (fix round 2, `fba2626`) — đọc trước khi bấm
+ LOAD trên dàn thật.** Cơ chế trên là hai chiều: nạp một file mà trần **nông
+ hơn** trần đang chạy (ví dụ `Music.json` trần −10 trong khi rig đang đứng ở
+ −18/−24) kéo **mọi notch Detector** đang sâu hơn trần mới lên ngay ở tick kế
+-tiếp của detector — `n.depthDB < ceiling` tại `NotchController.cpp:786-796`
+-đẩy một `pushRetuneLocked` reason `Ceiling`, ramp 10 ms — tức tới **+14 dB**
++tiếp của detector — nhánh `if (n.depthDB < ceiling)` tại
++`NotchController.cpp:792-805` (bên trong `if (n.origin == Origin::Detector)`
++mở ở `:752`) đẩy một `pushRetuneLocked` reason `Ceiling`, ramp 10 ms — tức tới **+14 dB**
+ năng lượng quay lại đúng tần số vừa hú. Trần **sâu hơn** thì 0 dB ngay lúc nạp,
+ chỉ mở đường đào sâu hơn về sau. Preset/Manual/Soundcheck có trần riêng (Q8) và
+ không bị kéo. **Mở âm lượng thấp trước khi LOAD, đừng LOAD giữa bài.**
+ 
+ Trần không nhất thiết rơi đúng bậc combo (Q13). Từ fix round 2, `TuningPanel`
+ và `SlotPanel` hiện giá trị ngoài danh sách đó như **chữ** (vd. "−10 dB",
+ "25") thay vì bỏ trống hay reset — và giữ nguyên số đó cho tới khi người vận
+ hành thật sự chọn một mục trong danh sách; chạm vào một combo KHÁC không còn
+ âm thầm đẩy Q 10 / −6 dB lên mọi slot Global (N2, đã đóng).
+ 
+@@ -517,22 +524,22 @@ ba mảng 1025 bin (`now`, `ref`, `other_lane_now`) → **đo được 19,5–19
+ của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 3 chữ số có nghĩa). Ở chế độ
+ LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
+ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
+ 
+ ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest, chưa đóng gói)
+ 
+ Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
+ nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
+ 10 ms trong `Biquad`, sự kiện `notch_retune` trong log.
+ 
+-- Suite: **546/546 test pass** (ctest Release, MSVC) sau fix round 2 Task 9
+-  của lane G (`fba2626`) — +92 so với 1.1.3 (454). Bốn bậc thang đo được đúng
++- Suite: **547/547 test pass** (ctest Release, MSVC) sau fix wave final review
++  của lane G (`63c1759`) — +93 so với 1.1.3 (454). Bốn bậc thang đo được đúng
+   `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
+   `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
+ - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).
+ 
+ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
+ `tools/logstats.py`.
+ 
+ - Suite lúc đó: **432/432 test pass** (ctest Release, MSVC, CI GitHub
+   Actions xanh) — +30 test so với 1.1.1 (402): `SessionLogger` (start/stop,
+   cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
+diff --git a/docs/release-notes/1.2.0-alpha.md b/docs/release-notes/1.2.0-alpha.md
+index ee01ee8..08faf4d 100644
+--- a/docs/release-notes/1.2.0-alpha.md
++++ b/docs/release-notes/1.2.0-alpha.md
+@@ -1,13 +1,13 @@
+ # Hands-free 1.2.0 alpha — notch sâu theo nhu cầu, nhả dần từng bậc
+ 
+-**Build:** 2026-09-07 · suite 546/546 (`fba2626`) · installer **sẽ là**
++**Build:** 2026-09-07 · suite 547/547 (`63c1759`) · installer **sẽ là**
+ `AZSoundtech-Handsfree-Setup-1.2.0.exe` tại `Z:\My Drive\RELEASE\ALPHA TEST`
+ **sau khi đóng gói** · SHA-256 và kích thước: **điền sau khi
+ `installer\release-alpha.ps1 -Part minor` chạy xong** (bản này chưa đóng gói lúc
+ viết note).
+ 
+ **CÓ đụng đường audio.** Đây là bản đầu tiên mà **độ sâu của một notch thay đổi
+ theo thời gian**. Đọc kỹ mục "Nghe ở âm lượng thấp trước" ở cuối trước khi cắm
+ vào PA thật.
+ 
+ ## Có gì trong 1.2.0
+@@ -116,15 +116,19 @@ Ba chỗ bản này **nghe khác** 1.1.3, theo đúng bảng §3 của spec:
+    Preset/Manual/Soundcheck mang trần riêng (Q8), không bị kéo. **Mở âm lượng
+    thấp trước khi LOAD, đừng LOAD giữa bài.**
+ 
+ Master, limiter, clamp output ±1.0, guard NaN/denormal: **không đụng**.
+ 
+ ## Cần báo lại ngay
+ 
+ - **Tiếng "cạch" hoặc "zip"** khi một notch đổi độ sâu — phải không có, mọi
+   thay đổi đều trải 10 ms.
+ - **Một tiếng hú app không bao giờ khống chế được.**
+-- **Một notch sâu hơn số trên slider DEPTH** — không đường nào được phép làm
+-  vậy.
++- **Một notch _của detector_ sâu hơn số trên slider DEPTH** — không đường nào
++  được phép làm vậy. Chỉ tính notch do detector tự đặt (dòng có cột LANE trong
++  ACTIVE NOTCHES). Notch từ **Preset / Manual / Soundcheck** mang trần riêng
++  của nó (Q8) và **được phép** sâu hơn slider: một preset lưu sau khi vừa hú
++  nạp lại ở `deepestDb`, có thể tới −24 dB, dù slider đang để −6. Đó là thiết
++  kế, không phải lỗi.
+ 
+ Kèm theo: Windows version, card tiếng, preset đang dùng, và file log session
+ (`%APPDATA%\AZSoundtech\HandsFree\logs\`).
+diff --git a/docs/superpowers/plans/2026-09-07-gain-aware-notch.md b/docs/superpowers/plans/2026-09-07-gain-aware-notch.md
+index 586a44c..3d54313 100644
+--- a/docs/superpowers/plans/2026-09-07-gain-aware-notch.md
++++ b/docs/superpowers/plans/2026-09-07-gain-aware-notch.md
+@@ -70,22 +70,23 @@ to the shallowest rung not deeper than the ceiling") and its test are **deleted*
+ 
+ Three requirements of spec §5.3 that had no step now have one: the **raise**-the-ceiling
+ half of the live-ceiling rule, the **preset** release-ladder and reclamp pair, and the
+ **INDEP** half of the LINKED/INDEP rung rule. One existing test the plan had missed —
+ `NotchControllerPreset.AdoptedPresetsAutoReleaseLikeDetectorNotches`
+ (`tests/test_notchcontroller.cpp:267`) — is now in Task 7's edit list.
+ 
+ ## Global Constraints
+ 
+ - **Depth is always inside [−24, 0] dB.** `setNotchImpl` clamps `depthDB = max(depthDB, -24.0)` for EVERY `Origin` (Q12); `pushRetuneLocked` refuses anything outside the range. No `NotchCommand::Set` may ever leave this controller with `depthDB > 0` or `< -24`.
+-- **A deepening step is at most 6 dB.** `kDepthStepDb = 6.0`, fixed rungs `{-6, -12, -18, -24}`. The **effective ladder** (Q13) is the fixed rungs shallower than the ceiling plus the ceiling itself as the last rung, so the final step can be SMALLER than 6 dB (−6 → −10 under `presets/Music.json`) but never larger. A step in the SHALLOW direction may be larger than 6 dB (a ceiling dropped several rungs at once) — invariant 3, allowed because shallower is never dangerous.
+-- **Every depth change on a running notch is ramped over `kRampMs = 10.0` ms** (`NotchChain::kRampMs`), i.e. ≤ 0.6 dB/ms in the deep direction.
++- **A DEEPEN step is at most 6 dB.** `kDepthStepDb = 6.0`, fixed rungs `{-6, -12, -18, -24}`. The **effective ladder** (Q13) is the fixed rungs shallower than the ceiling plus the ceiling itself as the last rung, so the final step can be SMALLER than 6 dB (−6 → −10 under `presets/Music.json`) but never larger. A step in the SHALLOW direction is **unbounded** (a ceiling dropped several rungs at once) — invariant 3, allowed because shallower is never dangerous.
++- **A RECLAMP is the deliberate exception, up to 18 dB in the deep direction.** `RetuneReason::Reclamp` goes straight to `max(deepestDb, ceilingRung)` in ONE 10 ms ramp — −6 → −24 after a full release. It is not a violation: the target is a depth **this notch already held**, invariant 2 still holds (never past the live ceiling), `|H| ≤ 1` at every ramp midpoint (`Biquad.RampMidpointsNeverBoostAnyFrequency`), and the coefficient walk is continuous, so no reset and no click.
++- **Every depth change on a running notch is ramped over `kRampMs = 10.0` ms** (`NotchChain::kRampMs`), i.e. ≤ 0.6 dB/ms for a deepen step and ≤ 1.8 dB/ms for a worst-case reclamp. **`NotchChain` enforces none of this** — it accepts any valid depth (see `NotchChain.h`); the ladder in `NotchController` is what holds the rule, and the rule holds only while the ladder is the sole caller of `pushRetuneLocked`.
+ - **Never remove a clamp, a limiter, a NaN/denormal guard, or a bounds check.** `ScopedNoDenormals` (`AudioEngine.cpp:487`) and the `isfinite` + output clamp (`AudioEngine.cpp:605-642`) are untouched by this lane.
+ - **No allocation, no logging, no locks on the audio thread.** `Biquad::processSample` gains exactly one branch (`rampRemaining_ > 0`) plus five additions.
+ - **No new lock order.** `modelMutex_` and `snapshotMutex_` are never nested today and must not become nested. The release freeze reads the detector-thread members `frameMaxScore_` / `frameScoreValid_` (`NotchController.h:433-434`), never the snapshot.
+ - **`NotchCommand` gains no field and `AudioEngine::drain` (`AudioEngine.cpp:430-450`) is not touched.** A retune is a `Set` onto the same `slot`/`channel`/`index`.
+ - **Constants are fixed for 1.2.0 and do not reach the GUI** (spec §4.9). No new widget, no new slider.
+ - **`.superpowers/sdd/.gitignore` must be deleted before every commit.** The `sdd-workspace` script rewrites it with `*` on each run, which silently un-tracks this repo's `.superpowers/` policy (memory/sdd-workspace-gitignore-trap-2026-09-04.md).
+ - **UTF-8 explicitly on any script that reads and rewrites a repo file** (repo rule 6). `tools/logstats.py` already opens with `encoding="utf-8"`; keep it.
+ - **Commit with explicit paths.** Never `git add -A` and never `git add .`.
+ - **Build commands** (from the worktree root):
+   - configure (only when a header or a `CMakeLists.txt` changed): `cmake -B build -G "Visual Studio 18 2026" -A x64`
+@@ -126,21 +127,21 @@ half of the live-ceiling rule, the **preset** release-ladder and reclamp pair, a
+   bool Biquad::rampNotchDepth (double freq, double Q, double sampleRate,
+                                double depthDB, int rampSamples);
+   struct Biquad::State  { double z1, z2; };
+   struct Biquad::Coeffs { double b0, b1, b2, a1, a2; };
+   Biquad::State  Biquad::stateForTest() const;
+   Biquad::Coeffs Biquad::coeffsForTest() const;
+   int            Biquad::rampRemainingForTest() const;
+   ```
+ - Consumes: nothing new. `setNotchFilter(double,double,double,double)` (`Biquad.h:102`) keeps its exact signature and behaviour.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_biquad.cpp`. `sineWave` (line 25) and `rms` (line 38) already exist in that file's anonymous namespace — reuse them; add only the two helpers below to the same namespace (put them next to `chargeThenFeedSilence`, line 53).
+ 
+ ```cpp
+     // |H(e^{j w})| straight from the five NORMALISED coefficients the filter is
+     // running RIGHT NOW. Evaluating the transfer function analytically is what
+     // makes the mid-ramp no-boost test exact: it reads the coefficient set the
+     // biquad actually holds at that instant, with no need to freeze the ramp.
+     double magnitudeAt(const Biquad::Coeffs& c, double freqHz, double sampleRate)
+     {
+@@ -405,26 +406,26 @@ TEST(Biquad, NonPositiveRampSamplesAppliesTheTargetAtOnceAndKeepsState)
+     Biquad direct;
+     ASSERT_TRUE(direct.setNotchFilter(1000.0, 30.0, 48000.0, -18.0));
+ 
+     EXPECT_DOUBLE_EQ(f.coeffsForTest().b0, direct.coeffsForTest().b0);
+     EXPECT_DOUBLE_EQ(f.coeffsForTest().a2, direct.coeffsForTest().a2);
+     EXPECT_DOUBLE_EQ(f.stateForTest().z1, before.z1);
+     EXPECT_EQ(f.rampRemainingForTest(), 0);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release 2>&1 | tail -5`
+ Expected: compile errors — `'rampNotchDepth': is not a member of 'Biquad'`, same for `stateForTest`, `coeffsForTest`, `rampRemainingForTest`.
+ 
+-- [ ] **Step 3: Extend `src/dsp/Biquad.h`**
++- [x] **Step 3: Extend `src/dsp/Biquad.h`**
+ 
+ Append this paragraph to the header's doc block, immediately before `#pragma once` (line 56):
+ 
+ ```cpp
+ // Depth retune without a click: rampNotchDepth()
+ // ==============================================
+ // setNotchFilter() calls reset() because a new DESIGN owns no state from the
+ // old one. That is right when the frequency or Q moves, and wrong when only
+ // the depth does: clearing z1/z2 mid-signal is a step discontinuity straight
+ // into a PA. rampNotchDepth() therefore keeps the state and walks the five
+@@ -505,21 +506,21 @@ private:
+     // Direct Form I transposed state.
+     double z1_, z2_;
+ 
+     // Ramp state. rampRemaining_ == 0 means "not ramping" and is the only
+     // thing processSample() branches on.
+     double target_[5];
+     double delta_[5];
+     int    rampRemaining_;
+ ```
+ 
+-- [ ] **Step 4: Implement in `src/dsp/Biquad.cpp`**
++- [x] **Step 4: Implement in `src/dsp/Biquad.cpp`**
+ 
+ Extend the constructor initialiser list (lines 10-19) to zero the new members:
+ 
+ ```cpp
+ Biquad::Biquad()
+     : b0_(1.0)
+     , b1_(0.0)
+     , b2_(0.0)
+     , a1_(0.0)
+     , a2_(0.0)
+@@ -664,36 +665,36 @@ Replace `reset` (lines 139-143):
+ void Biquad::reset()
+ {
+     z1_ = 0.0;
+     z2_ = 0.0;
+     // An explicit reset is a statement that the past is gone; a ramp toward a
+     // target designed against that past has nothing left to interpolate.
+     rampRemaining_ = 0;
+ }
+ ```
+ 
+-- [ ] **Step 5: Run the Biquad tests**
++- [x] **Step 5: Run the Biquad tests**
+ 
+ Run:
+ ```
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ cmake --build build --config Release
+ cd build && ctest -C Release -R Biquad --output-on-failure
+ ```
+ Expected: PASS — all `Biquad.*` tests, the nine new ones included.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (454 + 9 = 463).
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/dsp/Biquad.h src/dsp/Biquad.cpp tests/test_biquad.cpp
+ ```
+ ```bash
+ git commit -m "feat(dsp): Biquad::rampNotchDepth -- retune depth without clearing filter state"
+ ```
+@@ -712,21 +713,21 @@ git commit -m "feat(dsp): Biquad::rampNotchDepth -- retune depth without clearin
+ **Interfaces:**
+ - Consumes (Task 1): `bool Biquad::rampNotchDepth(double freq, double Q, double sampleRate, double depthDB, int rampSamples)`.
+ - Produces:
+   ```cpp
+   static constexpr double NotchChain::kRampMs = 10.0;
+   // void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
+   //   -- unchanged signature; NEW behaviour when the slot is Active and both
+   //      freq and Q compare equal to the stored NotchInfo.
+   ```
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_notchchain.cpp`. `sineWave` (line 20) and `rms` (line 31) already exist there.
+ 
+ ```cpp
+ // RED IF a depth-only setNotch on a running slot goes back through
+ // setNotchFilter (which resets the state). After a reset, feeding 0.0 into a
+ // charged chain returns EXACTLY 0.0; after a ramp it does not.
+ TEST(NotchChain, DepthOnlyRetuneOfARunningNotchKeepsTheFilterState)
+ {
+     NotchChain chain(48000.0);
+@@ -825,26 +826,26 @@ TEST(NotchChain, MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel)
+ TEST(NotchChain, RejectedDepthOnARunningNotchLeavesTheSlotUnchanged)
+ {
+     NotchChain chain(48000.0);
+     chain.setNotch(0, 1000.0, 30.0, -12.0);
+     chain.setNotch(0, 1000.0, 30.0, +3.0);   // boost: refused by the biquad
+     EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, -12.0);
+     EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchChain --output-on-failure`
+ Expected: FAIL — `DepthOnlyRetuneOfARunningNotchKeepsTheFilterState` reports `chain.processSample(0.0)` equal to 0 (today's `setNotch` always resets).
+ 
+-- [ ] **Step 3: Extend `src/dsp/NotchChain.h`**
++- [x] **Step 3: Extend `src/dsp/NotchChain.h`**
+ 
+ Add after `static constexpr int MAX_NOTCHES = 16;` (line 33):
+ 
+ ```cpp
+     // Depth-only retune ramp (spec 4.7, decision Q5). 10 ms is one block at a
+     // 2048 buffer and seven at 64, so it is always at least one callback and
+     // never long enough to be heard as a slew. 6 dB over 10 ms is 0.6 dB/ms --
+     // the invariant the controller's ladder is written against.
+     static constexpr double kRampMs = 10.0;
+ ```
+@@ -866,21 +867,21 @@ Replace the `setNotch` doc comment (lines 53-56) with:
+     //
+     // The comparison is a plain `==` on doubles ON PURPOSE: the caller
+     // (NotchController::pushRetuneLocked) resends the freq and Q it stored
+     // when the notch was placed, so the values are bit-identical by
+     // construction. A near-miss falls through to the reset path, which is the
+     // SAFE direction to fail in -- an audible click, never a filter running
+     // one design while claiming another.
+     void   setNotch(int index, double freq, double Q, double depthDB);
+ ```
+ 
+-- [ ] **Step 4: Implement in `src/dsp/NotchChain.cpp`**
++- [x] **Step 4: Implement in `src/dsp/NotchChain.cpp`**
+ 
+ Add the include at the top (after line 1):
+ 
+ ```cpp
+ #include "dsp/NotchChain.h"
+ 
+ #include <cmath>
+ ```
+ 
+ Replace `setNotch` (lines 25-53) — keep the whole existing comment block, and insert the ramp branch before the reset path:
+@@ -931,36 +932,36 @@ void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
+         return;
+     }
+ 
+     notchInfo_[index].frequency = freq;
+     notchInfo_[index].Q         = Q;
+     notchInfo_[index].depthDB   = depthDB;
+     notchInfo_[index].state     = NotchState::Active;
+ }
+ ```
+ 
+-- [ ] **Step 5: Run the NotchChain tests**
++- [x] **Step 5: Run the NotchChain tests**
+ 
+ Run:
+ ```
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ cmake --build build --config Release
+ cd build && ctest -C Release -R NotchChain --output-on-failure
+ ```
+ Expected: PASS. Record the four measured attenuations printed by a failure-free run of `MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel` — they are the numbers the release note quotes.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (469).
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/dsp/NotchChain.h src/dsp/NotchChain.cpp tests/test_notchchain.cpp
+ ```
+ ```bash
+ git commit -m "feat(dsp): NotchChain ramps a depth-only retune over kRampMs instead of resetting"
+ ```
+@@ -986,21 +987,21 @@ git commit -m "feat(dsp): NotchChain ramps a depth-only retune over kRampMs inst
+       float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+       float riseRatio = 1.0f;          // NEW: raw mag_now / mag_ref, unsaturated
+       float penalty = 1.0f;
+       float score = 0.0f;
+       const float* refFrame = nullptr;
+       double refAgeMs = 0.0;
+   };
+   ```
+   Task 5 reads it as `pc.breakdown.riseRatio`.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_candidatescorer.cpp`. That file already has `Rig` (line 72, with `tap`, `detector`, `analyzer`, `scorer`, `cycle()`, `feedHops()`), `makeToneInNoise()` (line 36), `kHop`, `kFrameMs` and `kSampleRate` in its anonymous namespace — use those names, do not invent new helpers.
+ 
+ ```cpp
+ // RED IF riseRatio stops being the RAW mag_now/mag_ref. rNorm saturates at
+ // rise 1.5 (CandidateScorer.cpp: (rise - 1)/0.5, clamped to 1), so it cannot
+ // tell "just rising" from "up 12 dB in 250 ms" -- and that distinction is
+ // exactly what lane G's jump to -12 dB needs (spec 4.2, Q6).
+ TEST (CandidateScorer, RiseRatioIsTheRawRatioWhileRNormStaysSaturated)
+ {
+@@ -1082,26 +1083,26 @@ TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
+     const auto detected = rig.analyzer.analyse (spectrum);
+     ASSERT_GT (detected.count, 0u);
+     const auto b = rig.scorer.scoreCandidateDetailed (detected.candidates[0],
+                                                       spectrum.magnitudes, {});
+     EXPECT_FLOAT_EQ (b.score, b.pNorm * b.rNorm * b.mNorm * b.penalty);
+     EXPECT_FLOAT_EQ (rig.scorer.scoreCandidate (detected.candidates[0],
+                                                 spectrum.magnitudes, {}), b.score);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release 2>&1 | tail -5`
+ Expected: compile error — `'riseRatio': is not a member of 'CandidateScorer::ScoreBreakdown'`.
+ 
+-- [ ] **Step 3: Add the field in `src/dsp/CandidateScorer.h`**
++- [x] **Step 3: Add the field in `src/dsp/CandidateScorer.h`**
+ 
+ Replace the `ScoreBreakdown` body (lines 84-89) with:
+ 
+ ```cpp
+         float rawPeakiness = 0.0f;
+         float pNorm = 0.0f, rNorm = 0.0f, mNorm = 0.0f;
+         // Lane G (spec 4.2): the RAW rise ratio mag_now / mag_ref, before any
+         // normalisation. rNorm above saturates at rise 1.5, so it cannot
+         // distinguish a howl creeping up from one that jumped 12 dB in a
+         // quarter second -- and that distinction is what decides whether a
+@@ -1109,21 +1110,21 @@ Replace the `ScoreBreakdown` body (lines 84-89) with:
+         // measurable rise": BOTH the no-history branch and the
+         // history-too-young branch report it, so an unknown rise can never buy
+         // a deeper starting notch.
+         float riseRatio = 1.0f;
+         float penalty = 1.0f;
+         float score = 0.0f;
+         const float* refFrame = nullptr;
+         double refAgeMs = 0.0;
+ ```
+ 
+-- [ ] **Step 4: Assign it in `src/dsp/CandidateScorer.cpp`**
++- [x] **Step 4: Assign it in `src/dsp/CandidateScorer.cpp`**
+ 
+ In the rise branch, the no-history case (lines 77-80):
+ 
+ ```cpp
+     float rNorm = 0.0f;
+     if (historyCount_ == 0)
+     {
+         rNorm = 1.0f;
+         out.riseRatio = 1.0f;   // lane G: nothing to compare against yet
+     }
+@@ -1136,36 +1137,36 @@ and inside `if (reference != nullptr)` (line 98), right after `rise` is computed
+ ```cpp
+             const float was  = std::max (reference[candidate.bin], 1e-12f);
+             const float rise = magnitudes[candidate.bin] / was;
+             out.riseRatio = rise;   // lane G: the raw ratio, unsaturated
+             rNorm = (rise - 1.0f) / 0.5f;
+             rNorm = std::min (std::max (rNorm, 0.0f), 1.0f);
+ ```
+ 
+ Leave the "history too young" path alone — `out.riseRatio` keeps its 1.0 default there, which is the documented neutral, and the comment at line 108 already explains that branch.
+ 
+-- [ ] **Step 5: Run the scorer tests**
++- [x] **Step 5: Run the scorer tests**
+ 
+ Run:
+ ```
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ cmake --build build --config Release
+ cd build && ctest -C Release -R CandidateScorer --output-on-failure
+ ```
+ Expected: PASS.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (472). Every pre-existing scorer AND controller test must be untouched — if a placement test moved, the field was not additive and the change is wrong.
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/dsp/CandidateScorer.h src/dsp/CandidateScorer.cpp tests/test_candidatescorer.cpp
+ ```
+ ```bash
+ git commit -m "feat(dsp): expose the raw riseRatio in ScoreBreakdown (score unchanged)"
+ ```
+@@ -1219,21 +1220,21 @@ git commit -m "feat(dsp): expose the raw riseRatio in ScoreBreakdown (score unch
+   void   setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override);
+ 
+   struct SnapshotNotch { float frequency, Q, depthDB, deepestDb; std::uint8_t channel, index; };
+   // SnapshotBuffer gains: bool releaseFrozen = false;
+ 
+   // private, modelMutex_ HELD by the caller
+   bool   pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason);
+   double ceilingDbFor (const ModelNotch& n) const;   // == the ceilingRung (Q13)
+   ```
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_notchcontroller.cpp`, after the last `NotchControllerRingRisk` test (the file ends at line 1681). `Harness`, `FakeClock`, `Recorder`, the `Ev` alias, `pump`, `SineSource`, `NoiseSource` and `primeAndPlace` already exist in that file — use those names.
+ 
+ ```cpp
+ // ===========================================================================
+ // Lane G (gain-aware notch), spec docs/superpowers/specs/
+ // 2026-09-06-gain-aware-notch-design.md. The ladder, its clamps, and the
+ // retune command path.
+ // ===========================================================================
+ 
+@@ -1484,26 +1485,26 @@ TEST (NotchControllerLadder, SnapshotCarriesTheDeepestDepthTheNotchEverHeld)
+ 
+     NotchController::SnapshotBuffer snap;
+     h.controller.copySnapshot (snap);
+     ASSERT_EQ (snap.notchCount, 1u);
+     EXPECT_FLOAT_EQ (snap.notches[0].depthDB,   -6.0f);
+     EXPECT_FLOAT_EQ (snap.notches[0].deepestDb, -18.0f);
+     EXPECT_FALSE (snap.releaseFrozen);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release 2>&1 | tail -8`
+ Expected: compile errors — `nextDeeperRungDb`, `nextShallowerRungDb`, `deepestDbForTest`, `activeForTest`, `retuneForTest`, `RetuneReason`, `Kind::Retune`, `fromDepthDb`, `riseRatio`, `SnapshotNotch::deepestDb` and `SnapshotBuffer::releaseFrozen` all undeclared.
+ 
+-- [ ] **Step 3: Extend `src/app/NotchController.h`**
++- [x] **Step 3: Extend `src/app/NotchController.h`**
+ 
+ Add `#include <optional>` and `#include <utility>` next to the existing includes (lines 42-48).
+ 
+ After `static constexpr double kDefaultNotchDepthDb = -18.0;` (line 95), add the lane-G constant block:
+ 
+ ```cpp
+     // === Lane G: the depth ladder (spec 4.9). Fixed for 1.2.0 and
+     // deliberately NOT exposed on the GUI -- these are the numbers the
+     // ladder's behaviour was reasoned about with, and a slider on any of them
+     // turns every future bug report into "which value was it on?".
+@@ -1718,21 +1719,21 @@ Declare the private helpers next to `pushClearLocked` (line 336):
+     // slider mid-show takes effect (spec 7).
+     double ceilingDbFor (const ModelNotch& n) const;
+ ```
+ 
+ And the override member, next to `failSetNotchLaneForTest_` (line 467):
+ 
+ ```cpp
+     std::optional<std::pair<bool, float>> ringRiskOverrideForTest_;
+ ```
+ 
+-- [ ] **Step 4: Implement in `src/app/NotchController.cpp`**
++- [x] **Step 4: Implement in `src/app/NotchController.cpp`**
+ 
+ Add `#include <optional>` and `#include <utility>` to the include block (lines 3-5).
+ 
+ Add the ladder helpers after `setWidth` (line 117):
+ 
+ ```cpp
+ // --- Lane G ladder arithmetic (spec 4.1, Q13). Pure: no state, no locks. ---
+ 
+ double NotchController::nextDeeperRungDb (double currentDb, double ceilingDb)
+ {
+@@ -1982,36 +1983,36 @@ bool NotchController::retuneForTest (int channel, int index, double newDepthDb,
+ }
+ 
+ void NotchController::setRingRiskOverrideForTest (std::optional<std::pair<bool, float>> override)
+ {
+     // Detector-thread state, written from the test thread with the detector
+     // STOPPED -- same precondition as setWidth() and setEventSink().
+     ringRiskOverrideForTest_ = override;
+ }
+ ```
+ 
+-- [ ] **Step 5: Run the controller tests**
++- [x] **Step 5: Run the controller tests**
+ 
+ Run:
+ ```
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ cmake --build build --config Release
+ cd build && ctest -C Release -R NotchController --output-on-failure
+ ```
+ Expected: PASS, including the eleven new `NotchControllerLadder.*` tests (the two ladder-arithmetic tests, `ActiveForTestReadsTheFlagNotTheRetainedDepth`, and the eight model/command tests).
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (483). No pre-existing test may move: nothing calls `pushRetuneLocked` outside the seam yet, and the only shipped behaviour change is the −24 clamp, which no shipped preset triggers.
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/NotchController.h src/app/NotchController.cpp tests/test_notchcontroller.cpp
+ ```
+ ```bash
+ git commit -m "feat(controller): depth ladder state, -24 clamp for every origin, pushRetuneLocked"
+ ```
+@@ -2031,21 +2032,21 @@ git commit -m "feat(controller): depth ladder state, -24 clamp for every origin,
+ - Consumes (Task 3): `pc.breakdown.riseRatio`. Consumes (Task 4): `kDepthLadderDb`, `kSteepRiseRatio`, `NotchEvent::riseRatio`, `activeForTest`, and `setNotchImpl`'s initialisation of `deepestDb` / `ceilingDb`.
+ - Produces: the placement depths Task 6 deepens from and Task 7 releases from. New test fixture symbols:
+   ```cpp
+   constexpr float kRampStartAmp = 3.0e-4f;   // the sine amplitude whose bin
+                                              // magnitude EQUALS NoiseSource's
+   struct RampSineSource { double freq; float amp; double gainDbPerMs; double nextSample;
+                           std::vector<float> hop(); };   // amp clamped to 0.9
+   int primeAndPlaceSlowly (Harness&);        // 64 noise blocks + <= 150 ramp blocks
+   ```
+ 
+-- [ ] **Step 1: Fix the two existing tests the new policy makes wrong (M-12)**
++- [x] **Step 1: Fix the two existing tests the new policy makes wrong (M-12)**
+ 
+ These are pre-existing tests that assert 1.1.3's fixed depth. They are not "broken by the change" — they encoded the old policy, and the spec says what replaces it. Edit them BEFORE writing the new tests so the run in Step 3 is unambiguous.
+ 
+ `tests/test_notchcontroller.cpp:436-438`, inside `PersistentHowlSetsNotchOnBothChannels`:
+ 
+ ```cpp
+     // Runtime defaults (brief 2026-08-24): Q 30. Depth is now the LADDER's
+     // (lane G, spec 4.3), not notchDepthDb_: SineSource switches its tone on
+     // hard, so riseRatio is far past kSteepRiseRatio and the notch starts on
+     // the second rung. -18 arrives later, via the deepen path (Task 6).
+@@ -2070,21 +2071,21 @@ TEST (NotchControllerDetection, SetNotchDefaultsFlowIntoPlacedNotch)
+     ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+     EXPECT_FLOAT_EQ (cmd.Q, 20.0f);
+     // Lane G: the depth default is now the CEILING (Q1), not the starting
+     // depth. A ceiling of -24 permits the whole ladder, and SineSource's hard
+     // start puts the first rung at -12.
+     EXPECT_FLOAT_EQ (cmd.depthDB, -12.0f);
+     EXPECT_DOUBLE_EQ (h.controller.deepestDbForTest (0, slot), -12.0);
+ }
+ ```
+ 
+-- [ ] **Step 2: Add `RampSineSource` to the fixture and write the failing tests**
++- [x] **Step 2: Add `RampSineSource` to the fixture and write the failing tests**
+ 
+ Add to the anonymous namespace in `tests/test_notchcontroller.cpp` **after `pump` closes at line 349** — not after `SineSource` at 327 (B-6). Both new helpers call `NoiseSource` (declared `:329`), `pump` (`:344-349`) and `kWarmupBlocks` (`:308`), so an insertion above `pump` does not compile. Line 349 is also where Task 7 adds `pumpQuietFor`.
+ 
+ **Deriving the ramp (B-5, rewritten at rev 3).** The rev-2 fixture — 64 noise blocks,
+ then tone blocks starting at `amp = 0.02` — cannot place at −6 either, and for a
+ different reason than the spec's +3 dB/250 ms example. **The decisive parameter is
+ the START amplitude, not the slope.** Work it in this order:
+ 
+ - **The reference frame.** `rNorm = clamp((rise − 1) / 0.5, 0, 1)`
+   (`CandidateScorer.cpp:104-106`), `rise = mag_now / mag_ref`, and the reference is
+@@ -2334,26 +2335,26 @@ TEST (NotchControllerLadder, PresetNotchesKeepTheirOwnCeilingAndDetectorNotchesF
+     h.controller.setDetectionActive (true);
+     int slot = -1;
+     ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+     ASSERT_GE (slot, 0);
+     ASSERT_NE (slot, 0);
+     // The detector notch obeys the -24 slider, so the steep-rise rung stands.
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), -12.0);
+ }
+ ```
+ 
+-- [ ] **Step 3: Run to verify it fails**
++- [x] **Step 3: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+ Expected: FAIL — `ASlowlyRisingHowlIsPlacedAtMinusSix` and `ASteeplyRisingHowlIsPlacedAtMinusTwelve` both report `-18`, and the two edited tests fail for the same reason.
+ 
+-- [ ] **Step 4: Implement the placement policy in `src/app/NotchController.cpp`**
++- [x] **Step 4: Implement the placement policy in `src/app/NotchController.cpp`**
+ 
+ **B-2 — read this before touching the file.** Today `placeConfirmed` reads the three
+ `const`s at `:585-587` and only then searches for a free index at `:589-596`. The v1
+ plan put the depth choice at `:585-587` and had Task 8 insert its room-memory lookup
+ into it — but the lookup needs `index >= 0` (an entry is CONSUMED, so it must not be
+ spent on a placement that then bails on a full chain) and needs the bin, which needs
+ the sample rate the index block already has in scope. So the **whole depth choice
+ moves BELOW the index lookup**, and Task 8 changes exactly one line of it.
+ 
+ Replace `:583-596` — the two-line `soundcheckActive()` comment, the three `const`
+@@ -2425,31 +2426,31 @@ and the `setNotchImpl` call at line 631 passes the chosen depth:
+         if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
+             ++applied;
+ ```
+ 
+ And the `depth=` field of the `[detect]` log line (line 698):
+ 
+ ```cpp
+         + " Q=" + juce::String (q, 1) + " depth=" + juce::String (depthDb, 1)
+ ```
+ 
+-- [ ] **Step 5: Run the controller tests**
++- [x] **Step 5: Run the controller tests**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+ Expected: PASS. The release ladder does not exist yet (Task 7), so every auto-release test still clears at 30 s exactly as it does today — nothing in this task moves their timing.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (489).
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/NotchController.cpp tests/test_notchcontroller.cpp
+ ```
+ ```bash
+ git commit -m "feat(controller): place notches at -6 dB (-12 on a steep rise) under the preset ceiling"
+ ```
+@@ -2488,21 +2489,21 @@ fails to set it. The real path needs the release ladder, which does not exist un
+ Task 7 — so `AReturningHowlReclampsImmediatelyToDeepestDb` is **moved to Task 7**,
+ where it climbs to −24, sits quiet through 30 s + 10 s so the ladder walks
+ −24 → −18 → −12 with `releasedSteps == 2`, and only then takes one tone block.
+ 
+ The consequence to accept with open eyes: **the reclamp branch added in this task has
+ no red test in this task.** Task 6's `ctest` run therefore proves the deepen half only.
+ Do not "cover" it here with a seam that writes `releasedSteps` directly, and do not
+ reorder Tasks 6 and 7 — the release ladder reads `quietMs`, which this task is what
+ zeroes.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_notchcontroller.cpp`.
+ 
+ ```cpp
+ // RED IF the ladder stops climbing while the bin is still over threshold
+ // (spec 4.4). The tone never stops, so every 300 ms of live time buys one
+ // rung until the ceiling's rung is reached.
+ TEST (NotchControllerLadder, AContinuingHowlDeepensOneRungPer300ms)
+ {
+     Harness h;
+@@ -2709,26 +2710,26 @@ TEST (NotchControllerLadder, SoundcheckNotchesNeverDeepen)
+     const double placed = h.controller.depthDbForTest (0, slot);
+ 
+     SineSource tone;
+     for (int i = 0; i < 200; ++i)
+         pump (h, tone.hop());
+ 
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, slot), placed);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
+ Expected: FAIL — `AContinuingHowlDeepensOneRungPer300ms` never leaves −12, `TheLastStepLandsExactlyOnAnOffRungCeiling` stays at −12, and `DeepeningStopsAtTheCeilingRung` never reaches −18. (Nothing in this run exercises the reclamp branch — see the M-A note above.)
+ 
+-- [ ] **Step 3: Implement the deepen/reclamp branch in `src/app/NotchController.cpp`**
++- [x] **Step 3: Implement the deepen/reclamp branch in `src/app/NotchController.cpp`**
+ 
+ **m-B / m-C — find this by ANCHOR, not by line number.** Task 5 inserts into
+ `placeConfirmed`, which sits ABOVE the reinforce loop, so every absolute number in
+ this task is pre-Task-5 and will already be wrong when you get here. Search for the
+ comment line
+ 
+ ```
+                 // Same live threshold analyse() used to accept candidates --
+ ```
+ 
+@@ -2818,31 +2819,31 @@ would leave the comment standing twice.
+                             if (pushRetuneLocked (c, i, next, RetuneReason::Deepen))
+                             {
+                                 n.deepestDb        = next;
+                                 n.stageChangedAtMs = liveMs_;
+                             }
+                         }
+                     }
+                 }
+ ```
+ 
+-- [ ] **Step 4: Run the controller tests**
++- [x] **Step 4: Run the controller tests**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+ Expected: PASS.
+ 
+-- [ ] **Step 5: Run the full suite**
++- [x] **Step 5: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (497 — one fewer than rev 2: the reclamp test moved to Task 7, M-A).
+ 
+-- [ ] **Step 6: Commit**
++- [x] **Step 6: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/NotchController.cpp tests/test_notchcontroller.cpp
+ ```
+ ```bash
+ git commit -m "feat(controller): deepen one rung per 300ms while the bin still rings; reclamp on return"
+ ```
+@@ -2871,21 +2872,21 @@ git commit -m "feat(controller): deepen one rung per 300ms while the bin still r
+ | −13.7 | 2 (−12, −6) | 30 s | **50 s** |
+ | −12 | 1 (−6) | 30 s | 30 + 10 = **40 s** |
+ | −10 | 1 (−6) | 30 s | **40 s** |
+ | −6 | 0 | — | 30 s |
+ 
+ B-4: the v1 plan used `pumpQuietFor(..., 55000.0)` on notches standing at −24, which is 5 s short of the Clear. Every pump length below states the rung it was computed from.
+ - Produces: the `ClearReason::AutoRelease` moment Task 8 hangs room memory on.
+ 
+ **Thread facts this task must respect:** step 3 runs on the detector thread and takes `modelMutex_`. `snapshotMutex_` must NOT be taken inside it — publishing `releaseFrozen` therefore happens in its own scope BEFORE `modelMutex_` is acquired, keeping the two mutexes un-nested exactly as they are today (M-5). The freeze reads `frameScoreValid_` / `frameMaxScore_` (`NotchController.h:433-434`), which are detector-thread-only members holding precisely the two numbers the snapshot publish just wrote — no lock needed, and no new lock order created.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_notchcontroller.cpp`. Add this helper to the anonymous namespace next to `pump` (line 344) first:
+ 
+ ```cpp
+ // Pumps ambient noise for `ms` of LIVE time. The tap stays alive (D-06) so
+ // the release clock runs, and the noise never feeds peakiness at 1 kHz.
+ void pumpQuietFor (Harness& h, NoiseSource& quiet, double ms)
+ {
+     const int blocks = (int) std::lround (ms / kBlockMs);
+     for (int i = 0; i < blocks; ++i)
+@@ -3294,26 +3295,26 @@ TEST (NotchControllerLadder, NoCommandEverLeavesTheLegalDepthRange)
+         while (h.commands.read (&cmd, 1) == 1)
+             if (cmd.type == NotchCommandType::Set)
+             {
+                 EXPECT_LE (cmd.depthDB,  0.0f);
+                 EXPECT_GE (cmd.depthDB, -24.0f);
+             }
+     }
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
+ Expected: FAIL — `ReleaseWalksTheLadderAt30sThen10sPerRung` finds the notch already cleared at 30.5 s (today's cliff), the freeze tests all release regardless of the override, `AReturningHowlReclampsImmediatelyToDeepestDb` finds the notch cleared long before its 42 s pump ends, and `ALoweredCeilingAlsoCapsTheReclampTarget` the same.
+ 
+-- [ ] **Step 3: Publish `releaseFrozen`'s neighbours, update the constant's doc, and collapse the duplicate 0.55**
++- [x] **Step 3: Publish `releaseFrozen`'s neighbours, update the constant's doc, and collapse the duplicate 0.55**
+ 
+ **m-D: `kRiskFreezeFraction`'s own doc string says "one constant, not two", and rev 2
+ still left two.** `gui::SpectrumView::kRingRiskRisingFraction` (`src/gui/SpectrumView.h:239`)
+ is a second `0.55f` literal that means exactly the same thing. `SpectrumView.h`
+ already includes `app/NotchController.h` (line 45 — verify with
+ `rg "NotchController.h" src/gui`, which reports that include and one in
+ `NotchListPanel.h:41`), so the GUI constant can simply BE the controller's:
+ 
+ ```cpp
+     // Where Rising starts, as a fraction of the threshold the DETECTOR
+@@ -3343,21 +3344,21 @@ In `src/app/NotchController.h:82-83`, replace the `kAutoReleaseMs` comment:
+ 
+ ```cpp
+     // Spec 5.2 step 7 as amended by lane G (spec 4.5, Q3): 30 s of quiet buys
+     // the FIRST rung of the release ladder, not a Clear. kReleaseStepMs
+     // (10 s) buys each rung after it, and only the notch already sitting at
+     // -6 dB is cleared. The name and value are kept because this is still
+     // "how long the first release takes"; kReleaseFirstMs is its lane-G alias.
+     static constexpr double kAutoReleaseMs       = 30000.0;
+ ```
+ 
+-- [ ] **Step 4: Replace step 3 in `src/app/NotchController.cpp`**
++- [x] **Step 4: Replace step 3 in `src/app/NotchController.cpp`**
+ 
+ Replace lines 403-416 in `runOnce` with:
+ 
+ ```cpp
+     // 3. Release ladder (spec 4.5), replacing 1.1.3's "30 s -> Clear" cliff.
+ 
+     // --- step 1: FREEZE ----------------------------------------------------
+     // Computed and PUBLISHED unconditionally, above the tapAlive gate (M-6).
+     // The v1 plan wrote latest_.releaseFrozen only while the tap was alive, so
+     // the flag kept whatever it last said once the tap died -- a GUI or a log
+@@ -3487,21 +3488,21 @@ Replace lines 403-416 in `runOnce` with:
+                 {
+                     // Already on the shallowest rung: the notch has nothing
+                     // left to give back, so it goes. Task 8 records what this
+                     // bin needed before the Clear.
+                     pushClearLocked (c, i, ClearReason::AutoRelease);
+                 }
+             }
+     }
+ ```
+ 
+-- [ ] **Step 5: Run the controller tests**
++- [x] **Step 5: Run the controller tests**
+ 
+ Step 3 touched two headers (`NotchController.h`, `SpectrumView.h`), so this run
+ reconfigures first:
+ 
+ Run: `cmake -B build -G "Visual Studio 18 2026" -A x64 && cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+ Expected: PASS. **Five** pre-existing tests now take LONGER to clear and must be checked, not "fixed" — the behaviour they assert (a Clear eventually arrives, carrying `AutoRelease`) is still correct, only the clock moved. Every new pump length is computed from the rung the notch actually stands on, using the table in this task's header.
+ 
+ **1. `NotchControllerAutoRelease.LiveTapReleasesAfter30s`** (line 152, notch at −12, pumps 7000 × 5 ms = 35 s). From −12 the Clear is at 40 s:
+ 
+ ```cpp
+@@ -3550,26 +3551,26 @@ TEST (NotchControllerAutoRelease, LiveTapReleasesThroughTheLadderAfter40s)
+ **6. `NotchControllerEvents.EveryClearPathCarriesItsReason`**'s AutoRelease case (line 1320). Its notch is a **Manual** −12, so its own depth is its ceiling and the Clear is at 40 s. Line 1325's `+ 10` becomes:
+ 
+ ```cpp
+         // Manual -12: -6 at 30 s, Clear at 40 s.
+         const int blocks = (int) ((NotchController::kReleaseFirstMs
+                                   + NotchController::kReleaseStepMs) / kBlockMs) + 10;
+ ```
+ 
+ The test also asserts `EXPECT_GT (c[0].ageMs, NotchController::kAutoReleaseMs)` — still true (40 s > 30 s) and left alone. If any of these five now reports TWO clears, the ladder is emitting a Clear per rung instead of a Retune: fix the loop, not the test.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (512).
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/NotchController.h src/app/NotchController.cpp src/gui/SpectrumView.h tests/test_notchcontroller.cpp
+ ```
+ ```bash
+ git commit -m "feat(controller): release ladder with a freezable quiet clock and a live ceiling"
+ ```
+@@ -3595,21 +3596,21 @@ git commit -m "feat(controller): release ladder with a freezable quiet clock and
+   struct MemoryEntry { double frequencyHz, deepestDb, clearedAtMs; bool used; };
+   void   rememberReleaseLocked (int lane, double frequencyHz, double deepestDb, bool bothLanes);
+   double takeRememberedDepthLocked (int lane, double frequencyHz, double binWidthHz, bool bothLanes);
+   void   clearRoomMemoryLocked();
+   std::array<std::array<MemoryEntry, kMemoryEntriesPerLane>, kChannels> roomMemory_ {};
+   std::array<int, kChannels> roomMemoryHead_ {};
+   ```
+ 
+ **Thread facts:** `roomMemory_` is written from the release path (detector thread, `modelMutex_` held) and read from `placeConfirmed` (detector thread) — and cleared from `setWidth`/`clearAll`/`setSampleRate` (message thread). It therefore lives under `modelMutex_`, the lock all four already take or can take without creating a new order. No allocation: fixed-size arrays, oldest entry overwritten.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ Append to `tests/test_notchcontroller.cpp`. `pumpQuietFor` comes from Task 7.
+ 
+ Two fixture rules apply to every test below and are not repeated in each comment:
+ 
+ - **B-3: liveness is `activeForTest`, never `depthDbForTest(...) < 0.0`.** `pushClearLocked` (`NotchController.cpp:195-212`) lowers only `active` — `depthDB` stays because the Clear event reads it at `:208`. A depth probe therefore matches every slot that has ever held a notch, and the v1 versions of these tests would have "found" a cleared slot and asserted the remembered depth against a corpse.
+ - **B-4: every quiet pump is derived from the rung the notch stands on**, using the table in Task 7's header. A notch that climbed to the −24 ceiling needs 30 + 10 + 10 + 10 = **60 s** to Clear, not the 55 s the v1 plan used, so the memory entry would never have been written at all.
+ 
+ **m-E — `firstActiveIndex` goes in the ANONYMOUS NAMESPACE, not at the end of the
+ file.** The anonymous namespace in `tests/test_notchcontroller.cpp` closes at
+@@ -3896,26 +3897,26 @@ TEST (NotchControllerLadder, LinkedReleaseWritesAndConsumesBothLanes)
+     {
+         pumpStereo (h, toneL.hop(), toneR.hop());
+         placed = firstActiveIndex (h.controller, 0);
+     }
+     ASSERT_GE (placed, 0);
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, placed), -24.0);
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (1, placed), -24.0);
+ }
+ ```
+ 
+-- [ ] **Step 2: Run to verify it fails**
++- [x] **Step 2: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchControllerLadder --output-on-failure`
+ Expected: FAIL — `AHowlReturningToTheSameBinStartsAtTheRememberedDepth` places at −12 (the steep-rise rung) instead of the remembered depth.
+ 
+-- [ ] **Step 3: Declare the memory in `src/app/NotchController.h`**
++- [x] **Step 3: Declare the memory in `src/app/NotchController.h`**
+ 
+ Next to the `pushRetuneLocked` declaration (Task 4's block):
+ 
+ ```cpp
+     // --- "Room memory" (spec 4.6, Q3/Q6/Q10) ------------------------------
+     // What a bin needed LAST time, so a howl that comes back inside
+     // kMemoryTtlMs is answered at the depth that killed it rather than
+     // crawling up the ladder again while the room rings. Per lane, fixed size,
+     // oldest entry overwritten -- no allocation, ever. Detector-thread reads
+     // (placeConfirmed, the release path) and message-thread wipes (setWidth,
+@@ -3946,21 +3947,21 @@ Next to the `pushRetuneLocked` declaration (Task 4's block):
+     void   clearRoomMemoryLocked();
+ ```
+ 
+ and, next to `model_` (line 454):
+ 
+ ```cpp
+     std::array<std::array<MemoryEntry, kMemoryEntriesPerLane>, kChannels> roomMemory_ {};
+     std::array<int, kChannels> roomMemoryHead_ {};
+ ```
+ 
+-- [ ] **Step 4: Implement in `src/app/NotchController.cpp`**
++- [x] **Step 4: Implement in `src/app/NotchController.cpp`**
+ 
+ Add the three helpers after `pushRetuneLocked`:
+ 
+ ```cpp
+ void NotchController::rememberReleaseLocked (int lane, double frequencyHz,
+                                              double deepestDb, bool bothLanes)
+ {
+     const int first = bothLanes ? 0 : lane;
+     const int last  = bothLanes ? width_ - 1 : lane;
+     for (int l = first; l <= last && l < kChannels; ++l)
+@@ -4136,31 +4137,31 @@ Finally, in Task 7's release path, record before the Clear:
+                     // What this bin needed, before the record of it goes away
+                     // with the notch (spec 4.6). ONLY on an AutoRelease: a
+                     // manual clear, a CLEAR ALL, a width change, a FALSE
+                     // verdict or an unwind are all statements that this notch
+                     // should not have been there.
+                     rememberReleaseLocked (c, n.frequency, n.deepestDb, effectiveLinked());
+                     pushClearLocked (c, i, ClearReason::AutoRelease);
+                 }
+ ```
+ 
+-- [ ] **Step 5: Run the controller tests**
++- [x] **Step 5: Run the controller tests**
+ 
+ Run: `cmake --build build --config Release && cd build && ctest -C Release -R NotchController --output-on-failure`
+ Expected: PASS.
+ 
+-- [ ] **Step 6: Run the full suite**
++- [x] **Step 6: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (520).
+ 
+-- [ ] **Step 7: Commit**
++- [x] **Step 7: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/NotchController.h src/app/NotchController.cpp tests/test_notchcontroller.cpp
+ ```
+ ```bash
+ git commit -m "feat(controller): room memory -- a howl returning to the same bin skips the crawl"
+ ```
+@@ -4175,21 +4176,21 @@ git commit -m "feat(controller): room memory -- a howl returning to the same bin
+ - Modify: `src/app/MainComponent.cpp:54-77` (a **free** `retuneReasonName` in the same anonymous namespace as `originName` (`:54`) and `reasonName` (`:66`) — m-5: it is not a `MainComponent::` member, and declaring it as one will not link), `:559-612` (`notchEventToVar`), `:950-962` (`savePreset`'s notch loop), `:983-985` (`notchDefaults`)
+ - Modify: `src/app/MainComponent.h:188` (the `notchEventToVarForTest` wrapper goes in the **public** section, next to `getNotchControllerForTest`; m-4: `savePreset` is declared at `:103` and `notchEventToVar` is a private `static` at `:256`, so the wrapper cannot live beside either)
+ - Modify: `tools/logstats.py:43-64` (the event dispatch), `:91-118` (`print_report`), `:124-127` (the `--expect-*` flags in `main`)
+ - Modify: `tests/fixtures/session-sample.jsonl`, `tests/CMakeLists.txt:113-117` (m-1: `add_test(NAME logstats_fixture` starts on line **113**, inside the `if(Python3_Interpreter_FOUND)` opened at 112, and closes at 117 — verified by grep in this worktree on 2026-09-07)
+ - Test: `tests/test_gui_wiring.cpp`, `tests/test_presetmanager.cpp`
+ 
+ **Interfaces:**
+ - Consumes (Tasks 4, 7, 8): `NotchEvent::Kind::Retune`, `RetuneReason`, `fromDepthDb`, `SnapshotNotch::deepestDb`.
+ - Produces: the log schema `ev: "notch_retune"` with keys `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `reason` (`deepen|release|reclamp|ceiling`), `from_db`, `age_ms`. Task 10 documents it.
+ 
+-- [ ] **Step 1: Write the failing tests**
++- [x] **Step 1: Write the failing tests**
+ 
+ In `tests/test_gui_wiring.cpp`, after `savePreset`'s existing lane test (around line 1129).
+ 
+ **M-1 — use this file's real helpers.** `TempDir`, `pumpOneBlockThroughSlotZero` and `notchControllerForTest` do not exist anywhere in the repo; the v1 plan invented all three and the tests would not have compiled. `SavePresetWritesAFileThatLoadPresetReopensIdentically` at `:1016-1041` is the shape to copy, and it is copied literally below:
+ 
+ - `const juce::ScopedJuceInitialiser_GUI juceInit;` is the **first line** of the test — constructing `MainComponent` without it is undefined;
+ - the accessor is `app.getNotchControllerForTest (0)` (declared `MainComponent.h:188`), and it returns a pointer that must be null-checked;
+ - there is no `TempDir`: the file is an explicit `juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (...)`, `deleteFile()`d before the save and again after the load;
+ - a snapshot is published by hand — `controller0->setSampleRate (48000.0)`, then `app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size())`, then `controller0->runOnce()`. The rate matters: `saveToFile` validates each notch's freq against the published rate's Nyquist, and `savePreset` refuses a preset whose rate is 0 (memory/preset-save-roundtrip-2026-09-05.md).
+ 
+@@ -4336,21 +4337,21 @@ TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
+     p.notches.push_back (n);
+ 
+     const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+     ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+     ASSERT_EQ (result.preset.notches.size(), 1u);
+     EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -24.0);
+ }
+ ```
+ 
+-- [ ] **Step 2: Extend the log fixture and its test**
++- [x] **Step 2: Extend the log fixture and its test**
+ 
+ **M-7 — the fixture has to tell a story that could actually have happened.** The v1 lines said `from_db:-12, depth_db:-18, reason:deepen` for the lane-1 index-0 notch, whose `notch_set` on line 4 already reads `depth_db:-18`: it deepens FROM a depth it never held, TO the depth it was placed at. A fixture that contradicts itself is worse than none — it is what the next reader will copy. Make the whole life of that notch consistent with the lane-G ladder:
+ 
+ 1. **Edit line 4** (`notch_set`, `t: 5001.0`, lane 1, index 0): `"depth_db":-18` → `"depth_db":-6`. That is a lane-G placement — the shallowest rung. Nothing else on the line changes; `rise:1` is rNorm, which saturates, so it is consistent with either band.
+ 2. **Insert after line 4** — a deepen 300 ms later, the `kDeepenAfterMs` gate exactly:
+ 
+ ```
+ {"ev":"notch_retune","t":5301.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-12,"from_db":-6,"origin":"detector","reason":"deepen","age_ms":300.0}
+ ```
+ 
+@@ -4397,29 +4398,29 @@ bin, so 1007.8 / 2437.5 / 1007.8 / 482.0 still gives a max of 2. None of these r
+ Then extend the fixture test in `tests/CMakeLists.txt:113-117`:
+ 
+ ```cmake
+     add_test(NAME logstats_fixture
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-sample.jsonl
+                 --expect-notches 4 --expect-verdicts 3 --expect-false 1
+                 --expect-recurrence-max 2 --expect-retunes 2)
+ ```
+ 
+-- [ ] **Step 3: Run to verify it fails**
++- [x] **Step 3: Run to verify it fails**
+ 
+ Run: `cmake --build build --config Release 2>&1 | tail -5`
+ Expected: compile error — `notchEventToVarForTest` and `retuneForTest` unresolved on `MainComponent`.
+ 
+ Run: `python tools/logstats.py tests/fixtures/session-sample.jsonl --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2`
+ Expected: FAIL — `unrecognized arguments: --expect-retunes`. Then, with that flag removed, it exits 0 and reports nothing new: m-7 — the current reader does **not** miscount, it **ignores** the two lines. `summarise` is an `if/elif` chain on `ev` with no `else` (`tools/logstats.py:45-63`), so an unknown name simply falls through: `notches` stays 4 and every other total is unchanged. That is the correct behaviour for an old reader meeting a new log, and the branch added in Step 5 must preserve it. The defect being fixed is not a wrong number — it is a **blind spot**: the depth column shows the placement depth forever, and the retunes are invisible.
+ 
+-- [ ] **Step 4: Implement in `src/app/MainComponent.cpp`**
++- [x] **Step 4: Implement in `src/app/MainComponent.cpp`**
+ 
+ Add next to `reasonName` (line 66) — m-5: a **free** function in the same anonymous namespace as `originName` (`:54`) and `reasonName` (`:66`), with no `MainComponent::` qualifier. `notchEventToVar` calls it unqualified from the same translation unit; writing it as a member would need a header declaration it does not have and would not link.
+ 
+ ```cpp
+ const char* retuneReasonName (NotchController::RetuneReason r)
+ {
+     switch (r)
+     {
+         case NotchController::RetuneReason::Deepen:  return "deepen";
+         case NotchController::RetuneReason::Release: return "release";
+@@ -4483,21 +4484,21 @@ and after `preset.sampleRate = presetRate;` (line 985):
+ 
+ ```cpp
+     // Q11: the CEILING round-trips too. Without this a reloaded preset falls
+     // back to PresetNotchDefaults' -12 dB (PresetManager.h:146) and caps every
+     // detector notch two rungs shallower than the show was tuned at -- a bug
+     // that predates lane G and that lane G's ladder makes load-bearing.
+     preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
+     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
+ ```
+ 
+-- [ ] **Step 5: Implement in `tools/logstats.py`**
++- [x] **Step 5: Implement in `tools/logstats.py`**
+ 
+ In `summarise`, extend the `notch_set` record and add the branch (lines 48-63):
+ 
+ ```python
+         if ev == "notch_set":
+             n = {"slot": e.get("slot"), "lane": e.get("lane"), "index": e.get("index"),
+                  "hz": float(e.get("hz", 0.0)), "origin": e.get("origin", "?"),
+                  "set_t": float(e.get("t", 0.0)), "clear_t": None, "reason": None,
+                  "verdict": None, "score": e.get("score"),
+                  # lane G: the depth a notch is RUNNING at, and how many times
+@@ -4567,39 +4568,39 @@ In `main`, add the flag and its check:
+     ap.add_argument("--expect-retunes", type=int)
+ ```
+ 
+ ```python
+     if args.expect_retunes is not None and s["retunes"] != args.expect_retunes:
+         failures.append(f"retunes {s['retunes']} != {args.expect_retunes}")
+ ```
+ 
+ The file is already opened with `encoding="utf-8"` in `load()` (line 19) and writes nothing back — repo rule 6 is satisfied; do not change that call.
+ 
+-- [ ] **Step 6: Run the log tool by hand, then the suites**
++- [x] **Step 6: Run the log tool by hand, then the suites**
+ 
+ Run: `python tools/logstats.py tests/fixtures/session-sample.jsonl --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2`
+ Expected: exit 0, and the table's first row shows `-6dB` running / `-12dB` deepest / `2` retunes with `held` ~40.4 s (5001 → 45400, m-A) — the record stayed OPEN across both retunes.
+ 
+ Run:
+ ```
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ cmake --build build --config Release
+ cd build && ctest -C Release -R "GuiWiring|PresetManager|logstats" --output-on-failure
+ ```
+ Expected: PASS.
+ 
+-- [ ] **Step 7: Run the full suite**
++- [x] **Step 7: Run the full suite**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` (526).
+ 
+-- [ ] **Step 8: Commit**
++- [x] **Step 8: Commit**
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add src/app/MainComponent.h src/app/MainComponent.cpp tools/logstats.py tests/fixtures/session-sample.jsonl tests/CMakeLists.txt tests/test_gui_wiring.cpp tests/test_presetmanager.cpp
+ ```
+ ```bash
+ git commit -m "feat(app): log notch_retune, save deepestDb, round-trip the notch ceiling"
+ ```
+@@ -4621,21 +4622,21 @@ git commit -m "feat(app): log notch_retune, save deepestDb, round-trip the notch
+ - Modify: `docs/spec-ring-risk.md` (new section before "## Out of scope")
+ - Modify: `docs/superpowers/specs/2026-09-05-data-loop-design.md:103-111`
+ - Modify: `docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md:23`, `:70`, and lane A's row
+ - Modify: `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md:5` (status line)
+ - Modify: `installer/TESTER-NOTES.md` (header block + a new "Mới trong 1.2.0" section)
+ - Create: `docs/release-notes/1.2.0-alpha.md`
+ - Create: `memory/gain-aware-notch-lane-g-2026-09-07.md`; modify `memory/MEMORY.md`
+ 
+ **Interfaces:** none — prose only.
+ 
+-- [ ] **Step 1: `docs/GIOI-THIEU.md`**
++- [x] **Step 1: `docs/GIOI-THIEU.md`**
+ 
+ Line 28, inside the overview diagram, replace `tự nhả filter khi hết hú`:
+ ```
+                             nhả dần từng bậc khi hết hú
+ ```
+ 
+ Line 41, the **Notch siêu hẹp** row — the depth default is now a ceiling:
+ ```
+ | **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30). Độ sâu −6 đến −24 dB (mặc định −18) nay là **TRẦN**: notch đặt ở −6 dB (hoặc −12 nếu đỉnh lên dốc) rồi chỉ đào sâu thêm 6 dB mỗi 300 ms chừng nào bin đó còn hú, không bao giờ quá trần. Chỉ mất đúng vài Hz quanh tần số hú |
+ ```
+@@ -4644,21 +4645,21 @@ Line 45, replace the **Tự nhả sau 30 giây** row:
+ ```
+ | **Nhả dần theo bậc** | Hết hú 30 giây → nông đi 6 dB; mỗi 10 giây yên tiếp theo nông thêm một bậc; tới −6 dB thì nhả hẳn (tổng ~50 giây). Hú quay lại là kẹp ngay về bậc sâu nhất đã từng đứng. Phòng đang căng (chip RING RISK ≥ RISING) thì đồng hồ **đứng yên** — notch giữ nguyên bậc chừng nào phòng còn căng |
+ | **Nhớ phòng 5 phút** | Hú quay lại đúng bin cũ trong 5 phút sau khi nhả hẳn → đặt lại thẳng ở độ sâu đã từng cần, không dò lại từ −6 dB |
+ ```
+ 
+ Line 50, the presets row — say the two numbers are ceilings now:
+ ```
+ | **Preset có sẵn** | `Speech` (Q=40, trần −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, trần −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Trần −10 của Music **tới được**: theo Q13 thang hiệu lực là −6 → −10, bậc cuối chính là trần, nên Music vẫn cắt đủ 10 dB như 1.1.3 chứ không bị lượng tử về −6. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). Từ 1.2.0 file lưu ra mang **độ sâu phòng đã cần** (`deepestDb`) và mang cả trần trong `notchDefaults`, nên nạp lại đúng như lúc lưu. |
+ ```
+ 
+-- [ ] **Step 2: `docs/KY-THUAT-CHONG-HU.md`**
++- [x] **Step 2: `docs/KY-THUAT-CHONG-HU.md`**
+ 
+ Line 32, the mermaid box: `auto-release 30 s` → `thang nhả 30 s + 10 s/bậc`.
+ 
+ Line 225, the mermaid note: `Khóa khi vượt ngưỡng,<br/>tự nhả sau 30 s im` → `Đặt nông rồi đào sâu theo nhu cầu,<br/>nhả dần từng bậc khi im`.
+ 
+ Section **### Bộ lọc notch và độ sâu** (lines 79-92) — append after the existing `depthDB > 0` paragraph:
+ 
+ ```markdown
+ **Đổi độ sâu trên notch đang chạy (1.2.0).** `Biquad::setNotchFilter` gọi
+ `reset()` mỗi lần đổi hệ số, đúng khi tần số hoặc Q đổi và **sai** khi chỉ độ
+@@ -4755,21 +4756,21 @@ Section **## 5. Tổng hợp các giới hạn an toàn** (line 322-326) — add
+ ```
+ 
+ Section **## 7. Log session** (line 359-360) — add the row and amend `notch_set`:
+ 
+ ```markdown
+ | `notch_retune` | lane G đổi độ sâu một notch đang chạy | slot, làn, index, Hz, Q, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` (tính từ lúc ĐẶT, không phải từ lần retune trước) |
+ ```
+ 
+ Section **## 8. Trạng thái & kiểm chứng** (line 389) — replace the version line with 1.2.0 and the suite count the final run reports.
+ 
+-- [ ] **Step 3: `docs/spec-ring-risk.md`**
++- [x] **Step 3: `docs/spec-ring-risk.md`**
+ 
+ Insert before `## Out of scope`:
+ 
+ ```markdown
+ ## Người đọc thứ hai: thang nhả lane G (1.2.0)
+ 
+ Cho tới 1.1.3 chỉ GUI đọc `ringRiskScore`. Từ 1.2.0 `NotchController` tự đọc
+ **số của chính nó** — `frameMaxScore_` / `frameScoreValid_`, hai member chỉ
+ sống trên detector thread và chứa đúng hai số vừa publish vào snapshot — để
+ **đóng băng đồng hồ nhả** khi `frameScoreValid_ && frameMaxScore_ ≥ 0.55 ×
+@@ -4790,21 +4791,21 @@ Ba điều cần biết khi đọc chip cạnh thang nhả:
+   đọc `displayedSlot_`, nên chip có thể báo RISING khi đồng hồ đã chạy lại, và
+   một slot không hiển thị có thể đang đóng băng mà màn hình không nói gì.
+   `SnapshotBuffer::releaseFrozen` tồn tại để sau này nói được điều đó — 1.2.0
+   publish nhưng chưa vẽ (Q9).
+ - **`ringRiskValid == false` KHÔNG đóng băng** (invariant 7). Tắt detection
+   phải nhả y như 1.1.3, nếu không thì tắt detection sẽ giam mọi notch lại.
+ - **Không có trần thời gian cho đóng băng** (Q9). Phòng còn căng thì notch còn
+   giữ bậc, không giới hạn.
+ ```
+ 
+-- [ ] **Step 4: `docs/superpowers/specs/2026-09-05-data-loop-design.md`**
++- [x] **Step 4: `docs/superpowers/specs/2026-09-05-data-loop-design.md`**
+ 
+ In the §3.2 table (lines 103-111), insert after the `notch_set` row:
+ 
+ ```markdown
+ | `notch_retune` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` |
+ ```
+ 
+ and append below the table:
+ 
+ ```markdown
+@@ -4813,79 +4814,79 @@ có thể retune nhiều lần giữa `notch_set` và `notch_clear` của nó.
+ `tools/logstats.py` xử lý nó bằng cách sửa bản ghi đang mở (`depth_db`,
+ `deepest_db`, `retunes`) và **không** đóng bản ghi — nếu đóng thì một lần đào
+ sâu ở mốc 300 ms sẽ biến mọi notch được đào thành "notch sống 300 ms", tức một
+ false positive giả trên mọi dòng thống kê.
+ 
+ Reader là một chuỗi `if/elif` trên `ev` và **bỏ qua tên lạ**, nên một file log
+ cũ đọc bằng tool mới vẫn chạy đúng, và một `ev` thêm sau này cũng không làm
+ hỏng reader cũ.
+ ```
+ 
+-- [ ] **Step 5: roadmap + spec status**
++- [x] **Step 5: roadmap + spec status**
+ 
+ `docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md` line 23 — replace the lane G row's last column with `đã hạ cánh 1.2.0`, and line 70's `| G | chờ S, D | |` with `| G | đã hạ cánh 1.2.0 | thang độ sâu + nhả dần + nhớ phòng; ramp 10 ms trong Biquad |`. In lane A's row, add: `fallback notch = thang G (đặt −6, đào 6 dB/300 ms, nhả 30 s + 10 s/bậc)`.
+ 
+ `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` line 5 — change `**Trạng thái:** spec v2 ... chờ owner duyệt trước khi viết plan` to `**Trạng thái:** đã thực thi, 1.2.0 alpha (plan: docs/superpowers/plans/2026-09-07-gain-aware-notch.md).`
+ 
+-- [ ] **Step 6: `docs/release-notes/1.2.0-alpha.md`**
++- [x] **Step 6: `docs/release-notes/1.2.0-alpha.md`**
+ 
+-Create it in the shape of `1.1.3-alpha.md`. It must contain, in this order: the version and date; the suite count from the final `ctest` run; the four measured attenuations from Task 2's test; a "cái gì đổi" list covering placement (−6/−12), deepening (6 dB/300 ms), the release ladder (30 s + 10 s/rung, Clear at −6), the freeze (no time cap), room memory (5 min, same bin, one use), the −24 clamp, the 10 ms ramp, `notch_retune` in the log, and `savePreset` writing `deepestDb` + `notchDefaults`; and an explicit **"nghe ở âm lượng thấp trước"** block naming the three rows from spec §3 that testers will hear: placement (up to ~0.6 s more howl before it is fully suppressed), the release window from 30 s to the Clear at 40–60 s depending on the rung reached (up to 18 dB more tone missing than 1.1.3), and the "stuck on a shallow rung" case (6–12 dB shallower for the notch's whole life — the intended tone win, and the one thing the suite cannot check). It must also state the Q13 consequence for the shipped presets: `Music` still reaches its −10 dB ceiling and `Speech` its −18, so neither is quieter than on 1.1.3 once the ladder has climbed.
++Create it in the shape of `1.1.3-alpha.md`. It must contain, in this order: the version and date; the suite count from the final `ctest` run; the four measured attenuations from Task 2's test; a "cái gì đổi" list covering placement (−6/−12), deepening (6 dB/300 ms), the release ladder (30 s + 10 s/rung, Clear at −6), the freeze (no time cap), room memory (5 min, same bin, one use), the −24 clamp, the 10 ms ramp, `notch_retune` in the log, and `savePreset` writing `deepestDb` + `notchDefaults`; and an explicit **"nghe ở âm lượng thấp trước"** block naming the three rows from spec §3 that testers will hear: placement (up to ~0.6 s more howl before it is fully suppressed), the release window from 30 s to the Clear at 30–60 s depending on the rung reached (−6: 30 s, the Clear lands on the first expiry; −12 and Music's −10: 40 s; −18: 50 s; −24: 60 s) (up to 18 dB more tone missing than 1.1.3), and the "stuck on a shallow rung" case (6–12 dB shallower for the notch's whole life — the intended tone win, and the one thing the suite cannot check). It must also state the Q13 consequence for the shipped presets: `Music` still reaches its −10 dB ceiling and `Speech` its −18, so neither is quieter than on 1.1.3 once the ladder has climbed.
+ 
+-- [ ] **Step 7: `installer/TESTER-NOTES.md`**
++- [x] **Step 7: `installer/TESTER-NOTES.md`**
+ 
+ Update the header block (version, build date, suite count, SHA-256 — the SHA comes from the installer the release script actually produces, so fill it in AFTER Step 9). Add a `## Mới trong 1.2.0` section before `## Mới trong 1.0.5`, written for a soundman, not a developer. It must say:
+ 
+ - notches now start shallow and get deeper only while the howl continues, so a sudden howl may be audible ~0.3–0.6 s longer than on 1.1.3 — **test at low volume first**;
+ - a notch that never needs to go deep will stay at −6 or −12 for its whole life, and that is correct, not a bug — **and this is the one behaviour no automated test in the project can check** (M-3), so it is the rig's job: if every notch on your rig ends up at the DEPTH slider's value, say so, because that is the reinforce loop misreading the spectrum;
+-- after a howl stops the notch now backs off in steps instead of vanishing at 30 s: the first step is at 30 s and each one after it costs 10 s, so a notch that reached the DEPTH slider's value takes **40–60 s** to disappear (40 s from −12, 50 s from −18, 60 s from −24) and between 30 s and that moment **more tone is missing than on 1.1.3**;
++- after a howl stops the notch now backs off in steps instead of vanishing at 30 s: the first step is at 30 s and each one after it costs 10 s, so a notch takes **30–60 s** to disappear depending on the rung it stood on (30 s from −6 — already the shallowest rung, so the first expiry Clears it; 40 s from −12 and from Music's −10; 50 s from −18; 60 s from −24) and between 30 s and that moment **more tone is missing than on 1.1.3**;
+ - while RING RISK reads RISING or CRITICAL, notches stop backing off entirely, with no time limit;
+ - the same howl coming back within 5 minutes is notched deep immediately;
+ - what to report: a click or a "zip" when a notch changes depth (there must be none — every change is ramped over 10 ms); a howl the app never gets on top of; a notch that goes deeper than the DEPTH slider says.
+ 
+-- [ ] **Step 8: `memory/`**
++- [x] **Step 8: `memory/`**
+ 
+ Create `memory/gain-aware-notch-lane-g-2026-09-07.md` with the front-matter shape the other notes use, recording whatever this lane actually taught — at minimum: that a coefficient ramp needs a state-identity assertion because every black-box measurement passes a silent `reset()` (M-7); that the reinforce loop and `runOnce` step 3 both already hold a non-recursive `modelMutex_`, which is why a `*Locked` sibling was the only option (B-1); that `pushClearLocked` leaves every field but `active` intact, so slot reuse must be re-initialised at `setNotchImpl` (B-2); that `ev` — not `kind` — is the log's dispatch key (B-3); and the M-9 consequence that "deepen" and "still howling" are the same test, so the ladder stops at the first rung that works.
+ 
+ Add, from this plan's own two 2026-09-07 revisions — these are lessons about writing the plan, and they are the ones that cost the most:
+ 
+ - **`pushClearLocked` retaining `depthDB` makes "depth < 0" a false liveness test.** Six tests across three tasks were written on it and would all have passed against cleared slots. The accessor `activeForTest` exists only because of this.
+ - **A ladder's timings must be derived from the rung, not from a round number.** `55000.0` looked like "past the 50 s release" and was 5 s short of the 60 s a −24 notch actually needs. Write the arithmetic in the comment or it drifts.
+ - **A scoring fixture has to be derived from the scorer's own formula before it is written — and twice, because the first derivation solved the wrong variable.** The spec's illustrative +3 dB/250 ms can never confirm (`rNorm = (rise−1)/0.5` against a ≥ 112.5 ms reference gives 0.35 against a 0.7 floor). But fixing the SLOPE still could not produce a −6 placement: for the first 11 tone blocks the rise reference is a NOISE frame, and a tone that switches on above the floor gives `riseRatio ≈ 64` at any slope — while peakiness, being scale-invariant, confirms within ~4 blocks, i.e. inside that window. The parameter that decides the band is the ramp's **starting amplitude**, which has to equal the noise floor's per-bin magnitude. Two lines of algebra beat a build; three lines beat two.
+ - **Q13: quantising a ceiling to a rung silently made the shipped `Music` preset 4 dB shallower than 1.1.3.** The defect was invisible in the spec, in the plan and in every test, because no test used a ceiling that was not a multiple of 6. When a constant can take values off the grid your tests use, test one that is.
+ - **A plan is not verified until someone opens the files it cites.** Three helpers used in Task 9 (`TempDir`, `pumpOneBlockThroughSlotZero`, `notchControllerForTest`) did not exist anywhere in the repo; the plan itself flagged them as unverified and the flag was not acted on until a second reader looked.
+ - **A one-way clamp guarding a value that has TWO ways to become stale is half a clamp** (M-B, and this is the safety lesson of the lane). The ceiling branch only clamped `deepestDb` when it also emitted a `Set` — i.e. only when the notch was currently deeper than the ceiling. A notch that had RELEASED to a shallower rung skipped the branch entirely and kept a `deepestDb` from under the old ceiling, which the next reclamp then honoured: **12 dB deeper than the operator's slider, on a live PA.** The fix is two lines and both are needed: clamp the remembered value unconditionally every tick, and clamp the reclamp target at the moment it is used. Whenever a "deepest ever" or "high water mark" is kept alongside a limit that can move, ask what happens when the limit moves while the value is not in use.
+ - **A test that needs a state should build it the way production does.** Rev 2 reached "already released" with `retuneForTest(..., Release)`, which sets `depthDB` and nothing else — so the branch under test was never entered and the test would have read the deepen path's answer instead. The seam looked like it set the state because its argument was named `Release`.
+ 
+ Add one line to `memory/MEMORY.md`'s `## Notes` list, in the same style as its neighbours, linking the new file.
+ 
+-- [ ] **Step 9: Verify and commit**
++- [x] **Step 9: Verify and commit**
+ 
+ Run: `cd build && ctest -C Release`
+ Expected: `100% tests passed` — record the number for the release note and the tester notes.
+ 
+ Run: `build/tools/Release/HandsFreeSnapshot.exe shots 1440 920 --fast`
+ Then READ `shots/console-live.png` back and check the ACTIVE NOTCHES depth column shows a ladder rung (−6 or −12), not −18. Send it to the owner — GUI-visible behaviour is not reported without a picture (CLAUDE.md).
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+ git add docs/GIOI-THIEU.md docs/KY-THUAT-CHONG-HU.md docs/spec-ring-risk.md docs/release-notes/1.2.0-alpha.md installer/TESTER-NOTES.md memory/MEMORY.md memory/gain-aware-notch-lane-g-2026-09-07.md
+ ```
+ ```bash
+ git add docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md docs/superpowers/specs/2026-09-05-data-loop-design.md docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
+ ```
+ ```bash
+ git commit -m "docs: lane G -- depth ladder, release staircase, room memory, notch_retune schema"
+ ```
+ 
+-- [ ] **Step 10: Release to the alpha testers**
++- [ ] **Step 10: Release to the alpha testers**  — **chưa xong (release-alpha.ps1 chạy sau fix wave này)**
+ 
+ Per CLAUDE.md's standing instruction, a finished change ships. This one is a minor version.
+ 
+ ```bash
+ pwsh -File installer\release-alpha.ps1 -Part minor
+ ```
+ 
+ Then fill the produced installer's SHA-256 and size into `installer/TESTER-NOTES.md`, and commit the version bump `CMakeLists.txt` change plus the notes:
+ 
+ ```bash
+diff --git a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+index b862eb2..1f9dbfe 100644
+--- a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
++++ b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+@@ -60,21 +60,21 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
+    commit khi hành vi user-visible đổi.
+ 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
+    gửi tester nêu rõ lane vừa đổi gì.
+ 
+ ## Trạng thái
+ 
+ | Lane | Trạng thái | Ngày |
+ |---|---|---|
+ | S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
+ | D | **đã làm xong** trên nhánh `feat/data-loop` (8 task + fix wave sau verifier độc lập & review toàn nhánh, suite 432/432); **release 1.1.2 alpha đã đẩy** lên `Z:\My Drive\RELEASE\ALPHA TEST` (gate 432/432, SHA-256 `51E28F8EDD6E…`); **đã merge main** `e9da9c6` (owner, 05/09/2026 chiều) | 2026-09-05 |
+-| G | **đã hạ cánh 1.2.0** trên nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568` (10 task SDD + fix rounds, commit `01ecb4c..fba2626`, suite 546/546, chưa đóng gói): thang độ sâu theo nhu cầu (đặt −6/−12, đào 6 dB mỗi 300 ms, trần = slider), nhả dần 30 s + 10 s/bậc, đóng băng nhả khi RING RISK ≥ RISING (slot-global, không trần thời gian), nhớ phòng 5 phút, ramp độ sâu 10 ms trong `Biquad`, `notch_retune` trong log session, `preset_load` đọc/ghi trần (Q11, `ceiling_applied`) | 2026-09-07 |
++| G | **đã hạ cánh 1.2.0** trên nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568` (10 task SDD + fix rounds, commit `01ecb4c..63c1759`, suite 547/547, chưa đóng gói): thang độ sâu theo nhu cầu (đặt −6/−12, đào 6 dB mỗi 300 ms, trần = slider), nhả dần 30 s + 10 s/bậc, đóng băng nhả khi RING RISK ≥ RISING (slot-global, không trần thời gian), nhớ phòng 5 phút, ramp độ sâu 10 ms trong `Biquad`, `notch_retune` trong log session, `preset_load` đọc/ghi trần (Q11, `ceiling_applied`) | 2026-09-07 |
+ | M | chờ S | |
+ | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
+ | L | chờ D | |
+ | A | chờ M (G đã xong: fallback notch dùng thang G) | |
+ 
+ **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
+ plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
+ khỏi lane D khi review**. Reset chỉ Detector mà không đụng lịch sử của
+ `CandidateScorer` để lại history cũ, khiến hai trục rise/novelty bị bão hòa về
+ 0 trong ~200 ms trên làn vừa quay lại — **dễ dãi hơn** hành vi 1.1.1 đang
+diff --git a/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md b/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
+index f37e997..6d5f6b0 100644
+--- a/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
++++ b/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
+@@ -1,15 +1,15 @@
+ # Lane G — Gain-aware notch: depth theo nhu cầu, nhả dần, nối ring-risk
+ 
+ **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
+ **Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q14, đừng hỏi lại).
+-**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task + fix rounds, suite 546/546 tại `fba2626`, chưa đóng gói — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
++**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task + fix rounds, suite 547/547 tại `63c1759`, chưa đóng gói — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+ 
+ ## 1. Vấn đề
+ 
+ Đọc code 2026-09-06:
+ 
+ - Depth là **một số cố định** đọc từ preset lúc đặt
+   (`NotchController::placeConfirmed`, `notchDepthDb_`, mặc định −18, kẹp
+   [−24, −6]). Không có gì đo notch *cần* bao nhiêu; phòng hú nhẹ vẫn bị cắt
+   18 dB, tone mất nhiều hơn cần.
+ - Nhả là **cụt**: `runOnce` bước 3, `liveMs_ − lastDetectedMs > 30 s` →
+@@ -249,22 +249,28 @@ float>>)` ép `frameScoreValid_/frameMaxScore_` sau mỗi drain, và
+ tĩnh tự tụt score về 0 sau vài giây, không giữ được ≥ 0.385 suốt 30 s bằng
+ audio.
+ 
+ `kAutoReleaseMs` (30 000) giữ tên/giá trị làm `kReleaseFirstMs`; doc string
+ đổi. `kTapSilenceTimeoutMs` không đổi.
+ 
+ ### 4.6 Phòng nhớ (`ReleasedMemory`, thread detector)
+ 
+ - Mỗi làn một mảng cố định 16 mục `{frequencyHz, deepestDb, clearedAtMs}`,
+   ghi vòng (đè cũ nhất). Không allocate.
+-- Ghi khi Clear do `AutoRelease` từ bậc −6 (không ghi Manual/ClearAll/
+-  WidthChange/VerdictFalse/PartialApplyUnwind).
++- Ghi khi Clear do `AutoRelease` (không ghi Manual/ClearAll/WidthChange/
++  VerdictFalse/PartialApplyUnwind). **Chính xác hơn "từ bậc −6"**: chỗ ghi là
++  nhánh `else` của `if (n.depthDB < kDepthLadderDb[0])` trong vòng nhả
++  (`NotchController.cpp:830-844`), tức mọi notch có `depthDB >= −6` khi đồng
++  hồ im hết hạn — bậc −6 là trường hợp thường gặp, nhưng một notch Manual đặt
++  ở độ sâu **lệch bậc và nông hơn −6** (vd. −3 dB) rơi thẳng vào nhánh này
++  ngay lần hết hạn đầu tiên và ghi `deepestDb = −3` vào phòng nhớ. Đúng
++  nghĩa: cái được ghi là "độ sâu bin này đã cần", không phải "bậc −6".
+ - Đọc ở §4.3 bước 3: cùng làn, **cùng bin** (`lround(f / binWidth)` bằng
+   nhau, ±0 — Q10; lệch một bin là hú mới, bắt đầu −6), `liveMs_ −
+   clearedAtMs ≤ kMemoryTtlMs (300 000)`. Trúng thì **xóa mục** (đã dùng).
+ - LINKED (M-11): một Clear LINKED ghi mục ở **cả hai làn**; một placement
+   LINKED tra và **xóa ở cả hai làn** (khớp ở làn nào cũng lấy `deepestDb`
+   lớn nhất). Không để mục mồ côi ở làn kia.
+ - Xóa toàn bộ khi `setWidth` (ranh thật của đổi thiết bị/SR qua
+   `onAfterRestart`, `NotchController.cpp:106-114`) và `clearAll`.
+   `setSampleRate` không có caller production (m-7) — vẫn xóa ở đó cho nhất
+   quán. Không persist ra preset/đĩa.
+@@ -374,23 +380,39 @@ audio.
+ 
+ ### 4.10 Invariant an toàn (test pin từng dòng)
+ 
+ 1. Controller không bao giờ phát `Set` với `depthDB > 0` hoặc `< −24`
+    (kẹp trước khi push; `setNotchImpl` đã từ chối `> 0`).
+ 2. Notch Detector không bao giờ sâu hơn trần; Preset/Manual không bao giờ
+    sâu hơn depth được cho. **Kể cả đường kẹp lại**: đích Reclamp là
+    `max(deepestDb, ceilingRung)`, và `deepestDb` của notch Detector bị kẹp
+    về trần mỗi tick (§4.1, §4.4, §4.5 bước 2). Không có đường nào để một
+    `deepestDb` ghi lại dưới trần cũ quay lại làm depth dưới trần mới.
+-3. Một lần đổi depth theo hướng **sâu** ≤ 6 dB. Theo hướng **nông** có thể
+-   > 6 dB một lần (hạ trần nhiều bậc) — được phép, nông đi không nguy hiểm.
+-   Mọi lần đều trải `kRampMs` ⇒ ≤ 0.6 dB/ms theo hướng sâu.
++3. Một bước **ĐÀO SÂU** (`RetuneReason::Deepen`) ≤ 6 dB — `nextDeeperRungDb`
++   đi đúng một bậc, và bậc cuối còn có thể nhỏ hơn 6 dB khi trần lệch bậc
++   (Q13). Theo hướng **nông** thì **không có trần**: hạ trần nhiều bậc một
++   lúc đổi > 6 dB trong một bước, được phép vì nông đi không nguy hiểm.
++
++   **Ngoại lệ có chủ ý — KẸP LẠI (`RetuneReason::Reclamp`, §4.4):** một lần
++   kẹp lại đi thẳng về `max(deepestDb, ceilingRung)`, tức **tới 18 dB theo
++   hướng SÂU trong một ramp 10 ms** (−6 → −24 sau khi đã nhả hết ba bậc).
++   Đó là thiết kế, không phải vi phạm: đích đến là **một độ sâu chính notch
++   này đã từng đứng** và đã được chứng minh là cần, invariant 2 vẫn giữ
++   (không bao giờ quá trần), `|H| ≤ 1` ở mọi điểm giữa ramp
++   (`Biquad.RampMidpointsNeverBoostAnyFrequency`), và hệ số đi liên tục nên
++   không có reset, không có "cạch".
++
++   Mọi lần đổi đều trải `kRampMs` ⇒ ≤ 0.6 dB/ms cho bước đào sâu, ≤ 1.8 dB/ms
++   cho một lần kẹp lại tối đa. **`NotchChain` không cưỡng chế điều nào ở
++   trên** (`NotchChain.h` nói rõ nó nhận bất kỳ độ sâu hợp lệ nào) — thang
++   trong `NotchController` mới là nơi giữ, và invariant này chỉ đúng chừng
++   nào thang còn là đường duy nhất gọi `pushRetuneLocked`.
+ 4. Bộ hệ số đích bị `Biquad` từ chối ⇒ slot không đổi, ramp cũ (nếu có)
+    không đổi.
+ 5. Ramp chỉ giữa hai bộ cùng `freq`, `Q`, `sampleRate`; đổi bất kỳ cái nào
+    ⇒ reset như hôm nay.
+ 6. `processSample` không allocate, không log, không branch ngoài
+    `rampRemaining > 0`.
+ 7. Đóng băng chỉ khi `ringRiskValid`; detection tắt ⇒ nhả như hôm nay.
+ 8. Soundcheck: không đào, không nhả, không kẹp (KD-7).
+ 
+ ## 5. Kiểm thử (headless, thêm vào suite 454)
+@@ -477,22 +499,27 @@ cách chỉnh nằm trong plan Task 5.
+ - Preset: `adoptPreset` depth −12 ⇒ không đào; nhả thang; kẹp lại về −12.
+ - Soundcheck: không có Set/Clear nào ngoài hôm nay.
+ - LINKED: hai làn cùng index cùng bậc ở mọi bước; INDEP: làn kia không đổi.
+ - Event: mỗi đổi depth một `Retune` với reason đúng, `fromDepthDb` đúng,
+   `ctx == nullptr`; SessionLogger ghi `ev: "notch_retune"`; `logstats.py` giữ
+   bản ghi mở qua retune.
+ - Không có `Set` nào với depth ngoài [−24, 0] trong toàn bộ fixture (fuzz
+   nhỏ: 200 block ngẫu nhiên reinforce/yên/frozen).
+ 
+ ### 5.4 Snapshot tool / ảnh
+-- `HandsFreeSnapshot` không cần stage mới; ảnh `console-live.png` gửi owner
+-  theo luật GUI, số depth trên panel là −6/−12 thay vì −18.
++- `console-live.png`: gửi owner theo luật GUI, số depth trên panel là
++  −6/−12 thay vì −18. Tool có stage sẵn thang −18/−12/−6 (`97521aa`).
++- `console-preset-music.png` (thêm ở fix wave final review, I-4): đúng khung
++  của `console-live` nhưng đặt notch defaults về cặp lệch bậc của
++  `presets/Music.json` (Q 25, −10 dB) rồi `TuningPanel::refresh()` +
++  `SlotPanel::refresh()`, để có ảnh chứng minh hành vi `fba2626` — ô DEPTH
++  hiện "−10 dB" và ô Q hiện "25" bằng chữ thay vì bỏ trống.
+ 
+ ## 6. Việc phải làm ngoài code
+ 
+ - `docs/GIOI-THIEU.md`, `docs/KY-THUAT-CHONG-HU.md`: mục depth/nhả viết lại
+   theo thang; nêu "nghe ở âm lượng thấp trước".
+ - `docs/spec-ring-risk.md`: thêm §"Người đọc thứ hai: thang nhả lane G".
+ - Code ngoài `NotchController`/`dsp` phải đổi (B-3): `src/app/MainComponent.cpp`
+   (`notchEventToVar`), `tools/logstats.py`, `tests/test_notchcontroller.cpp:438`.
+ - Docs data-loop: schema thêm `ev: "notch_retune"`.
+ - `installer/TESTER-NOTES.md`: mục 1.2.0 — cái gì đổi, nghe gì, báo gì.
+diff --git a/installer/TESTER-NOTES.md b/installer/TESTER-NOTES.md
+index 6aebcdc..a85f69f 100644
+--- a/installer/TESTER-NOTES.md
++++ b/installer/TESTER-NOTES.md
+@@ -1,13 +1,13 @@
+ # Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
+ 
+-Ngày build: 2026-09-07 · suite test 546/546 xanh (`fba2626`) · installer: kích
++Ngày build: 2026-09-07 · suite test 547/547 xanh (`63c1759`) · installer: kích
+ thước điền sau khi đóng gói
+ 
+ SHA-256 của Setup 1.2.0:
+ `<điền sau khi installer\release-alpha.ps1 -Part minor chạy xong>`
+ 
+ Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
+ nhờ test bản cũ.
+ 
+ > **1.2.0 CÓ đụng đường audio.** Độ sâu của một notch nay thay đổi theo thời
+ > gian. **Mở âm lượng nhỏ trước** và đọc mục "Mới trong 1.2.0" bên dưới trước
+@@ -76,23 +76,29 @@ Từ trước tới nay, notch cắt thẳng đúng con số trên slider **DEPT
+    **+14 dB** năng lượng quay lại đúng tần số vừa hú, ramp 10 ms nên không có
+    tiếng "cạch" nhưng vẫn là một cú tăng mức THẬT. Trần SÂU hơn thì không đổi
+    gì lúc nạp. **Mở âm lượng nhỏ trước khi bấm LOAD, đừng LOAD giữa bài.**
+    Preset/Manual/Soundcheck không bị kéo theo cách này.
+ 8. **Ô Q/DEPTH có thể hiện một số không có trong danh sách.** Sau khi LOAD một
+    file mang trần lệch bậc (vd. −10 dB của `Music.json`), ô đó hiện đúng số đó
+    bằng chữ thay vì để trống — bình thường, không phải lỗi hiển thị; nó giữ
+    nguyên cho tới khi bạn bấm chọn một mục trong danh sách.
+ 
+ **Báo lại ngay** nếu gặp: tiếng "cạch"/"zip" khi notch đổi độ sâu; một tiếng hú
+-app không bao giờ khống chế được; hoặc một notch **sâu hơn** con số trên slider
+-DEPTH (không đường nào được phép). Kèm file log session trong
+-`%APPDATA%\AZSoundtech\HandsFree\logs\`.
++app không bao giờ khống chế được; hoặc một notch **của detector** (dòng có cột
++LANE trong ACTIVE NOTCHES, **không** phải notch từ Preset/Manual/Soundcheck)
++sâu hơn con số trên slider DEPTH — đường đó không được phép.
++
++Notch từ **Preset, Manual hoặc Soundcheck mang trần riêng của nó** (Q8) và
++**được phép** đứng sâu hơn slider: một preset lưu sau khi vừa hú nạp lại ở
++`deepestDb`, có thể tới −24 dB, dù slider đang để −6 — đúng là dòng chảy bước 3
++của kịch bản test dưới đây. Đó là thiết kế, không phải lỗi. Kèm file log session
++trong `%APPDATA%\AZSoundtech\HandsFree\logs\`.
+ 
+ ## Mới trong 1.0.5 (so với 1.0.4)
+ 
+ - **Chuỗi preset trọn vẹn.** Installer nay chép sẵn hai preset `Speech` và
+   `Music` vào máy; lần đầu mở app tự nạp chúng vào
+   `%APPDATA%\AZSoundtech\HandsFree\presets\` — **không bao giờ ghi đè** file
+   anh em đã sửa. Dưới mục **INTERFACE** có hai nút mới **LOAD… / SAVE…**:
+   LOAD nạp một preset `*.json`, SAVE lưu trạng thái notch đang chạy ra file
+   mở lại được. (Preset đóng gói chỉ mang Q/độ sâu mặc định, chưa khóa notch
+   nào — nạp xong app vẫn tự dò như thường.)
+@@ -111,19 +117,20 @@ DEPTH (không đường nào được phép). Kèm file log session trong
+    vẫn reset như trước, không phải lỗi. LOAD cũng đọc lại **trần** từ file
+    [`notchDefaults`] cho mọi slot Global — **mở âm lượng nhỏ trước khi thử
+    LOAD `Music.json` (trần −10 dB) trên một rig đang cắt sâu hơn**, xem mục 7
+    ở trên.)
+ 4. SOUNDCHECK 15 giây với mic mở → app khóa các đỉnh tìm thấy (bảng ACTIVE
+    NOTCHES); hết 15 giây app NGỪNG DÒ (đúng thiết kế) → bấm AUTO để chạy show.
+ 5. AUTO: gây hú nhẹ (mic gần loa, gain thấp) → notch xuất hiện trong ~1 giây,
+    marker trên phổ. Nhìn cột độ sâu trong **ACTIVE NOTCHES**: nó phải bắt đầu
+    ở **−6** (hoặc −12) rồi đi sâu dần, chứ không nhảy thẳng vào số trên slider
+    DEPTH. Hết hú: 30 giây sau nó nông đi một bậc, rồi mỗi 10 giây một bậc, tới
+-   −6 thì biến mất (40–60 giây tổng cộng).
++   −6 thì biến mất (**30–60 giây** tổng cộng, tùy bậc nó đang đứng khi hết hú:
++   −6 → 30 s; −12 hoặc −10 → 40 s; −18 → 50 s; −24 → 60 s).
+ 6. BYPASS: nghe passthrough trong suốt, không màu.
+ 7. ROUTING: bật thêm slot 02, đổi kênh vào/ra → không click/pop, không sập.
+ 8. Thanh ANALYSER: đổi averaging (0.1 s → 3 s), Peak hold, RANGE (gõ "60",
+    "16k") → phổ phản hồi đúng.
+ 9. Rút cáp input giữa chừng → app không crash, DEVICE báo ERROR.
+ 10. Uninstall → thư mục + registry key biến mất sạch.
+ 
+ Báo lỗi kèm: Windows version, card tiếng, bước nào, hiện tượng, screenshot.
+diff --git a/memory/gain-aware-notch-lane-g-2026-09-07.md b/memory/gain-aware-notch-lane-g-2026-09-07.md
+index 3708e2b..ea7dd54 100644
+--- a/memory/gain-aware-notch-lane-g-2026-09-07.md
++++ b/memory/gain-aware-notch-lane-g-2026-09-07.md
+@@ -1,15 +1,15 @@
+ # Bài học từ lane G (gain-aware notch: thang độ sâu, nhả dần, nhớ phòng) — 2026-09-07
+ 
+ **Bối cảnh:** 10 task SDD + fix rounds trên nhánh
+-`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..fba2626`, 1.2.0
+-alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **546**.
++`claude_desk/lane-g-brainstorm-sdd-f3c568`, commit `01ecb4c..63c1759`, 1.2.0
++alpha — đã hiện thực và qua gate ctest, chưa đóng gói. Suite 454 → **547**.
+ **Đụng audio
+ path** (`Biquad`, `NotchChain`, `NotchController`). Spec
+ `docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` (v2 + Q13 + Q14),
+ sổ quyết định `docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md`
+ (Q1–Q14), plan `docs/superpowers/plans/2026-09-07-gain-aware-notch.md` (rev 3).
+ 
+ ---
+ 
+ ## A. Bài học kỹ thuật
+ 
+@@ -181,20 +181,39 @@ làn 1 đó **đầu độc penalty harmonic** ở các test sau trong cùng fil
+ Một file preset mang trần ngoài lưới (Q13, vd. −10 dB của `Music.json`) **không
+ tới được** GUI cho tới khi `loadPreset` thật sự đọc lại `notchDefaults` (Q11) —
+ và ngay khi đường đó mở ra, hai lỗi mới lộ diện chỉ vì có giá trị thật để hiển
+ thị: `TuningPanel`/`SlotPanel` bỏ trống ô combo cho một id không có trong danh
+ sách (`idForValue` → 0), và chạm vào MỘT combo khác đọc combo trống đó ra Q 10
+ / −6 dB rồi đẩy lên **mọi** slot Global đang chạy. Cả hai lỗi nằm im từ lúc các
+ panel này được viết — chỉ lộ ra khi có một writer thật đưa một giá trị ngoài
+ lưới vào model. Bài học: mỗi lần một trường model có thêm một đường GHI mới,
+ phải rà lại **mọi** nơi ĐỌC trường đó, không chỉ nơi vừa sửa.
+ 
++### 21. Sổ sách đi kèm một phép ghi phải nằm CẠNH phép ghi, không ở chỗ gọi
++
++`stageChangedAtMs` được đóng dấu ở **bốn** chỗ gọi `pushRetuneLocked` chứ không
++nằm trong chính nó, dù nó chỉ có đúng một nghĩa: "`liveMs_` lúc depth đổi lần
++cuối", và depth chỉ đổi ở đúng một dòng — `n.depthDB = newDepthDb` trong
++`pushRetuneLocked`. Bốn bản sao đều đúng, nên không test nào đỏ. Nguy hiểm là
++**bản thứ năm**: một caller mới quên đóng dấu để lại notch trông như đã đứng
++yên từ lúc đặt, và cổng 300 ms của DEEPEN (`liveMs_ − stageChangedAtMs >=
++kDeepenAfterMs`) mở ngay — notch leo nhiều bậc trong một cửa sổ, trên PA thật.
++Chuyển dấu vào trong helper (`63c1759`); test `RetuneStampsStageChangedAtMs`
++lái qua seam `retuneForTest` nên nó khẳng định hợp đồng của **helper**, không
++phải của một caller.
++
++Một chỗ gọi vẫn giữ dấu — và đó là điểm đáng nhớ: nhánh kẹp lại có đường tắt
++`target == n.depthDB || pushRetuneLocked(...)`, tức có một đường **kẹp lại mà
++không gửi gì cả** (notch đã đứng đúng ở đích). Đường đó vẫn phải nạp lại cổng
++DEEPEN. Xóa sạch bốn dấu là đổi hành vi ở đúng đường đó — "dọn cho gọn" một
++cách máy móc là cách làm hỏng. Đọc từng chỗ gọi trước khi xóa.
++
+ ---
+ 
+ ## C. Còn treo sau lane G
+ 
+ - **NaN self-heal trong `AudioEngine`** reset chuỗi filter mỗi khi output
+   non-finite, hủy mọi ramp đang bay và **không** có replay hệ số theo sau → filter
+   đứng ở độ sâu trung gian trong khi `NotchInfo.depthDB` đọc giá trị đích. Tự lành
+   ở lệnh `Set` kế tiếp. Follow-up ngoài lane G.
+ - **`PresetNotchDefaults::depthDB = -12` vẫn lệch `kDefaultNotchDepthDb = -18`.**
+   File do app LƯU nay mang `notchDefaults` nên không dính; preset viết tay không
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index d688098..262914a 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -324,21 +324,29 @@ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthD
+     ev.fromDepthDb = (float) n.depthDB;
+     ev.depthDb     = (float) newDepthDb;
+     ev.origin = n.origin;
+     ev.retuneReason = reason;
+     // Age from PLACEMENT, like a Clear's. lockedAtMs, origin and
+     // lastDetectedMs are deliberately left alone: this is the same notch, and
+     // lane D's labels are keyed to when it was placed (B-1).
+     ev.ageMs = liveMs_ - n.lockedAtMs;
+     pushEventLocked (std::move (ev));
+ 
+-    n.depthDB = newDepthDb;
++    // Final review (M-1): the stamp lives HERE, beside the write it describes,
++    // not at the call sites. stageChangedAtMs means "liveMs_ at the last depth
++    // change", and the only place a depth changes is this line -- a caller that
++    // forgets to stamp (or a new caller written later) would leave a notch
++    // looking like it had stood at its depth since placement, and the DEEPEN
++    // gate (liveMs_ - stageChangedAtMs >= kDeepenAfterMs) would let it climb
++    // rung after rung inside one 300 ms window.
++    n.depthDB          = newDepthDb;
++    n.stageChangedAtMs = liveMs_;
+     return true;
+ }
+ 
+ // --- Lane G room memory (spec 4.6, Q3/Q6/Q10). modelMutex_ HELD by every
+ // caller; see the header for why that lock and no other. -------------------
+ 
+ void NotchController::rememberReleaseLocked (int lane, double frequencyHz,
+                                              double deepestDb, bool bothLanes)
+ {
+     const int first = bothLanes ? 0 : lane;
+@@ -782,22 +790,23 @@ void NotchController::runOnce()
+                     n.deepestDb = std::max (n.deepestDb, ceiling);
+ 
+                     if (n.depthDB < ceiling)
+                     {
+                         // One ramped step, possibly more than 6 dB, and
+                         // possibly landing off-rung (Q13: the ceiling IS the
+                         // last rung). Invariant 3 bounds the DEEP direction
+                         // only -- shallower is never dangerous.
+                         if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
+                         {
+-                            n.stageChangedAtMs = liveMs_;
+-                            n.quietMs          = 0.0;   // a depth change restarts the clock
++                            // stageChangedAtMs is stamped inside
++                            // pushRetuneLocked (M-1), next to the depth write.
++                            n.quietMs = 0.0;   // a depth change restarts the clock
+                         }
+                         continue;   // one depth change per notch per tick
+                     }
+                 }
+ 
+                 // --- steps 2-4: the quiet clock and the ladder -------------
+                 if (! frozen)
+                     n.quietMs += dt;
+ 
+                 const double needed = (n.releasedSteps == 0) ? kReleaseFirstMs
+@@ -808,22 +817,21 @@ void NotchController::runOnce()
+                 if (n.depthDB < kDepthLadderDb[0])
+                 {
+                     // Up one rung, never two: nextShallowerRungDb returns the
+                     // deepest rung strictly shallower than where the notch
+                     // stands, so an odd Preset/Manual depth resolves to the
+                     // nearest rung above it and nothing is skipped.
+                     const double next = nextShallowerRungDb (n.depthDB);
+                     if (pushRetuneLocked (c, i, next, RetuneReason::Release))
+                     {
+                         ++n.releasedSteps;
+-                        n.stageChangedAtMs = liveMs_;
+-                        n.quietMs          = 0.0;
++                        n.quietMs = 0.0;   // stageChangedAtMs: see pushRetuneLocked
+                     }
+                 }
+                 else
+                 {
+                     // Already on the shallowest rung: the notch has nothing
+                     // left to give back, so it goes.
+                     //
+                     // What this bin needed, recorded before the record of it
+                     // goes away with the notch (spec 4.6). ONLY on an
+                     // AutoRelease: a manual clear, a CLEAR ALL, a width
+@@ -1375,22 +1383,30 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
+                         // come after 10 s instead of 30.
+                         if (target == n.depthDB
+                             || pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
+                         {
+                             // Keep the memory and the depth in step: when the
+                             // ceiling did not bind, target == deepestDb and
+                             // this is a no-op; when it did, the notch must not
+                             // go on remembering a rung it is no longer allowed
+                             // to stand on. The release ladder's per-tick clamp
+                             // says the same thing from the other side.
+-                            n.deepestDb        = target;
+-                            n.releasedSteps    = 0;
++                            n.deepestDb     = target;
++                            n.releasedSteps = 0;
++                            // The ONE stamp that stays outside pushRetuneLocked
++                            // (M-1). This branch is also entered on the
++                            // short-circuit above -- target == depthDB, nothing
++                            // pushed -- and that path must still re-arm the
++                            // DEEPEN gate: the notch WAS reclamped, it merely
++                            // had nowhere to go. In the pushing path this is a
++                            // no-op, pushRetuneLocked has already written the
++                            // same liveMs_.
+                             n.stageChangedAtMs = liveMs_;
+                         }
+                     }
+                     else if (n.origin == Origin::Detector)
+                     {
+                         // DEEPEN (spec 4.4). Only Detector notches climb:
+                         // Preset/Manual said what they wanted (Q8) and
+                         // Soundcheck is already excluded above (KD-7).
+                         //
+                         // M-9, and it is a CONSEQUENCE of Q2, not a bug: the
+@@ -1420,22 +1436,25 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
+                             // the ceiling it returns currentDb unchanged, and
+                             // past the ceiling it can return something
+                             // SHALLOWER. The `n.depthDB > ceiling` guard above
+                             // already excludes both cases mathematically, but
+                             // this makes the contract explicit rather than
+                             // relying on that guard alone to keep holding.
+                             const double next = nextDeeperRungDb (n.depthDB, ceiling);
+                             if (next < n.depthDB
+                                 && pushRetuneLocked (c, i, next, RetuneReason::Deepen))
+                             {
+-                                n.deepestDb        = next;
+-                                n.stageChangedAtMs = liveMs_;
++                                // stageChangedAtMs: see pushRetuneLocked (M-1).
++                                // It is what re-arms the 300 ms gate above, so
++                                // a rung climbed here cannot be followed by
++                                // another until the gate reopens.
++                                n.deepestDb = next;
+                             }
+                         }
+                     }
+                 }
+             }
+         }
+     }
+ 
+     // Locked fundamentals for the harmonic penalty (KD-3). Same lane rule as
+     // the reinforcement loop above: under INDEP the lanes hold different
+diff --git a/src/app/NotchController.h b/src/app/NotchController.h
+index 0ac2055..faf3917 100644
+--- a/src/app/NotchController.h
++++ b/src/app/NotchController.h
+@@ -469,20 +469,23 @@ private:
+         // --- lane G ladder state (spec 4.2) -------------------------------
+         // All five are re-initialised by setNotchImpl, the ONE place a slot
+         // becomes active, for every Origin and every path (placeConfirmed,
+         // adoptPreset, the GUI's setNotch, the partial-apply unwind).
+         // pushClearLocked only lowers `active`, so a reused slot would
+         // otherwise inherit the previous tenant's ladder (B-2).
+ 
+         // Deepest rung held since placement -- also where a reclamp jumps to.
+         double deepestDb        = 0.0;
+         // liveMs_ at the last depth change (deepen, release, reclamp, ceiling).
++        // Stamped by pushRetuneLocked itself, beside the depthDB write (M-1);
++        // the reclamp site stamps it a second time for the one path that
++        // reclamps without pushing anything.
+         double stageChangedAtMs = 0.0;
+         // ACCUMULATED quiet time since the last depth change or reinforce, in
+         // live ms. A counter rather than a timestamp precisely so the freeze
+         // can stop it without losing what it had banked.
+         double quietMs          = 0.0;
+         // Rungs released from deepestDb. 0 == not releasing. An integer count
+         // instead of comparing doubles (m-3).
+         int    releasedSteps    = 0;
+         // This notch's own ceiling. Preset/Manual/Soundcheck: the depth the
+         // caller asked for -- the slider must not drag a notch a human or a
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index a487cb5..86b6868 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -2074,20 +2074,64 @@ TEST (NotchControllerLadder, DepthDeeperThanMinus24IsClampedForEveryOrigin)
+ // RED IF adoptPreset stops clamping. A file is not a trusted source.
+ TEST (NotchControllerLadder, AdoptPresetClampsADeepPresetNotch)
+ {
+     Harness h;
+     PresetNotch p;
+     p.index = 0; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -40.0;
+     EXPECT_EQ (h.controller.adoptPreset ({ p }), 1);
+     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
+ }
+ 
++// RED IF pushRetuneLocked stops stamping stageChangedAtMs itself and the
++// bookkeeping goes back to living at the call sites (final review, M-1). The
++// stamp is what re-arms the 300 ms DEEPEN gate; a retune that changes the
++// depth without moving the stamp leaves the notch free to climb another rung
++// on the very next tick, which is a multi-rung jump on a live PA.
++//
++// retuneForTest drives the locked helper the way the detector thread does, so
++// it is the only seam that can observe the helper's own contract rather than
++// one caller's version of it.
++TEST (NotchControllerLadder, RetuneStampsStageChangedAtMs)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 1, 1000.0, 30.0, -6.0,
++                                        NotchController::Origin::Detector));
++    const double atPlacement = h.controller.stageChangedAtMsForTest (0, 1);
++
++    // Live time only advances inside runOnce(), so the stamp taken at
++    // placement is provably older than the one the retune must write.
++    std::vector<float> hop (512, 0.1f);
++    for (int i = 0; i < 100; ++i) {          // 100 * 5 ms = 500 ms of live time
++        h.tap.write (hop.data(), hop.size());
++        h.clock.advance (5.0);
++        h.controller.runOnce();
++    }
++    ASSERT_GT (h.controller.liveMsForTest(), atPlacement);
++
++    ASSERT_TRUE (h.controller.retuneForTest (0, 1, -12.0,
++                                             NotchController::RetuneReason::Deepen));
++
++    EXPECT_DOUBLE_EQ (h.controller.stageChangedAtMsForTest (0, 1),
++                      h.controller.liveMsForTest())
++        << "a successful retune must stamp stageChangedAtMs with the CURRENT "
++           "live time, from inside pushRetuneLocked";
++    EXPECT_GT (h.controller.stageChangedAtMsForTest (0, 1), atPlacement);
++
++    // A REFUSED retune must leave the stamp alone: nothing was sent, so the
++    // notch has stood at its depth since the successful one above.
++    const double afterRetune = h.controller.stageChangedAtMsForTest (0, 1);
++    EXPECT_FALSE (h.controller.retuneForTest (0, 1, -40.0,
++                                              NotchController::RetuneReason::Deepen))
++        << "-40 dB is past the ladder floor and must be refused";
++    EXPECT_DOUBLE_EQ (h.controller.stageChangedAtMsForTest (0, 1), afterRetune);
++}
++
+ // RED IF pushRetuneLocked stops sending the STORED freq/Q (m-2). Sending the
+ // live notchQ_ instead would differ by a bit whenever the operator had moved
+ // the Q slider after placement, and NotchChain would take the reset path --
+ // which is a click.
+ TEST (NotchControllerLadder, RetuneResendsTheStoredFrequencyAndQ)
+ {
+     Harness h;
+     ASSERT_TRUE (h.controller.setNotch (0, 2, 987.0, 17.5, -6.0,
+                                         NotchController::Origin::Detector));
+     h.controller.setNotchDefaults (44.0, -24.0);   // move the live defaults away
+diff --git a/tools/snapshot.cpp b/tools/snapshot.cpp
+index 2928862..ad9f4aa 100644
+--- a/tools/snapshot.cpp
++++ b/tools/snapshot.cpp
+@@ -17,20 +17,26 @@
+ // What it renders
+ // ===============
+ //   console-idle.png   the state the app opens in -- no signal, no notches
+ //   console-live.png   a real published spectrum with three notches placed at
+ //                      staggered ages, so the sodium-to-ice ramp that the whole
+ //                      design is built around is actually visible -- two of
+ //                      them on lane 0 (L) and one on lane 1 (R), so the LANE
+ //                      column, the dashed R stem and the L/R picker all render
+ //                      with something real behind them, plus a RING RISK chip
+ //                      STAGED to Critical (see the note where it is set)
++//   console-preset-music.png
++//                      console-live's frame with the notch defaults set to
++//                      presets/Music.json's OFF-LIST pair (Q 25, depth -10 dB),
++//                      so the DEPTH and Q cells render the fba2626 behaviour:
++//                      a value that sits on no combo rung is shown as text
++//                      rather than leaving the combo blank
+ //
+ // The live shot uses the REAL path: audio is written into BOTH of slot 0's tap
+ // rings and the controller's runOnce() publishes genuine two-lane snapshots,
+ // exactly as tests/test_spectrumview.cpp does. Nothing here hand-writes a
+ // lookalike struct, so a snapshot that looks right is evidence the real
+ // pipeline is. Slot 1 is put in LINK so the routing table shows both states of
+ // the per-slot ring-risk control side by side.
+ //
+ // Usage:
+ //   HandsFreeSnapshot <out-dir> [width] [height] [--fast]
+@@ -341,12 +347,50 @@ int main (int argc, char** argv)
+     // job. What the picture proves is what the chip LOOKS like when it is lit
+     // -- legibility, colour, whether CRITICAL fits its box. That the chip
+     // reaches Critical from a real detector is proven by a test, not here
+     // (MainComponent.RingRiskGoesCriticalWhenTheMonitoredSlotsDetectorConfirms).
+     app.getSpectrumViewForTest().ringRiskForTest()
+         = gui::SpectrumView::RingRisk::Critical;
+     std::cout << "console-live: RING RISK chip STAGED to Critical "
+                  "(not measured -- see the comment in tools/snapshot.cpp)"
+               << std::endl;
+ 
+-    return shoot (app, outDir.getChildFile ("console-live.png")) ? 0 : 1;
++    if (! shoot (app, outDir.getChildFile ("console-live.png")))
++        return 1;
++
++    //--------------------------------------------------------------------
++    // The off-list-ceiling shot (final review, I-4).
++    //
++    // fba2626 changed what the tuning strip DISPLAYS when the values handed
++    // to it do not sit on a combo's fixed rungs: before it, an off-list value
++    // left the combo BLANK (idForValue returned 0), and the operator's next
++    // touch on any of the five combos pushed Q 10 / -6 dB onto every Global
++    // slot -- a ceiling nobody asked for, on a live rig. After it, the value
++    // is shown as text and currentParams() reports it back unchanged.
++    //
++    // That is a change to what the console LOOKS like and nothing pictured
++    // it. presets/Music.json ships exactly such a pair -- Q 25, depth -10 dB,
++    // neither on a rung -- so this shot puts the console in the state loading
++    // that preset produces. Everything else is console-live's frame: same
++    // three staged ages, same verdicts, same chip.
++    //
++    // The defaults go straight to the controllers rather than through
++    // loadPreset(): that path opens a file chooser and drives the device
++    // restart cycle, and the ceiling is the only part of the preset this shot
++    // is about. Both panels then re-read through their providers -- TuningPanel
++    // via paramsProvider (which reads controller 0), SlotPanel via
++    // slotTuningProvider (per row) -- so the strip and the routing table's
++    // mini combos are showing the SAME reality the real load would leave.
++    for (int i = 0; i < kMaxSlots; ++i)
++        if (auto* c = app.getNotchControllerForTest (i))
++            c->setNotchDefaults (25.0, -10.0);   // presets/Music.json
++
++    app.getTuningPanel().refresh();
++    slots.refresh();
++    app.resized();
++
++    std::cout << "console-preset-music: notch defaults set to Q 25 / -10 dB "
++                 "(presets/Music.json) -- the off-list ceiling render"
++              << std::endl;
++
++    return shoot (app, outDir.getChildFile ("console-preset-music.png")) ? 0 : 1;
+ }

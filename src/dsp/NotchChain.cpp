@@ -1,5 +1,7 @@
 #include "dsp/NotchChain.h"
 
+#include <cmath>
+
 NotchChain::NotchChain(double sampleRate)
     : sampleRate_(sampleRate)
 {
@@ -26,6 +28,27 @@ void NotchChain::setNotch(int index, double freq, double Q, double depthDB)
 {
     if (index < 0 || index >= MAX_NOTCHES)
     {
+        return;
+    }
+
+    // Depth-only retune of a RUNNING notch: keep the state, ramp the
+    // coefficients (see the header). rampSamples is rounded from kRampMs
+    // against the chain's CURRENT rate, so the ramp is 10 ms of real time at
+    // any device rate. A rejected design leaves the slot completely alone,
+    // exactly like the path below.
+    if (notchInfo_[index].state == NotchState::Active
+        && freq == notchInfo_[index].frequency
+        && Q    == notchInfo_[index].Q)
+    {
+        const int rampSamples = static_cast<int>(std::lround(kRampMs * sampleRate_ / 1000.0));
+        if (! filters_[index].rampNotchDepth(freq, Q, sampleRate_, depthDB, rampSamples))
+        {
+            return;
+        }
+        // The reported depth is the TARGET, from the instant the command is
+        // accepted -- the model, the GUI and the preset all describe intent,
+        // not the ramp's momentary position (spec 4.7).
+        notchInfo_[index].depthDB = depthDB;
         return;
     }
 
@@ -64,6 +87,11 @@ void NotchChain::clearNotch(int index)
 
 void NotchChain::reset()
 {
+    // GAP (spec 4.7, m-5): this cancels every in-flight depth ramp and does
+    // NOT re-apply the stored design, so a reset that is not followed by
+    // setSampleRate()'s coefficient replay -- AudioEngine's per-sample NaN
+    // self-heal is the one such caller -- strands the filter at the ramp's
+    // intermediate depth while NotchInfo.depthDB already reads the target.
     for (int i = 0; i < MAX_NOTCHES; ++i)
     {
         filters_[i].reset();

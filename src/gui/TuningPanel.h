@@ -137,6 +137,14 @@ private:
 
     int presetId_ = kPresetBalancedId;
 
+    // What refresh() last read out of paramsProvider. The five combos hold
+    // FIXED rungs, but the values handed to this panel need not sit on one --
+    // a preset's notch ceiling is kept at its exact value (Q13), and
+    // presets/Music.json ships Q 25 / -10 dB. refresh() shows such a value as
+    // text, which leaves that combo with no list selection; currentParams()
+    // then reports it back from here rather than snapping to the first item.
+    Params provided_;
+
     juce::Label responseLabel_ { {}, "Response" };
     juce::Label notchLabel_    { {}, "Notch" };
     juce::Label triggerLabel_  { {}, "Trigger" };

@@ -20,11 +20,11 @@ Thứ tự đi theo **cái gì nuôi cái gì**, không theo độ hấp dẫn t
 |---|---|---|---|---|
 | S | **Stereo-aware detection**: một detector/slot nhìn cả hai làn, notch đặt theo làn, nút LINK | Có (tap làn 1, lệnh mang lane mask) | không | [`2026-09-05-stereo-aware-detection-design.md`](2026-09-05-stereo-aware-detection-design.md) |
 | D | **Vòng dữ liệu**: nút oan/đúng trên notch list, log session JSONL (magnitudes quanh sự kiện, không lưu audio) | Không | không | [`2026-09-05-data-loop-design.md`](2026-09-05-data-loop-design.md) |
-| G | **Gain-aware notch**: depth theo nhu cầu từ τ ringing, nhả dần thay vì nhả cụt, nối data ring-risk | Có (depth thay đổi theo thời gian) | S (lane), D (đo hiệu quả) | viết khi S+D hạ cánh |
-| M | **Soundcheck đo chủ động**: chirp/MLS qua từng output, đo loa→mic, loop gain theo tần số, notch trước khi hú | Có (phát tín hiệu test ra PA) | S (đo per-output = per-lane) | viết khi S hạ cánh |
+| G | **Gain-aware notch**: depth theo nhu cầu (đo thực nghiệm, không từ τ), nhả dần thay vì nhả cụt, nối data ring-risk | Có (depth thay đổi theo thời gian) | S (lane), D (đo hiệu quả) | [`2026-09-06-gain-aware-notch-design.md`](2026-09-06-gain-aware-notch-design.md) — **đã hạ cánh 1.2.0** |
+| M | **Soundcheck đo chủ động**: chirp/MLS qua từng output, đo loa→mic, loop gain theo tần số, notch trước khi hú | Có (phát tín hiệu test ra PA) | S (đo per-output = per-lane) | S đã hạ cánh → **viết được ngay** (spec `2026-09-06-active-soundcheck-design.md` chưa có; phiên B theo prompt 2026-09-06 chưa chạy) |
 | C | **Classifier nhỏ** trên detector thread (RTNeural), phân loại hú vs nốt nhạc, feature L/R từ S | Không (chỉ quyết định, không xử lý) | D (nhãn), S (feature) | viết khi D có ≥ vài trăm nhãn từ alpha |
 | L | **LLM copilot**: đọc telemetry qua tool call, gợi ý cho soundman | Không | D (telemetry) | viết khi D hạ cánh; chạy song song C |
-| A | **AFC**: NLMS + PEM, watchdog + fallback notch | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
+| A | **AFC**: NLMS + PEM, watchdog + fallback notch — fallback notch = thang G (đặt −6, đào 6 dB/300 ms, nhả 30 s + 10 s/bậc) | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
 | U | **Hai chế độ giao diện**: Dumb mode (≤ 3 nút) ⇄ Geek mode (console đầy đủ hiện tại) — quyết định owner 06/09/2026 | Không | G (G định nghĩa 3 nút là gì) | brainstorm trước; xem [`../../research/2026-09-06-cedar-realtime-plugins.md`](../../research/2026-09-06-cedar-realtime-plugins.md) §6 |
 
 Tùy chọn không xếp lane riêng, gắn vào lane gần nhất khi có nhu cầu:
@@ -66,13 +66,13 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 
 | Lane | Trạng thái | Ngày |
 |---|---|---|
-| S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
+| S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); **đã merge main** (trước lane R, main `d58eac0`→`6b8d084` 06/09/2026); 1.1.3 alpha mang S+D+R | 2026-09-05 |
 | D | **đã làm xong** trên nhánh `feat/data-loop` (8 task + fix wave sau verifier độc lập & review toàn nhánh, suite 432/432); **release 1.1.2 alpha đã đẩy** lên `Z:\My Drive\RELEASE\ALPHA TEST` (gate 432/432, SHA-256 `51E28F8EDD6E…`); **đã merge main** `e9da9c6` (owner, 05/09/2026 chiều) | 2026-09-05 |
-| G | chờ S, D | |
-| M | chờ S | |
+| G | **đã merge main `68dd7ef`** (owner "merge master local" 07/09/2026), **đã đóng gói 1.2.0 alpha** (gate 547/547, SHA-256 `F701FFFC…`, `Z:\My Drive\RELEASE\ALPHA TEST`, chưa ai nghe trên rig) — nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568`, 40 commit, 10 task SDD + fix rounds, final review 0 finding mở: thang độ sâu theo nhu cầu (đặt −6/−12, đào 6 dB mỗi 300 ms, trần = slider), nhả dần 30 s + 10 s/bậc, đóng băng nhả khi RING RISK ≥ RISING (slot-global, không trần thời gian), nhớ phòng 5 phút, ramp độ sâu 10 ms trong `Biquad`, `notch_retune` trong log session, `preset_load` đọc/ghi trần (Q11, `ceiling_applied`) | 2026-09-07 |
+| M | **mở** — S đã hạ cánh; chưa có spec, chưa có nhánh. Bước kế theo roadmap (A cần M) | 2026-09-07 |
 | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
 | L | chờ D | |
-| A | chờ M, G | |
+| A | chờ M (G đã merge: fallback notch dùng thang G) | 2026-09-07 |
 | U | chờ G; chưa brainstorm | 2026-09-06 |
 
 **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của

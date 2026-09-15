@@ -507,6 +507,62 @@ TEST (PresetManager, NotchDefaultsSurviveTheRoundTrip)
     EXPECT_LT (result.preset.notchDefaults.depthDB, 0.0);
 }
 
+// RED IF the deepest rung of the lane-G ladder stops round-tripping. -24 dB
+// is a legal ceiling and a legal notch depth, and a preset that cannot carry
+// it caps the app two rungs shallower than the operator asked for.
+TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
+{
+    // makeValidPreset(), not a default-constructed Preset: version, device and
+    // bufferSize are all validated, and a bare `Preset p;` is refused for a
+    // bufferSize of 0 long before it ever reaches the depth this test is about.
+    Preset p = makeValidPreset();
+    p.notchDefaults.Q       = 30.0;
+    p.notchDefaults.depthDB = -24.0;
+    PresetNotch n;
+    n.index = 0; n.freq = 1000.0; n.Q = 30.0; n.depthDB = -24.0; n.slot = 0; n.lane = 0;
+    p.notches = { n };
+
+    const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+    ASSERT_EQ (result.preset.notches.size(), 1u);
+    EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -24.0);
+}
+
+// RED IF an ABSENT notchDefaults block cannot be told apart from a block that
+// happens to carry the format's own -12 dB fallback (fix round 1, M-3).
+// MainComponent::loadPreset now APPLIES the block to the live ceiling, so the
+// two cases must give different answers: absent leaves the running ceiling
+// alone, present sets it. Without this flag a v1 preset -- and every file
+// written before af5201e -- would silently drag a rig tuned at -18 dB back to
+// -12 on every load.
+TEST (PresetManager, AnAbsentNotchDefaultsBlockIsReportedAsAbsent)
+{
+    const auto without = PresetManager::fromJSON (kValidPresetJson);
+
+    ASSERT_TRUE (without.ok) << without.errors.joinIntoString ("; ");
+    EXPECT_FALSE (without.preset.hasNotchDefaults);
+    // The documented fallback still fills the struct -- absent is not empty.
+    EXPECT_DOUBLE_EQ (without.preset.notchDefaults.Q,       30.0);
+    EXPECT_DOUBLE_EQ (without.preset.notchDefaults.depthDB, -12.0);
+}
+
+TEST (PresetManager, APresentNotchDefaultsBlockIsReportedAsPresent)
+{
+    Preset p = makeValidPreset();
+    // Deliberately the SAME values the fallback supplies: the flag must report
+    // where the numbers came from, not whether they differ from the default.
+    p.notchDefaults.Q       = 30.0;
+    p.notchDefaults.depthDB = -12.0;
+
+    const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+
+    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+    EXPECT_TRUE (result.preset.hasNotchDefaults);
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       30.0);
+    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -12.0);
+}
+
 // The same rules as a real notch. A bad default is worse than a bad notch,
 // because it seeds every notch the detector goes on to create.
 TEST (PresetManager, APositiveDefaultDepthIsRefused)

@@ -29,8 +29,11 @@ build/tools/Release/HandsFreeSnapshot.exe shots 1280 880 --fast
 
 Source: [tools/snapshot.cpp](tools/snapshot.cpp), wired up in
 [tools/CMakeLists.txt](tools/CMakeLists.txt). It writes `console-idle.png`
-(the state the app opens in) and `console-live.png` (a real published
-spectrum with notches placed in it).
+(the state the app opens in), `console-live.png` (a real published spectrum
+with notches placed in it) and `console-preset-music.png` (that same live
+frame with the notch defaults set to `presets/Music.json`'s off-list pair,
+Q 25 / −10 dB, so the tuning strip renders a value that sits on no combo
+rung).
 
 `--fast` skips the real-time waits that age the notches. Drop it when the
 sodium-to-ice age ramp has to be visible: the full run takes ~23 s because a

@@ -1,0 +1,1437 @@
+# Review package: af5201e..HEAD
+
+## Commits
+b8e3f25 feat(app): loadPreset applies an explicit notchDefaults ceiling (Q11 read side); retuneReasonName unknown fallthrough
+11adb3b docs: lane G gain-aware notch — user docs, tester notes, release notes 1.2.0, data-loop schema, roadmap, memory
+
+## Files changed
+ docs/GIOI-THIEU.md                                 |   9 +-
+ docs/KY-THUAT-CHONG-HU.md                          | 131 ++++++++++++--
+ docs/release-notes/1.2.0-alpha.md                  | 104 +++++++++++
+ docs/spec-ring-risk.md                             |  33 ++++
+ .../specs/2026-09-04-anti-feedback-v2-roadmap.md   |   8 +-
+ .../specs/2026-09-05-data-loop-design.md           |  16 ++
+ .../specs/2026-09-06-gain-aware-notch-design.md    |   2 +-
+ installer/TESTER-NOTES.md                          |  56 +++++-
+ memory/MEMORY.md                                   |   1 +
+ memory/gain-aware-notch-lane-g-2026-09-07.md       | 191 +++++++++++++++++++++
+ src/app/MainComponent.cpp                          |  61 ++++++-
+ src/app/PresetManager.cpp                          |   6 +
+ src/app/PresetManager.h                            |  15 ++
+ tests/test_gui_wiring.cpp                          |  79 +++++++++
+ tests/test_presetmanager.cpp                       |  34 ++++
+ tools/logstats.py                                  |  13 +-
+ 16 files changed, 722 insertions(+), 37 deletions(-)
+
+## Diff
+diff --git a/docs/GIOI-THIEU.md b/docs/GIOI-THIEU.md
+index 505316f..d8a8bb8 100644
+--- a/docs/GIOI-THIEU.md
++++ b/docs/GIOI-THIEU.md
+@@ -18,43 +18,44 @@ phát ra tiếng rít sắc như dao. Người xử lý sound truyền thống p
+ 
+ ## Giải pháp
+ 
+ AZ Soundtech Hands-free làm thay 4 bước đó **tự động và liên tục**:
+ 
+ ```
+ Micro ──► Mixer (Wing/iD14...) ──► [Hands-free] ──► Loa/PA
+                                         │
+                             phát hiện tần số hú trong ~1 giây
+                             tự đặt filter notch siêu hẹp đúng chỗ
+-                            tự nhả filter khi hết hú
++                            nhả dần từng bậc khi hết hú
+ ```
+ 
+ App cắm vào đường tín hiệu như một thiết bị insert: lấy audio từ bất kỳ audio
+ interface ASIO nào, phân tích phổ bằng FFT trên một luồng nền, và khi thấy một
+ tần số đang "vươn lên" thành hú thì đặt ngay một bộ lọc notch cực hẹp đúng tần
+ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng chất lượng nhạc.
+ 
+ ## Tính năng chính
+ 
+ | | |
+ |---|---|
+ | **Phát hiện tự động** | FFT 2048 điểm, chấm điểm "độ nhọn" của đỉnh phổ — phân biệt tiếng hú (một gai duy nhất nhô lên) với nhạc (nhiều đỉnh tự nhiên). Thời gian khóa mục tiêu trong ~1 giây kể từ khi hú đạt ngưỡng |
+-| **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30), độ sâu −6 đến −24 dB (mặc định −18 dB). Chỉ mất đúng vài Hz quanh tần số hú |
++| **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30). Độ sâu −6 đến −24 dB (mặc định −18) nay là **TRẦN**: notch đặt ở −6 dB (hoặc −12 nếu đỉnh lên dốc) rồi chỉ đào sâu thêm 6 dB mỗi 300 ms chừng nào bin đó còn hú, không bao giờ quá trần. Chỉ mất đúng vài Hz quanh tần số hú |
+ | **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra bất kỳ của interface — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật |
+ | **Stereo độc lập** | Mic hú qua loa trái thì chỉ cắt cánh trái; nút LINK mỗi slot để cắt cả hai bên như trước |
+ | **Chấm notch để app học** | Mỗi dòng ACTIVE NOTCHES có nút **GOOD** / **FALSE**. FALSE xóa notch ngay và ghi nhãn "cắt oan"; GOOD ghi nhãn "cắt đúng". Nhãn + phổ lúc quyết định vào log session trên máy (không audio) — dữ liệu cho bộ phân loại ở bản sau |
+-| **Tự nhả sau 30 giây** | Hết hú là filter tự nhả — không tích tụ vết cắt vô nghĩa suốt buổi show |
++| **Nhả dần theo bậc** | Hết hú 30 giây → nông đi 6 dB; mỗi 10 giây yên tiếp theo nông thêm một bậc; tới −6 dB thì nhả hẳn (tổng ~40–60 giây tùy bậc đang đứng). Hú quay lại là kẹp ngay về bậc sâu nhất đã từng đứng. Phòng đang căng (chip RING RISK ≥ RISING) thì đồng hồ **đứng yên** — mọi notch của slot đó giữ nguyên bậc chừng nào phòng còn căng |
++| **Nhớ phòng 5 phút** | Hú quay lại đúng bin cũ trong 5 phút sau khi nhả hẳn → đặt lại thẳng ở độ sâu đã từng cần, không dò lại từ −6 dB |
+ | **Chống báo nhầm harmonic** | Nếu đã khóa tần số F thì bậc harmonics 1.4F–4.1F bị trừ điểm, tránh cắt oan bội số của nốt nhạc |
+ | **3 chế độ** | **Bypass** (thông tuyến thuần), **Auto** (chạy liên tục), **Soundcheck** (nghe 15 giây đầu show, khóa mọi đỉnh tìm thấy, không tự nhả; hết 15 giây detector tự ngừng dò — bấm **Auto** để chạy tiếp) |
+ | **Chỉnh độ nhạy một nút** | ONE-KNOB RESPONSE: **SAFE** / **BALANCED** / **AGGRESSIVE** (tự chuyển **CUSTOM** khi chỉnh tay); mỗi slot chọn theo tuning **Global** chung hoặc **Custom** riêng |
+ | **Chọn device trực quan** | Chọn driver/device/sample rate/buffer ngay trong app; hiện latency và trạng thái theo thời gian thực |
+-| **Preset có sẵn** | `Speech` (Q=40, −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). |
++| **Preset có sẵn** | `Speech` (Q=40, trần −18 dB — hà khắc cho loa hội thoại) và `Music` (Q=25, trần −10 dB — dịu cho nhạc sống) đúng giá trị trong repo. Trần −10 của Music **tới được**: theo Q13 thang hiệu lực là −6 → −10, bậc cuối chính là trần, nên Music vẫn cắt đủ 10 dB như 1.1.3 chứ không bị lượng tử về −6. Installer chép hai preset vào máy, app tự seed chúng vào `%APPDATA%` lúc first-run (không bao giờ ghi đè file người dùng đã sửa), và GUI có hai nút **LOAD… / SAVE…** dưới mục INTERFACE để nạp/lưu preset (`*.json`). Từ 1.2.0 file lưu ra mang **độ sâu phòng đã cần** (`deepestDb`) và mang cả trần trong `notchDefaults`, nên nạp lại đúng như lúc lưu. |
+ | **An toàn theo thiết kế** | Không cấp phát bộ nhớ hay khóa mutex trên đường audio real-time; từ chối độ sâu dương (điều gì sẽ xảy ra nếu một lỗi đánh dấu biến notch thành máy khuếch đại hú?); tự vô hiệu notch khi đổi sample rate khiến notch vượt Nyquist |
+ 
+ ## Thông số nhanh
+ 
+ | | |
+ |---|---|
+ | Nền tảng | Windows 10/11 64-bit, standalone (không phải plugin) |
+ | Audio I/O | ASIO (khuyên dùng) hoặc Windows Audio/DirectSound dự phòng |
+ | Sample rate | Theo device báo về (không phải danh sách cứng) |
+ | Kênh | 8 slot xử lý độc lập; mỗi slot mono hoặc stereo, tự chọn kênh vào/ra của interface |
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index 10c070f..50b6422 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -1,14 +1,14 @@
+ # Kỹ thuật chống hú — AZ Soundtech Hands-free
+ 
+ > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
+-> đang chạy (`src/`) tại thời điểm 06/09/2026, v1.1.3 (đã release alpha 06/09/2026; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
++> đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã release alpha; 1.2.0 = lane G, thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
+ > header/khối `constexpr` trong source. Đọc kèm [`GIOI-THIEU.md`](GIOI-THIEU.md).
+ 
+ ## 1. Kiến trúc tổng thể — hai luồng, một đường lock-free
+ 
+ Nguyên tắc nền tảng của real-time audio: **luồng audio không bao giờ được chờ
+ ai**. Mọi allocation, mutex hay I/O trên luồng đó là một cơn dropout tiềm ẩn.
+ Vì thế hệ thống tách làm hai luồng, trao đổi nhau qua hai kênh lock-free
+ (SPSC — single-producer single-consumer), và mọi thứ còn lại dùng mutex thoải mái:
+ 
+ ```mermaid
+@@ -22,21 +22,21 @@ flowchart LR
+         NC["NotchChain ×2 làn × 8 slot<br/>16 notch biquad / làn"]
+         TAP["16 tap ring buffer SPSC<br/>(2 làn × 8 slot)"]
+         CQ["8 command queue SPSC<br/>LockFreeRingBuffer&lt;NotchCommand&gt;"]
+         DRAIN["drainCommandQueue()<br/>≤ 256 lệnh / callback,<br/>ngân sách chung 8 queue"]
+     end
+ 
+     subgraph DETTHREAD["Luồng detector (nền, ×8 — một thread mỗi slot,<br/>trong đó 2 bộ phân tích chạy lockstep, một bộ mỗi làn)"]
+         DET["Detector<br/>FFT 2048 · hop 512 · Hann"]
+         PA["PeakinessAnalyzer<br/>chấm điểm annulus ±3..±5"]
+         CS["CandidateScorer<br/>peakiness × rise × novelty<br/>+ trừ điểm harmonic"]
+-        CTRL["NotchController<br/>mô hình notch · outbox retry<br/>auto-release 30 s"]
++        CTRL["NotchController<br/>mô hình notch · outbox retry<br/>thang nhả 30 s + 10 s/bậc"]
+         SNAP["Snapshot phổ + notch<br/>(mutex, caller-owned copy)"]
+     end
+ 
+     GUI["GUI (message thread)<br/>ModeRail · StatusBadge · SlotTabs<br/>SlotPanel · TuningPanel · DeviceDrawer<br/>SpectrumView · NotchListPanel<br/>(ModeBar cũ còn sống nhưng HIDDEN)"]
+ 
+     HW -->|"input theo routing slot"| CB
+     CB --> NC
+     CB -->|"copy post-notch MỖI LÀN của mỗi slot"| TAP
+     TAP -->|"read ≤512 mẫu/lần"| DET
+     DET --> PA --> CS --> CTRL
+@@ -84,20 +84,49 @@ tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo c
+ 
+ - `depthDB > 0` bị **từ chối ở cả 3 tầng** (PresetManager → NotchChain → Biquad):
+   dạng peaking là đối xứng, gain dương sẽ **khuếch đại đúng tần số đang hú** —
+   biến phần mềm chống hú thành máy phát hú.
+ - Tham số không hợp lệ (Q ≤ 0, freq ≥ Nyquist...) bị chặn trước khi chạm hệ số;
+   pole ngoài vòng tròn đơn vị đã được đo bùng tới 3.7e77 chỉ sau 208 mẫu.
+ - Đổi sample rate khiến notch vượt Nyquist mới → notch về trạng thái Idle giữ
+   nguyên tham số (**D-00**: hủy kích hoạt, không clamp, không xóa). Clamp là thứ
+   từng tạo đỉnh đầu ra 4.11e18.
+ 
++**Đổi độ sâu trên notch đang chạy (1.2.0).** `Biquad::setNotchFilter` gọi
++`reset()` mỗi lần đổi hệ số, đúng khi tần số hoặc Q đổi và **sai** khi chỉ độ
++sâu đổi: xóa `z1/z2` giữa dòng tín hiệu là một bước nhảy vào loa.
++`Biquad::rampNotchDepth` giữ nguyên state và nội suy tuyến tính 5 hệ số trong
++`NotchChain::kRampMs` = **10 ms** (≤ 0,6 dB/ms). `NotchChain::setNotch` chỉ đi
++đường ramp khi slot đang Active **và** `freq`, `Q` bằng đúng giá trị đã lưu;
++mọi trường hợp khác vẫn reset như cũ.
++
++Vì sao bộ hệ số nội suy an toàn: cố định `freq/Q/sr`, mọi tổ hợp lồi của các bộ
++peaking đã chuẩn hóa vẫn **là** một peaking RBJ với gain tử `A_n ≤ 1 ≤ 1/A_d`,
++nên `|H| ≤ 1` ở **mọi** tần số — ramp không thể khuếch đại gì, kể cả tần số nó
++đang nhắm — và bán kính cực `sqrt((1 − α/A_d)/(1 + α/A_d)) < 1` nên không phân
++kỳ. Đo 06/09/2026: gain lớn nhất 1,9e-15 dB trên 3 sample rate × 5 tần số × 3 Q
++× 7 cặp độ sâu × 101 điểm, và 20 000 tổ hợp lồi ngẫu nhiên × 400 tần số (ramp
++khởi từ một biquad identity chưa cấu hình: −3,5e-11 dB, vẫn không khuếch đại).
++Test `Biquad.RampMidpointsNeverBoostAnyFrequency` chốt điều này bằng cách đọc
++hệ số **đang chạy** giữa ramp rồi tính `|H|` giải tích.
++
++Suy giảm đo được tại f0 sau khi ramp xong, từng bậc, sai số ±0,5 dB — test
++`NotchChain.MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel` in ra
++`−6,000000 / −12,000000 / −18,000000 / −24,000000 dB` (chạy lại 07/09/2026
++trên binary Release ở `af5201e`).
++
++**Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
++non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
++không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
++khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
++cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
++
+ ## 3. Phát hiện hú — từ mẫu đến điểm số
+ 
+ ```mermaid
+ sequenceDiagram
+     participant T as Tap (audio)
+     participant D as Detector
+     participant P as PeakinessAnalyzer
+     participant S as CandidateScorer
+     participant C as NotchController
+     participant Q as Command queue
+@@ -167,41 +196,88 @@ lượt calibration thực địa trước khi tin default này.
+ 
+ Peakiness chỉ là một nhân tử. Điểm cuối = **peakiness × rise × novelty**, kèm
+ **phạt harmonic**: nếu tần số F nằm trong dải bội 1.4×–4.1× của một notch đã
+ khóa thì điểm nhân thêm 0.5. Không có chỗ cho việc cắt bội số của nốt nhạc —
+ harmonic của keyboard không phải hú.
+ 
+ Hai tham số thời gian của scorer đều runtime-tunable (brief 2026-08-24):
+ **rise reference** mặc định 250 ms (chỉnh được 100–1000 ms) — mag hiện tại so
+ với mag ~250 ms trước; và **persistence** mặc định 3 block liên tiếp (chỉnh
+ được 1–10) trước khi phát lệnh `Set`. GUI gom chúng vào ONE-KNOB RESPONSE:
+-SAFE (500 ms/4/−12 dB/Q40/thr 12.0), BALANCED (250/3/−18/30/10.0), AGGRESSIVE
+-(100/1/−24/20/8.0), tự chuyển CUSTOM khi chỉnh tay; mỗi slot chọn theo tuning
++SAFE (500 ms/4/trần −12 dB/Q40/thr 12.0), BALANCED (250/3/trần −18/30/10.0), AGGRESSIVE
++(100/1/trần −24/20/8.0), tự chuyển CUSTOM khi chỉnh tay; mỗi slot chọn theo tuning
+ Global chung hoặc Custom riêng.
+ 
+ ### 3.4 NotchController — detector là tác giả duy nhất (D-05)
+ 
+ Quyết định kiến trúc quan trọng nhất: **detector là người duy nhất ra lệnh
+ notch**. Nó không đọc lại trạng thái filter (đọc ngược cross-thread là nơi sinh
+ race); nó **nhớ những gì mình đã lệnh**. Preset nạp giữa show cũng đi vào qua
+ detector ("detector nhận nuôi") chứ không ai tự tay đặt vào NotchChain.
+ 
+ Trạng thái mỗi slot mang theo đồng hồ riêng (`locked_at`, `last_detected_at`)
+ — đây cũng chính là dữ liệu cột "Locked Time" của GUI cần. Lệnh Set/Clear đi
+ vào outbox có **retry**; audio thread rút ≤ N lệnh/callback nên một đống lệnh
+ cũng không kéo dài callback.
+ 
+-**Auto-release 30 s** (spec §5.2): quá 30 giây không thấy peakiness ở tần số
+-đã khóa → phát `Clear`. Filter nhả, quỹ notch quay lại phục vụ ca hú tiếp theo.
+-**Ngoại lệ KD-7**: notch đặt trong Soundcheck (Origin::Soundcheck) **miễn
+-auto-release** — chỉ nhả qua `clearNotch`/`clearAll` tường minh, vì tần số
+-phòng "tự khai" lúc soundcheck là tần số nguy hiểm cả buổi.
++**Thang độ sâu (1.2.0, lane G).** Depth không còn là một số cố định đọc lúc
++đặt. Bậc cố định: `kDepthLadderDb = {−6, −12, −18, −24}`; slider độ sâu của
++preset là **trần**, đọc **sống** mỗi tick. **Thang hiệu lực (Q13) = các bậc cố
++định NÔNG HƠN trần, cộng chính trần làm bậc cuối**: trần −10 (`presets/Music.json`)
++⇒ −6 → −10; trần −13,7 ⇒ −6 → −12 → −13,7; trần −18 ⇒ −6 → −12 → −18; trần −6
++⇒ không bao giờ đào. Bậc cuối = trần, có thể là số lẻ — đây là chỗ DUY NHẤT một
++notch Detector không đứng trên bậc cố định. Không có bước lượng tử hóa nào:
++lượng tử trần −10 xuống −6 sẽ làm Music nông hơn 1.1.3 4 dB mà không ai báo.
++
++- **Đặt**: −6 dB, hoặc −12 nếu `riseRatio ≥ kSteepRiseRatio` = 2.0 (đỉnh lên
++  ≥ 6 dB trong cửa sổ rise), rồi kẹp về trần. Notch Soundcheck không có thang
++  (KD-7).
++- **Đào**: trong vòng reinforce, bin còn vượt ngưỡng peakiness ⇒ sâu thêm một
++  bậc mỗi `kDeepenAfterMs` = 300 ms, dừng ở trần (bước cuối có thể NHỎ hơn
++  6 dB: trần −10 thì bước cuối là 4 dB). Tiêu chí đào và tiêu chí "còn hú" là
++  **cùng một phép thử trên phổ SAU notch**, nên thang dừng ở bậc đầu tiên làm
++  bin hết vượt ngưỡng — có thể là −6 hoặc −12 suốt đời notch. Đó là chủ ý (Q7):
++  độ sâu theo nhu cầu, không theo mặc định. **Không test nào trong suite chứng
++  minh được điều này** (M-3): harness ghi tone THÔ vào `h.tap`
++  (`tests/test_notchcontroller.cpp:350-355`) nên analyser không bao giờ thấy
++  phổ đã bị notch, và trong test thang luôn leo tới trần. Chỉ dàn thật kiểm
++  chứng được — nêu trong tester notes, đừng dựng test giả cho nó.
++- **Nhả**: `quietMs` tích lũy khi bin im; ≥ `kReleaseFirstMs` = 30 s ⇒ nông
++  một bậc, mỗi `kReleaseStepMs` = 10 s tiếp theo một bậc nữa, tới −6 thì
++  `Clear(AutoRelease)` — tổng 40 s từ −12, 50 s từ −18, 60 s từ −24. Đồng hồ
++  **đóng băng** khi `frameScoreValid_ && frameMaxScore_ ≥ kRiskFreezeFraction`
++  (= 0.55) `× kConfirmScore` (băng RISING của chip), không có trần thời gian
++  (Q9), và đóng băng là **theo slot**: một bin đang căng giữ **mọi** notch của
++  slot đó ở nguyên bậc. Cờ `SnapshotBuffer::releaseFrozen` publish ra nhưng
++  1.2.0 chưa vẽ.
++- **Kẹp lại**: bin hú lại khi đang nhả ⇒ về `deepestDb` **ngay trong frame
++  đó**, không chờ 300 ms — nhưng **luôn kẹp bởi trần đang có hiệu lực**
++  (`max(deepestDb, ceilingDbFor(n))`, M-B). Trần đọc sống, nên nếu người vận
++  hành kéo slider nông đi trong lúc notch đang nhả, lần kẹp lại KHÔNG được
++  vượt giá trị mới. Song song, `deepestDb` của notch Detector bị kẹp về trần
++  mỗi tick, kể cả khi notch đang nông hơn trần — đó là đường duy nhất bắt được
++  trường hợp này.
++- **Nhớ phòng**: mỗi làn `kMemoryEntriesPerLane` = 16 mục
++  `{tần số, deepestDb, thời điểm nhả}`, TTL `kMemoryTtlMs` = 5 phút, khớp
++  **đúng cùng bin** (±0 — lệch một bin là 21,5 Hz @44,1k/2048, đủ để một
++  partial nhạc cụ bên cạnh kế thừa nhầm một vết cắt sâu). Dùng một lần, và
++  theo Q14 **chỉ được đào sâu hơn**, không bao giờ làm một placement nông đi.
++  Xóa sạch khi `setWidth` / `clearAll` / `setSampleRate`. Không persist ra đĩa.
++- Mọi lần đổi độ sâu đi qua `pushRetuneLocked` — anh em của `pushClearLocked`,
++  gọi khi đã cầm `modelMutex_`. Không gọi `setNotch`/`setNotchImpl` từ đó
++  được: mutex **không đệ quy**, và `setNotchImpl` sẽ ghi đè `lockedAtMs`, tức
++  nhãn tuổi mà lane D ghi vào mọi `notch_clear`.
++
++**Ngoại lệ KD-7**: notch đặt trong Soundcheck (Origin::Soundcheck) **miễn trừ
++mọi thứ ở trên** — không thang, không đào, không nhả tự động; chỉ nhả qua
++`clearNotch`/`clearAll` tường minh, vì tần số phòng "tự khai" lúc soundcheck là
++tần số nguy hiểm cả buổi.
+ 
+ **Theo làn (lane S, 2026-09-05).** Slot stereo có hai bộ phân tích (Detector +
+ PeakinessAnalyzer + CandidateScorer) chạy lockstep trên cùng một detector
+ thread, mỗi làn tự đếm persistence và tự đặt notch trên làn của mình (INDEP,
+ mặc định). LINK trên SlotPanel trả về hành vi cũ: một làn confirm → cả hai làn
+ nhận notch tại index rảnh ở cả hai làn. Auto-release theo (làn, index); khi
+ LINK, cặp nhả cùng lúc khi cả hai làn im. Tham số `laneAsymmetryBonus` (mặc
+ định 1.0, chưa có núm GUI) chờ sweep ở lane T. Ctor một tap (test cũ) luôn LINK.
+ 
+ ### 3.5 Chế độ hoạt động
+@@ -215,21 +291,21 @@ stateDiagram-v2
+     Auto --> Bypass : nút BYPASS
+     Soundcheck --> Bypass : nút BYPASS
+ 
+     state Bypass {
+         note right of Bypass : Copy thẳng in→out.<br/>Tap VẪN chạy — detector vẫn thấy phòng
+     }
+     state Soundcheck {
+         note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả (KD-7).<br/>Hết 15 s detector tự NGỪNG DÒ<br/>nhưng mode KHÔNG tự chuyển —<br/>chờ người vận hành bấm AUTO
+     }
+     state Auto {
+-        note right of Auto : Khóa khi vượt ngưỡng,<br/>tự nhả sau 30 s im
++        note right of Auto : Đặt nông rồi đào sâu theo nhu cầu,<br/>nhả dần từng bậc khi im
+     }
+ ```
+ 
+ Soundcheck dùng cho 15 giây đầu buổi: để phòng "tự khai" — đẩy monitor lên,
+ bật mic, app khóa sẵn các tần số nguy hiểm trước khi khán giả vào.
+ 
+ ### 3.6 Chip RING RISK — số của detector, không phải số thứ hai
+ 
+ Chip **RING RISK** trên thanh analyser (nối data 06/09/2026, lane R) đọc đúng
+ `score` mà quyết định đặt notch dùng — `breakdown.score × asym`, lấy **max**
+@@ -312,59 +388,79 @@ từ snapshot để file luôn mở lại được. FileChooser bất đồng b
+ 
+ Loader: lỗi version → từ chối ngay kèm trích version lạ; >16 notch **trên mỗi
+ (slot, làn)** hoặc trùng index **trong cùng một (slot, làn)** → từ chối (slot
+ notch đánh địa chỉ theo index, "người sau thắng" nghĩa là preset tai nghe ≠
+ preset trong file); hai notch cùng index nhưng khác làn là **hợp lệ**, còn
+ `lane` = −1 (mọi làn) đụng với bất kỳ làn nào ở cùng index → từ chối; notch
+ trên Nyquist của **file** → từ chối
+ (file tự mâu thuẫn), notch trên Nyquist của **device hiện tại** → nạp bình
+ thường, đánh dấu AboveNyquist giữ nguyên tham số (D-00).
+ 
++Từ 1.2.0 `savePreset` ghi `deepestDb` (độ sâu phòng đã cần) chứ không phải bậc
++đang đứng lúc bấm SAVE, và ghi cả `notchDefaults {Q, depth}` từ tuning đang
++chạy — trước đó `savePreset` không set `notchDefaults`, nên nạp lại rơi về mặc
++định −12 dB của `PresetNotchDefaults` và trần bị hạ hai bậc mà không ai báo.
++Độ sâu sâu hơn −24 dB trong file bị **kẹp về −24** lúc adopt, cho mọi Origin,
++và `adoptPreset` ghi một dòng `juce::Logger` đếm số notch bị kẹp (Q12).
++`adoptPreset` cũng có thể re-Set một index đang Active mà không clear trước:
++từ 1.2.0 đường đó rơi vào nhánh **ramp** thay vì reset — nạp preset đè lên
++notch đang sống nay chuyển mượt 10 ms chứ không xóa state filter.
++
++**Vẫn còn lệch, không phải việc của lane G:** mặc định `notchDefaults.depthDB`
++của `PresetManager` là −12 dB trong khi `NotchController::kDefaultNotchDepthDb`
++là −18. File do app này LƯU ra đã mang `notchDefaults` nên không dính, nhưng
++một preset viết tay không có khối đó vẫn im lặng nhận trần −12.
++
+ ## 5. Tổng hợp các giới hạn an toàn
+ 
+ | Nguy cơ | Chắn bằng |
+ |---|---|
+ | Notch thành máy khuếch đại hú (depth dương) | Từ chối ở PresetManager + NotchChain + Biquad |
+ | Pole ngoài vòng tròn đơn vị → output bùng | Guard Q/freq/rate ở mọi overload biquad |
+ | Denormal blow-up sau im lặng dài | `ScopedNoDenormals` đầu callback |
+ | Allocation/lock trên luồng audio | Zero-alloc theo thiết kế; atomics cho mọi state cross-thread; test ràng buộc |
+ | Drop tap im lặng biến thành giả broadband | `getTapDropCount()` đếm công khai |
+ | Timeline discontinuity sau đổi rate | `Detector::reset()` xóa cửa sổ phân tích |
+ | Notch oan harmonic nhạc | Trừ điểm 1.4×–4.1× của notch đã khóa |
+ | Race GUI ↔ detector | Snapshot mutex, caller-owned copy |
+ | Notch mồ côi làn 1 khi thu về mono | `setWidth` push Clear cho làn rời slot |
++| Đổi độ sâu giữa dòng tín hiệu thành tiếng "cạch" | `Biquad::rampNotchDepth` giữ state, nội suy 10 ms; chỉ đi đường này khi cùng `freq`/`Q` |
++| Ramp khuếch đại giữa chừng | Chứng minh tổ hợp lồi `A_n ≤ 1 ≤ 1/A_d` + test đo `\|H\|` tại 5 điểm giữa ramp |
++| Notch sâu hơn −24 dB từ file preset | Kẹp ở `setNotchImpl` cho MỌI Origin, có log (Q12); `pushRetuneLocked` từ chối |
++| "Nhớ phòng" / `deepestDb` cũ vượt trần mới của slider | Kẹp `deepestDb` về trần **mỗi tick** vô điều kiện, VÀ kẹp lại mục tiêu reclamp ngay lúc dùng (M-B) |
+ | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
+ | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
+ | Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
+ | Logger chặn detector thread | Hàng đợi có cap 4096, bỏ + đếm; sink gọi ngoài modelMutex_ |
+ 
+ ## 6. Những gì hệ thống cố tình KHÔNG làm (v1)
+ 
+ - **Không adaptive AFC/NLMS** — filter thích ứng liên tục; phạm vi v1 là
+   detect-and-notch, đơn giản hơn để tin được trên sân khấu.
+ - **Không macOS/Linux/plugin** — standalone Windows only.
+ - **Không cloud sync preset** — local only.
+ - **Không licensing** (D-07) — freeware; mã license nằm chờ trong repo.
+ - **Không phủ dưới ~117 Hz @ 48 kHz** (5 × sample rate / 2048) — giới hạn
+   hình học của phép chấm điểm annulus; đã hạ từ ~234 Hz nhờ FFT 2048.
+ 
+-## 7. Log session và nhãn (lane D, v1.1.2)
++## 7. Log session và nhãn (lane D từ v1.1.2; `notch_retune` thêm ở v1.2.0)
+ 
+ App ghi một file mỗi lần chạy vào `%APPDATA%\AZSoundtech\HandsFree\logs\session-YYYYMMDD-HHMMSS-mmm.jsonl`,
+ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30 file mới nhất.
+ 
+ | `ev` | Khi nào | Mang gì |
+ |---|---|---|
+ | `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
+ | `mode` | ngay sau `session_start` (mode lúc mở phiên), rồi mỗi lần bấm Bypass / Auto / Soundcheck | `mode` |
+ | `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
+ | `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
++| `notch_retune` | lane G đổi độ sâu một notch đang chạy | slot, làn, index, Hz, Q, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` (tính từ lúc ĐẶT, không phải từ lần retune trước) |
+ | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
+ | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
+ | `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono) |
+ | `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
+ 
+ Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
+ người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
+ thread; hàng đợi 4096 dòng, quá thì bỏ và đếm vào `dropped_events` ở dòng `session_end`.
+ Sự kiện của `NotchController` đi qua một outbox 64 phần tử và chỉ được đẩy ra **ngoài**
+ `modelMutex_` trên detector thread (spec D-6), nên nút CLEAR ALL không bao giờ chờ I/O.
+@@ -379,26 +475,35 @@ hai số lệch nhau đúng bằng thời gian tap chết, và đó là hành vi
+ nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
+ frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
+ Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
+ 
+ **Kích thước.** Một dòng `notch_set` có `ctx` là dòng nặng nhất: trên slot stereo nó mang
+ ba mảng 1025 bin (`now`, `ref`, `other_lane_now`) → **đo được 19,5–19,7 KB/dòng** (log thật
+ của test teardown; tối đa ~23 KB nếu mọi giá trị đều dùng hết 3 chữ số có nghĩa). Ở chế độ
+ LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự kiện Set (~40 KB). Một show 3 giờ
+ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
+ 
+-## 8. Trạng thái & kiểm chứng (05/09/2026, v1.1.2 — đã release alpha)
++## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã release alpha)
++
++Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
++nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
++10 ms trong `Biquad`, sự kiện `notch_retune` trong log.
++
++- Suite: **535/535 test pass** (ctest Release, MSVC) sau task cuối của lane G
++  (`af5201e`) — +81 so với 1.1.3 (454). Bốn bậc thang đo được đúng
++  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB).
++- Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).
+ 
+ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,
+ `tools/logstats.py`.
+ 
+-- Suite: **432/432 test pass** (ctest Release, MSVC, CI GitHub
++- Suite lúc đó: **432/432 test pass** (ctest Release, MSVC, CI GitHub
+   Actions xanh) — +30 test so với 1.1.1 (402): `SessionLogger` (start/stop,
+   cap hàng đợi, `LogDoesNotMutateTheCallersVar`, đường dẫn không tạo được thư
+   mục là no-op), sự kiện `notch_set`/`notch_clear`/`verdict` qua outbox ngoài
+   `modelMutex_`, nút GOOD/FALSE trên `NotchListPanel`, và `logstats_fixture`
+   chạy `tools/logstats.py` dưới ctest.
+ - Mỗi test ghi rõ **thay đổi production nào làm nó đỏ**; nhiều test được xác
+   minh bằng mutation thật (sửa production → đỏ đúng test dự đoán → hoàn tác).
+ - DSP spine (Tasks 12–15), bridge, routing 8 slot, presets, installer, và
+   GUI console rebuild ("Sodium Rack": ModeRail · StatusBadge · SlotTabs ·
+   SlotPanel · TuningPanel · DeviceDrawer · SpectrumView · NotchListPanel),
+diff --git a/docs/release-notes/1.2.0-alpha.md b/docs/release-notes/1.2.0-alpha.md
+new file mode 100644
+index 0000000..fb7565f
+--- /dev/null
++++ b/docs/release-notes/1.2.0-alpha.md
+@@ -0,0 +1,104 @@
++# Hands-free 1.2.0 alpha — notch sâu theo nhu cầu, nhả dần từng bậc
++
++**Build:** 2026-09-07 · suite 535/535 · `AZSoundtech-Handsfree-Setup-1.2.0.exe` tại
++`Z:\My Drive\RELEASE\ALPHA TEST` · SHA-256 và kích thước: **điền sau khi
++`installer\release-alpha.ps1 -Part minor` chạy xong** (bản này chưa đóng gói lúc
++viết note).
++
++**CÓ đụng đường audio.** Đây là bản đầu tiên mà **độ sâu của một notch thay đổi
++theo thời gian**. Đọc kỹ mục "Nghe ở âm lượng thấp trước" ở cuối trước khi cắm
++vào PA thật.
++
++## Có gì trong 1.2.0
++
++Cho tới 1.1.3, một notch đặt xuống là cắt thẳng đúng con số trong slider DEPTH
++(mặc định −18 dB) và biến mất hẳn sau 30 giây im. Từ 1.2.0:
++
++- **Đặt nông.** Notch mới đặt ở **−6 dB**, hoặc **−12 dB** nếu đỉnh lên dốc
++  (`riseRatio ≥ 2.0`, tức lên ≥ 6 dB trong cửa sổ rise).
++- **Đào sâu theo nhu cầu.** Chừng nào bin đó còn vượt ngưỡng peakiness, notch
++  sâu thêm **6 dB mỗi 300 ms**, và **dừng ở bậc đầu tiên làm bin hết hú** — có
++  thể là −6 hoặc −12 suốt đời notch.
++- **Slider DEPTH nay là TRẦN, không phải giá trị đặt.** Đọc sống mỗi tick: hạ
++  slider giữa show thì notch đang sâu hơn được kéo nông lên ngay.
++- **Thang nhả thay cho cú Clear cụt.** Im 30 giây → nông một bậc; mỗi 10 giây
++  im tiếp theo nông thêm một bậc; tới −6 dB thì nhả hẳn. Tổng: **40 s** từ −12,
++  **50 s** từ −18, **60 s** từ −24.
++- **Đóng băng khi phòng đang căng.** Chip RING RISK ở **RISING** hoặc
++  **CRITICAL** thì đồng hồ nhả đứng yên — **không có trần thời gian**, và đóng
++  băng là **theo slot**: một bin đang căng giữ mọi notch của slot đó ở nguyên
++  bậc.
++- **Kẹp lại tức thì.** Hú quay lại trong lúc notch đang nhả → về thẳng bậc sâu
++  nhất đã từng đứng ngay trong frame đó, không chờ 300 ms — nhưng không bao giờ
++  vượt trần đang có hiệu lực.
++- **Nhớ phòng 5 phút.** Hú quay lại **đúng cùng bin** trong 5 phút sau khi nhả
++  hẳn → đặt lại thẳng ở độ sâu đã từng cần. Bộ nhớ chỉ được **đào sâu** một
++  placement, không bao giờ làm nó nông đi (Q14). 16 mục mỗi làn, dùng một lần,
++  không ghi ra đĩa.
++- **Kẹp −24 dB.** Không đường nào — preset, tay, thang, nhớ phòng — đưa một
++  notch sâu quá −24 dB. Preset mang số sâu hơn bị kẹp lúc nạp và ghi một dòng
++  log đếm số notch bị kẹp.
++- **Không có tiếng "cạch".** Mọi lần đổi độ sâu đi qua ramp hệ số **10 ms** giữ
++  nguyên trạng thái filter, thay vì reset. Nạp preset đè lên notch đang sống
++  cũng đi đường ramp này.
++- **Log session có `notch_retune`.** Mỗi lần đổi độ sâu ghi một dòng
++  (`depth_db` mới, `from_db` cũ, `reason`: `deepen` / `release` / `reclamp` /
++  `ceiling`, `age_ms`); `tools/logstats.py` đếm chúng (`--expect-retunes`) và
++  **sửa** bản ghi notch đang mở chứ không đóng nó.
++- **SAVE… lưu độ sâu phòng đã cần.** File preset ghi `deepestDb` chứ không phải
++  bậc đang đứng lúc bấm, và ghi cả `notchDefaults {Q, depth}` từ tuning đang
++  chạy, nên nạp lại đúng như lúc lưu.
++
++Suy giảm đo được tại tần số tâm sau khi ramp xong, từng bậc
++(`NotchChain.MeasuredAttenuationMatchesEveryLadderRungWithinHalfADecibel`,
++sai số cho phép ±0,5 dB):
++
++| Yêu cầu | Đo được |
++|---|---|
++| −6 dB | **−6,000000 dB** |
++| −12 dB | **−12,000000 dB** |
++| −18 dB | **−18,000000 dB** |
++| −24 dB | **−24,000000 dB** |
++
++## Hai preset đóng gói không bị nông đi
++
++Thang hiệu lực (Q13) = các bậc cố định nông hơn trần, **cộng chính trần làm bậc
++cuối**. Nên `Music` (trần −10 dB) chạy thang −6 → **−10**, và `Speech` (trần
++−18 dB) chạy −6 → −12 → **−18**: cả hai vẫn cắt đủ đúng con số của 1.1.3 khi
++thang đã leo hết. Không có bước lượng tử hóa nào — nếu có, `Music` sẽ dừng ở −6
++và nông hơn 1.1.3 4 dB mà không ai báo.
++
++## Nghe ở âm lượng thấp trước
++
++Ba chỗ bản này **nghe khác** 1.1.3, theo đúng bảng §3 của spec:
++
++1. **Lúc đặt notch — hú có thể kêu lâu hơn.** Notch bắt đầu ở −6 (hoặc −12),
++   nên trong **tối đa ~0,6 giây** đầu nó nén ít hơn 1.1.3 tới **12 dB** (hoặc
++   6). Một tiếng hú bùng nhanh sẽ nghe rõ lâu hơn trước khi bị cắt hết. Đây là
++   hàng phải nghe ở âm lượng thấp trước.
++2. **Lúc nhả — tone mất nhiều hơn, lâu hơn.** 1.1.3 Clear thẳng ở 30 giây;
++   1.2.0 ở 30 giây mới nông đi một bậc và chỉ biến mất ở 40–60 giây tùy bậc
++   đang đứng. Trong khoảng đó, tại bin của notch, **tone mất nhiều hơn 1.1.3
++   tới 18 dB**. Cộng thêm: nếu chip RING RISK còn ≥ RISING thì đồng hồ đứng
++   yên, **không giới hạn thời gian**.
++3. **Kẹt ở bậc nông — tone TỐT hơn.** Một notch không cần sâu sẽ đứng ở −6 hoặc
++   −12 **suốt đời nó**, tức nông hơn 1.1.3 6–12 dB tại bin đó. Đây chính là
++   mục tiêu của lane này. **Và đây là hành vi duy nhất không một test nào trong
++   dự án kiểm chứng được** — harness ghi tone thô vào tap nên bộ phân tích
++   không bao giờ thấy phổ đã bị notch, và trong test thang luôn leo tới trần.
++   Chỉ dàn thật trả lời được. Nếu trên dàn của bạn **mọi** notch đều kết thúc
++   đúng bằng số trên slider DEPTH, hãy báo lại: đó là vòng reinforce đọc sai
++   phổ, không phải sở thích.
++
++Master, limiter, clamp output ±1.0, guard NaN/denormal: **không đụng**.
++
++## Cần báo lại ngay
++
++- **Tiếng "cạch" hoặc "zip"** khi một notch đổi độ sâu — phải không có, mọi
++  thay đổi đều trải 10 ms.
++- **Một tiếng hú app không bao giờ khống chế được.**
++- **Một notch sâu hơn số trên slider DEPTH** — không đường nào được phép làm
++  vậy.
++
++Kèm theo: Windows version, card tiếng, preset đang dùng, và file log session
++(`%APPDATA%\AZSoundtech\HandsFree\logs\`).
+diff --git a/docs/spec-ring-risk.md b/docs/spec-ring-risk.md
+index 5d820c1..85c47b4 100644
+--- a/docs/spec-ring-risk.md
++++ b/docs/spec-ring-risk.md
+@@ -230,16 +230,49 @@ Not optimised before anything has measured a problem.
+   last raw band. The named follow-up is a `lastDataMs_` (or sequence-number)
+   timeout gate in the provider: if the snapshot has not advanced within N ms,
+   report `Unavailable`. It covers **both** cases, needs no change to
+   `NotchController`, and — unlike the engine-state guard — is drivable from the
+   headless suite. **Owner decision**, not taken in lane R.
+ - A-R7: `CandidateScorer.cpp` gates on `PeakinessAnalyzer::kDefaultThreshold`
+   (compile-time) rather than the live `analyzer.getThreshold()`, so the RESPONSE
+   preset does not move the scorer's gate. Out of scope for lane R — changing it
+   changes placement behaviour — and waiting on an owner decision.
+ 
++## A second reader: lane G's release ladder (1.2.0)
++
++Up to 1.1.3 only the GUI read `ringRiskScore`. From 1.2.0 `NotchController`
++reads **its own number** — `frameMaxScore_` / `frameScoreValid_`, two members
++that live on the detector thread only and hold exactly the two values just
++published into the snapshot — in order to **freeze the release clock** while
++`frameScoreValid_ && frameMaxScore_ >= 0.55 × CandidateScorer::kConfirmScore`,
++i.e. exactly the RISING boundary of `SpectrumView::riskForScore`. The constant
++is ONE in the literal sense (m-D, rev 3): `NotchController::kRiskFreezeFraction
++= 0.55f` is the DEFINITION and `SpectrumView::kRingRiskRisingFraction` is only
++an alias (`= NotchController::kRiskFreezeFraction`). There are no longer two
++`0.55f` literals that can drift apart; changing one changes both.
++
++Four things to know when reading the chip next to the release ladder:
++
++- **It does not take `snapshotMutex_`.** Today `modelMutex_` and
++  `snapshotMutex_` have never nested; reading the snapshot from inside the
++  release loop would invent a new lock order for one readout — not worth it
++  (M-5). The `releaseFrozen` flag is published in its OWN scope, **before**
++  `modelMutex_` is taken.
++- **The chip and the clock can disagree** (M-8). The chip still passes through
++  the 750 ms hold and reads `displayedSlot_` only, so the chip can say RISING
++  after the clock has resumed, and a slot that is not on screen can be frozen
++  with nothing on the display saying so. `SnapshotBuffer::releaseFrozen` exists
++  so that this can be shown later — 1.2.0 publishes it but does not draw it
++  (Q9).
++- **`ringRiskValid == false` does NOT freeze** (invariant 7). Detection off
++  must release exactly as it did in 1.1.3, otherwise turning detection off
++  would imprison every notch.
++- **There is no time cap on the freeze** (Q9), and the freeze is
++  **slot-global**: while the room is tense, every notch of that slot holds its
++  rung, indefinitely.
++
+ ## Out of scope
+ 
+ - Per-slot risk shown for **all** slots at once. The readout describes the
+   monitored slot only; the masthead selector says which that is.
+ - Any change to placement behaviour. This feature is a readout. If wiring it
+   up changes when a notch gets placed, something is wrong.
+diff --git a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+index 60292c7..e88c198 100644
+--- a/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
++++ b/docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md
+@@ -13,25 +13,25 @@ Thứ tự đi theo **cái gì nuôi cái gì**, không theo độ hấp dẫn t
+   release alpha chỉ mang một thay đổi DSP.
+ - Mỗi lane = một spec + một plan + một worktree + một release alpha.
+   Không gộp hai lane vào một release.
+ 
+ ## Bảng lane
+ 
+ | # | Lane | Đụng audio path? | Cần gì trước | Spec |
+ |---|---|---|---|---|
+ | S | **Stereo-aware detection**: một detector/slot nhìn cả hai làn, notch đặt theo làn, nút LINK | Có (tap làn 1, lệnh mang lane mask) | không | [`2026-09-05-stereo-aware-detection-design.md`](2026-09-05-stereo-aware-detection-design.md) |
+ | D | **Vòng dữ liệu**: nút oan/đúng trên notch list, log session JSONL (magnitudes quanh sự kiện, không lưu audio) | Không | không | [`2026-09-05-data-loop-design.md`](2026-09-05-data-loop-design.md) |
+-| G | **Gain-aware notch**: depth theo nhu cầu từ τ ringing, nhả dần thay vì nhả cụt, nối data ring-risk | Có (depth thay đổi theo thời gian) | S (lane), D (đo hiệu quả) | viết khi S+D hạ cánh |
++| G | **Gain-aware notch**: depth theo nhu cầu (đo thực nghiệm, không từ τ), nhả dần thay vì nhả cụt, nối data ring-risk | Có (depth thay đổi theo thời gian) | S (lane), D (đo hiệu quả) | [`2026-09-06-gain-aware-notch-design.md`](2026-09-06-gain-aware-notch-design.md) — **đã hạ cánh 1.2.0** |
+ | M | **Soundcheck đo chủ động**: chirp/MLS qua từng output, đo loa→mic, loop gain theo tần số, notch trước khi hú | Có (phát tín hiệu test ra PA) | S (đo per-output = per-lane) | viết khi S hạ cánh |
+ | C | **Classifier nhỏ** trên detector thread (RTNeural), phân loại hú vs nốt nhạc, feature L/R từ S | Không (chỉ quyết định, không xử lý) | D (nhãn), S (feature) | viết khi D có ≥ vài trăm nhãn từ alpha |
+ | L | **LLM copilot**: đọc telemetry qua tool call, gợi ý cho soundman | Không | D (telemetry) | viết khi D hạ cánh; chạy song song C |
+-| A | **AFC**: NLMS + PEM, watchdog + fallback notch | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
++| A | **AFC**: NLMS + PEM, watchdog + fallback notch — fallback notch = thang G (đặt −6, đào 6 dB/300 ms, nhả 30 s + 10 s/bậc) | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
+ 
+ Tùy chọn không xếp lane riêng, gắn vào lane gần nhất khi có nhu cầu:
+ frequency shift 3–5 Hz cho mode Speech (gắn G), delay modulation (gắn A).
+ 
+ ## Đồ thị phụ thuộc
+ 
+ ```mermaid
+ flowchart LR
+     S[S · Stereo-aware] --> G[G · Gain-aware notch]
+     D[D · Data loop] --> G
+@@ -60,25 +60,25 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
+    commit khi hành vi user-visible đổi.
+ 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
+    gửi tester nêu rõ lane vừa đổi gì.
+ 
+ ## Trạng thái
+ 
+ | Lane | Trạng thái | Ngày |
+ |---|---|---|
+ | S | **đã làm xong** trên nhánh `claude_desk/feedback-detection-upgrade-102019` (24 commit, suite 397/397, review toàn nhánh sạch); đã merge main (lane P, 1.0.5) vào nhánh 2026-09-05, `savePreset` ghi notch theo làn + `linked`; release 1.1.1 alpha (1.1.0 là bản nhánh chưa gộp, bỏ); chờ owner PR vào main và nghe thử | 2026-09-05 |
+ | D | **đã làm xong** trên nhánh `feat/data-loop` (8 task + fix wave sau verifier độc lập & review toàn nhánh, suite 432/432); **release 1.1.2 alpha đã đẩy** lên `Z:\My Drive\RELEASE\ALPHA TEST` (gate 432/432, SHA-256 `51E28F8EDD6E…`); **đã merge main** `e9da9c6` (owner, 05/09/2026 chiều) | 2026-09-05 |
+-| G | chờ S, D | |
++| G | **đã hạ cánh 1.2.0** trên nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568` (10 task SDD, commit `01ecb4c..HEAD`, suite 535/535): thang độ sâu theo nhu cầu (đặt −6/−12, đào 6 dB mỗi 300 ms, trần = slider), nhả dần 30 s + 10 s/bậc, đóng băng nhả khi RING RISK ≥ RISING (slot-global, không trần thời gian), nhớ phòng 5 phút, ramp độ sâu 10 ms trong `Biquad`, `notch_retune` trong log session | 2026-09-07 |
+ | M | chờ S | |
+ | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
+ | L | chờ D | |
+-| A | chờ M, G | |
++| A | chờ M (G đã xong: fallback notch dùng thang G) | |
+ 
+ **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
+ plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
+ khỏi lane D khi review**. Reset chỉ Detector mà không đụng lịch sử của
+ `CandidateScorer` để lại history cũ, khiến hai trục rise/novelty bị bão hòa về
+ 0 trong ~200 ms trên làn vừa quay lại — **dễ dãi hơn** hành vi 1.1.1 đang
+ chạy, không phải chặt hơn. Việc có nên chặn `riseReferenceMs` cho làn tái nhập
+ sau khi widen hay không là **quyết định owner còn treo cho lane S**. Chi tiết:
+ `.superpowers/sdd/2026-09-05-data-loop/progress.md`, mục "Task 3: CONTROLLER
+ RULING".
+diff --git a/docs/superpowers/specs/2026-09-05-data-loop-design.md b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+index c941db9..ada2864 100644
+--- a/docs/superpowers/specs/2026-09-05-data-loop-design.md
++++ b/docs/superpowers/specs/2026-09-05-data-loop-design.md
+@@ -99,24 +99,40 @@ gọi `setEventSink(nullptr)` cho mọi controller **trước** mọi việc kh
+ rồi `sessionLogger_.stop()`.
+ 
+ ### 3.2 Sự kiện
+ 
+ | `ev` | Từ đâu | Trường |
+ |---|---|---|
+ | `session_start` | MainComponent | `app_version`, `os`, `device`, `sample_rate`, `buffer_size`, `slots[]` (`SlotConfig` + `linked` nếu lane S đã merge) |
+ | `mode` | MainComponent | `mode`: `bypass` / `auto` / `soundcheck` |
+ | `tuning` | MainComponent | `slot` (−1 = global), `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
+ | `notch_set` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `score`, `peakiness`, `rise`, `novelty`, `penalty`, `persist_needed`, `thr`, `ctx` |
++| `notch_retune` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` |
+ | `notch_clear` | NotchController | `slot`, `lane`, `index`, `hz`, `reason`: `auto_release` / `manual` / `clear_all` / `width_change` / `verdict_false`, `age_ms` |
+ | `verdict` | NotchListPanel → MainComponent | `slot`, `lane`, `index`, `hz`, `verdict`: `good` / `false`, `age_ms` |
+ | `session_end` | SessionLogger | `dropped_events` |
+ 
++`notch_retune` (lane G, 1.2.0) là **cập nhật**, không phải đóng/mở: một notch
++có thể retune nhiều lần giữa `notch_set` và `notch_clear` của nó.
++`tools/logstats.py` xử lý nó bằng cách sửa bản ghi đang mở (`depth_db`,
++`deepest_db`, `retunes`) và **không** đóng bản ghi — nếu đóng thì một lần đào
++sâu ở mốc 300 ms sẽ biến mọi notch được đào thành "notch sống 300 ms", tức một
++false positive giả trên mọi dòng thống kê. Cờ `--expect-retunes` kiểm chứng số
++lần retune trong fixture ctest.
++
++Reader là một chuỗi `if/elif` trên `ev` và **bỏ qua tên lạ**, nên một file log
++cũ đọc bằng tool mới vẫn chạy đúng, và một `ev` thêm sau này cũng không làm
++hỏng reader cũ. **Một file log ghi bởi build nhánh TRƯỚC `af5201e` thì hỏng đối
++với logstats**: lúc đó `MainComponent` còn ghi mọi Retune thành `notch_clear`,
++nên tool đóng bản ghi ở lần đào sâu đầu tiên. Không bản nào như vậy được phát
++hành — chỉ cần biết khi đọc log nội bộ cũ.
++
+ `ctx` của `notch_set` là ngữ cảnh phổ:
+ 
+ ```json
+ "ctx": {
+   "bins": 1025, "bin_hz": 23.4375,
+   "now":  [ ...1025 float, 3 chữ số có nghĩa... ],
+   "ref":  [ ...frame gần nhất ≥ rise_ms trước, cùng định dạng... ],
+   "other_lane_now": [ ... ]        // chỉ khi slot stereo và làn kia có phổ cùng vòng
+ }
+ ```
+diff --git a/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md b/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
+index 6cd80ad..eef7739 100644
+--- a/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
++++ b/docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md
+@@ -1,15 +1,15 @@
+ # Lane G — Gain-aware notch: depth theo nhu cầu, nhả dần, nối ring-risk
+ 
+ **Ngày:** 2026-09-06. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane G, chờ S + D + R — cả ba đã hạ cánh, main `6b8d084`, 1.1.3 alpha, suite 454/454).
+ **Sổ quyết định:** [`../decisions/2026-09-06-lane-g-gain-aware-notch.md`](../decisions/2026-09-06-lane-g-gain-aware-notch.md) (Q1–Q14, đừng hỏi lại).
+-**Trạng thái:** spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13; **cập nhật 2026-09-07 sau phản biện vòng 2** (B-5 fixture ramp, M-B kẹp lại vượt trần — xem §8). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
++**Trạng thái:** **đã thực thi, 1.2.0 alpha** (plan: [`../plans/2026-09-07-gain-aware-notch.md`](../plans/2026-09-07-gain-aware-notch.md), 10 task, suite 535/535 — xem §8). Spec v2 sau phản biện vòng 1 + ruling Q7–Q12 + Q13, cập nhật 2026-09-07 sau phản biện vòng 2 (B-5 fixture ramp, M-B kẹp lại vượt trần) và Q14 (nhớ phòng chỉ được đào sâu). Q1–Q13 không đổi. **Đụng audio path:** có (`Biquad`, `NotchChain`). **Release:** 1.2.0 (`-Part minor`).
+ 
+ ## 1. Vấn đề
+ 
+ Đọc code 2026-09-06:
+ 
+ - Depth là **một số cố định** đọc từ preset lúc đặt
+   (`NotchController::placeConfirmed`, `notchDepthDb_`, mặc định −18, kẹp
+   [−24, −6]). Không có gì đo notch *cần* bao nhiêu; phòng hú nhẹ vẫn bị cắt
+   18 dB, tone mất nhiều hơn cần.
+ - Nhả là **cụt**: `runOnce` bước 3, `liveMs_ − lastDetectedMs > 30 s` →
+diff --git a/installer/TESTER-NOTES.md b/installer/TESTER-NOTES.md
+index 42c1c2a..694dbe1 100644
+--- a/installer/TESTER-NOTES.md
++++ b/installer/TESTER-NOTES.md
+@@ -1,20 +1,25 @@
+-# Ghi chú cho team test — AZ Soundtech Hands-free v1.1.3
++# Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
+ 
+-Ngày build: 2026-09-06 · suite test 454/454 xanh · installer ~26.8 MB
++Ngày build: 2026-09-07 · suite test 535/535 xanh · installer: kích thước điền
++sau khi đóng gói
+ 
+-SHA-256 của Setup 1.1.3:
+-`0B09D7FDBF71B39C31EF9114800CDF10523273E4C817DC68E15EC5AEB7376E26`
++SHA-256 của Setup 1.2.0:
++`<điền sau khi installer\release-alpha.ps1 -Part minor chạy xong>`
+ 
+ Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
+ nhờ test bản cũ.
+ 
++> **1.2.0 CÓ đụng đường audio.** Độ sâu của một notch nay thay đổi theo thời
++> gian. **Mở âm lượng nhỏ trước** và đọc mục "Mới trong 1.2.0" bên dưới trước
++> khi cắm vào PA thật.
++
+ ## Biết trước để không tưởng app hỏng
+ 
+ 1. **SmartScreen chặn lần đầu** — file chưa ký số. "More info" → "Run
+    anyway". Hành vi đúng của bản unsigned, không phải virus.
+ 2. **Chưa kèm driver ASIO** (licence Steinberg). Không có ASIO thì app chạy
+    Windows Audio — vẫn test được mọi thứ, chỉ đừng đo latency thật.
+ 3. **Ô RING RISK — cách đọc (từ 1.1.3 đã có dữ liệu thật).** Chip đọc số của
+    detector trên slot đang theo dõi:
+    - **N/A** — chưa có gì để nói: detection đang tắt, detector chưa đủ lịch sử,
+      hoặc vừa đổi slot / đổi device. **Không phải bug.**
+@@ -23,40 +28,79 @@ nhờ test bản cũ.
+    - **CRITICAL** — detector đã vượt ngưỡng đặt notch; thường thấy dòng notch
+      mới trong ACTIVE NOTCHES ngay sau, trừ khi bảng đã đầy, bin đó đang bị
+      chặn, hoặc đỉnh chưa trụ đủ số frame liên tiếp (persistence).
+ 
+    Chip đã bước lên thì **giữ 750 ms** trước khi được bước xuống — để nó không
+    nháy trên tín hiệu sát ngưỡng. **Khi rig dừng hoặc đang restart, chip đứng
+    nguyên ở mức đọc cuối** thay vì về N/A: khoảng trống đã biết của bản này,
+    đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
+    **hú mà chip vẫn LOW**.
+ 
++## Mới trong 1.2.0 (so với 1.1.3) — **nghe ở âm lượng thấp trước**
++
++Từ trước tới nay, notch cắt thẳng đúng con số trên slider **DEPTH** (thường
++−18 dB) rồi biến mất hẳn sau 30 giây im. Bản này đổi cả hai đầu.
++
++1. **Notch bắt đầu NÔNG rồi mới sâu dần.** Đặt ở −6 dB (−12 nếu đỉnh lên rất
++   dốc), rồi cứ **6 dB mỗi 300 ms** chừng nào còn hú. Hệ quả anh em sẽ nghe:
++   **một tiếng hú bùng nhanh có thể kêu lâu hơn 1.1.3 khoảng 0,3–0,6 giây**
++   trước khi bị cắt hết. **Mở nhỏ âm lượng lần thử đầu.**
++2. **Một notch không cần sâu sẽ đứng mãi ở −6 hoặc −12 — đúng, không phải
++   lỗi.** Đó chính là cái được của bản này: chỉ cắt đúng lượng phòng cần, tone
++   giữ được nhiều hơn.
++   **Và đây là điều duy nhất không một test tự động nào trong dự án kiểm tra
++   được** — chỉ dàn thật mới trả lời. Nên: **nếu trên dàn của anh em MỌI notch
++   đều kết thúc đúng bằng con số trên slider DEPTH, hãy báo lại.** Đó là dấu
++   hiệu máy đang đọc sai phổ, không phải chuyện sở thích.
++3. **Hết hú thì notch lùi từng bậc, không biến mất một phát.** Bậc đầu ở 30
++   giây, mỗi bậc sau cách 10 giây, tới −6 dB thì nhả hẳn. Một notch đã leo tới
++   con số trên slider DEPTH cần **40–60 giây** để biến mất (40 s từ −12, 50 s
++   từ −18, 60 s từ −24). **Trong khoảng từ 30 giây tới lúc đó, tone tại tần số
++   ấy mất nhiều hơn 1.1.3** — 1.1.3 đã nhả sạch ở 30 giây rồi.
++4. **Phòng đang căng thì notch không lùi.** Chip **RING RISK** báo **RISING**
++   hoặc **CRITICAL** → đồng hồ nhả đứng yên, **không có giới hạn thời gian**,
++   và đứng cho **mọi notch của slot đó**, không riêng notch đang hú.
++5. **Hú cũ quay lại trong 5 phút thì bị cắt sâu ngay.** App nhớ đúng tần số đó
++   đã từng cần sâu bao nhiêu và đặt thẳng vào, không dò lại từ −6 dB.
++6. **Không được có tiếng "cạch".** Mọi lần đổi độ sâu đều trải 10 ms. Nghe thấy
++   "cạch" hoặc "zip" lúc notch đổi độ sâu là **lỗi phải báo**.
++
++**Báo lại ngay** nếu gặp: tiếng "cạch"/"zip" khi notch đổi độ sâu; một tiếng hú
++app không bao giờ khống chế được; hoặc một notch **sâu hơn** con số trên slider
++DEPTH (không đường nào được phép). Kèm file log session trong
++`%APPDATA%\AZSoundtech\HandsFree\logs\`.
++
+ ## Mới trong 1.0.5 (so với 1.0.4)
+ 
+ - **Chuỗi preset trọn vẹn.** Installer nay chép sẵn hai preset `Speech` và
+   `Music` vào máy; lần đầu mở app tự nạp chúng vào
+   `%APPDATA%\AZSoundtech\HandsFree\presets\` — **không bao giờ ghi đè** file
+   anh em đã sửa. Dưới mục **INTERFACE** có hai nút mới **LOAD… / SAVE…**:
+   LOAD nạp một preset `*.json`, SAVE lưu trạng thái notch đang chạy ra file
+   mở lại được. (Preset đóng gói chỉ mang Q/độ sâu mặc định, chưa khóa notch
+   nào — nạp xong app vẫn tự dò như thường.)
+ 
+ ## Kịch bản test đề nghị (15 phút)
+ 
+ 1. Cài → mở app ở **âm lượng nhỏ nhất**.
+ 2. INTERFACE: chọn driver/device → masthead hiện DEVICE OK + CPU %.
+ 3. Kiểm tra preset: mở
+    `%APPDATA%\AZSoundtech\HandsFree\presets\` → có `Speech.json` + `Music.json`.
+    Bấm **SAVE…** lưu một file, rồi **LOAD…** nạp lại → app không sập, notch
+-   phản ánh đúng file.
++   phản ánh đúng file. (Từ 1.2.0: SAVE ghi độ sâu phòng đã CẦN, không phải bậc
++   đang đứng lúc bấm; và LOAD đè lên notch đang sống nay chuyển mượt 10 ms chứ
++   không xóa filter — không được nghe thấy "cạch".)
+ 4. SOUNDCHECK 15 giây với mic mở → app khóa các đỉnh tìm thấy (bảng ACTIVE
+    NOTCHES); hết 15 giây app NGỪNG DÒ (đúng thiết kế) → bấm AUTO để chạy show.
+ 5. AUTO: gây hú nhẹ (mic gần loa, gain thấp) → notch xuất hiện trong ~1 giây,
+-   marker trên phổ; hết hú ~30 giây notch tự nhả.
++   marker trên phổ. Nhìn cột độ sâu trong **ACTIVE NOTCHES**: nó phải bắt đầu
++   ở **−6** (hoặc −12) rồi đi sâu dần, chứ không nhảy thẳng vào số trên slider
++   DEPTH. Hết hú: 30 giây sau nó nông đi một bậc, rồi mỗi 10 giây một bậc, tới
++   −6 thì biến mất (40–60 giây tổng cộng).
+ 6. BYPASS: nghe passthrough trong suốt, không màu.
+ 7. ROUTING: bật thêm slot 02, đổi kênh vào/ra → không click/pop, không sập.
+ 8. Thanh ANALYSER: đổi averaging (0.1 s → 3 s), Peak hold, RANGE (gõ "60",
+    "16k") → phổ phản hồi đúng.
+ 9. Rút cáp input giữa chừng → app không crash, DEVICE báo ERROR.
+ 10. Uninstall → thư mục + registry key biến mất sạch.
+ 
+ Báo lỗi kèm: Windows version, card tiếng, bước nào, hiện tượng, screenshot.
+diff --git a/memory/MEMORY.md b/memory/MEMORY.md
+index 69b1ac7..99a7390 100644
+--- a/memory/MEMORY.md
++++ b/memory/MEMORY.md
+@@ -16,18 +16,19 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
+ - [UI rebuild — Sodium Rack](ui-rebuild-sodium-rack-2026-08-25.md) — chụp GUI bằng `createComponentSnapshot()` chứ không chụp màn hình; ảnh render bắt được 4 lỗi test xanh không bắt; nội suy RGB giữa amber và cyan ra màu bùn; melatonin_blur cache theo object.
+ - [Peakiness sweep @ FFT-2048](peakiness-sweep-2048-2026-09-04.md) — `analyse()` che phân bố dưới ngưỡng (phải tự MAX `peakinessAt`); baseline 7.35 là 60-seed một-shot, lấy mẫu dày liên tục cross 10.0 một lần (13.99); sine tĩnh không phải proxy nhạc hợp lệ. Ngưỡng chờ T2.
+ - [cl.exe orphan file lock](cl-exe-orphan-file-lock-2026-08-24.md) — merge fail "unable to unlink ... Invalid argument" = compiler cl.exe mồ côi từ build bị ngắt giữ handle; chẩn đoán bằng Restart Manager, kill cây cl.exe.
+ - [Preset save round-trip](preset-save-roundtrip-2026-09-05.md) — `savePreset` phải lấy `sampleRate` từ snapshot (saveToFile validate Nyquist, để 0 là bị từ chối im lặng); snapshot chỉ refresh khi `runOnce()` có block nên test headless phải bơm block sau `adoptPreset`; sau khi hợp nhất lane S (05/09/2026) `savePreset` KHÔNG dedup nữa — một `PresetNotch` cho mỗi (slot, làn, index) kèm `lane`, cộng section `slots` mang `linked`.
+ - [Docs drift audit](docs-drift-audit-2026-08-27.md) — plan checkbox không tự tick, số test chép tay stale ngay trong cùng wave, và lỗ hổng an toàn có-từ-đầu (thiếu output clamp/NaN guard) không hiện trong diff nào; danh sách việc còn treo chờ người quyết.
+ - [Anti-feedback next-gen research](anti-feedback-research-2026-09-04.md) — app hiện "dò mono, đè stereo"; LLM không ở tầng realtime; lật cực chỉ dời hú; AFC là lane cuối; roadmap xếp theo phụ thuộc dữ liệu.
+ - [Stereo lane lessons](stereo-lane-lessons-2026-09-05.md) — reset persistence chéo làn suy biến ở ngưỡng 1; test tắt detection cũng tắt reinforcement; ảnh render bắt 2 lỗi 396 test bỏ qua; đo cột bằng font thật với ô rộng nhất formatter in được; preallocateSpace đếm float.
+ - [SDD workspace gitignore trap](sdd-workspace-gitignore-trap-2026-09-04.md) — skill `subagent-driven-development`'s `sdd-workspace` script tự ghi `.superpowers/sdd/.gitignore` (`*`) mỗi lần chạy, âm thầm đè chính sách "`.superpowers/` phải TRACKED" của repo này — xóa file đó ngay trước commit cuối, mọi session SDD.
+ - [Data loop lessons](data-loop-lessons-2026-09-05.md) — `juce::JSON` in double tới 18 chữ số nên phải làm tròn 3 chữ số có nghĩa trước khi vào `var`; `getDynamicObject()` trên `const var&` vẫn mutate được caller, phải copy `DynamicObject` một cấp trước khi stamp `t`; logger không bao giờ start trong ctor của `MainComponent` (26 test + snapshot tool sẽ prune log thật); test headless gọi `onClick()` chứ không `triggerClick()` (async, suite không bơm); nửa cái reset (Detector sạch, CandidateScorer history cũ) dễ dãi hơn không reset gì — A-9 bị rút, chờ owner quyết cho lane S; hai bẫy quy trình: một prompt dán hai session cùng một lane, và prune worktree theo tên mà không check `git worktree list` + cwd session đang chạy.
+ - [Ring risk lane R](ring-risk-lane-r-2026-09-06.md) — khối publish phải DƯỚI vòng detection (không thì chip đỏ sau notch); `score` là tích 0..1 so với `kConfirmScore` 0.7, KHÔNG phải peakiness 10 như spec viết; valid = có history *kể từ lần reset*, không phải `historyCount_>0`; hold 750 ms phải nạp lại trên frame BẰNG mức đang giữ; `setController` phải xóa cả trường đang vẽ; `NotchController::setSampleRate` không có caller production; test GUI trên clock thật cần một `sleep(260)` thật; chip CRITICAL trong ảnh live là dàn dựng.
++- [Gain-aware notch lane G](gain-aware-notch-lane-g-2026-09-07.md) — `setNotchFilter` gọi `reset()` nên đổi độ sâu = "cạch", ramp phải giữ state và test phải khẳng định DANH TÍNH state (đo hộp đen xanh qua một `reset()` lén); chứng minh tổ hợp lồi `A_n ≤ 1 ≤ 1/A_d` nên ramp không bao giờ khuếch đại; `rNorm` bão hòa 1.5 nên phải phơi `riseRatio` (so sánh, đừng scale); fixture lên dốc chậm phải khởi ĐÚNG nền nhiễu (mọi onset bậc cho riseRatio ≫ 2) và số đo là `r^12` vì pipeline lệch một hop; `modelMutex_` không đệ quy ⇒ retune phải là `*Locked`; `pushClearLocked` giữ `depthDB` nên "depth < 0" là phép thử sống/chết SAI (6 test dựa vào nó); `ev` chứ không `kind` là khóa dispatch của log — Retune ghi thành notch_clear làm logstats pop bản ghi (B-3); "đào sâu" và "còn hú" là cùng một phép thử nên thang dừng ở bậc đầu tiên đủ — và KHÔNG test nào chứng minh được (M-3); test thang phải assert từng frame; đóng băng nhả là theo SLOT; kẹp một chiều cho giá trị có hai đường trở nên cũ = nửa cái kẹp (M-B, 12 dB sâu hơn slider trên PA thật); lượng tử trần về bậc làm `Music` nông hơn 1.1.3 4 dB (Q13); `effectiveLinked()` trên harness mono đầu độc penalty harmonic của test sau; và hai bẫy quy trình: `git stash` (stack dùng chung) + script SDD ghi đè `.superpowers/sdd/.gitignore`.
+ 
+ ## Conventions (tóm tắt)
+ 
+ - Commit: `feat:` / `fix:` / `docs:` / `chore:` / `refactor:` — nhỏ, một việc một commit
+ - Branch: `feat/<tên>` / `fix/<tên>` — 1 session = 1 branch = 1 worktree (`.worktrees/`)
+ - Merge: qua Pull Request + review, không commit thẳng vào main
+ - Secret-scan hook: chạy tự động mỗi commit — không commit `.env`, `*.key`, token
+ - Stack: C++ / JUCE / CMake / MSVC / ASIO — xem `docs/superpowers/specs/`
+diff --git a/memory/gain-aware-notch-lane-g-2026-09-07.md b/memory/gain-aware-notch-lane-g-2026-09-07.md
+new file mode 100644
+index 0000000..85cf613
+--- /dev/null
++++ b/memory/gain-aware-notch-lane-g-2026-09-07.md
+@@ -0,0 +1,191 @@
++# Bài học từ lane G (gain-aware notch: thang độ sâu, nhả dần, nhớ phòng) — 2026-09-07
++
++**Bối cảnh:** 10 task SDD trên nhánh `claude_desk/lane-g-brainstorm-sdd-f3c568`,
++commit `01ecb4c..HEAD`, release 1.2.0 alpha. Suite 454 → **535**. **Đụng audio
++path** (`Biquad`, `NotchChain`, `NotchController`). Spec
++`docs/superpowers/specs/2026-09-06-gain-aware-notch-design.md` (v2 + Q13 + Q14),
++sổ quyết định `docs/superpowers/decisions/2026-09-06-lane-g-gain-aware-notch.md`
++(Q1–Q14), plan `docs/superpowers/plans/2026-09-07-gain-aware-notch.md` (rev 3).
++
++---
++
++## A. Bài học kỹ thuật
++
++### 1. `Biquad::setNotchFilter` gọi `reset()` — đổi độ sâu bằng nó là một cú "cạch" vào PA
++
++Reset đúng khi tần số hoặc Q đổi (design mới không sở hữu state cũ), **sai** khi
++chỉ độ sâu đổi: xóa `z1/z2` giữa dòng tín hiệu là bước nhảy bậc. `rampNotchDepth`
++giữ state và nội suy 5 hệ số trong 10 ms.
++
++**Và:** một phép đo hộp đen (RMS, suy giảm tại f0, thậm chí "không có bước nhảy
++biên độ") **không bắt được một `reset()` lén** — nó vẫn cho đúng đáp số sau khi
++ramp xong. Test phải khẳng định **danh tính state**: đọc `z1/z2` trước và sau
++lệnh và đòi chúng không đổi (M-7). Cùng lý do, "ramp có thật không" phải đo bằng
++hệ số **đang chạy giữa ramp**, không phải kết quả cuối.
++
++### 2. Chứng minh nội suy hệ số không bao giờ khuếch đại
++
++Cố định `freq/Q/sr`, mọi tổ hợp lồi của các peaking RBJ đã chuẩn hóa **vẫn là**
++một peaking RBJ, với `A_n ≤ 1 ≤ 1/A_d` (vì mọi `A_i ≤ 1` khi depth ≤ 0), nên
++`|H| ≤ 1` ở **mọi** tần số — không riêng tần số đang nhắm — và bán kính cực
++`sqrt((1 − α/A_d)/(1 + α/A_d)) < 1` nên không phân kỳ. Ramp khởi lại giữa chừng
++là trường hợp 3 điểm của cùng lập luận; khởi từ biquad identity chưa cấu hình
++(A = 1) cũng nằm trong tam giác lồi đó. Đo: 1,9e-15 dB tối đa; identity −3,5e-11 dB.
++**Ba dòng đại số rẻ hơn một vòng build.**
++
++### 3. `rNorm` bão hòa ở 1.5 nên phải phơi `riseRatio` ra
++
++Trục rise của scorer chuẩn hóa `(rise − 1)/0.5` rồi clamp, nên từ điểm số không
++đọc ngược ra được "đỉnh lên dốc bao nhiêu". Phải thêm `ScoreBreakdown::riseRatio`
++(thô, **không chặn trên** — dùng để *so sánh*, không bao giờ để *scale*) thì
++tiêu chí đặt −12 mới viết được.
++
++### 4. Fixture "lên dốc chậm" phải khởi động ĐÚNG NGƯỠNG NHIỄU NỀN
++
++Đây là chỗ tốn nhất của cả lane. Muốn một fixture rơi vào băng `riseRatio < 2`
++thì **độ dốc không phải tham số quyết định — biên độ khởi đầu mới là.** Trong
++~11 hop đầu, frame tham chiếu của trục rise vẫn là một frame **NHIỄU**, nên một
++tone bật lên trên nền nhiễu cho `riseRatio ≈ 64` ở bất kỳ độ dốc nào; trong khi
++peakiness (bất biến theo thang) confirm chỉ sau ~4 block, tức **bên trong** cửa
++sổ đó. Sửa: cho ramp bắt đầu đúng bằng magnitude mỗi bin của nhiễu nền → rise
++luôn là tone-vs-tone.
++
++Giá trị đo được cuối cùng (1,7507) khớp `r^12` chứ không phải `r^11`: pipeline
++lệch **một hop** giữa frame được chấm và mốc thời gian tính ra nó. Nếu một con
++số "gần đúng nhưng lệch một bậc lũy thừa", hãy nghi độ trễ một hop trước khi
++nghi công thức.
++
++### 5. `modelMutex_` KHÔNG đệ quy — nên retune phải là anh em `*Locked`
++
++Vòng reinforce và bước 3 của `runOnce` đều **đang cầm** `modelMutex_`. Gọi
++`setNotch`/`setNotchImpl` từ trong đó vừa deadlock vừa ghi đè `lockedAtMs` (nhãn
++tuổi lane D ghi vào mọi `notch_clear`). Đường duy nhất là `pushRetuneLocked`,
++anh em của `pushClearLocked`.
++
++### 6. `pushClearLocked` chỉ hạ cờ `active` — "depth < 0" là phép thử SỐNG/CHẾT SAI
++
++Mọi trường khác (`depthDB`, `deepestDb`, …) giữ nguyên sau khi clear. Sáu test
++trải ba task đã được viết dựa trên "depth < 0 nghĩa là notch còn sống" và **cả
++sáu đều sẽ xanh trên slot đã bị clear**. Accessor `activeForTest` tồn tại chỉ vì
++lý do này. Hệ quả song song: tái dùng slot phải **khởi tạo lại đủ 5 trường**
++thang ở `setNotchImpl`, không dựa vào giá trị còn sót.
++
++### 7. `ev` — không phải `kind` — là khóa dispatch của log (B-3)
++
++`MainComponent::notchEventToVar` từng dùng ternary hai nhánh, nên mọi `Retune`
++được ghi thành `notch_clear`. `tools/logstats.py` **pop** bản ghi notch ở dòng
++clear đầu tiên → mỗi notch được đào sâu biến thành "notch sống 300 ms", tức false
++positive giả trên mọi dòng thống kê, cộng với mất luôn clear thật và verdict.
++Lỗi này sống qua 5 task vì không có caller production nào cho tới Task 6. **Log
++từ build nhánh trước `af5201e` là rác đối với logstats** (không bản nào phát
++hành như vậy).
++
++### 8. "Đào sâu" và "còn hú" là CÙNG một phép thử (M-9)
++
++Nên thang tự dừng ở bậc đầu tiên làm bin hết vượt ngưỡng — đó là toàn bộ điểm
++của lane. **Và không test nào trong suite chứng minh được nó:** harness ghi tone
++THÔ vào `h.tap` (`tests/test_notchcontroller.cpp:350-355`), analyser không bao
++giờ thấy phổ đã bị notch, nên trong test thang **luôn** leo tới trần. Mọi test
++đào sâu khẳng định "leo tới trần" — đúng cho fixture đó, và không nói gì về bậc
++mà hệ thống thật dừng lại. Đã ghi vào tester notes; **đừng dựng test giả** (một
++source tự trừ mô hình notch khỏi chính nó sẽ test cái mô hình, không test vòng
++lặp, và sẽ xanh trong khi chuỗi thật sai).
++
++### 9. Test thang phải khẳng định THEO TỪNG FRAME
++
++Bão hòa che độ trễ: nếu chỉ kiểm tra sau vòng pump, một thang đi chậm gấp đôi
++vẫn cho cùng đáp số cuối. `LinkedLanesStayOnTheSameRung` ban đầu bão hòa cả hai
++làn ở −24 trước khi so — không thể đỏ theo đúng tên của nó.
++
++### 10. Đóng băng nhả là **theo slot**, không theo notch
++
++Một bin ở RISING giữ **mọi** notch của slot đó ở nguyên bậc, vô hạn định (Q9
++không có trần thời gian). Câu mô tả mức level phải nói "mọi notch của slot",
++không phải "notch đang hú".
++
++### 11. Kẹp một chiều cho một giá trị có HAI đường trở nên cũ = nửa cái kẹp (M-B — bài học an toàn của lane)
++
++Nhánh trần chỉ kẹp `deepestDb` khi nó **đồng thời** phát một `Set`, tức chỉ khi
++notch đang sâu hơn trần. Một notch đã **NHẢ** lên bậc nông hơn bỏ qua nhánh đó
++và giữ nguyên `deepestDb` sinh ra dưới trần cũ — rồi lần kẹp lại kế tiếp tôn
++trọng con số đó: **sâu hơn 12 dB so với slider của người vận hành, trên một PA
++đang chạy.** Sửa mất hai dòng và **cần cả hai**: kẹp giá trị nhớ vô điều kiện
++mỗi tick, VÀ kẹp mục tiêu reclamp ngay lúc dùng. Hễ giữ một "sâu nhất từng có" /
++high-water mark cạnh một giới hạn có thể di chuyển, hãy hỏi: điều gì xảy ra khi
++giới hạn đổi trong lúc giá trị kia đang không được dùng?
++
++### 12. Q13: lượng tử hóa trần về bậc làm preset `Music` nông hơn 1.1.3 4 dB
++
++Vô hình trong spec, trong plan và trong mọi test — vì **không test nào dùng một
++trần không phải bội số của 6**. Thang hiệu lực phải là "các bậc nông hơn trần,
++cộng chính trần làm bậc cuối". Khi một hằng số có thể nhận giá trị ngoài lưới mà
++test đang dùng, hãy test một giá trị như vậy.
++
++### 13. Bộ nhớ phòng chỉ được ĐÀO SÂU (Q14)
++
++`depthDb = remembered` ghi đè bước 1–2 theo **cả hai** chiều: một notch −6 chưa
++bao giờ được reinforce (hoặc một Manual −3 để tự nhả) ghi một ký ức NÔNG, và ký
++ức đó **chặn** lần hú kế tiếp ở bin ấy xuống dưới bậc −12 của đỉnh lên dốc.
++Sửa: `min(depth, remembered)`, cộng gate không cho Soundcheck tiêu ký ức.
++
++### 14. Một test cần một trạng thái thì phải dựng nó theo đường production
++
++Rev 2 tới "đã nhả" bằng `retuneForTest(..., Release)` — hàm này chỉ set `depthDB`
++và không set gì khác, nên nhánh đang được test **không bao giờ được vào** và test
++đọc đáp số của đường đào sâu. Cái seam trông như đã dựng đúng trạng thái chỉ vì
++tham số của nó tên là `Release`.
++
++---
++
++## B. Bài học quy trình
++
++### 15. Thời điểm trong test thang phải suy từ BẬC, không từ số tròn
++
++`55000.0` trông như "quá mốc nhả 50 s" và thiếu 5 s so với 60 s mà một notch −24
++thật sự cần. **Viết phép tính vào comment**, không thì nó trôi.
++
++### 16. Một plan chưa được kiểm chứng cho tới khi có người MỞ file nó trích dẫn
++
++Ba helper Task 9 dùng (`TempDir`, `pumpOneBlockThroughSlotZero`,
++`notchControllerForTest`) **không tồn tại ở đâu trong repo**. Chính plan đã gắn
++cờ "chưa verify" và cờ đó nằm im cho tới khi người đọc thứ hai mở file ra.
++
++### 17. Reviewer sai số dòng, implementer đúng — grep, đừng tin bên nào
++
++Ba lần: `logstats_fixture` (reviewer nói 112, thực 113), `NotchDefaultsSurvive…`
++(497 vs **496**), cờ `--expect-*` (128-131 vs **124-127**). Cross-check cũng là
++một nguồn cần verify.
++
++### 18. `effectiveLinked()` bật trên harness mono làm placement tràn sang làn 1
++
++Harness mono có `width_ == 2` nên một placement ghi cả một entry làn 1 chết. Rác
++làn 1 đó **đầu độc penalty harmonic** ở các test sau trong cùng file — một test
++đỏ vì test trước đó, không vì code.
++
++### 19. Hai bẫy quy trình lặp lại
++
++- **Một implementer đã dùng `git stash`** để lấy bằng chứng RED. Stash stack là
++  **dùng chung giữa các worktree** — cấm tuyệt đối; phải ghi "never git stash"
++  vào mọi brief dispatch.
++- **Script SDD tự ghi đè `.superpowers/sdd/.gitignore`** (`*`) mỗi lần chạy, âm
++  thầm đè chính sách "`.superpowers/` phải TRACKED" của repo. Xóa file đó ngay
++  trước commit cuối, mọi session SDD (đã có note riêng
++  `sdd-workspace-gitignore-trap-2026-09-04.md`).
++
++---
++
++## C. Còn treo sau lane G
++
++- **NaN self-heal trong `AudioEngine`** reset chuỗi filter mỗi khi output
++  non-finite, hủy mọi ramp đang bay và **không** có replay hệ số theo sau → filter
++  đứng ở độ sâu trung gian trong khi `NotchInfo.depthDB` đọc giá trị đích. Tự lành
++  ở lệnh `Set` kế tiếp. Follow-up ngoài lane G.
++- **`PresetNotchDefaults::depthDB = -12` vẫn lệch `kDefaultNotchDepthDb = -18`.**
++  File do app LƯU nay mang `notchDefaults` nên không dính; preset viết tay không
++  có khối đó vẫn im lặng nhận trần −12.
++- **`NotchController::setSampleRate` vẫn không có caller production** (carry-over
++  từ lane R). Lane G vẫn xóa bộ nhớ phòng ở đó vì đó là chỗ đúng của nó.
++- **`releaseFrozen` publish nhưng chưa vẽ** (Q9): chip và đồng hồ nhả có thể lệch
++  nhau, và một slot không hiển thị có thể đang đóng băng mà màn hình không nói gì.
++- **`kDepthStepDb = 6` không có code nào đọc** — tài liệu dưới dạng hằng số, và
++  dưới Q13 nó hơi gây hiểu nhầm (bậc cuối có thể nhỏ hơn 6 dB).
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index 6cb9ab0..1afab0c 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -83,21 +83,24 @@ const char* reasonName (NotchController::ClearReason r)
+ // declaration it deliberately does not have.
+ const char* retuneReasonName (NotchController::RetuneReason r)
+ {
+     switch (r)
+     {
+         case NotchController::RetuneReason::Deepen:  return "deepen";
+         case NotchController::RetuneReason::Release: return "release";
+         case NotchController::RetuneReason::Reclamp: return "reclamp";
+         case NotchController::RetuneReason::Ceiling: return "ceiling";
+     }
+-    return "deepen";
++    // Same fallthrough as originName and reasonName: an enumerator added
++    // without a name here reads as "unknown" in the log rather than
++    // masquerading as a deepening that never happened.
++    return "unknown";
+ }
+ 
+ const char* modeName (AudioEngine::Mode m)
+ {
+     switch (m)
+     {
+         case AudioEngine::Mode::Bypass:     return "bypass";
+         case AudioEngine::Mode::Auto:       return "auto";
+         case AudioEngine::Mode::Soundcheck: return "soundcheck";
+     }
+@@ -911,20 +914,61 @@ bool MainComponent::loadPreset (const juce::File& file)
+                     + juce::String (s + 1) + " is mono, skipped " + juce::String (skipped)
+                     + " lane-R notch(es)");
+             }
+         }
+     }
+ 
+     if (detectorsRunning)
+         for (auto& controller : notchControllers_)
+             controller->start();
+ 
++    // Q11, the READ side: the file's CEILING lands on the live controllers.
++    //
++    // savePreset writes notchDefaults from slot 0; without this nothing ever
++    // read it back, so reopening a show tuned at -18 dB left the ceiling
++    // wherever the tuning strip happened to be standing and capped every
++    // detector notch placed after the load at that value instead.
++    //
++    // ONLY when the file actually carried the block. `hasNotchDefaults` is
++    // false for a v1 preset and for anything written before the ceiling was
++    // saved at all, and PresetNotchDefaults' -12 dB fallback must not be
++    // mistaken for an operator's choice -- applying it would walk a rig tuned
++    // at -18 back two rungs every time an old file was opened.
++    //
++    // Routing mirrors the TuningPanel handler above (the Global strip): every
++    // slot on Global tuning follows, a slot switched to Custom keeps its own
++    // values until its Tune combo goes back to G. The preset format carries
++    // ONE global pair, so there is nothing per-slot to restore.
++    //
++    // Expected level change: 0 dB right here. The ceiling caps FUTURE
++    // deepening only; the notches this load installed were adopted at their
++    // own file depth by adoptPreset above.
++    if (result.preset.hasNotchDefaults)
++    {
++        for (int i = 0; i < kMaxSlots; ++i)
++        {
++            if (! slotUsesGlobalTuning_[(std::size_t) i])
++                continue;
++
++            // setNotchDefaults clamps to Q 8..50 / -24..-6 dB, so a file
++            // carrying a legal-but-extreme pair cannot push the controller
++            // outside the range the panels can reach.
++            notchControllers_[(std::size_t) i]->setNotchDefaults (
++                result.preset.notchDefaults.Q, result.preset.notchDefaults.depthDB);
++        }
++
++        // The strip re-reads slot 0 through paramsProvider, so the Q and depth
++        // combos show what the file just installed rather than the value the
++        // operator left them on.
++        tuningPanel_.refresh();
++    }
++
+     // M-4: the mono-skip count had nowhere to go but a Logger line and a test
+     // accessor. It belongs in the session log next to the notches the load
+     // DID install -- a preset that silently loses half its notches on a mono
+     // rig is exactly the kind of thing a show log has to be able to explain.
+     // File NAME only: the full path can carry the operator's own name.
+     {
+         auto v = SessionLogger::makeEvent ("preset_load");
+         auto* o = v.getDynamicObject();
+         o->setProperty ("file", file.getFileName());
+         o->setProperty ("adopted", adoptedTotal);
+@@ -1012,24 +1056,31 @@ bool MainComponent::savePreset (const juce::File& file)
+ 
+         PresetSlot entry;
+         entry.index  = s;
+         entry.config = config;
+         entry.linked = isSlotLinked (s);
+         preset.slots.push_back (entry);
+     }
+ 
+     preset.sampleRate = presetRate;
+ 
+-    // Q11: the CEILING round-trips too. Without this a reloaded preset falls
+-    // back to PresetNotchDefaults' -12 dB (PresetManager.h) and caps every
+-    // detector notch two rungs shallower than the show was tuned at -- a bug
+-    // that predates lane G and that lane G's ladder makes load-bearing.
++    // Q11: the CEILING is written here and read back by loadPreset(), which
++    // applies it to every slot on Global tuning. Both halves are needed: a
++    // preset whose ceiling is only WRITTEN reloads onto whatever the tuning
++    // strip was left on, and one that is neither written nor read falls back
++    // to PresetNotchDefaults' -12 dB (PresetManager.h), capping every detector
++    // notch two rungs shallower than the show was tuned at.
++    //
++    // Slot 0 is the source because notchDefaults is a single global pair in
++    // the format and every Global slot carries the same values. A slot on
++    // Custom tuning is not represented in the file at all -- see the note in
++    // the task-9 report if per-slot ceilings ever arrive.
+     preset.notchDefaults.Q       = notchControllers_[0]->getNotchQ();
+     preset.notchDefaults.depthDB = notchControllers_[0]->getNotchDepthDb();
+ 
+     juce::StringArray errors;
+     const bool ok = PresetManager::saveToFile (preset, file, errors);
+ 
+     if (! ok)
+         juce::Logger::writeToLog (
+             "savePreset \"" + file.getFileName() + "\" refused: " + errors.joinIntoString ("; "));
+ 
+diff --git a/src/app/PresetManager.cpp b/src/app/PresetManager.cpp
+index c926dbe..7e0f0ef 100644
+--- a/src/app/PresetManager.cpp
++++ b/src/app/PresetManager.cpp
+@@ -720,20 +720,26 @@ bool parsePresetText (const juce::String& text,
+     if (root->hasProperty ("notchDefaults"))
+     {
+         const juce::var defaults = root->getProperty ("notchDefaults");
+ 
+         if (auto* defaultsObject = defaults.getDynamicObject())
+         {
+             readNumber (*defaultsObject, "Q",     "notchDefaults: ", errors,
+                         preset.notchDefaults.Q);
+             readNumber (*defaultsObject, "depth", "notchDefaults: ", errors,
+                         preset.notchDefaults.depthDB);
++
++            // The FILE said so -- see Preset::hasNotchDefaults. Set only on
++            // the branch that actually read numbers out of a block: a
++            // malformed "notchDefaults" leaves the struct's fallback in place
++            // and must not be reported as a ceiling the operator chose.
++            preset.hasNotchDefaults = true;
+         }
+         else
+         {
+             errors.add ("\"notchDefaults\" must be an object, but is "
+                         + describeType (defaults));
+         }
+     }
+ 
+     // -- slots: OPTIONAL (preset format v2) ---------------------------------
+     // Absent is every v1 file ever written. Present but malformed is a shape
+diff --git a/src/app/PresetManager.h b/src/app/PresetManager.h
+index ea9367f..09a5a7e 100644
+--- a/src/app/PresetManager.h
++++ b/src/app/PresetManager.h
+@@ -151,20 +151,35 @@ struct PresetNotchDefaults
+     device and buffer size.
+ */
+ struct Preset
+ {
+     juce::String version = "1.0";
+     juce::String device;
+     double       sampleRate = 0.0;  ///< Hz as a NUMBER. See PresetManager.cpp.
+     int          bufferSize = 0;    ///< Samples.
+ 
+     PresetNotchDefaults      notchDefaults;
++
++    /** Did the FILE carry a "notchDefaults" block, or is `notchDefaults` above
++        standing in with PresetNotchDefaults' documented values?
++
++        The block is optional (see PresetNotchDefaults), so the struct alone
++        cannot answer that -- and the two cases mean different things to
++        MainComponent::loadPreset, which applies a file's ceiling to the live
++        NotchControllers. Absent must leave the running ceiling untouched: a v1
++        preset, or any file written before the ceiling was saved at all, would
++        otherwise drag a rig tuned at -18 dB back to the fallback -12 on every
++        load. Set by fromJSON; never written into the file (toJSON always emits
++        the block, so anything this app saves reads back as true).
++    */
++    bool hasNotchDefaults = false;
++
+     std::vector<PresetNotch> notches;
+ 
+     /** OPTIONAL routing section. Empty for every v1 file. */
+     std::vector<PresetSlot> slots;
+ };
+ 
+ //==============================================================================
+ /** What should happen to one stored notch at a given sample rate. */
+ enum class NotchApplicability
+ {
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index 1ea7eaf..ab9a6ab 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -1233,20 +1233,99 @@ TEST (GuiWiring, SavePresetRoundTripsTheCeilingThroughNotchDefaults)
+     ASSERT_TRUE (app.savePreset (outFile));
+ 
+     const auto result = PresetManager::loadFromFile (outFile);
+     outFile.deleteFile();
+ 
+     ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       44.0);
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+ }
+ 
++// RED IF loadPreset ignores the ceiling the file carries (fix round 1, the
++// READ side of Q11). savePreset has written notchDefaults since af5201e but
++// nothing ever read it back: reopening a show tuned at -18 dB left the live
++// ceiling wherever the slider happened to be standing, and every detector
++// notch placed after the load was capped there instead of at the tuned value.
++//
++// Expected level change: 0 dB at load time. The ceiling caps FUTURE deepening
++// only; the notches in the file are still adopted at their own file depth.
++TEST (GuiWiring, LoadPresetAppliesTheCeilingTheFileCarries)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    MainComponent app;
++    auto* controller0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (controller0, nullptr);
++    controller0->setSampleRate (48000.0);
++
++    // The show is tuned at Q 30 / -18 dB and saved there.
++    controller0->setNotchDefaults (30.0, -18.0);
++    ASSERT_TRUE (controller0->setNotch (0, 0, 1000.0, 30.0, -18.0,
++                                        NotchController::Origin::Detector));
++
++    std::vector<float> hop (512, 0.25f);
++    app.getAudioEngine().getTapBuffer (0).write (hop.data(), hop.size());
++    controller0->runOnce();
++
++    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                       .getChildFile ("az-handsfree-laneg-ceiling-load.json");
++    outFile.deleteFile();
++    ASSERT_TRUE (app.savePreset (outFile));
++
++    // The operator then drags both controls somewhere else, the way the
++    // tuning strip does between two shows.
++    controller0->setNotchDefaults (8.0, -6.0);
++    ASSERT_DOUBLE_EQ (controller0->getNotchDepthDb(), -6.0);
++
++    ASSERT_TRUE (app.loadPreset (outFile));
++    outFile.deleteFile();
++
++    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
++    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
++
++    // Every OTHER slot follows too, because they all sit on Global tuning --
++    // the same routing the TuningPanel handler uses.
++    auto* controller1 = app.getNotchControllerForTest (1);
++    ASSERT_NE (controller1, nullptr);
++    EXPECT_DOUBLE_EQ (controller1->getNotchDepthDb(), -18.0);
++}
++
++// RED IF a preset WITHOUT a notchDefaults block resets the live ceiling to
++// PresetNotchDefaults' -12 dB (M-3). Every file written before af5201e is such
++// a file, and a rig tuned at -18 must not be quietly walked back two rungs by
++// opening one of them.
++TEST (GuiWiring, LoadPresetLeavesTheCeilingAloneWhenTheFileCarriesNone)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    MainComponent app;
++    auto* controller0 = app.getNotchControllerForTest (0);
++    ASSERT_NE (controller0, nullptr);
++    controller0->setSampleRate (48000.0);
++    controller0->setNotchDefaults (30.0, -18.0);
++
++    // Hand-written because savePreset ALWAYS writes the block now; this is the
++    // shape of a v1 file (and of the plan Task 25 sample).
++    auto outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
++                       .getChildFile ("az-handsfree-laneg-no-defaults.json");
++    outFile.deleteFile();
++    ASSERT_TRUE (outFile.replaceWithText (
++        R"({"version":"1.0","device":"Fake ASIO","sampleRate":48000,"bufferSize":64,)"
++        R"("notches":[{"index":0,"freq":482.0,"Q":30.0,"depth":-12.0}]})"));
++
++    ASSERT_TRUE (app.loadPreset (outFile));
++    outFile.deleteFile();
++
++    EXPECT_DOUBLE_EQ (controller0->getNotchDepthDb(), -18.0);
++    EXPECT_DOUBLE_EQ (controller0->getNotchQ(),        30.0);
++}
++
+ // RED IF a Retune event is serialised as notch_clear (B-3 of the spec's own
+ // critique list). The `ev` key is what logstats.py dispatches on, and a
+ // mislabelled retune closes the notch's record at the first 300 ms deepening.
+ // No MainComponent is needed: the serialiser is static.
+ TEST (GuiWiring, RetuneEventsAreLoggedUnderTheirOwnEventName)
+ {
+     NotchController::NotchEvent e;
+     e.kind = NotchController::NotchEvent::Kind::Retune;
+     e.slot = 0; e.lane = 1; e.index = 3;
+     e.hz = 1007.8f; e.q = 30.0f;
+diff --git a/tests/test_presetmanager.cpp b/tests/test_presetmanager.cpp
+index 13d1ae6..aa93f7b 100644
+--- a/tests/test_presetmanager.cpp
++++ b/tests/test_presetmanager.cpp
+@@ -522,20 +522,54 @@ TEST (PresetManager, TheFullLadderRangeSurvivesTheRoundTrip)
+     n.index = 0; n.freq = 1000.0; n.Q = 30.0; n.depthDB = -24.0; n.slot = 0; n.lane = 0;
+     p.notches = { n };
+ 
+     const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
+     ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
+     EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -24.0);
+     ASSERT_EQ (result.preset.notches.size(), 1u);
+     EXPECT_DOUBLE_EQ (result.preset.notches[0].depthDB, -24.0);
+ }
+ 
++// RED IF an ABSENT notchDefaults block cannot be told apart from a block that
++// happens to carry the format's own -12 dB fallback (fix round 1, M-3).
++// MainComponent::loadPreset now APPLIES the block to the live ceiling, so the
++// two cases must give different answers: absent leaves the running ceiling
++// alone, present sets it. Without this flag a v1 preset -- and every file
++// written before af5201e -- would silently drag a rig tuned at -18 dB back to
++// -12 on every load.
++TEST (PresetManager, AnAbsentNotchDefaultsBlockIsReportedAsAbsent)
++{
++    const auto without = PresetManager::fromJSON (kValidPresetJson);
++
++    ASSERT_TRUE (without.ok) << without.errors.joinIntoString ("; ");
++    EXPECT_FALSE (without.preset.hasNotchDefaults);
++    // The documented fallback still fills the struct -- absent is not empty.
++    EXPECT_DOUBLE_EQ (without.preset.notchDefaults.Q,       30.0);
++    EXPECT_DOUBLE_EQ (without.preset.notchDefaults.depthDB, -12.0);
++}
++
++TEST (PresetManager, APresentNotchDefaultsBlockIsReportedAsPresent)
++{
++    Preset p = makeValidPreset();
++    // Deliberately the SAME values the fallback supplies: the flag must report
++    // where the numbers came from, not whether they differ from the default.
++    p.notchDefaults.Q       = 30.0;
++    p.notchDefaults.depthDB = -12.0;
++
++    const auto result = PresetManager::fromJSON (PresetManager::toJSON (p));
++
++    ASSERT_TRUE (result.ok) << result.errors.joinIntoString ("; ");
++    EXPECT_TRUE (result.preset.hasNotchDefaults);
++    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.Q,       30.0);
++    EXPECT_DOUBLE_EQ (result.preset.notchDefaults.depthDB, -12.0);
++}
++
+ // The same rules as a real notch. A bad default is worse than a bad notch,
+ // because it seeds every notch the detector goes on to create.
+ TEST (PresetManager, APositiveDefaultDepthIsRefused)
+ {
+     const auto result = PresetManager::fromJSON (
+         R"({"version":"1.0","device":"d","sampleRate":48000,"bufferSize":64,)"
+         R"("notchDefaults":{"Q":40.0,"depth":18.0},"notches":[]})");
+ 
+     EXPECT_FALSE (result.ok);
+ }
+diff --git a/tools/logstats.py b/tools/logstats.py
+index fb52d06..0a4c666 100644
+--- a/tools/logstats.py
++++ b/tools/logstats.py
+@@ -59,24 +59,29 @@ def summarise(events: list[dict]) -> dict:
+         elif ev == "notch_retune":
+             # lane G: a retune UPDATES the open record. It must never close it
+             # -- a deepening 300 ms after placement would otherwise read as a
+             # 300 ms notch, and every deepened howl in the log would look like
+             # a false positive. An unknown ev name falls through every branch
+             # here, so a NEW event added later cannot corrupt an old reader
+             # either; that is why this is an if/elif chain and not a lookup
+             # that raises.
+             n = open_by_key.get(key(e))
+             if n is not None:
+-                n["depth_db"] = e.get("depth_db")
+-                if n["deepest_db"] is None or (e.get("depth_db") is not None
+-                                               and float(e["depth_db"]) < float(n["deepest_db"])):
+-                    n["deepest_db"] = e.get("depth_db")
++                # depth_db is guarded the same way deepest_db is: a truncated
++                # or hand-edited line without it must not erase the running
++                # depth the notch_set established. The retune still counts --
++                # it happened, we just cannot say what it moved to.
++                d = e.get("depth_db")
++                if d is not None:
++                    n["depth_db"] = d
++                    if n["deepest_db"] is None or float(d) < float(n["deepest_db"]):
++                        n["deepest_db"] = d
+                 n["retunes"] += 1
+         elif ev == "verdict":
+             n = open_by_key.get(key(e))
+             if n is not None:
+                 n["verdict"] = e.get("verdict")
+         elif ev == "notch_clear":
+             n = open_by_key.pop(key(e), None)
+             if n is not None:
+                 n["clear_t"] = float(e.get("t", 0.0))
+                 n["reason"] = e.get("reason")

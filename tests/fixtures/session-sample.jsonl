@@ -1,7 +1,8 @@
 {"ev":"session_start","t":0,"app_version":"1.1.2","os":"Windows 11","device":"Fake ASIO","sample_rate":48000,"buffer_size":256,"slots":[{"index":0,"enabled":true,"width":2,"in":[0,1],"out":[0,1],"linked":false}]}
 {"ev":"mode","t":12.5,"mode":"auto"}
 {"ev":"tuning","t":13.0,"slot":-1,"rise_ms":250,"persist":3,"q":30,"depth_db":-18,"thr":10}
-{"ev":"notch_set","t":5001.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":1,"score":0.91,"peakiness":22.1,"p_norm":0.13,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":117.3,"now":[0.01,0.5,0.02,0.01],"ref":[0.01,0.1,0.02,0.01],"other_lane_now":[0.01,0.02,0.02,0.01]}}
+{"ev":"notch_set","t":5001.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"origin":"detector","confirmed_lane":1,"score":0.91,"peakiness":22.1,"p_norm":0.13,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":117.3,"now":[0.01,0.5,0.02,0.01],"ref":[0.01,0.1,0.02,0.01],"other_lane_now":[0.01,0.02,0.02,0.01]}}
+{"ev":"notch_retune","t":5301.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-12,"from_db":-6,"origin":"detector","reason":"deepen","age_ms":300.0}
 {"ev":"notch_set","t":9020.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":0,"score":0.75,"peakiness":15.0,"p_norm":0.06,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":128.0,"now":[0.01,0.02,0.4,0.01],"ref":[0.01,0.02,0.1,0.01]}}
 {"ev":"verdict","t":11000.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"verdict":"false","age_ms":1980.0}
 {"ev":"notch_clear","t":11000.5,"slot":0,"lane":0,"index":0,"hz":2437.5,"origin":"detector","reason":"verdict_false","age_ms":1980.5}
@@ -9,5 +10,6 @@
 {"ev":"verdict","t":21000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"verdict":"good","age_ms":1000.0}
 {"ev":"notch_set","t":30000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"q":30,"depth_db":-12,"origin":"preset"}
 {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
-{"ev":"notch_clear","t":41000.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":36000.0}
+{"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
+{"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
 {"ev":"session_end","t":60000.0,"dropped_events":0}
