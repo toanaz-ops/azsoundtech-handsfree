@@ -1531,23 +1531,25 @@ void MainComponent::resized()
     // between two layout passes is never drawn at stale coordinates (the bug
     // that left the routing table an empty black rect on 2026-08-24).
     //
-    // The analyser keeps kMinSpectrumHeight whatever happens: a window too
-    // short to hold both gets the strip laid over the plot after all, because
-    // a results strip with nowhere to go is a set of proposals the operator
-    // cannot answer.
+    // THE STRIP WINS, and the analyser goes under kMinSpectrumHeight if that is
+    // what it costs. Round 1 had it the other way round -- below
+    // kMinSpectrumHeight the strip went back on top of the plot -- and that is
+    // the wrong trade twice over: it buries the frequency axis and the
+    // marked-bin rake again, AND the strip it saves room for is the thing
+    // carrying "1 kenh sai dinh tuyen", a sentence the operator has to read to
+    // know the run told them nothing. A short analyser is a nuisance; a fault
+    // sentence nobody sees is a room that stays wrong.
+    //
+    // The height ASKED FOR, not kPanelHeight: the summary's line count is
+    // data-dependent, and SoundcheckPanel::paint does not truncate.
     {
-        const int stripH = juce::jmin (gui::SoundcheckPanel::kPanelHeight,
-                                       juce::jmax (0, analyser.getHeight() - gap));
+        const int wanted = soundcheckPanel_.preferredHeight();
+        const int stripH = juce::jmin (wanted, juce::jmax (0, analyser.getHeight()));
 
-        if (soundcheckPanel_.isVisible()
-            && analyser.getHeight() - stripH >= kMinSpectrumHeight)
-        {
+        if (soundcheckPanel_.isVisible())
             soundcheckPanel_.setBounds (analyser.removeFromBottom (stripH));
-        }
         else
-        {
             soundcheckPanel_.setBounds (analyser.withTop (analyser.getBottom() - stripH));
-        }
     }
 
     spectrumView_.setBounds (analyser);

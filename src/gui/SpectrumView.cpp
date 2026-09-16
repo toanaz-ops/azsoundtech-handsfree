@@ -50,15 +50,19 @@ constexpr float kOverlayTickHeight  = 12.0f;
 constexpr float kOverlayTickWidth   = 2.5f;
 constexpr float kOverlayCurveWidth  = 1.6f;
 
-// The low-confidence veil. It is drawn in the ENGRAVED-HAIRLINE grey and
-// LIGHTENS the band, which is the opposite of what "dimmed" suggests and is
-// the only thing that can work here: the plot ground is already near-black, so
-// a darker wash over it is invisible. Round 1 used `shade` at 0.20 and then at
-// 0.42 and the render showed nothing at all either time -- `shade` is two
-// values darker than `background`, so the band simply was not there. A band
-// nobody can see is a caveat nobody reads, and the operator is left with a
-// measurement that stops dead at 6 kHz with no explanation.
-constexpr float kLowConfidenceAlpha = 0.22f;
+// The low-confidence veil. It LIGHTENS the band, which is the opposite of what
+// "dimmed" suggests and is the only thing that can work here: the plot ground
+// is already near-black, so a darker wash over it is invisible.
+//
+// Three attempts, and the first two were measured wrong rather than judged
+// wrong. `shade` at 0.20 and at 0.42 rendered NOTHING -- `shade` is darker than
+// `background`, so there was no band at all. `border` at 0.22 lifted the ground
+// by about seven values out of 255, which is below what anyone sees on a plot
+// in a dark room. At 0.55 it lifts by about eighteen, which the pixel samples
+// in the review notes confirm is visible. A band nobody can see is a caveat
+// nobody reads, and the operator is then looking at a measurement that stops
+// dead at 6 kHz with no explanation.
+constexpr float kLowConfidenceAlpha = 0.55f;
 
 // Non-zero ids make each segmented group mutually exclusive.
 constexpr int kBandRadioGroupId    = 11;
@@ -109,6 +113,14 @@ constexpr float kHighlightRelWidth = 0.004f;
 
 SpectrumView::SpectrumView (const NotchController& controller)
     : controller_ (&controller)
+    // "do tin cay thap" -- EXPLICIT UTF-8 BYTES. No /utf-8 reaches MSVC in this
+    // build, so a source literal would be decoded with the machine's active
+    // codepage; that is the mojibake middle dot again
+    // (src/gui/DeviceViewModel.cpp:13 is the precedent). Built HERE, once, for
+    // the same reason noSignalLabel_ is.
+    , lowConfidenceLabel_ (juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x99 tin "
+                                                   "c\xe1\xba\xady th\xe1\xba\xa5p"))
+    , overlayLabelFont_ (az::theme::monoFont (az::theme::segmentFontSize))
     , tickFont_ (az::theme::monoFont())
     , bodyFont_ (az::theme::baseFont())
     , yTickLabels_ { juce::String ("0"), juce::String ("-30"),
@@ -968,17 +980,23 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
 
         g.setColour (border.withAlpha (kLowConfidenceAlpha));
         g.fillRect (band);
-        g.setColour (border);
+
+        // The edge in `dim`, not `border`: the hairline grey is the GROOVE
+        // colour, which is meant to be felt rather than read, and against the
+        // plot ground it simply was not there. This line is the boundary of
+        // what the measurement is willing to claim, so it has to be readable.
+        g.setColour (dim);
         g.drawLine (band.getX(), band.getY(), band.getX(), band.getBottom(), 1.0f);
 
-        // "do tin cay thap" -- EXPLICIT UTF-8 BYTES. No /utf-8 reaches MSVC in
-        // this build, so a source literal would be decoded with the machine's
-        // active codepage; that is the mojibake middle dot again
-        // (src/gui/DeviceViewModel.cpp:13 is the precedent).
+        // The caption and its font are MEMBERS, built in the constructor. Both
+        // were built here, per frame, until the round-1 review caught it:
+        // juce::String::fromUTF8 allocates and so does constructing a
+        // juce::Font, so the overlay was heap-allocating on every paint --
+        // through the rule this whole view is built on, and past a test that
+        // only watched the Path grow.
         g.setColour (dim);
-        g.setFont (monoFont (segmentFontSize));
-        g.drawText (juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x99 tin c\xe1\xba\xady "
-                                            "th\xe1\xba\xa5p"),
+        g.setFont (overlayLabelFont_);
+        g.drawText (lowConfidenceLabel_,
                     band.toNearestInt().reduced (spacing, spacing),
                     juce::Justification::topRight, false);
     }
@@ -996,6 +1014,15 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
     //    would have degraded into decoration. `text` is the app's plain
     //    foreground and claims nothing, which is what a measured line wants.
     //
+    //    But `text` and `peak` are six values apart, so with peak hold ON they
+    //    are the same pale line to the eye. The DASH is what separates them --
+    //    built into this path as gaps rather than by stroking a dash pattern
+    //    into a second Path, because createDashedStroke writes an outline whose
+    //    element count scales with the curve's pixel length and would need a
+    //    second reserved member several times this one's size. The dash period
+    //    is counted in PIXELS OF X TRAVEL: the axis is logarithmic, so a
+    //    bin-counted dash would be long at 100 Hz and invisible at 10 kHz.
+    //
     //    Only TRUSTED bins are drawn, and an untrusted run BREAKS the line
     //    rather than being interpolated across. A curve drawn through bins the
     //    estimator refused to believe is a line the operator has no reason to
@@ -1007,21 +1034,53 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
         return (float) ((double) k * soundcheckSampleRate_ / (double) Detector::kFftSize);
     };
 
+    // The dash is applied by SUBDIVIDING each bin-to-bin segment, not by
+    // skipping whole bins.
+    //
+    // Skipping bins was the first attempt and the render killed it: the axis is
+    // logarithmic, so at 250 Hz two adjacent bins are tens of pixels apart and
+    // a single step already exceeded a whole dash period. The state machine
+    // then toggled on every bin, emitting startNewSubPath with no lineTo after
+    // it -- and the ENTIRE low half of the curve, including the 247 Hz hot spot
+    // the picture exists to show, silently disappeared. Every test still
+    // passed: the path had elements in it, they just drew nothing.
+    //
+    // Subdividing cannot do that. Every bin-to-bin segment is walked in dash-
+    // and gap-length pieces along x, so the pattern is even at 100 Hz and at
+    // 10 kHz, and no measured point is ever dropped -- only hidden inside a
+    // gap whose length is known.
     const float marginSpan = kMarginSafeDb - kMarginAtRiskDb;
-    bool penDown = false;
+
+    bool  penDown   = false;
+    bool  inDash    = true;     // a dash, not a gap, at the start of every run
+    float dashTaken = 0.0f;     // x already spent inside the current dash/gap
+    bool  havePrev  = false;
+    float prevX = 0.0f, prevY = 0.0f;
+
+    const auto breakRun = [&penDown, &inDash, &dashTaken, &havePrev]
+    {
+        // A run of bins the estimator refused to believe BREAKS the line rather
+        // than being interpolated across, and the dash phase starts over on the
+        // far side -- a gap that happens to land on a trust boundary must not
+        // read as the boundary itself.
+        penDown = false;
+        havePrev = false;
+        inDash = true;
+        dashTaken = 0.0f;
+    };
 
     for (int k = 0; k < soundcheckBins_; ++k)
     {
         if (! soundcheckTrusted_[(std::size_t) k])
         {
-            penDown = false;
+            breakRun();
             continue;
         }
 
         const float hz = binHz (k);
         if (hz < lowHz_ || hz > highHz_)
         {
-            penDown = false;
+            breakRun();
             continue;
         }
 
@@ -1031,15 +1090,55 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
         const float x = xForHz (hz, plot);
         const float y = plot.getY() + t * plot.getHeight();
 
-        if (! penDown)
+        if (! havePrev)
         {
-            soundcheckOverlayPath_.startNewSubPath (x, y);
-            penDown = true;
+            prevX = x; prevY = y; havePrev = true;
+            continue;
         }
-        else
+
+        const float dx = x - prevX;
+        if (dx <= 0.0f)
         {
-            soundcheckOverlayPath_.lineTo (x, y);
+            // Two bins landing on the same pixel column: nothing to subdivide,
+            // and dividing by it would be a NaN straight into the path.
+            prevX = x; prevY = y;
+            continue;
         }
+
+        float travelled = 0.0f;
+        while (travelled < dx)
+        {
+            const float period = inDash ? kMarginDashOnPx : kMarginDashOffPx;
+            const float take   = juce::jmin (period - dashTaken, dx - travelled);
+
+            if (inDash)
+            {
+                const float t0 = travelled / dx;
+                const float t1 = (travelled + take) / dx;
+
+                if (! penDown)
+                {
+                    soundcheckOverlayPath_.startNewSubPath (prevX + dx * t0,
+                                                            prevY + (y - prevY) * t0);
+                    penDown = true;
+                }
+
+                soundcheckOverlayPath_.lineTo (prevX + dx * t1,
+                                               prevY + (y - prevY) * t1);
+            }
+
+            travelled += take;
+            dashTaken += take;
+
+            if (dashTaken >= period)
+            {
+                inDash = ! inDash;
+                dashTaken = 0.0f;
+                penDown = false;     // a dash ends, or a gap begins: lift the pen
+            }
+        }
+
+        prevX = x; prevY = y;
     }
 
     if (! soundcheckOverlayPath_.isEmpty())

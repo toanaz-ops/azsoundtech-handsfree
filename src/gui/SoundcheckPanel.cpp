@@ -26,7 +26,10 @@ constexpr int kNumberHeight = 40;
 constexpr float kNumberFontSize = 34.0f;
 
 // Line height of one summary sentence, and the two type sizes it carries.
-constexpr int   kSummaryLineHeight = 19;
+constexpr int   kSummaryLineHeight = SoundcheckPanel::kSummaryLineHeightForTest;
+// Breathing room above the first line, so the headline does not sit on the
+// panel's top edge when the strip is at its minimum height.
+constexpr int   kSummaryTopPad     = 4;
 constexpr float kHeadlineFontSize  = 15.5f;
 constexpr float kSentenceFontSize  = 13.0f;
 
@@ -91,6 +94,31 @@ juce::String saturatedSentence()
                                    "tr\xe1\xba\xa7n, ho\xe1\xba\xb7" "c "
                                    "\xc4\x91\xe1\xbb\x95i v\xe1\xbb\x8b "
                                    "tr\xc3\xad mic");
+}
+
+juce::String clearedPrefix()           // "da xoa "
+{
+    return juce::String::fromUTF8 ("\xc4\x91\xc3\xa3 xo\xc3\xa1 ");
+}
+
+juce::String worseOffSentence()
+{
+    // " notch cu nhung khong dat duoc notch moi -- phong KEM an toan hon truoc"
+    return juce::String::fromUTF8 (" notch c\xc5\xa9 nh\xc6\xb0ng kh\xc3\xb4ng "
+                                   "\xc4\x91\xe1\xba\xb7t \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c "
+                                   "notch m\xe1\xbb\x9bi \xe2\x80\x94 ph\xc3\xb2ng "
+                                   "K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n "
+                                   "tr\xc6\xb0\xe1\xbb\x9b" "c");
+}
+
+juce::String placedSentence()          // " notch moi"
+{
+    return juce::String::fromUTF8 (" notch m\xe1\xbb\x9bi");
+}
+
+juce::String appliedPrefix()           // "da dat "
+{
+    return juce::String::fromUTF8 ("\xc4\x91\xc3\xa3 \xc4\x91\xe1\xba\xb7t ");
 }
 
 juce::String cannotProposeSentence()
@@ -174,13 +202,18 @@ void SoundcheckPanel::setMode (const Mode mode)
 
     const bool running = mode == Mode::Running;
     const bool results = mode == Mode::Results;
+    const bool applied = mode == Mode::Applied;
 
     setVisible (mode != Mode::Hidden);
 
     stopButton     .setVisible (running);
     countdownLabel_.setVisible (running);
     applyButton    .setVisible (results);
-    dismissButton  .setVisible (results);
+    // BO is the only control an Applied report carries: there is nothing left
+    // to apply, and the report still has to be dismissable -- an outcome the
+    // operator cannot clear is an outcome that covers the analyser until the
+    // app is restarted.
+    dismissButton  .setVisible (results || applied);
 
     // Esc can only arrive at a component that has focus, so the panel asks for
     // it exactly while the run it can abort is in flight -- and gives it back
@@ -190,6 +223,10 @@ void SoundcheckPanel::setMode (const Mode mode)
     if (running)
         grabKeyboardFocus();
 
+    // The Applied headline depends on the mode, so the summary is rebuilt here
+    // rather than only in setResults -- a Model set before the mode changed
+    // would otherwise still be printing the Results headline.
+    rebuildSummary();
     resized();
     repaint();
 
@@ -234,6 +271,24 @@ void SoundcheckPanel::setResultsSummary (const int hotSpots, const int saturated
     setResults (model);
 }
 
+int SoundcheckPanel::preferredHeight() const
+{
+    using namespace az::theme;
+
+    if (mode_ == Mode::Running)
+        return kPanelHeight;
+
+    // Every line it is holding, plus the panel's own padding. NEVER the other
+    // way round -- a height chosen first and lines fitted into it afterwards is
+    // how a fault sentence gets cut in half, and the two sentences most likely
+    // to be last are the two that ask the operator to go and fix something.
+    const int needed = 2 * spacing
+                     + (int) summaryLineCount_ * kSummaryLineHeight
+                     + kSummaryTopPad;
+
+    return juce::jmax (kPanelHeight, needed);
+}
+
 void SoundcheckPanel::setResults (const Model& model)
 {
     model_ = model;
@@ -265,12 +320,27 @@ void SoundcheckPanel::rebuildSummary()
     // ERROR, and it is what replaces the headline when there is nothing else to
     // put there: "0 hot spots" on a run that judged nothing reads as an
     // excellent PA (Task 3 I-3).
-    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0;
+    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0 || model_.worseOff();
+
+    // THE line that must never be silent, and it goes FIRST: an apply that
+    // removed notches and placed none left the room worse than it found it.
+    if (model_.worseOff())
+        addSummaryLine (clearedPrefix() + juce::String (model_.clearedPrevious)
+                            + worseOffSentence(),
+                        danger);
+    else if (mode_ == Mode::Applied)
+        addSummaryLine (appliedPrefix() + juce::String (model_.placed) + placedSentence(),
+                        accent);
 
     if (model_.hotSpots > 0)
         addSummaryLine (foundPrefix() + juce::String (model_.hotSpots) + hotSpotWord(),
                         accent);
-    else if (! hasError_ && model_.unmeasured == 0)
+    else if (! hasError_ && model_.unmeasured == 0 && model_.saturatedBins == 0
+             && mode_ != Mode::Applied)
+        // "no hot spots" is only the same thing as "clean room" when nothing
+        // ELSE went wrong. A saturated bin means the run found something a
+        // filter cannot fix, which is the opposite of a clean room -- round 1
+        // still printed the clean-room line beside it.
         addSummaryLine (nothingFound(), dim);
 
     if (model_.cannotPropose > 0)
@@ -356,12 +426,16 @@ void SoundcheckPanel::paint (juce::Graphics& g)
     // carry DIFFERENT colours -- an error is not the same red-orange as a
     // warning, and one Label cannot be two colours. Geometry comes from
     // resized(); nothing here computes a layout.
+    // NO BOUNDS CHECK, deliberately, and this is the point of preferredHeight():
+    // a fault sentence is never dropped or half-drawn to make the strip fit.
+    // The owner is told how much room the lines need and gives it; if the
+    // console is so short that even that is impossible, the strip keeps its
+    // height and the ANALYSER goes under its floor instead. Round 1 had a
+    // `break` here, which silently swallowed whichever sentence was last --
+    // and the last two are the ones asking the operator to fix a patch.
     auto row = summaryArea_.withHeight (kSummaryLineHeight);
     for (std::size_t i = 0; i < summaryLineCount_; ++i)
     {
-        if (row.getBottom() > summaryArea_.getBottom())
-            break;
-
         // The first line is THE answer and is set one step up from the
         // qualifications under it, for the same reason the countdown is bigger
         // than its caption: one is read across the room, the rest are read
@@ -417,7 +491,7 @@ void SoundcheckPanel::resized()
 
     captionArea_ = {};
     countdownLabel_.setBounds ({});
-    summaryArea_  = area;
+    summaryArea_  = area.withTrimmedTop (kSummaryTopPad);
 }
 
 } // namespace gui

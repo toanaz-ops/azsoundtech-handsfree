@@ -71,7 +71,12 @@ ModeRail::ModeRail (Orientation orientation)
         // "phat tin hieu" -- explicit UTF-8 bytes; see ModeRail.h on the
         // measureButton declaration for why nothing here is a source literal.
         juce::String::fromUTF8 ("ph\xc3\xa1t t\xc3\xadn hi\xe1\xbb\x87u"));
-    measureButton.setColour (juce::TextButton::buttonOnColourId, accent);
+    // The ACCENT on the legend, not on buttonOnColourId. That colour id only
+    // paints the lamp of a LATCHED switch, and this button never latches -- so
+    // the line it replaces set a colour that could not be reached, and the
+    // cell that makes sound come out of the PA was drawn exactly like the
+    // three that do not. Same route AP DUNG takes on the results strip.
+    measureButton.setColour (juce::TextButton::textColourOffId, accent);
     measureButton.onClick = [this] { if (onMeasure != nullptr) onMeasure(); };
     addAndMakeVisible (measureButton);
 

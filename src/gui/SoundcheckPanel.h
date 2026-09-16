@@ -69,7 +69,14 @@ public:
     // different amount of the plot at every size.
     static constexpr int kPanelHeight = 104;
 
-    enum class Mode { Hidden, Running, Results };
+    // Applied is where SoundcheckApplyStats lands (Task 10). It exists NOW, and
+    // empty, because the one outcome that must never be silent belongs in it:
+    // clearedPrevious > 0 with placed == 0 means the run removed working
+    // notches and put nothing back, so the room is measurably WORSE than
+    // before APPLY was pressed. With nowhere to report that, Task 10's obvious
+    // move is to hide the strip on success and say nothing -- which is exactly
+    // how that outcome would ship silently onto a PA.
+    enum class Mode { Hidden, Running, Results, Applied };
 
     void setMode (Mode mode);
     [[nodiscard]] Mode getMode() const { return mode_; }
@@ -94,6 +101,12 @@ public:
     //                  had nothing to propose FROM. Reported as an ERROR and
     //                  never as an empty proposal list, because an empty list
     //                  reads as an excellent room (Task 3 I-3)
+    //   placed / clearedPrevious
+    //                  SoundcheckApplyStats, AFTER the operator pressed AP
+    //                  DUNG. `placed` counts LANE-WRITES (2 per linked pair),
+    //                  never candidates -- the two numbers differ and reading
+    //                  one as the other would report a linked stereo pair as
+    //                  twice the work it was.
     struct Model
     {
         int hotSpots       = 0;
@@ -101,9 +114,35 @@ public:
         int unmeasured     = 0;
         int routingInvalid = 0;
         int cannotPropose  = 0;
+        int placed         = 0;
+        int clearedPrevious = 0;
+
+        // THE outcome that must never be shown as success: the apply removed
+        // notches that were holding and placed nothing in their place, so the
+        // room is worse than it was before the operator touched anything.
+        //
+        // DERIVED, not a field the caller sets. A bool beside the two counts it
+        // is computed from is a bool that can be set to disagree with them, and
+        // the disagreement would be invisible until a show.
+        [[nodiscard]] bool worseOff() const
+        {
+            return clearedPrevious > 0 && placed == 0;
+        }
     };
 
     void setResults (const Model& model);
+
+    // What this strip needs to show every line it is holding WITHOUT cutting
+    // one off. The owner asks rather than assuming kPanelHeight, because the
+    // summary's line count is data-dependent and a fault sentence that is
+    // half-drawn is a fault the operator never reads. Never less than
+    // kPanelHeight, so the Running layout is unaffected.
+    [[nodiscard]] int preferredHeight() const;
+
+    // The figure preferredHeight() and resized() both count in. Exposed so a
+    // test asserts against the number the code actually uses rather than a
+    // second copy of it that is free to drift.
+    static constexpr int kSummaryLineHeightForTest = 19;
 
     // The four-field convenience the brief names. Kept because it is the
     // common case; it fills a Model and forwards.
@@ -128,10 +167,14 @@ public:
     // is invoked rather than triggerClick() -- the latter POSTS a message and
     // this suite pumps no loop (memory/data-loop-lessons-2026-09-05.md).
     //
-    // ONE argument each. juce::TextButton(name, tooltip) changed the meaning of
-    // its second parameter in JUCE 9, so the two-argument form renders a button
-    // with NO TEXT while the build stays green
-    // (memory/juce9-api-traps-2026-08-25.md).
+    // The two-argument juce::TextButton(name, tooltip) is the trap here, and
+    // the mechanism is worth stating exactly, because the one-line version of
+    // it is wrong: param 2 IS the tooltip (juce_TextButton.cpp:46-49). What
+    // ships blank is `{ {}, "LABEL" }` -- an empty NAME with the legend put in
+    // the tooltip slot, which renders a button with no text while the build
+    // stays green. So the defence is not "use one argument", it is "assert the
+    // exact label", which the tests do
+    // (memory/juce9-api-traps-2026-08-25.md; its rule is right).
     juce::TextButton stopButton    { juce::String::fromUTF8 ("D\xe1\xbb\xaaNG") };
     juce::TextButton applyButton   { juce::String::fromUTF8 ("\xc3\x81P D\xe1\xbb\xa4NG") };
     juce::TextButton dismissButton { juce::String::fromUTF8 ("B\xe1\xbb\x8e") };
@@ -147,7 +190,9 @@ private:
     // At most: the headline, the cannot-propose error, the saturation warning,
     // the unmeasured sentence and the routing sentence. A fixed array rather
     // than a vector so nothing in the summary path can grow.
-    static constexpr std::size_t kMaxSummaryLines = 5;
+    // Headline, cannot-propose, saturation, unmeasured, routing -- and the
+    // worse-off line, which can appear beside any of them.
+    static constexpr std::size_t kMaxSummaryLines = 6;
 
     struct SummaryLine
     {

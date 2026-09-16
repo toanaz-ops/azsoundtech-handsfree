@@ -105,10 +105,14 @@ public:
     // codepage happens to be -- the mojibake that shipped the middle-dot bug
     // (src/gui/DeviceViewModel.cpp:13 is the precedent).
     //
-    // ONE argument. juce::TextButton(name, tooltip) changed the meaning of its
-    // second parameter in JUCE 9, so the two-argument form renders a button
-    // with NO TEXT while the build stays green
-    // (memory/juce9-api-traps-2026-08-25.md). Set a tooltip with setTooltip().
+    // The two-argument juce::TextButton(name, tooltip) is the trap here, and
+    // the mechanism is worth stating exactly, because the one-line version of
+    // it is wrong: param 2 IS the tooltip (juce_TextButton.cpp:46-49). What
+    // ships blank is `{ {}, "LABEL" }` -- an empty NAME with the legend put in
+    // the tooltip slot, which renders a button with no text while the build
+    // stays green. So the defence is not "use one argument", it is "assert the
+    // exact label", which the tests do
+    // (memory/juce9-api-traps-2026-08-25.md; its rule is right).
     juce::TextButton measureButton    { juce::String::fromUTF8 ("\xc4\x90O") };
     juce::TextButton autoButton       { "AUTO" };
     juce::TextButton bypassButton     { "BYPASS" };

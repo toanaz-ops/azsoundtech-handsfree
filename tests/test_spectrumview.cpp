@@ -976,6 +976,16 @@ TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
     std::vector<char>  trusted (Detector::kNumBins, 1);
     for (int k = 100; k < 700; k += 37) marked[(std::size_t) k] = 1;
 
+    // The low-confidence caption is built by the CONSTRUCTOR, and this is
+    // asserted BEFORE anything has painted -- which is the whole proof.
+    // juce::String::fromUTF8 allocates, so building it inside paint() (which
+    // round 1 did) heap-allocated on every frame, straight through the rule
+    // this view is built on and past the Path check below. The Font is cached
+    // beside it for the same reason; juce::Font has no comparable read-back, so
+    // this assertion covers the String and the ctor's initialiser list covers
+    // both.
+    EXPECT_FALSE (view.soundcheckLowConfidenceLabelForTest().isEmpty());
+
     view.setSoundcheckOverlay (margin.data(),
                                reinterpret_cast<const bool*> (marked.data()),
                                reinterpret_cast<const bool*> (trusted.data()),
@@ -998,4 +1008,81 @@ TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
 
     EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsAfterFirst);
     EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
+}
+
+// RED IF the dash swallows part of the curve. This is not hypothetical: the
+// first dash implementation skipped whole BINS, and because the axis is
+// logarithmic two adjacent bins at 250 Hz are tens of pixels apart, so one step
+// already exceeded a whole dash period. The state machine then toggled on every
+// bin and emitted startNewSubPath with no lineTo after it -- the entire low
+// half of the curve, 247 Hz hot spot included, drew nothing at all. The path
+// was FULL of elements, so SoundcheckOverlayPaintsWithoutAllocating stayed
+// green; only the render showed it.
+//
+// A bounding box is what tells the two apart, so that is what this pins.
+TEST (SpectrumView, TheDashedMarginCurveSpansTheWholeTrustedBandNotJustItsTopEnd)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.setDisplayRange (gui::SpectrumView::kDefaultLowHz,
+                          gui::SpectrumView::kDefaultHighHz);
+    view.resized();
+
+    constexpr double kRate = 48000.0;
+
+    // A SLOPING margin, not a constant one. A flat curve is a zero-height
+    // rectangle, and juce::Rectangle::isEmpty() is true whenever width OR
+    // height is zero -- so a constant margin would fail the extent assertion
+    // below for a reason that has nothing to do with the dash. (Found by
+    // running it: the first version of this test used a constant 10 dB.)
+    std::vector<float> margin ((std::size_t) Detector::kNumBins, 10.0f);
+    for (int k = 0; k < Detector::kNumBins; ++k)
+        margin[(std::size_t) k] = 6.0f + 12.0f * (float) k / (float) Detector::kNumBins;
+
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  trusted (Detector::kNumBins, 0);
+
+    // Trusted across the whole displayed window, so anything missing from the
+    // drawn extent is the DRAWING's fault and not the data's.
+    int firstTrusted = -1, lastTrusted = -1;
+    for (int k = 0; k < Detector::kNumBins; ++k)
+    {
+        const double hz = (double) k * kRate / (double) Detector::kFftSize;
+        if (hz >= gui::SpectrumView::kDefaultLowHz && hz <= gui::SpectrumView::kDefaultHighHz)
+        {
+            trusted[(std::size_t) k] = 1;
+            if (firstTrusted < 0) firstTrusted = k;
+            lastTrusted = k;
+        }
+    }
+    ASSERT_GT (firstTrusted, 0);
+    ASSERT_GT (lastTrusted, firstTrusted);
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (trusted.data()),
+                               Detector::kNumBins, kRate);
+
+    juce::Image img { juce::Image::ARGB, 900, 420, true };
+    { juce::Graphics g { img }; view.paint (g); }
+
+    const auto drawn = view.soundcheckOverlayPathBoundsForTest();
+    ASSERT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
+
+    // The plot is everything but the toolbar, the dB gutter and the tick row;
+    // rather than reproduce that arithmetic here, the assertion is on the
+    // PROPORTION of the view the curve reaches across. The broken version
+    // covered only the dense high end -- roughly the right third.
+    EXPECT_GT (drawn.getWidth(), 0.75f * (float) view.getWidth());
+
+    // And it genuinely starts on the left: a curve that begins a third of the
+    // way in is the exact defect, and a width check alone could still be
+    // satisfied by one stray subpath at the far left.
+    EXPECT_LT (drawn.getX(), 0.25f * (float) view.getWidth());
 }

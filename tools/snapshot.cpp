@@ -417,7 +417,21 @@ int main (int argc, char** argv)
         // A margin that dips towards zero around the partials the live shot's
         // programme material actually carries, so the curve peaks where the
         // trace does and a reviewer can see whether the two are separable.
-        static const double hotHz[] = { 247.0, 660.0, 1240.0, 1920.0, 3400.0 };
+        //
+        // SNAPPED TO BIN CENTRES. Round 1 put the dips at the partials' exact
+        // frequencies with a sigma of ~0.028 octaves -- about 5 Hz wide at
+        // 247 Hz, against a 23.4 Hz bin. The dip fell BETWEEN two bins and was
+        // never sampled, so the 247 Hz tick sat on the axis with no peak above
+        // it and the picture showed a marker pointing at nothing.
+        const auto snapToBin = [] (double hz)
+        {
+            const double bin = std::lround (hz * (double) Detector::kFftSize / kSampleRate);
+            return bin * kSampleRate / (double) Detector::kFftSize;
+        };
+
+        const double hotHz[] = { snapToBin (247.0),  snapToBin (660.0),
+                                 snapToBin (1240.0), snapToBin (1920.0),
+                                 snapToBin (3400.0) };
 
         for (int k = 0; k < (int) result.marginDb.size(); ++k)
         {
@@ -429,7 +443,11 @@ int main (int argc, char** argv)
             for (const double f : hotHz)
             {
                 const double octaves = std::log2 (juce::jmax (1.0, hz) / f);
-                margin -= 17.0 * std::exp (-(octaves * octaves) / 0.0016);
+                // sigma ~0.1 octaves, not ~0.028: a peak has to be wider than
+                // the bin spacing to be VISIBLE as a peak once it is sampled
+                // at 23.4 Hz, and at 247 Hz the round-1 figure was five times
+                // narrower than one bin.
+                margin -= 17.0 * std::exp (-(octaves * octaves) / 0.02);
             }
 
             result.marginDb[(std::size_t) k] = (float) margin;

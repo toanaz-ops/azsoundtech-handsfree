@@ -270,13 +270,14 @@ TEST (ModeRail, MeasureButtonHasItsLabel)
     EXPECT_EQ (rail.measureButton.getButtonText(), juce::String::fromUTF8 ("\xc4\x90O"));
     EXPECT_NE (rail.measureButton.getButtonText(), rail.soundcheckButton.getButtonText());
 
-    // RED IF the button is constructed as TextButton(name, tooltip). In JUCE 9
-    // the SECOND argument of that two-argument constructor is NOT the tooltip,
-    // so the button renders with NO TEXT AT ALL -- and the build stays green.
-    // This is memory/juce9-api-traps-2026-08-25.md, and it shipped once
-    // already. The explicit emptiness check says so out loud: the EXPECT_EQ
-    // above already covers it, but a future edit that loosens the comparison
-    // must still trip over this one.
+    // RED IF the label is wrong in ANY way, which is the only defence that
+    // works here. The two-argument juce::TextButton(name, tooltip) is the trap
+    // (memory/juce9-api-traps-2026-08-25.md), and its mechanism is exactly
+    // this: param 2 IS the tooltip (juce_TextButton.cpp:46-49), so what ships
+    // blank is `{ {}, "LABEL" }` -- an empty NAME with the legend put in the
+    // tooltip slot. The build stays green either way. The emptiness check
+    // below says that case out loud; the EXPECT_EQ above catches it and every
+    // other wrong label too.
     EXPECT_FALSE (rail.measureButton.getButtonText().isEmpty());
 }
 

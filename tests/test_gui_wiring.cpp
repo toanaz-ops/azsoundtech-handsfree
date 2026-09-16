@@ -1993,3 +1993,199 @@ TEST (SoundcheckPanel, ProgressShowsLaneMsOwnCountdownAndTheChannelItIsOn)
     panel.setProgress (3, 4, 0.0);
     EXPECT_EQ (panel.countdownTextForTest(), juce::String ("0 s"));
 }
+
+//==============================================================================
+// Lane M Task 9, review round 1.
+
+// RED IF a fault sentence is dropped or half-drawn to make the strip fit. Both
+// of the last two sentences ask the operator to go and FIX something -- a bad
+// patch, a channel that could not be measured -- so a strip that silently
+// swallows the tail is a strip that reports a run as clean when it was not.
+// The rule is: the panel asks for the height its lines need, and the owner
+// gives it.
+TEST (SoundcheckPanel, ThePanelAsksForEnoughHeightToDrawEveryFaultSentence)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    EXPECT_EQ (panel.preferredHeight(), gui::SoundcheckPanel::kPanelHeight);
+
+    // One line: the minimum is enough and the strip must not grow for nothing.
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.setResultsSummary (0, 0, 0, 0);
+    const int oneLine = panel.preferredHeight();
+    EXPECT_EQ (oneLine, gui::SoundcheckPanel::kPanelHeight);
+
+    // Every fault at once. The strip has to get taller, and every line has to
+    // fit inside the area paint() draws into.
+    gui::SoundcheckPanel::Model worst;
+    worst.hotSpots        = 4;
+    worst.saturatedBins   = 2;
+    worst.unmeasured      = 3;
+    worst.routingInvalid  = 1;
+    worst.cannotPropose   = 2;
+    worst.clearedPrevious = 5;      // with placed == 0 this is the worse-off line too
+    panel.setResults (worst);
+
+    const int many = panel.preferredHeight();
+    EXPECT_GT (many, oneLine);
+
+    panel.setSize (900, many);
+    panel.resized();
+
+    const auto lines = juce::StringArray::fromLines (panel.summaryTextForTest());
+    EXPECT_GE (lines.size(), 6);
+    EXPECT_GE (panel.summaryBoundsForTest().getHeight(),
+               lines.size() * gui::SoundcheckPanel::kSummaryLineHeightForTest);
+}
+
+// RED IF the post-apply outcome has nowhere to go. clearedPrevious > 0 with
+// placed == 0 means the apply took working notches OUT and put nothing back:
+// the room is measurably worse than before the operator pressed AP DUNG. It is
+// the one outcome that must never be reported as success, and Task 10 needs a
+// landing place for SoundcheckApplyStats that already refuses to do that.
+TEST (SoundcheckPanel, AnApplyThatClearedAndPlacedNothingIsReportedAsWorseOff)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 140);
+    panel.setMode (gui::SoundcheckPanel::Mode::Applied);
+
+    gui::SoundcheckPanel::Model stats;
+    stats.clearedPrevious = 3;
+    stats.placed          = 0;
+    EXPECT_TRUE (stats.worseOff());
+
+    panel.setResults (stats);
+    panel.resized();
+
+    EXPECT_TRUE (panel.hasErrorForTest());
+
+    const auto text = panel.summaryTextForTest();
+    // "KEM an toan hon truoc" -- the sentence says the room got WORSE, in the
+    // operator's own language, not a count they have to interpret.
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")));
+    EXPECT_TRUE (text.contains ("3"));
+
+    // And it is NOT dressed up as a clean room.
+    EXPECT_FALSE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("kh\xc3\xb4ng t\xc3\xacm th\xe1\xba\xa5y")));
+
+    // An apply that actually placed something is not an error, and says so.
+    gui::SoundcheckPanel::Model good;
+    good.clearedPrevious = 3;
+    good.placed          = 4;      // LANE-writes: 2 per linked pair
+    EXPECT_FALSE (good.worseOff());
+    panel.setResults (good);
+    EXPECT_FALSE (panel.hasErrorForTest());
+    EXPECT_TRUE  (panel.summaryTextForTest().contains ("4"));
+
+    // BO is still reachable: an outcome the operator cannot clear is an
+    // outcome that covers the analyser until the app restarts.
+    panel.resized();
+    EXPECT_TRUE  (panel.dismissButton.isVisible());
+    EXPECT_FALSE (panel.applyButton.isVisible());
+}
+
+// RED IF "no hot spots" is printed beside a finding that contradicts it. A
+// saturated bin is one the DEEPEST rung on the ladder could not fix -- the
+// opposite of a clean room -- and round 1 printed both lines together.
+TEST (SoundcheckPanel, ASaturatedBinIsNeverAccompaniedByTheCleanRoomLine)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 140);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+
+    const auto cleanRoom = juce::String::fromUTF8 (
+        "kh\xc3\xb4ng t\xc3\xacm th\xe1\xba\xa5y \xc4\x91i\xe1\xbb\x83m");   // "khong tim thay diem"
+
+    panel.setResultsSummary (/*hotSpots*/ 0, /*saturated*/ 2,
+                             /*unmeasured*/ 0, /*routingInvalid*/ 0);
+    EXPECT_FALSE (panel.summaryTextForTest().containsIgnoreCase (cleanRoom));
+    EXPECT_TRUE  (panel.summaryTextForTest().containsIgnoreCase (juce::String ("gain")));
+
+    // A run that really did find nothing still says so.
+    panel.setResultsSummary (0, 0, 0, 0);
+    EXPECT_TRUE (panel.summaryTextForTest().containsIgnoreCase (cleanRoom));
+}
+
+// Gap B / I-4. RED IF the strip goes back on top of the analyser. It did in
+// round 1, and the render -- not a test -- showed it burying the whole
+// frequency axis and the overlay's own marked-bin rake.
+TEST (GuiWiring, TheSoundcheckStripTakesABandOffTheAnalyserAndNeverCoversIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    auto& view  = app.getSpectrumViewForTest();
+
+    app.setSize (1440, 920);
+    app.resized();      // headless: no peer, so setSize() never runs it
+                        // (memory/gui-console-lessons-2026-08-24.md)
+
+    const int analyserWhenHidden = view.getHeight();
+    EXPECT_FALSE (panel.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    app.resized();
+
+    const auto strip = panel.getBounds();
+    const auto plot  = view.getBounds();
+
+    EXPECT_TRUE  (panel.isVisible());
+    EXPECT_FALSE (strip.intersects (plot));               // never an overlay
+    EXPECT_GE    (strip.getY(), plot.getBottom());        // and always BELOW
+    EXPECT_EQ    (strip.getHeight(), panel.preferredHeight());
+    EXPECT_LT    (plot.getHeight(), analyserWhenHidden);  // the plot paid for it
+
+    // Hidden again: the analyser gets its height back.
+    panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
+    app.resized();
+    EXPECT_EQ (view.getHeight(), analyserWhenHidden);
+}
+
+// I-4. RED IF the strip is the thing that shrinks on a short window. The
+// analyser going under its floor is a nuisance; a fault sentence nobody sees
+// is a room that stays wrong.
+TEST (GuiWiring, AShortWindowShrinksTheAnalyserRatherThanTheSoundcheckStrip)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    auto& view  = app.getSpectrumViewForTest();
+
+    // Every fault at once, so the strip is asking for more than its minimum.
+    gui::SoundcheckPanel::Model worst;
+    worst.hotSpots        = 4;
+    worst.saturatedBins   = 2;
+    worst.unmeasured      = 3;
+    worst.routingInvalid  = 1;
+    worst.cannotPropose   = 2;
+    worst.clearedPrevious = 5;
+    panel.setResults (worst);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+
+    app.setSize (1440, 920);
+    app.resized();
+    const int tallPlot = view.getHeight();
+    ASSERT_EQ (panel.getHeight(), panel.preferredHeight());
+
+    // A genuinely short window. There is no kMinHeight constant to reach for;
+    // 560 px is well under what the masthead, transport, strip and floor want
+    // together, which is exactly the case the rule is about.
+    app.setSize (1440, 560);
+    app.resized();
+
+    // The strip kept EVERY pixel it asked for...
+    EXPECT_EQ (panel.getHeight(), panel.preferredHeight());
+    // ...the analyser is what gave way...
+    EXPECT_LT (view.getHeight(), tallPlot);
+    // ...and the two still do not overlap, so nothing is drawn over anything.
+    EXPECT_FALSE (panel.getBounds().intersects (view.getBounds()));
+    EXPECT_GE    (panel.getBounds().getY(), view.getBounds().getBottom());
+}
