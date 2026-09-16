@@ -13,7 +13,9 @@ Một mục mới: **Q3 (lật lại lần 2)**, và bảng **Q17** được b�
 Mục cũ **giữ nguyên, không sửa** — theo đúng `recording-design-decisions`: lật
 lại là một mục mới, không phải một lần biên tập mục cũ.
 
-**Danh sách owner phải xác nhận TRƯỚC KHI phát tín hiệu ra PA thật — chín mục:**
+**Cập nhật lần 3, 2026-09-16, SAU khi lane hạ cánh trên nhánh** (`feat/lane-m-active-soundcheck`, `a6be099..17f5225`, suite 712/712). Sáu mục mới — **Q18** tới **Q23** — **không xuất hiện lúc thiết kế**: chúng lộ ra khi review từng task đọc code thật, và cả sáu do điều phối tự chốt. Mục cũ **giữ nguyên, không sửa**. Bảng đối chiếu code-với-spec: spec §9.
+
+**Danh sách owner phải xác nhận TRƯỚC KHI phát tín hiệu ra PA thật — chín mục cũ, cộng sáu mục Q18–Q23 ở cuối file:**
 
 1. **Q2** — mức phát −20 dBFS, với cách diễn đạt trung thực ở spec §3 ("20 dB
    dưới toàn thang ở master hiện tại", không quy ra dB SPL).
@@ -32,11 +34,27 @@ lại là một mục mới, không phải một lần biên tập mục cũ.
    hai trên `NotchController`, và là thứ duy nhất làm cho việc "dọn notch
    soundcheck của lần chạy trước" khả thi (spec §4.6).
 
+Sáu mục thêm, sinh ra trong lúc triển khai (2026-09-16), chi tiết ở cuối file:
+
+10. **Q18** — phạm vi dọn notch của lần `ÁP DỤNG` trước = **sổ per-slot**, không
+    thêm enumerator `Origin` mới. Hệ quả: notch của mode `SOUNDCHECK` 15 giây
+    **không bị đụng**, và `CLEAR ALL` **không** reset sổ.
+11. **Q19** — `applyModeGating` nay **tắt hẳn** detector của một slot đang
+    disable. Đây là **thay đổi hành vi NGOÀI phạm vi lane M**.
+12. **Q20** — báo cáo sau `ÁP DỤNG` **giữ console tới khi bấm `BỎ`**, không có
+    timeout.
+13. **Q21** — mở khoá trong `Results` **tách đôi**: rail mode + `CLEAR ALL`
+    sống; `ĐO`, preset, định tuyến, tuning, verdict khoá.
+14. **Q22** — abort trong pha nền bị **hoãn ≤ ~0,53 s** (không phát ra mẫu nào
+    trong cửa sổ đó); việc đổi sentinel bị **PARKED**.
+15. **Q23** — `soundcheck_apply` ghi **một dòng mỗi slot**, có `slot` và hai tín
+    hiệu lỗi `skipped_other_slot` / `skipped_bad_lane`.
+
 Mỗi mục là một ngả rẽ thiết kế. Ghi đủ: câu hỏi, các phương án đã đề xuất (kèm
 phương án khuyên dùng), và lựa chọn. Lật lại khi cần đổi hướng; đừng hỏi lại
 câu đã có đáp án ở đây.
 
-Spec đích: `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (**rev 2**).
+Spec đích: `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (**rev 5**; Q1–Q17 được viết khi spec còn ở rev 2).
 Người hỏi: Fable (điều phối). Người quyết: **owner (ToanAZ) — chưa duyệt.**
 Owner không có mặt 2026-09-15 và đã yêu cầu giảm tối đa số câu hỏi, nên điều
 phối chốt tạm để spec viết được; mọi `Chọn` dưới đây lật lại được, chi phí là
@@ -418,6 +436,131 @@ ngược lại trong cùng dự án.
 duyệt; lật lại được trước khi release. Kèm hai test bắt buộc, vì một cổng sai
 đơn vị **không** làm test nào đỏ nếu không có chúng: cửa sổ nhiễu tổng hợp
 **không** hủy, cửa sổ có tone **có** hủy (spec §5.1).
+
+
+---
+
+**Q18–Q23 — từ sáu RULING của điều phối trong lúc TRIỂN KHAI (2026-09-16).**
+Khác mọi mục trên: sáu câu hỏi này **không xuất hiện lúc thiết kế**, chúng lộ ra
+khi review từng task đọc code thật. Mục cũ **không bị sửa**. Nguồn đầy đủ:
+`.superpowers/sdd/2026-09-15-active-soundcheck/progress.md`, các dòng
+`CONTROLLER RULING`.
+
+## Q18 — Chạy `ĐO` lại thì dọn notch nào của lần trước: theo `Origin`, hay theo một sổ?
+
+`applySoundcheckResults` phải gỡ đề xuất của lần `ÁP DỤNG` trước trước khi đặt
+đề xuất mới. Bản đầu gỡ **mọi** notch `Origin::Soundcheck` trong slot. Review
+Task 7 (C2) chỉ ra: **mode `SOUNDCHECK` 15 giây thụ động là người sinh thứ hai
+của chính origin đó** (`src/app/NotchController.cpp`, `placeConfirmed`). Nên một
+lượt `ÁP DỤNG` **xoá im lặng** lớp bảo vệ mà người vận hành đã tự khoá vào bằng
+nút cũ.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Sổ per-slot `SoundcheckApplyLedger`** `(lane, index, hz)` do caller giữ (một cái mỗi slot, sống suốt đời `MainComponent`), khớp `active && origin == Soundcheck && \|Δhz\| ≤ 1 bin`. Notch của mode cũ **không bị đụng**. Không thêm API cho `NotchController` | khuyên dùng |
+| 2 | Thêm một enumerator `Origin::SoundcheckMeasured` | Sạch về ngữ nghĩa, nhưng Q7 cấm thêm API cho `NotchController`, và mọi chỗ lane G kiểm `origin != Soundcheck` phải được rà lại — một lane khác phải chịu rủi ro của lane này |
+| 3 | Không dọn gì, để đề xuất cũ tự chồng lên | Chuỗi đầy sau hai lần chạy; và inv 15 (±1 bin) sẽ từ chối gần hết lần thứ hai |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt.
+
+Giá phải trả, đã ghi trong header và trong tester notes: một mục sổ bị mồ côi
+bởi `CLEAR ALL` hoặc một lần đổi width được **mang theo vô hạn** (chặn trên bởi
+`kTotalSlots`), và về lý thuyết có thể quy một notch origin-Soundcheck tương lai
+ở cùng `(lane, index)` trong ±1 bin về sổ này. **`CLEAR ALL` không reset sổ.**
+
+## Q19 — `applyModeGating` có được phép TẮT detector của một slot đang disable không?
+
+Lane M khôi phục detection **hàng loạt** khi kết thúc (`finishRun()` bật lại vô
+điều kiện), rồi `applyModeGating` trả mọi slot về luật của mode. Nhưng
+`applyModeGating` có một early-return: nó **bỏ qua** slot đang disable. Vô hại —
+cho tới khi có một người bật hàng loạt. Sau lane M, một slot **disable** có thể
+ở lại trạng thái **detector đang chạy** suốt cửa sổ `Results`.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Bỏ early-return: `applyModeGating` tắt hẳn detection của một slot đang disable.** Một slot disable không có chuỗi sống nào để bảo vệ, nên đây là hướng an toàn | khuyên dùng |
+| 2 | Để lane M tự tắt riêng các slot disable sau khi khôi phục | Sửa đúng triệu chứng, để lại cùng cái bẫy cho người gọi hàng loạt tiếp theo |
+| 3 | Không đụng | Slot disable chạy detector 20 giây mỗi lần đo, kể cả trong `BYPASS` |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt.
+
+**Đây là thay đổi hành vi NGOÀI phạm vi lane M** — nó đụng mọi đường gọi
+`applyModeGating`, kể cả đường không liên quan gì tới soundcheck. Owner phải
+nhìn riêng mục này. (`loadPreset` nạp slot mà **không** gọi `applyModeGating` —
+lỗ hổng có sẵn, không phải do lane M, và không sửa ở đây.)
+
+## Q20 — Báo cáo sau `ÁP DỤNG` có tự biến mất không?
+
+`kResultsTimeoutMs` (20 s) ném **đề xuất** đi. Nhưng sau khi bấm `ÁP DỤNG` thì
+không còn đề xuất nào, chỉ còn một **báo cáo**: đặt được bao nhiêu, từ chối bao
+nhiêu, gỡ bao nhiêu notch cũ. Và trong đó có một kết quả không bao giờ được biến
+mất im lặng: **`clearedPrevious > 0 && placed == 0`** — đã gỡ notch cũ và không
+đặt lại được cái nào, tức **phòng KÉM an toàn hơn trước khi bấm**.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **`Mode::Applied` giữ console tới khi bấm `BỎ`, không timeout.** Console ở mức khoá `Pending` (rail + `CLEAR ALL` sống) nên luôn có đường thoát; `BỎ` là **một cú bấm** | khuyên dùng |
+| 2 | Timeout riêng cho báo cáo (ví dụ 60 s) | Một con số nữa chưa ai đo, và nó vẫn có thể hết giờ đúng lúc người vận hành quay đi |
+| 3 | Dùng lại `kResultsTimeoutMs` | 20 giây là quá ngắn để đọc một báo cáo có tin xấu |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt.
+`installer/TESTER-NOTES.md` phải nói ra điều này, nếu không nó trông như app
+treo.
+
+## Q21 — Trong cửa sổ `Results`, mở khoá những gì?
+
+Spec §4.3 viết "mở khoá mọi thứ trừ `PRESET LOAD`". Review Task 10 (I3) chỉ ra
+điều đó mở quá nhiều: `tuningPanel_` đổi `DEPTH`/`Q` giữa lúc đang xem kết quả
+làm `ÁP DỤNG` đặt theo một trần khác hẳn con số dải kết quả vừa mô tả; nút
+`FALSE` trong `notchListPanel_` là **một cú CLEAR ALL cục bộ** lên chính chuỗi
+vừa đo; và `SnapshotBuffer::linked` cũ ~10 ms nên đổi LINK/width lúc này làm
+việc gỡ ngược một cặp linked sai.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Tách đôi.** `Measuring` = khoá hết. `Pending` (`Results` **và** `Applied`): **mở** rail mode (`AUTO`/`BYPASS`/`SOUNDCHECK`) + `CLEAR ALL`; **khoá** `ĐO`, `PRESET LOAD/SAVE`, `slotPanel_`, `tuningPanel_`, `notchListPanel_` | khuyên dùng |
+| 2 | Theo đúng chữ của §4.3: mở hết trừ `PRESET LOAD` | Ba lỗi trên |
+| 3 | Khoá hết cho tới khi `BỎ` | `BYPASS` là cách một soundman cứu một show. Khoá nó 20 giây là sai hướng, và trên PA thật là hướng nguy hiểm |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt. Nguyên tắc đằng
+sau: **luôn phải còn một đường thoát**, và mọi thứ có thể làm sai một `ÁP DỤNG`
+chưa xảy ra thì đóng băng.
+
+## Q22 — Abort trong pha nền bị hoãn ≤ ~0,53 s: sửa sentinel bây giờ hay hoãn?
+
+`scRampOutAtSample_` dùng giá trị **âm** làm sentinel "chưa có mỏ neo". Trong
+pha nền, `scSampleIndex_` **cũng** âm, nên một mỏ neo chốt lúc đó **trùng
+sentinel** và lời xin ramp-out chỉ được nghe thấy khi chỉ số về 0.
+
+Thực tế của nó: **không có mẫu nào được phát trong cửa sổ đó** (biên độ đã bằng
+0, invariant 9 vẫn đúng); hệ quả duy nhất là kênh ngõ ra nằm im và tap còn treo
+thêm **≤ ~0,53 giây**.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Giữ nguyên, hoãn việc đổi sentinel tới final review**; bắt buộc `setSoundcheckOutputChannel(-1)` làm **chốt chặn abort**, có test ghim | khuyên dùng |
+| 2 | Đổi sentinel sang `INT64_MIN` ngay trong fix round | Đúng hướng, nhưng nhét một thay đổi ngữ nghĩa của một atomic **trên đường audio** vào giữa một vòng sửa là đúng cách sinh ra lỗi mới — chính là mẫu vòng-2-sửa-lỗi-của-vòng-1 mà lane này đã gặp |
+| 3 | Thêm một bit hợp lệ riêng | Một atomic nữa; xem D1 |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt. **Đây là mục
+PARKED**: nó chờ một quyết định, không phải đã xong.
+
+## Q23 — `soundcheck_apply`: một sự kiện cho một lần `ÁP DỤNG`, hay một dòng mỗi slot?
+
+Spec §4.7 viết một sự kiện mang `placed` / `refused` / `cleared_previous`. Nhưng
+`ÁP DỤNG` chạy **từng slot một** với sổ riêng của slot đó, và hai tình huống
+**lỗi** — kết quả gửi nhầm slot, và làn slot này không lái — chỉ nhìn thấy được
+trên GUI nếu không ghi ra.
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Một dòng mỗi slot**, thêm trường `slot`, cộng `skipped_other_slot` và `skipped_bad_lane`. **Không** ghi `skipped_live` — nó là **tập con** của `refused`, ghi cạnh các tổng sẽ mời người đọc cộng nó vào | khuyên dùng |
+| 2 | Một dòng cho cả lần, cộng dồn mọi slot | Mất chỗ lỗi xảy ra; và một chuỗi đầy ở slot 3 trông giống hệt một phòng sạch ở slot 3 |
+| 3 | Một dòng mỗi slot nhưng không ghi hai `skipped_*` | Hai tín hiệu lỗi biến mất khỏi mọi thứ gửi về được |
+
+**Chọn: 1.** — điều phối tự chọn 2026-09-16, owner CHƯA duyệt. `at_output` trong
+`soundcheck_abort` cũng được định nghĩa rõ ở đây: nó là lượt đo **đang dở**,
+không phải lượt cuối đã xong.
 
 
 ## Ghi chú quy trình
