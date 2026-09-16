@@ -205,6 +205,16 @@ MainComponent::MainComponent()
     };
 
     addAndMakeVisible (modeRail_);
+    // LANE M Task 9. Added as a CHILD COMPONENT, not made visible: the panel
+    // starts in Mode::Hidden and shows itself when the owner sets a mode.
+    // Added AFTER spectrumView_ so it paints over the analyser rather than
+    // under it. Nothing here connects it to a SoundcheckController -- that is
+    // Task 10; this console only owns, lays out and renders it.
+    addChildComponent (soundcheckPanel_);
+
+    // The strip takes a band off the analyser rather than covering it, so a
+    // mode change changes the layout and the console has to be told.
+    soundcheckPanel_.onModeChanged = [this] { resized(); };
     addAndMakeVisible (deviceDrawer_);
     addAndMakeVisible (slotScroller_);
     // The notch list is a FIXED bottom strip -- always visible.
@@ -1505,7 +1515,42 @@ void MainComponent::resized()
 
     //--------------------------------------------------------------------
     // 4. The analyser takes everything that is left.
-    spectrumView_.setBounds (area.reduced (kEdgePad, 0).withTrimmedBottom (gap));
+    auto analyser = area.reduced (kEdgePad, 0).withTrimmedBottom (gap);
+
+    //--------------------------------------------------------------------
+    // 4b. Lane M's strip TAKES A BAND off the bottom of the analyser; it does
+    //     not lie on top of it.
+    //
+    // Round 1 of this task did lay it over the plot, and the render showed why
+    // that is wrong: the strip buried the whole frequency axis AND the
+    // overlay's own marked-bin rake, which lives along the plot floor. Both
+    // are exactly what an operator reads a results screen for. No test noticed
+    // -- the panel was inside its own bounds and every assertion passed.
+    //
+    // Bounds are set whether or not the strip is visible, so a panel shown
+    // between two layout passes is never drawn at stale coordinates (the bug
+    // that left the routing table an empty black rect on 2026-08-24).
+    //
+    // The analyser keeps kMinSpectrumHeight whatever happens: a window too
+    // short to hold both gets the strip laid over the plot after all, because
+    // a results strip with nowhere to go is a set of proposals the operator
+    // cannot answer.
+    {
+        const int stripH = juce::jmin (gui::SoundcheckPanel::kPanelHeight,
+                                       juce::jmax (0, analyser.getHeight() - gap));
+
+        if (soundcheckPanel_.isVisible()
+            && analyser.getHeight() - stripH >= kMinSpectrumHeight)
+        {
+            soundcheckPanel_.setBounds (analyser.removeFromBottom (stripH));
+        }
+        else
+        {
+            soundcheckPanel_.setBounds (analyser.withTop (analyser.getBottom() - stripH));
+        }
+    }
+
+    spectrumView_.setBounds (analyser);
 
     //--------------------------------------------------------------------
     // 5. Floor columns: the notch table reads left -- it is the answer -- and

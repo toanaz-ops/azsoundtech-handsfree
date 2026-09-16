@@ -44,6 +44,7 @@
 
 #include "app/NotchController.h"
 #include "dsp/Detector.h"
+#include "dsp/LoopGainEstimator.h"
 #include "gui/RtaProcessing.h"
 
 #include <array>
@@ -201,6 +202,75 @@ public:
     // reads as instant.
     void setDisplayLane (int lane);
     [[nodiscard]] int getDisplayLane() const { return displayLane_; }
+
+    //==========================================================================
+    // LANE M -- the active-soundcheck overlay (Task 9).
+    //
+    // A DATA overlay only: the margin curve, a marker per marked bin, and the
+    // dimmed band above kLowConfidenceAboveHz. Everything a finger touches is
+    // in gui::SoundcheckPanel.
+    //
+    // IT IS FED LANE M'S OWN ARRAYS, NEVER copySnapshot(). The detector's
+    // publish happens inside NotchController's drain loop
+    // (NotchController.cpp:568-582 builds the list, :617-650 publishes), and
+    // lane M runs with the taps SUSPENDED -- so nothing is drained and
+    // copySnapshot() returns the SAME frozen frame for the whole 72 s run.
+    // An overlay sourced from it would be showing the room as it was before
+    // the measurement started (spec section 4.1).
+    //
+    // The three arrays are COPIED, not borrowed: SoundcheckController's results
+    // vector lives behind its stateMutex_ and is rebuilt per run, so holding
+    // pointers into it would outlive what they point at.
+    //
+    // marginDb is SoundcheckController::OutputResult::marginDb (= -H_dB, so
+    // LOW means close to feeding back); marked and trusted are the per-bin
+    // arrays of the same struct. numBins is clamped to Detector::kNumBins.
+    void setSoundcheckOverlay (const float* marginDb, const bool* marked, const bool* trusted,
+                               int numBins, double sampleRate);
+    void clearSoundcheckOverlay();
+    [[nodiscard]] bool hasSoundcheckOverlay() const { return hasSoundcheckOverlay_; }
+
+    // Above this, LoopGainEstimator does not trust its own numbers, so the band
+    // is drawn dimmed and labelled rather than left looking like a measurement.
+    // ALIASED, not re-stated: a second 6000.0 here would be free to drift away
+    // from the one the estimator actually gates on.
+    static constexpr float kLowConfidenceAboveHz = (float) LoopGainEstimator::kTrustedHighHz;
+
+    // The margin window the curve is drawn against, in dB of headroom before
+    // the loop rings. It is NOT the plot's own -90..0 dB magnitude axis -- that
+    // axis measures a different quantity -- so the curve carries its own scale
+    // and the two are read as two things.
+    //
+    // Oriented the same way round as the trace, which is the whole reason for
+    // these two numbers rather than the obvious ones: LOW margin draws HIGH on
+    // the plot, so the curve rises exactly where the trace does and an operator
+    // reads "up = about to howl" once for both.
+    static constexpr float kMarginAtRiskDb = 0.0f;    // at the plot ceiling
+    static constexpr float kMarginSafeDb   = 24.0f;   // at the plot floor
+
+    // soundcheckOverlayPath_'s ctor reservation. Same units and the same
+    // caveat as kDashedStemReserveFloats above: Path::preallocateSpace()
+    // reserves COORDS, not elements, at roughly three floats per lineTo or
+    // startNewSubPath. The worst case here is one element per bin --
+    // Detector::kNumBins = 1025, every one of them trusted and in range -- so
+    // 1025 * 3 = 3075, rounded up for the subpath breaks an untrusted run
+    // inserts and for a clean constant.
+    static constexpr int kSoundcheckOverlayReserveFloats = 3300;
+
+    // TEST ACCESSORS ONLY -- the no-allocation-in-paint guarantee, proved for
+    // the overlay path exactly as dashedStemPathElementCountForTest proves it
+    // for the dashed stem, and carrying the same honest caveat: juce::Path
+    // exposes no capacity getter, so the element count walked with
+    // Path::Iterator is the closest available proxy for "did not grow".
+    [[nodiscard]] std::size_t soundcheckOverlayPathElementCountForTest() const
+    {
+        std::size_t count = 0;
+        juce::Path::Iterator it (soundcheckOverlayPath_);
+        while (it.next())
+            ++count;
+        return count;
+    }
+    [[nodiscard]] int soundcheckMarkedCountForTest() const { return soundcheckMarkedCount_; }
 
     //==========================================================================
     // RING RISK -- how close the room is to ringing right now.
@@ -401,6 +471,13 @@ private:
     // The axis gutter under the plot, where the range is dragged.
     [[nodiscard]] juce::Rectangle<int> axisGutter() const;
 
+    // LANE M. Drawn from TWO places in paint() -- once in the empty-state
+    // branch and once after the trace -- because the overlay has to survive a
+    // console that has never published a frame: the taps are suspended for the
+    // whole run, so a soundcheck started on a freshly-opened window would
+    // otherwise show 72 s of empty grid.
+    void paintSoundcheckOverlay (juce::Graphics& g, const juce::Rectangle<float>& plot);
+
     // Ticks that actually fall inside the current window, chosen from a fixed
     // 1-2-5 ladder so they stay on round numbers as the range changes.
     void rebuildTicks();
@@ -445,6 +522,22 @@ private:
     // allocating its own -- reusing this member keeps that write inside
     // memory this object already owns, same as markerPath_ above.
     juce::Path dashedStemPath_;
+
+    // LANE M. One reused path for the margin curve, following markerPath_'s
+    // pattern: Path::clear() resets the element count without releasing
+    // storage, so a rebuild writes into memory this object already owns.
+    juce::Path soundcheckOverlayPath_;
+
+    // Lane M's own copy of the run's per-bin arrays. Fixed std::arrays, so
+    // taking a result costs no allocation and paint() reads members rather
+    // than chasing a pointer into somebody else's vector.
+    std::array<float, (std::size_t) Detector::kNumBins> soundcheckMarginDb_ {};
+    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckMarked_ {};
+    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckTrusted_ {};
+    bool   hasSoundcheckOverlay_ = false;
+    int    soundcheckBins_       = 0;
+    int    soundcheckMarkedCount_ = 0;
+    double soundcheckSampleRate_ = 0.0;
 
     // Tuning-toolbar state (display-only: changing these never restarts the
     // audio engine, detector or notch chain).

@@ -31,6 +31,7 @@
 #include "gui/NotchListPanel.h"
 #include "gui/SlotPanel.h"
 #include "gui/SlotTabs.h"
+#include "gui/SoundcheckPanel.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
@@ -143,6 +144,11 @@ public:
     // TEST ACCESSORS -- let headless tests assert rail/spectrum geometry
     // without reaching into private members.
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
+
+    // Lane M Task 9. The rail itself, not just its bounds: a headless caller
+    // and tools/snapshot.cpp have to put the transport into its LOCKED state
+    // (F10) to render it, and that is three setters on the rail.
+    [[nodiscard]] gui::ModeRail& getModeRailForTest() { return modeRail_; }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
     // The routing table's CONTENT rect -- a zero height here means the
@@ -180,6 +186,14 @@ public:
     // so it has to drive refreshFromSnapshot() itself. tools/snapshot.cpp uses
     // these to render the console with real detector output in it.
     [[nodiscard]] gui::SpectrumView&   getSpectrumViewForTest()   { return spectrumView_; }
+
+    // Lane M Task 9. The strip is a plain-data component: it is laid out and
+    // rendered by this console, but nothing in Task 9 CONNECTS it to a
+    // SoundcheckController -- that wiring (the confirm dialog, the poll, APPLY) is
+    // Task 10. Exposed now so a headless caller and tools/snapshot.cpp can put
+    // the console into a Running or a Results state and look at it, which is
+    // the only way a GUI change gets reported (CLAUDE.md, 2026-08-25).
+    [[nodiscard]] gui::SoundcheckPanel& getSoundcheckPanelForTest() { return soundcheckPanel_; }
     [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
@@ -297,6 +311,10 @@ private:
     // SpectrumView reads notchControllers_[0], DeviceDrawer re-parents
     // devicePanel_ -- both are declared above, so they outlive these.
     gui::SpectrumView spectrumView_;
+    // Lane M Task 9. An OVERLAY over the analyser, so it is declared AFTER the
+    // view it covers: JUCE paints children in the order they were added, and
+    // a strip that has to be opaque over a live trace must be added second.
+    gui::SoundcheckPanel soundcheckPanel_;
     gui::ModeRail     modeRail_;
     gui::StatusBadge  statusBadge_;      // masthead furniture (see the ctor)
     gui::SlotTabs     slotTabs_;         // masthead furniture likewise

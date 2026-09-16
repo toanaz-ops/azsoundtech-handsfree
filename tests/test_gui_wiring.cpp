@@ -1796,3 +1796,200 @@ TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
 }
+
+//==============================================================================
+// Lane M Task 9 -- gui::SoundcheckPanel.
+//
+// Vietnamese labels are compared against EXPLICIT UTF-8 BYTES written out here
+// independently of the ones in src/gui/SoundcheckPanel.cpp. Sharing a constant
+// between the assertion and the thing asserted would make these tests
+// incapable of failing; and a raw source literal would depend on MSVC's
+// source-charset guess, which is what produced the mojibake middle dot
+// (src/gui/DeviceViewModel.cpp:13 is the byte-escape precedent).
+
+TEST (SoundcheckPanel, StopIsTheOfficialPathAndEscIsTheSecondOne)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.resized();
+
+    int stops = 0;
+    panel.onStop = [&stops] { ++stops; };
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    EXPECT_TRUE (panel.getWantsKeyboardFocus());
+
+    panel.stopButton.onClick();
+    EXPECT_EQ (stops, 1);
+
+    // Esc is BEST EFFORT and second, not first: a key press only reaches the
+    // component that currently has focus and the preset name field also takes
+    // keys (MainComponent.cpp:255-290). F14.
+    EXPECT_TRUE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+    EXPECT_EQ (stops, 2);
+
+    // Anything the panel does not own must be REFUSED so it still reaches
+    // whatever else wants it.
+    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::returnKey)));
+    EXPECT_EQ (stops, 2);
+
+    // And Esc must not be a stop button in disguise once the run is over: in
+    // Results the only two answers are AP DUNG and BO.
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+    EXPECT_EQ (stops, 2);
+}
+
+TEST (SoundcheckPanel, ModesShowTheRightControlsWithRealLabels)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+
+    // RED IF the three buttons carry no text (the JUCE 9 two-argument
+    // TextButton(name, tooltip) trap), or if AP DUNG is shown mid-run.
+    EXPECT_EQ (panel.stopButton.getButtonText(),
+               juce::String::fromUTF8 ("D\xe1\xbb\xaaNG"));                 // DUNG
+    EXPECT_EQ (panel.applyButton.getButtonText(),
+               juce::String::fromUTF8 ("\xc3\x81P D\xe1\xbb\xa4NG"));       // AP DUNG
+    EXPECT_EQ (panel.dismissButton.getButtonText(),
+               juce::String::fromUTF8 ("B\xe1\xbb\x8e"));                   // BO
+
+    EXPECT_FALSE (panel.stopButton.getButtonText().isEmpty());
+    EXPECT_FALSE (panel.applyButton.getButtonText().isEmpty());
+    EXPECT_FALSE (panel.dismissButton.getButtonText().isEmpty());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.resized();
+    EXPECT_TRUE  (panel.isVisible());
+    EXPECT_TRUE  (panel.stopButton.isVisible());
+    EXPECT_FALSE (panel.applyButton.isVisible());
+    EXPECT_FALSE (panel.dismissButton.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.resized();
+    EXPECT_FALSE (panel.stopButton.isVisible());
+    EXPECT_TRUE  (panel.applyButton.isVisible());
+    EXPECT_TRUE  (panel.dismissButton.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
+    EXPECT_FALSE (panel.isVisible());
+    EXPECT_FALSE (panel.getWantsKeyboardFocus());
+}
+
+TEST (SoundcheckPanel, EveryVisibleControlIsInsideThePanelAndNoneOverlap)
+{
+    // RED IF a button is laid off the panel's own bounds -- invisible in every
+    // test and obvious in a render (memory/gui-console-lessons-2026-08-24.md:
+    // headless setSize() has no peer, so resized() is driven by hand).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, gui::SoundcheckPanel::kPanelHeight);
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.resized();
+    EXPECT_TRUE (panel.getLocalBounds().contains (panel.stopButton.getBounds()));
+    EXPECT_GT   (panel.stopButton.getWidth(), 0);
+    EXPECT_GE   (panel.stopButton.getHeight(), az::theme::touchTarget);
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.resized();
+    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.applyButton.getBounds()));
+    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.dismissButton.getBounds()));
+    EXPECT_FALSE (panel.applyButton.getBounds().intersects (panel.dismissButton.getBounds()));
+
+    // The summary must not run under the two buttons: a results line that is
+    // half-covered by AP DUNG is a line nobody reads before pressing it.
+    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.applyButton.getBounds()));
+    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.dismissButton.getBounds()));
+
+    // Both legends must FIT, measured with the real font rather than guessed
+    // (memory/stereo-lane-lessons-2026-09-05.md).
+    const auto font = az::theme::legendFont (az::theme::switchFontSize, true,
+                                             az::theme::trackingSwitch);
+    EXPECT_GE ((float) panel.applyButton.getWidth(),
+               az::theme::stringWidth (font, panel.applyButton.getButtonText().toUpperCase())
+                   + 2.0f * (float) az::theme::gap);
+}
+
+TEST (SoundcheckPanel, UnmeasuredAndMisroutedAreSeparateSentences)
+{
+    // RED IF an unmeasured channel or a mis-routed one is folded into the
+    // headline count. They are DIFFERENT sentences for the operator: "could
+    // not measure" and "the routing is wrong" ask for different actions (F26).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.setResultsSummary (/*hotSpots*/ 3, /*saturated*/ 1,
+                             /*unmeasured*/ 2, /*routingInvalid*/ 1);
+    panel.resized();
+
+    const juce::String text = panel.summaryTextForTest();
+    EXPECT_TRUE (text.contains ("3"));
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("kh\xc3\xb4ng \xc4\x91o \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c")));  // khong do duoc
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x8bnh tuy\xe1\xba\xbfn")));                  // dinh tuyen
+
+    // The two faults are separate LINES, not one run-on sentence.
+    EXPECT_GE (juce::StringArray::fromLines (text).size(), 4);
+
+    // And the saturated warning names the action to take, not just the fact.
+    EXPECT_TRUE (text.containsIgnoreCase (juce::String ("gain")));
+}
+
+TEST (SoundcheckPanel, AMissingCeilingIsAnErrorAndNeverReadsAsACleanRoom)
+{
+    // SoundcheckController::OutputResult::ceilingMissing / ladderMissing mean
+    // "pick() had nothing to propose FROM" -- a fault in the setup, not a
+    // verdict about the room. Reporting that as zero hot spots would tell an
+    // operator their PA is clean when nothing was actually judged.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+
+    gui::SoundcheckPanel::Model model;
+    model.hotSpots      = 0;
+    model.cannotPropose = 2;
+    panel.setResults (model);
+
+    const juce::String text = panel.summaryTextForTest();
+    EXPECT_TRUE (panel.hasErrorForTest());
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("thi\xe1\xba\xbfu tr\xe1\xba\xa7n c\xe1\xba\xaft")));   // thieu tran cat
+
+    // A genuinely clean room says so, and is NOT an error.
+    const gui::SoundcheckPanel::Model clean;
+    panel.setResults (clean);
+    EXPECT_FALSE (panel.hasErrorForTest());
+}
+
+TEST (SoundcheckPanel, ProgressShowsLaneMsOwnCountdownAndTheChannelItIsOn)
+{
+    // F12: the number is lane M's OWN remaining-ms, never
+    // getSoundcheckRemainingMs() -- that one measures the PASSIVE 15 s window
+    // in liveMs_, which is frozen while the taps are suspended and would show
+    // a number that stands still. The panel is fed a double and formats it;
+    // nothing here reaches for the controller.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.setProgress (/*channelIndex*/ 1, /*channelCount*/ 4, /*remainingMs*/ 47200.0);
+    panel.resized();
+
+    // Caption and number are two different sizes, so they are two different
+    // things -- one Label cannot be two sizes (ModeRail.h:66-72).
+    const auto caption = panel.progressTextForTest();
+    EXPECT_TRUE (caption.contains ("2/4"));                     // 1-based for a human
+    EXPECT_TRUE (caption.containsIgnoreCase (
+        juce::String::fromUTF8 ("k\xc3\xaanh")));               // kenh
+    EXPECT_FALSE (caption.contains ("48"));                     // the number is NOT in here
+
+    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("48 s"));   // ceil(47.2)
+
+    panel.setProgress (3, 4, 0.0);
+    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("0 s"));
+}

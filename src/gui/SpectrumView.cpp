@@ -39,6 +39,27 @@ constexpr float kGlowRadius        = 16.0f;
 constexpr float kGlowAlpha         = 0.40f;
 constexpr float kGlowFloor         = 0.05f;  // below this heat, no blur at all
 
+// LANE M -- the soundcheck overlay.
+//
+// The markers are a RAKE ALONG THE FLOOR of the plot, not full-height stems.
+// During the console rebuild a render caught markers burying the trace they
+// were annotating (memory/ui-rebuild-sodium-rack-2026-08-25.md); a marked bin
+// here is a frequency, and a short tick on the axis says a frequency without
+// covering anything above it. The margin curve itself already peaks there.
+constexpr float kOverlayTickHeight  = 12.0f;
+constexpr float kOverlayTickWidth   = 2.5f;
+constexpr float kOverlayCurveWidth  = 1.6f;
+
+// The low-confidence veil. It is drawn in the ENGRAVED-HAIRLINE grey and
+// LIGHTENS the band, which is the opposite of what "dimmed" suggests and is
+// the only thing that can work here: the plot ground is already near-black, so
+// a darker wash over it is invisible. Round 1 used `shade` at 0.20 and then at
+// 0.42 and the render showed nothing at all either time -- `shade` is two
+// values darker than `background`, so the band simply was not there. A band
+// nobody can see is a caveat nobody reads, and the operator is left with a
+// measurement that stops dead at 6 kHz with no explanation.
+constexpr float kLowConfidenceAlpha = 0.22f;
+
 // Non-zero ids make each segmented group mutually exclusive.
 constexpr int kBandRadioGroupId    = 11;
 constexpr int kAverageRadioGroupId = 12;
@@ -115,6 +136,10 @@ SpectrumView::SpectrumView (const NotchController& controller)
     // preallocateSpace here keeps the paint path's first-frame growth off
     // the steady-state no-allocation guarantee.
     dashedStemPath_.preallocateSpace (kDashedStemReserveFloats);
+
+    // LANE M: one element per bin, same reasoning and the same units -- see
+    // kSoundcheckOverlayReserveFloats in the header.
+    soundcheckOverlayPath_.preallocateSpace (kSoundcheckOverlayReserveFloats);
 
     // Toolbar, in the study's order: the display groups sit LEFT next to the
     // section caption, ring risk sits far right. Nothing here reaches the
@@ -882,6 +907,178 @@ double SpectrumView::ageMsOf (const NotchController::SnapshotNotch& notch,
     return it != firstSeenMs_.end() ? juce::jmax (0.0, nowMs - it->second) : 0.0;
 }
 
+void SpectrumView::setSoundcheckOverlay (const float* marginDb, const bool* marked,
+                                         const bool* trusted, const int numBins,
+                                         const double sampleRate)
+{
+    // A null array or a rate of zero cannot be drawn on any axis, so it is
+    // REFUSED rather than drawn as a flat line at the bottom of the plot -- a
+    // flat line at maximum margin reads as an excellent room.
+    if (marginDb == nullptr || marked == nullptr || trusted == nullptr
+        || numBins <= 0 || sampleRate <= 0.0)
+    {
+        clearSoundcheckOverlay();
+        return;
+    }
+
+    const int n = juce::jmin (numBins, Detector::kNumBins);
+
+    soundcheckMarkedCount_ = 0;
+    for (int k = 0; k < n; ++k)
+    {
+        soundcheckMarginDb_[(std::size_t) k] = marginDb[k];
+        soundcheckMarked_  [(std::size_t) k] = marked[k];
+        soundcheckTrusted_ [(std::size_t) k] = trusted[k];
+
+        if (marked[k])
+            ++soundcheckMarkedCount_;
+    }
+
+    soundcheckBins_       = n;
+    soundcheckSampleRate_ = sampleRate;
+    hasSoundcheckOverlay_ = true;
+    repaint();
+}
+
+void SpectrumView::clearSoundcheckOverlay()
+{
+    hasSoundcheckOverlay_  = false;
+    soundcheckBins_        = 0;
+    soundcheckMarkedCount_ = 0;
+    soundcheckSampleRate_  = 0.0;
+    repaint();
+}
+
+void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
+                                           const juce::Rectangle<float>& plot)
+{
+    using namespace az::theme;
+
+    if (! hasSoundcheckOverlay_ || soundcheckBins_ <= 0 || soundcheckSampleRate_ <= 0.0)
+        return;
+
+    //----------------------------------------------------------------------
+    // 1. The band LoopGainEstimator does not trust. Dimmed and LABELLED, not
+    //    hidden: a measurement that quietly stops at 6 kHz looks like a room
+    //    with no top end.
+    const float lowConfX = xForHz (kLowConfidenceAboveHz, plot);
+    if (lowConfX < plot.getRight() && highHz_ > kLowConfidenceAboveHz)
+    {
+        const auto band = plot.withLeft (juce::jmax (plot.getX(), lowConfX));
+
+        g.setColour (border.withAlpha (kLowConfidenceAlpha));
+        g.fillRect (band);
+        g.setColour (border);
+        g.drawLine (band.getX(), band.getY(), band.getX(), band.getBottom(), 1.0f);
+
+        // "do tin cay thap" -- EXPLICIT UTF-8 BYTES. No /utf-8 reaches MSVC in
+        // this build, so a source literal would be decoded with the machine's
+        // active codepage; that is the mojibake middle dot again
+        // (src/gui/DeviceViewModel.cpp:13 is the precedent).
+        g.setColour (dim);
+        g.setFont (monoFont (segmentFontSize));
+        g.drawText (juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x99 tin c\xe1\xba\xady "
+                                            "th\xe1\xba\xa5p"),
+                    band.toNearestInt().reduced (spacing, spacing),
+                    juce::Justification::topRight, false);
+    }
+
+    //----------------------------------------------------------------------
+    // 2. The margin curve. ONE colour straight from the palette, never an
+    //    interpolation between the sodium accent and the ice: the midpoints of
+    //    that blend come out an olive mud that reads as a fault
+    //    (memory/ui-rebuild-sodium-rack-2026-08-25.md).
+    //
+    //    `text` -- the silkscreen white -- and deliberately NOT `peak`, which
+    //    already means "the peak-hold ceiling of this same trace" on this same
+    //    plot, nor `cooling`/`settled`, which are two stops of the notch age
+    //    ramp. A second meaning bolted onto any of those is exactly how `ice`
+    //    would have degraded into decoration. `text` is the app's plain
+    //    foreground and claims nothing, which is what a measured line wants.
+    //
+    //    Only TRUSTED bins are drawn, and an untrusted run BREAKS the line
+    //    rather than being interpolated across. A curve drawn through bins the
+    //    estimator refused to believe is a line the operator has no reason to
+    //    believe either -- and the gap says so without a legend.
+    soundcheckOverlayPath_.clear();
+
+    const auto binHz = [this] (int k)
+    {
+        return (float) ((double) k * soundcheckSampleRate_ / (double) Detector::kFftSize);
+    };
+
+    const float marginSpan = kMarginSafeDb - kMarginAtRiskDb;
+    bool penDown = false;
+
+    for (int k = 0; k < soundcheckBins_; ++k)
+    {
+        if (! soundcheckTrusted_[(std::size_t) k])
+        {
+            penDown = false;
+            continue;
+        }
+
+        const float hz = binHz (k);
+        if (hz < lowHz_ || hz > highHz_)
+        {
+            penDown = false;
+            continue;
+        }
+
+        const float t = juce::jlimit (0.0f, 1.0f,
+                                      (soundcheckMarginDb_[(std::size_t) k] - kMarginAtRiskDb)
+                                          / marginSpan);
+        const float x = xForHz (hz, plot);
+        const float y = plot.getY() + t * plot.getHeight();
+
+        if (! penDown)
+        {
+            soundcheckOverlayPath_.startNewSubPath (x, y);
+            penDown = true;
+        }
+        else
+        {
+            soundcheckOverlayPath_.lineTo (x, y);
+        }
+    }
+
+    if (! soundcheckOverlayPath_.isEmpty())
+    {
+        // A dark keyline under the curve, the same trick the notch stems use,
+        // so it stays readable where it crosses the lit area fill.
+        g.setColour (background.withAlpha (0.8f));
+        g.strokePath (soundcheckOverlayPath_,
+                      juce::PathStrokeType (kOverlayCurveWidth + kKeylineWidth));
+
+        g.setColour (text);
+        g.strokePath (soundcheckOverlayPath_, juce::PathStrokeType (kOverlayCurveWidth));
+    }
+
+    //----------------------------------------------------------------------
+    // 3. The marked bins, as a rake along the FLOOR. Short ticks on the axis,
+    //    never stems through the plot: markers burying the trace is a defect a
+    //    render caught once already, and it passed the whole suite.
+    //
+    //    `danger` rather than the sodium accent: these are the frequencies the
+    //    run says will ring, and the accent already means "the live signal" on
+    //    this plot. Numbers appear on hover, not here -- a row of printed
+    //    frequencies along the axis is a smear nobody reads.
+    g.setColour (danger);
+    for (int k = 0; k < soundcheckBins_; ++k)
+    {
+        if (! soundcheckMarked_[(std::size_t) k])
+            continue;
+
+        const float hz = binHz (k);
+        if (hz < lowHz_ || hz > highHz_)
+            continue;
+
+        const float x = std::round (xForHz (hz, plot));
+        g.fillRect (x - kOverlayTickWidth * 0.5f, plot.getBottom() - kOverlayTickHeight,
+                    kOverlayTickWidth, kOverlayTickHeight);
+    }
+}
+
 void SpectrumView::paint (juce::Graphics& g)
 {
     using namespace az::theme;
@@ -1000,6 +1197,18 @@ void SpectrumView::paint (juce::Graphics& g)
     // says what the app is doing, not what is absent.
     if (snapshot_.sequence == 0)
     {
+        // LANE M: the run suspends the taps for its whole 72 s, so a soundcheck
+        // started on a window that has not published a frame yet would show an
+        // empty grid for the entire measurement. The overlay is lane M's OWN
+        // data and does not depend on a published snapshot, so it is drawn
+        // here too -- and it replaces the "waiting for signal" copy, which
+        // would be describing a tap that is suspended on purpose.
+        if (hasSoundcheckOverlay_)
+        {
+            paintSoundcheckOverlay (g, plot);
+            return;
+        }
+
         // Same reasoning as the notch table's empty state: a label, not prose.
         g.setColour (dim);
         g.setFont (legendFont (captionFontSize, true, trackingCaption));
@@ -1084,6 +1293,13 @@ void SpectrumView::paint (juce::Graphics& g)
                         1.0f);
         }
     }
+
+    //--------------------------------------------------------------------
+    // LANE M's overlay: after the spectrum polyline so the trace reads as the
+    // ground truth underneath it, and BEFORE the notch markers so a stem the
+    // detector placed is never hidden by a curve describing a measurement.
+    if (hasSoundcheckOverlay_)
+        paintSoundcheckOverlay (g, plot);
 
     //--------------------------------------------------------------------
     // THE MARKERS. Per notch: a stem, a depth wedge, and a numbered flag, all

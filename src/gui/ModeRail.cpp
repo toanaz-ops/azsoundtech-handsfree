@@ -2,6 +2,7 @@
 
 #include "gui/theme/AzTheme.h"
 
+#include <cmath>
 #include <utility>
 
 namespace gui
@@ -56,6 +57,45 @@ ModeRail::ModeRail (Orientation orientation)
     // slabs is a slab somebody eventually hits by accident, in the dark.
     clearAllButton.getProperties().set ("azStyle", "danger");
     addAndMakeVisible (clearAllButton);
+
+    // LANE M -- DO. A MOMENTARY control, deliberately outside the radio group:
+    // it does not latch, it does not un-light whichever mode the engine is
+    // actually in, and a second press while a run is in flight is impossible
+    // because setMeasureEnabled(false) takes it out of reach (F10).
+    //
+    // Its face is the ACCENT rather than a mode lamp, because it is the only
+    // control on this rail that MAKES SOUND COME OUT OF THE PA. The hint says
+    // so in the operator's own language: the legend names the control, the
+    // hint says what it does to the room.
+    measureButton.getProperties().set (hintProperty,
+        // "phat tin hieu" -- explicit UTF-8 bytes; see ModeRail.h on the
+        // measureButton declaration for why nothing here is a source literal.
+        juce::String::fromUTF8 ("ph\xc3\xa1t t\xc3\xadn hi\xe1\xbb\x87u"));
+    measureButton.setColour (juce::TextButton::buttonOnColourId, accent);
+    measureButton.onClick = [this] { if (onMeasure != nullptr) onMeasure(); };
+    addAndMakeVisible (measureButton);
+
+    // MEASURED, not estimated: the widest string this cell must print, set in
+    // the font the LookAndFeel will actually draw it in. A cell narrower than
+    // its legend does not fail a test -- it ships a truncated button
+    // (memory/stereo-lane-lessons-2026-09-05.md).
+    //
+    // Two strings, because the switch face carries both: the uppercase legend
+    // in the tracked silkscreen face, and the hint underneath in mono at
+    // hintFontSize. drawButtonText() reduces the face by `gap` on each side
+    // before fitting either, so that padding is added back here.
+    {
+        const auto legendW = stringWidth (legendFont (switchFontSize, true, trackingSwitch),
+                                          measureButton.getButtonText().toUpperCase());
+        const auto hintW   = stringWidth (monoFont (hintFontSize),
+                                          measureButton.getProperties()
+                                              .getWithDefault (hintProperty, juce::String())
+                                              .toString());
+
+        measureCellWidth_ = juce::jmax (touchTarget,
+                                        (int) std::ceil (juce::jmax (legendW, hintW))
+                                            + 2 * gap);
+    }
 
     // The countdown is a NUMBER, so it is mono and it is big: it is read at a
     // glance from across a room while the room is being swept. Its caption is
@@ -130,6 +170,23 @@ void ModeRail::setDisplayedMode (const Mode mode)
     soundcheckButton.setToggleState (mode == Mode::Soundcheck, juce::dontSendNotification);
     autoButton      .setToggleState (mode == Mode::Auto,       juce::dontSendNotification);
     bypassButton    .setToggleState (mode == Mode::Bypass,     juce::dontSendNotification);
+}
+
+void ModeRail::setModeControlsEnabled (const bool enabled)
+{
+    // DO is NOT in this list. The two locks have different lifetimes: the mode
+    // switches and CLEAR ALL come back the moment the run ends, while DO stays
+    // dead through the whole Results window -- starting a second measurement
+    // on top of an unanswered proposal set would throw the proposals away.
+    soundcheckButton.setEnabled (enabled);
+    autoButton      .setEnabled (enabled);
+    bypassButton    .setEnabled (enabled);
+    clearAllButton  .setEnabled (enabled);
+}
+
+void ModeRail::setMeasureEnabled (const bool enabled)
+{
+    measureButton.setEnabled (enabled);
 }
 
 void ModeRail::updateCountdown()
@@ -231,6 +288,14 @@ void ModeRail::resized()
     fb.items.add (cell (autoButton,       cellW, cellH));
     fb.items.add (cell (bypassButton,     cellW, cellH));
 
+    // LANE M -- DO, immediately after the three modes and before the slack.
+    // Narrower than a mode switch on purpose: a two-character legend in a
+    // 168 px cell reads as a mode somebody forgot to name. In the vertical
+    // orientation every cell is railWidth, so it follows suit there.
+    fb.items.add (cell (measureButton,
+                        vertical ? cellW : (float) measureCellWidth_,
+                        cellH));
+
     // The countdown takes the slack between the modes and CLEAR ALL, so the
     // destructive control is always pinned at the far end of the transport --
     // as far from the three switches a hand reaches for as the row allows.
@@ -251,14 +316,17 @@ void ModeRail::resized()
     fb.performLayout (getLocalBounds());
 
     // The gap the spacer left, between the last mode switch and CLEAR ALL.
+    // The gap now opens after DO rather than after BYPASS: the spacer flex item
+    // sits between them, and reading it off the wrong neighbour would lay the
+    // countdown block straight over the new cell.
     auto block = vertical
-                     ? juce::Rectangle<int> (0, bypassButton.getBottom() + gap,
+                     ? juce::Rectangle<int> (0, measureButton.getBottom() + gap,
                                              railWidth,
                                              juce::jmax (0, clearAllButton.getY() - gap
-                                                            - (bypassButton.getBottom() + gap)))
-                     : juce::Rectangle<int> (bypassButton.getRight() + gap, 0,
+                                                            - (measureButton.getBottom() + gap)))
+                     : juce::Rectangle<int> (measureButton.getRight() + gap, 0,
                                              juce::jmax (0, clearAllButton.getX() - gap
-                                                            - (bypassButton.getRight() + gap)),
+                                                            - (measureButton.getRight() + gap)),
                                              getHeight());
 
     if (block.getWidth() <= 0 || block.getHeight() <= 0)

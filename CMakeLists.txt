@@ -118,6 +118,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.h
+    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.h
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.cpp
