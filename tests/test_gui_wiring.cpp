@@ -2189,3 +2189,359 @@ TEST (GuiWiring, AShortWindowShrinksTheAnalyserRatherThanTheSoundcheckStrip)
     EXPECT_FALSE (panel.getBounds().intersects (view.getBounds()));
     EXPECT_GE    (panel.getBounds().getY(), view.getBounds().getBottom());
 }
+
+
+//==============================================================================
+// LANE M Task 10 -- the wiring that connects a button to a loudspeaker.
+//
+// NOTHING IN THIS FILE CAN EMIT. Every test here builds a MainComponent with no
+// audio device: SoundcheckController::arm() refuses outright while the engine
+// is not running (Refusal::EngineNotRunning), so the machine never leaves Idle
+// and scOutChannel_ is never armed. That is asserted rather than assumed --
+// soundcheckIsEmitting() is checked on the DO path below.
+
+// RED IF: onBeforeRestart forgets lane M, or onAfterRestart forgets to start the
+// poll thread again. audioDeviceAboutToStart clears every ring under "no
+// producer and no consumer running" (LockFreeRingBuffer.h), and micCapture_ is
+// in that block now with the lane M thread as its consumer. abortAndJoin()
+// leaves the thread STOPPED and nothing inside the controller restarts it
+// (SoundcheckController.h:219-220). F15.
+TEST (MainComponentSoundcheck, DeviceRestartAbortsAndJoinsTheSoundcheckFirst)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_NE (app.getDevicePanelForTest().onBeforeRestart, nullptr);
+    ASSERT_NE (app.getDevicePanelForTest().onAfterRestart,  nullptr);
+
+    // A poll thread, as a live device would have left behind.
+    sc.start();
+    ASSERT_TRUE (sc.isPollThreadRunningForTest());
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    // JOINED -- not merely asked to stop. This is the assertion that goes red
+    // if the hook restarts the device with the lane M thread still draining.
+    EXPECT_FALSE (sc.isPollThreadRunningForTest());
+    EXPECT_EQ    (sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+
+    app.getDevicePanelForTest().onAfterRestart();
+
+    // ...and running again, or the next DO would arm a run nothing ever polls.
+    EXPECT_TRUE (sc.isPollThreadRunningForTest());
+
+    sc.stop (2000);
+}
+
+// RED IF: a device restart leaves the console locked. The restart can happen
+// without the operator asking for it, so the abort path has to hand the
+// controls back -- a rig with its mode rail dead mid-show is unusable.
+TEST (MainComponentSoundcheck, DeviceRestartUnlocksTheConsoleAndSaysWhatHappened)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckControlsLockedForTest (true);
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Running);
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_TRUE (app.getModeRailForTest().autoButton.isEnabled());
+    EXPECT_EQ   (app.getSoundcheckPanelForTest().getMode(),
+                 gui::SoundcheckPanel::Mode::Hidden);
+    // A measurement that vanished has to SAY it vanished.
+    EXPECT_TRUE (app.lastMessageForTest().isNotEmpty());
+}
+
+// RED IF: PRESET LOAD stays live while proposals are pending. adoptPreset uses
+// the FILE's indices and overwrites without checking n.active
+// (NotchController.cpp -> setNotchImpl), so it would silently erase every
+// pending proposal. F10.
+TEST (MainComponentSoundcheck, PresetLoadIsRefusedWhileASoundcheckIsPending)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckControlsLockedForTest (true);
+
+    juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("lane-m-lock-test.json");
+    tmp.replaceWithText ("{\"version\":\"1.0\",\"notches\":[]}");
+
+    EXPECT_FALSE (app.loadPreset (tmp)) << "a pending soundcheck must refuse a preset load";
+    // And it must be a REFUSAL the operator can read, not a silent false that
+    // looks exactly like a corrupt file.
+    const auto refusal = app.lastMessageForTest();
+    EXPECT_TRUE (refusal.isNotEmpty());
+
+    // THE LOCK is what refused, not the file. With the lock off the same file
+    // goes back to PresetManager and comes back with ITS verdict -- whatever
+    // that is for this fixture -- without lane M's sentence on screen. (The
+    // fixture is deliberately minimal: whether PresetManager accepts it is
+    // tested elsewhere, and asserting its verdict here would make this test
+    // about the preset format instead of about the lock.)
+    app.setSoundcheckControlsLockedForTest (false);
+    app.showMessage ({});
+    app.loadPreset (tmp);
+    EXPECT_NE (app.lastMessageForTest(), refusal)
+        << "with the lock off the refusal sentence must not be shown again";
+
+    tmp.deleteFile();
+}
+
+// RED IF: the mode buttons, CLEAR ALL, the preset row or any slot control stays
+// live during a run. A mode change mid-run re-arms detection under a suspended
+// tap; CLEAR ALL mid-run removes notches nobody asked about; a width or routing
+// change moves the very chain the run is measuring.
+TEST (MainComponentSoundcheck, ModeAndClearAllAreLockedWhileRunning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckControlsLockedForTest (true);
+    auto& rail = app.getModeRailForTest();
+
+    EXPECT_FALSE (rail.soundcheckButton.isEnabled());
+    EXPECT_FALSE (rail.autoButton.isEnabled());
+    EXPECT_FALSE (rail.bypassButton.isEnabled());
+    EXPECT_FALSE (rail.clearAllButton.isEnabled());
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+
+    // PRESET LOAD / SAVE, and the device controls that would restart the engine.
+    EXPECT_FALSE (app.getDeviceDrawer().loadButton.isEnabled());
+    EXPECT_FALSE (app.getDeviceDrawer().saveButton.isEnabled());
+
+    // enable / width / routing / LINK-INDEP on a slot row. Component::isEnabled
+    // walks the parent chain, which is what one setEnabled on the panel buys.
+    auto& row = app.getSlotPanelForTest().getRowForTest (0);
+    EXPECT_FALSE (row.enable.isEnabled());
+    EXPECT_FALSE (row.width.isEnabled());
+    EXPECT_FALSE (row.outLanes[0].isEnabled());
+    EXPECT_FALSE (row.link.isEnabled());
+
+    app.setSoundcheckControlsLockedForTest (false);
+    EXPECT_TRUE (rail.measureButton.isEnabled());
+    EXPECT_TRUE (rail.clearAllButton.isEnabled());
+    EXPECT_TRUE (app.getDeviceDrawer().loadButton.isEnabled());
+    // The row controls come back -- but NOT width / in / out, which SlotPanel
+    // itself keeps disabled while no device has reported any channels
+    // (SlotPanel.cpp:282-295, `haveChannels`). enable and LINK are ungated, so
+    // they are what proves the unlock reached the rows.
+    EXPECT_TRUE (row.enable.isEnabled());
+    EXPECT_TRUE (row.link.isEnabled());
+}
+
+// RED IF: the restore-detection lambda grows past a relaxed atomic store per
+// slot. It runs on the LANE M THREAD, and that is only defensible because
+// NotchController::setDetectionActive is exactly one relaxed store. inv 17.
+TEST (MainComponentSoundcheck, RestoreDetectionCallbackOnlyTouchesAtomics)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_NE (sc.setDetectionActiveOnAllSlots, nullptr);
+    ASSERT_NE (sc.logEvent, nullptr);
+    ASSERT_NE (sc.onStateChanged, nullptr);
+
+    sc.setDetectionActiveOnAllSlots (false);
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_FALSE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+
+    sc.setDetectionActiveOnAllSlots (true);
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_TRUE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+}
+
+// RED IF: pressing DO with no device open emits anything, or shows nothing at
+// all. A refusal must SAY which refusal it was. inv 19, F26.
+TEST (MainComponentSoundcheck, MeasureWithNoDeviceRefusesAndSaysSo)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    bool confirmAsked = false;
+    app.soundcheckConfirmHook = [&confirmAsked] (const juce::String&,
+                                                 std::function<void (bool)>)
+    {
+        confirmAsked = true;
+    };
+
+    ASSERT_NE (app.getModeRailForTest().onMeasure, nullptr);
+    app.getModeRailForTest().onMeasure();
+
+    EXPECT_EQ (app.getSoundcheckControllerForTest().getState(),
+               SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    EXPECT_TRUE  (app.lastMessageForTest().isNotEmpty());
+    // The dialog is NEVER reached: the refusal happens in preflight, before the
+    // operator is asked to drop their master for a run that cannot happen.
+    EXPECT_FALSE (confirmAsked);
+    // ...and the console is not left locked by a refusal.
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+}
+
+// RED IF: a null confirm hook means a SILENT run instead of no run. The
+// confirmation is the only thing standing between a button and 72 seconds of
+// sweep through a PA.
+TEST (MainComponentSoundcheck, NoConfirmHookMeansNoRun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.soundcheckConfirmHook = nullptr;
+    app.getModeRailForTest().onMeasure();
+
+    EXPECT_EQ (app.getSoundcheckControllerForTest().getState(),
+               SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    EXPECT_TRUE  (app.lastMessageForTest().isNotEmpty());
+}
+
+// RED IF: the countdown is fed NotchController::getSoundcheckRemainingMs -- the
+// PASSIVE 15 s window, measured in liveMs_, which is FROZEN while lane M has the
+// taps suspended. It would show a number that stands still or reads 0 for the
+// whole run. F12.
+TEST (MainComponentSoundcheck, TheCountdownComesFromLaneMsOwnClockNotThePassiveWindow)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // A passive 15 s soundcheck window, in flight and reporting a big number.
+    app.getNotchControllerForTest (0)->startSoundcheck();
+    ASSERT_GT (app.getNotchControllerForTest (0)->getSoundcheckRemainingMs(), 1000.0);
+
+    // Lane M is Idle, so ITS countdown is zero. Swap the source and this reads
+    // ~15000 instead.
+    EXPECT_DOUBLE_EQ (app.soundcheckCountdownMsForTest(), 0.0);
+}
+
+// RED IF: the run is armed without the running preset's ceiling, or without the
+// detector's live peakiness threshold. Neither omission is caught by arm(): a
+// defaulted ceilingDb of 0.0 is FINITE and passes its isfinite() check, and the
+// run would then propose nothing at all while looking like a clean room
+// (Task 3 I-3, N1).
+TEST (MainComponentSoundcheck, RunParamsCarryTheRunningPresetsCeilingAndTheLiveGate)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto* controller = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller, nullptr);
+    controller->setNotchDefaults (24.0, -18.0);
+    controller->setPeakinessThreshold (7.5f);
+
+    const auto params = app.soundcheckRunParamsForTest();
+
+    EXPECT_DOUBLE_EQ (params.ceilingDb, controller->getNotchDepthDb());
+    EXPECT_DOUBLE_EQ (params.notchQ,    controller->getNotchQ());
+    EXPECT_FLOAT_EQ  (params.noiseFloorGate, controller->getPeakinessThreshold());
+    EXPECT_GT (params.noiseFloorGate, 0.0f);
+    EXPECT_FLOAT_EQ (params.peak, SoundcheckController::kSoundcheckMaxPeak);
+
+    // And the ceiling really is the tuning value, not the 0.0 default.
+    EXPECT_LT (params.ceilingDb, 0.0);
+}
+
+// RED IF: the targets stop being "every lane of every enabled slot". The
+// spec's worst case -- 8 stereo slots, 16 outputs, ~72 s -- IS this count, and
+// the confirmation quotes it.
+TEST (MainComponentSoundcheck, TargetsAreEveryLaneOfEveryEnabledSlot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // Slot 0 ships enabled and stereo (AudioEngine's constructor).
+    const auto targets = app.soundcheckTargetsForTest();
+    ASSERT_EQ (targets.size(), 2u);
+    EXPECT_EQ (targets[0].slot, 0);
+    EXPECT_EQ (targets[0].lane, 0);
+    EXPECT_EQ (targets[1].lane, 1);
+    EXPECT_EQ (targets[0].outChannel, app.getAudioEngine().getSlotConfig (0).outputChannels[0]);
+    EXPECT_EQ (targets[1].inChannel,  app.getAudioEngine().getSlotConfig (0).inputChannels[1]);
+
+    // A mono slot contributes ONE target, not two.
+    SlotConfig mono = app.getAudioEngine().getSlotConfig (0);
+    mono.width = 1;
+    app.getAudioEngine().setSlotConfig (0, mono);
+    EXPECT_EQ (app.soundcheckTargetsForTest().size(), 1u);
+
+    // A disabled rig has nothing to measure at all, which is what preflight
+    // turns into Refusal::NoChannels rather than a zero-length run.
+    mono.enabled = false;
+    app.getAudioEngine().setSlotConfig (0, mono);
+    EXPECT_TRUE (app.soundcheckTargetsForTest().empty());
+}
+
+// RED IF: the confirmation stops making the honest level statement, or stops
+// quoting the real cost in seconds. Spec 4.3 / F13: no SPL figure (the app
+// cannot know one), but "20 dB below full scale at YOUR master" and the total
+// duration both have to be there before the operator agrees to it.
+TEST (MainComponentSoundcheck, TheConfirmationSaysHaMasterTruocAndTheRealDuration)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    const auto text = MainComponent::soundcheckConfirmTextForTest (16);
+
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "H\xe1\xba\xa0 MASTER TR\xc6\xaf\xe1\xbb\x9a" "C")))   // "HA MASTER TRUOC"
+        << "the confirmation must tell the operator to drop the master";
+    EXPECT_TRUE (text.contains ("20 dB")) << "the level statement is the point";
+
+    // 16 outputs x kPerTargetMs. The number is DERIVED from the constant, so
+    // this asserts the arithmetic rather than a second copy of "72".
+    const double totalSec = SoundcheckController::kPerTargetMs * 16.0 / 1000.0;
+    EXPECT_TRUE (text.contains (juce::String (totalSec, 1)))
+        << "expected " << totalSec << " s in: " << text.toStdString();
+    EXPECT_TRUE (text.contains (juce::String (SoundcheckController::kPerTargetMs / 1000.0, 1)))
+        << "the per-channel silence has to be stated too";
+}
+
+// RED IF: DUNG / Esc is not wired. SoundcheckPanel routes BOTH through onStop
+// (SoundcheckPanel::keyPressed), so this one callback is the whole stop path a
+// finger can reach.
+TEST (MainComponentSoundcheck, StopAndDismissAreWiredAndNeitherEmits)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    ASSERT_NE (panel.onStop,    nullptr);
+    ASSERT_NE (panel.onApply,   nullptr);
+    ASSERT_NE (panel.onDismiss, nullptr);
+
+    // Esc reaches onStop through the panel itself.
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    app.setSoundcheckControlsLockedForTest (true);
+    EXPECT_TRUE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+
+    // Nothing was emitting, and the stop leaves nothing armed behind it.
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+
+    // BO puts the strip away and hands the console back.
+    panel.onDismiss();
+    EXPECT_EQ   (panel.getMode(), gui::SoundcheckPanel::Mode::Hidden);
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_FALSE (app.getSpectrumViewForTest().hasSoundcheckOverlay());
+}
+
+// RED IF: a ledger is shared between slots, or reset by anything. It is one per
+// slot, alive for the component's lifetime, and CLEAR ALL deliberately does NOT
+// reset it (SoundcheckController.h: a property of the design, not a leak).
+TEST (MainComponentSoundcheck, EverySlotHasItsOwnApplyLedgerAndClearAllDoesNotResetIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        EXPECT_TRUE (app.soundcheckLedgerForTest (slot).entries.empty()) << "slot " << slot;
+
+    ASSERT_NE (app.getModeRailForTest().onClearAllConfirmed, nullptr);
+    app.getModeRailForTest().onClearAllConfirmed();
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        EXPECT_TRUE (app.soundcheckLedgerForTest (slot).entries.empty()) << "slot " << slot;
+}
