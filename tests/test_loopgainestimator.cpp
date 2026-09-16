@@ -7,6 +7,7 @@
 #include "dsp/LoopGainEstimator.h"
 #include "dsp/SoundcheckSignal.h"
 
+#include <algorithm>   // std::max, for the Box-Muller floor in noise()
 #include <cmath>
 #include <random>
 #include <vector>
@@ -66,12 +67,32 @@ std::vector<float> resonantRoom (const std::vector<float>& x, double hz, double 
     return y;
 }
 
+// BOX-MULLER, NOT std::normal_distribution (final review M-1). mt19937's
+// sequence is standardised; normal_distribution's mapping of it is not, so the
+// same seed draws a different noise floor under libc++ than under MSVC and the
+// SNR tolerances below were only ever measured on one of them. Same statistics
+// (mean 0, s.d. sigma, independent), same seed, same numbers everywhere.
 std::vector<float> noise (std::size_t n, float sigma, unsigned seed)
 {
+    constexpr float kTwoPi = 6.28318530717958647692f;
+
     std::mt19937 rng { seed };
-    std::normal_distribution<float> d { 0.0f, sigma };
+    std::uniform_real_distribution<float> u { 0.0f, 1.0f };
     std::vector<float> out (n);
-    for (auto& v : out) v = d (rng);
+
+    for (std::size_t i = 0; i < n; i += 2)
+    {
+        // Floored off zero: log(0) is -inf, and a single inf here would reach
+        // every bin of the estimator's noise-floor spectrum.
+        const float u1  = std::max (u (rng), 1.0e-12f);
+        const float mag = sigma * std::sqrt (-2.0f * std::log (u1));
+        const float th  = kTwoPi * u (rng);
+
+        out[i] = mag * std::cos (th);
+        if (i + 1 < n)
+            out[i + 1] = mag * std::sin (th);
+    }
+
     return out;
 }
 

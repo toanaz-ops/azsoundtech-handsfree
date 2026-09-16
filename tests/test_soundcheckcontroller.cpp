@@ -208,12 +208,38 @@ struct Rig
     }
 };
 
+// BOX-MULLER, NOT std::normal_distribution (final review M-1). The standard
+// pins mt19937's sequence but NOT normal_distribution's mapping of it: MSVC and
+// libc++ use different algorithms, so the same seed gives a different noise
+// floor on the macOS runner -- and the flake guards below were measured on MSVC
+// alone. A Box-Muller pair off uniform_real_distribution has the same
+// statistics (mean 0, s.d. sigma, samples independent) and is the same sequence
+// everywhere in practice.
+//
+// NOT a relaxation of anything: the guards are unchanged, and they are what
+// says the fixture still lands where the tests need it.
 std::vector<float> whiteNoise (std::size_t n, float sigma, unsigned seed = 3)
 {
+    constexpr float kTwoPi = 6.28318530717958647692f;
+
     std::mt19937 rng { seed };
-    std::normal_distribution<float> d { 0.0f, sigma };
+    std::uniform_real_distribution<float> u { 0.0f, 1.0f };
     std::vector<float> v (n);
-    for (auto& x : v) x = d (rng);
+
+    for (std::size_t i = 0; i < n; i += 2)
+    {
+        // u1 floored off zero: log(0) is -inf, and one inf in the fixture would
+        // propagate through the FFT into every bin. The floor is far below any
+        // value the generator produces often enough to bias sigma.
+        const float u1  = std::max (u (rng), 1.0e-12f);
+        const float mag = sigma * std::sqrt (-2.0f * std::log (u1));
+        const float th  = kTwoPi * u (rng);
+
+        v[i] = mag * std::cos (th);
+        if (i + 1 < n)
+            v[i + 1] = mag * std::sin (th);
+    }
+
     return v;
 }
 
@@ -693,7 +719,7 @@ TEST (SoundcheckController, NoiseFloorOfAQuietRoomDoesNotAbort)
 //
 // It also pins WHEN the gate decides: a ringing room must be refused with the
 // sweep index still negative, i.e. before the first sample. That is what
-// kNoiseFloorGuardMs buys, and asserting the output channel stayed at zero for
+// kSweepLeadInMs buys, and asserting the output channel stayed at zero for
 // the whole fixture is the only way to see it.
 TEST (SoundcheckController, NoiseFloorWithARingingToneAborts)
 {
