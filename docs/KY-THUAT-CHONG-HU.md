@@ -366,6 +366,293 @@ chờ chủ sở hữu quyết, xem `docs/spec-ring-risk.md` mục "Known gaps (
 **Mức thay đổi level: 0 dB.** Toàn bộ phần này là readout: không đổi
 `NotchCommand`, không đổi hệ số filter, không đổi quyết định đặt/xóa notch.
 
+### 3.7 Soundcheck đo chủ động (1.3.0, lane M) — đo trước khi hú
+
+Tới 1.2.0, "soundcheck" nghĩa là **ngồi nghe 15 giây và chờ phòng tự hú**
+(`AudioEngine::Mode::Soundcheck`). Lane M đảo chiều: app **tự sinh tín hiệu và
+phát ra PA** để đo loop gain từng bin, rồi **đề xuất** notch phòng ngừa. Đây là
+lần đầu tiên app là một **nguồn tín hiệu**, không chỉ là một bộ trừ gain — và
+đường ra không có limiter nào, chỉ có kẹp cứng ±1.0f.
+
+#### Bốn điểm chèn trong callback, và tại sao chúng nằm đúng chỗ đó
+
+`AudioEngine::audioDeviceIOCallbackWithContext` nhận thêm bốn chỗ:
+
+1. **Thu mic thô** (`src/app/AudioEngine.cpp:701`): `capSource =
+   inputChannelData[scInCh]`, lấy thẳng từ con trỏ vào của callback, **trước mọi
+   DSP**.
+2. **Tắt làn** (`:769`): `if (scOut >= 0 && outIdx == scOut)` — mọi làn có kênh
+   ra trùng kênh đang đo bị bỏ qua, và `chain.clearState()` được gọi mỗi block
+   cho làn đó.
+3. **Tiêm sweep** (`:852-880`): cộng mẫu sweep vào đúng một kênh, `scOut`.
+4. **Ghi ring thu** (`:954-957`): chỉ khi `scCaptureActive` và `capSource` khác
+   null.
+
+**Con trỏ thu KHÔNG được lấy bên trong vòng lặp per-lane.** Mic đo, theo định
+nghĩa, **không nằm trong bảng định tuyến** — đó chính là nghĩa của "mic thô".
+Một điểm thu chỉ nổ khi có một làn **đang bật, định tuyến đúng** đọc từ
+`scCaptureInChannel_` sẽ thu **không gì cả** trong trường hợp thường gặp, và
+thread lane M sẽ báo mọi kênh là "không đo được" mà không có manh mối nào. Con
+trỏ vì thế được **hoist** lên cạnh chỗ kiểm biên.
+
+**Điểm tiêm phải nằm TRÊN kẹp ±1.0f** (`:911-927`, `kMaxOutputLevel` ở `:20`).
+Kẹp cuối đường là hàng rào cuối cùng trước driver; sweep đi **qua** nó, không đi
+vòng. Sweep đã tự kẹp ở nguồn tại `kSoundcheckMaxPeak = 0.1f` (−20 dBFS) ở
+**cả** chỗ đặt **lẫn** chỗ dùng — một giá trị có hai đường trở nên sai thì một
+kẹp là nửa cái kẹp (bài học lane G) — nên trên thực tế kẹp ±1.0f không phải làm
+việc gì ở đây. Nhưng nó vẫn phải nằm sau, và không được bỏ.
+
+#### Tắt theo KÊNH NGÕ RA, không theo `(slot, làn)`
+
+Callback xoá trắng mọi kênh ra (`:565-577`) đúng để DSP **cộng dồn** `out[n] +=
+v` (`:621`). Nhiều slot cộng dồn lên **cùng một** kênh ra. Vì thế tắt một
+`(slot, làn)` **không mở được** vòng hú của kênh đó: kênh vẫn mang tiếng mic từ
+slot khác, và phép đo sẽ đo cả tiếng mic lẫn sweep. Chỉ có tắt **mọi làn có
+`outIdx == scOutChannel_`** mới cho kênh đó mang **duy nhất** sweep.
+
+Tắt bằng `continue` là **đóng băng state DF1 của `NotchChain`** tới 4,5 giây; mở
+lại, đáp ứng tự do từ state cũ có thể lớn gấp ~5–6× mức lúc tắt — một tiếng
+"cạch" tại tần số notch. Nên mỗi block, làn bị tắt được gọi
+`NotchChain::clearState()`: **state-only**, không đụng `rampRemaining_`, vì
+`reset()` sẽ làm mắc kẹt mọi ramp độ sâu của lane G đang bay.
+
+#### Tám atomic, đọc MỘT LẦN, cạnh `bypass`
+
+`AudioEngine` nhận **tám atomic soundcheck**, một bộ đếm và một ring. Cả tám
+được snapshot **một lần** ở đầu callback (`:664-680`), cạnh `bypass` và
+`currentSampleRate_`, và phần còn lại của callback chỉ dùng bản sao stack — luật
+nhà, đúng như mọi state cross-thread khác. Đọc lại giữa chừng là cho phép sweep
+được sinh với một `T` và đánh chỉ số bằng một `T` khác.
+
+| Atomic | Giữ gì |
+|---|---|
+| `scOutChannel_` | kênh ngõ ra đang đo; `-1` = nghỉ. Publish **release**, đọc **acquire** |
+| `scSuspendTaps_` | treo ghi tap, giữ SUỐT lần chạy |
+| `scCaptureInChannel_` | kênh mic đo |
+| `scCaptureActive_` | giấy phép thu, **tách khỏi** `scOutChannel_` |
+| `scSampleIndex_` | chỉ số mẫu của sweep; **âm** = đang chạy đà im lặng |
+| `scPeak_` | đỉnh đã kẹp |
+| `scRampOutAtSample_` | mỏ neo ramp tắt, callback **tự chốt** |
+| `scRampOutRequested_` | message thread **xin** tắt; callback chốt mỏ neo ở block đầu tiên thấy cờ |
+
+Cặp `scRampOutRequested_` → `scRampOutAtSample_` tồn tại vì hai lý do, và cả hai
+là lỗi thật đã bắt được: (a) chốt mỏ neo trên message thread làm block ramp đầu
+tiên bắt đầu ở envelope 0 — tức **cắt phựt** — khi buffer ≥ 1440; (b) một abort
+kiểu `device_changed` để lại mỏ neo cũ không ai xoá, treo controller ở "chờ về
+−1" và **cắt cụt lần chạy sau**. `setSoundcheckOutputChannel()` xoá cả hai trước
+khi publish kênh mới, và `setSoundcheckOutputChannel(-1)` là **chốt chặn abort**
+cuối cùng.
+
+Kiểm biên là **mỗi callback**, với số kênh của **chính callback đó**
+(`:686-689`) — một lần restart device xuống ít kênh hơn mà không có nó là một
+lần ghi ngoài mảng trên audio thread.
+
+#### Treo tap khoá theo `scSuspendTaps_`, không theo `scOutChannel_`
+
+`scOutChannel_` **về −1 ở mỗi `Gap`**. Khoá việc treo ghi tap theo nó thì tap
+bật lại **300 ms một lần** ⇒ ≈ 0,72 s mỗi kênh ⇒ **≈ 11,5 giây cho 16 kênh** —
+vượt `kReleaseStepMs` (10 s), đủ để thang nhả của lane G bước một bậc giữa lúc
+đang đo. `scSuspendTaps_` giữ nguyên từ `Arm` tới hết đuôi của kênh **cuối
+cùng**, nên tổng phần `liveMs_` trôi vì một lần chạy là **≤ ~420 ms cho cả lần
+chạy**, không phải cho mỗi kênh, và `tapDropCounts_` **không tăng**.
+
+Hệ quả dây chuyền: `copySnapshot()` được làm mới **bên trong vòng drain**
+(`src/app/NotchController.cpp:568-582`, `:617-650`), nên treo tap là **đông cứng
+snapshot**. Overlay lúc đang đo vì thế vẽ dữ liệu của **chính lane M**, và mọi
+lần đọc `index` chỉ xảy ra sau khi tap đã chạy lại.
+
+#### Toán của phép đo
+
+Ba luồng mẫu vào: nền nhiễu, sweep tham chiếu **tái sinh** từ
+`SoundcheckSignal`, và cái mic thật sự nghe. Cùng biến đổi với detector — FFT
+2048 điểm, hop 512, cửa sổ Hann — nên một chỉ số bin nghĩa **cùng một tần số** ở
+hai nơi, và một đề xuất của soundcheck rơi đúng bin mà detector sống sẽ nhìn.
+
+```
+Nbar[k] = (Σ trên khung nền |mic_f[k]|²) / frames_N
+EX[k]   =  Σ trên khung tham chiếu |X_f[k]|²
+EY[k]   =  Σ trên khung thu       |Y_f[k]|²
+H_dB[k] = 10·log10( max(EY[k] − Nbar[k]·frames_Y, ε) / max(EX[k], ε) )
+```
+
+`X` là dBFS ở **ngõ ra** của app, `Y` là dBFS ở **ngõ vào**, nên `H` là hàm
+truyền của **toàn bộ phần vật lý** của vòng. Vòng khép lại qua app, và app là
+unity ở mọi tần số khi không có notch. Vậy:
+
+> **Hú xảy ra ở bin nào có `H_dB[k] ≥ 0`, và biên của bin đó là
+> `margin = −H_dB[k]` dB.** Đây là con số app vẽ lên phổ.
+
+**Vì sao không bù trễ, và lập luận đó ngừng đúng ở đâu.** Đây là một **tỉ số
+NĂNG LƯỢNG theo bin**, không phải một phép tương quan theo thời gian: năng lượng
+sweep bơm vào bin `k` không phụ thuộc vào lúc nó tới, và năng lượng mic nhận ở
+bin `k` cũng vậy — **với điều kiện** cửa sổ thu chứa cả phần quét lẫn phần ngân.
+Điều kiện đó là toàn bộ rủi ro. Một cộng hưởng ngân dài hơn cửa sổ thu bị **đọc
+thiếu** đúng bằng phần năng lượng rơi ra ngoài, và không gì ở đây sửa nó: sai số
+đó được **đo** bởi `DecayLongerThanTheTailIsUnderRead`
+(`tests/test_loopgainestimator.cpp`) chứ không bị giấu. **Đọc thiếu là hướng an
+toàn** — nó đề xuất cắt ít hơn nhu cầu thật, không bao giờ nhiều hơn.
+
+**Băng tin cậy hẹp hơn băng quét.** Một sweep log biên độ hằng dành **thời gian
+bằng nhau cho mỗi octave**, nên năng lượng **trên mỗi Hz** giảm theo `1/f`: với
+bin cố định 23,4 Hz, một bin ở 10 kHz nhận **đúng 20 dB ít hơn** một bin ở
+100 Hz. Vì thế v1 **quét** 100 Hz – 10 kHz nhưng chỉ đánh dấu tin cậy trong
+`[kSweepLowHz, kTrustedHighHz] = [100 Hz, 6 kHz]`. Bin trên 6 kHz vẫn mang giá
+trị `H_dB` — chúng **được vẽ** — và **không bao giờ được đề xuất**. Pre-emphasis
+(+3 dB/octave) hoãn: nghiêng phổ của sweep là đổi thứ phát ra PA, tức một quyết
+định mức riêng, và chưa có dữ liệu rig nào để chọn độ nghiêng.
+
+Hai cổng SNR **tách rời**: SNR cả băng `< 12 dB` ⇒ **không bin nào** được tin
+(kênh trả về "không đo được"); SNR từng bin `< 6 dB` ⇒ riêng bin đó không được
+tin.
+
+#### Từ `H_dB` ra độ sâu đề xuất
+
+Một bin được **đánh dấu** khi `H_dB ≥ −6 dB` (`kCandidateMarginDb`) và nó nhô
+lên ít nhất **6 dB** trên trung bình 1/3-octave quanh nó (`kMinProminenceDb`).
+Độ sâu thô là lượng cắt để còn lại **6 dB** biên (`kTargetMarginDb`); dưới
+**3 dB** (`kMinUsefulCutDb`) thì không đề xuất. Rồi lượng tử:
+
+> **Lấy bậc NÔNG NHẤT sâu ít nhất bằng `depth_raw`**, trong thang
+> `−6 / −12 / −18 / −24`, bão hoà ở `kMaxDepthDb`; **trần preset được áp bằng
+> `max(rung, ceiling)`**, và **trần chính là bậc cuối** — nên nó **không nhất
+> thiết rơi đúng bội số của 6 (`presets/Music.json` mang −10)**.
+
+Phát biểu ngược ("bậc sâu nhất không sâu hơn `depth_raw`") cho −6 khi cần −8 và
+**tập rỗng** khi cần −5; sáu ví dụ tính lại bằng tay là thứ bắt được nó.
+
+Trần "chưa đặt" mang sentinel **`NaN`** (`SoundcheckCandidates::Input::ceilingDb`
+mặc định `quiet_NaN()`) — 0.0 là hướng an toàn nhưng không phân biệt được với
+"phòng sạch". Bẫy: `std::max(rung, NaN)` **trả về `rung`**, nên sentinel phải
+được kiểm bằng `std::isfinite` **tại cửa**, và `Output::ceilingMissing` phải
+được phơi ra GUI thành một câu riêng.
+
+Tối đa **6 bin mỗi làn** (`kMaxPreventivePerLane`). Không đặt lên bin đã có notch
+sống trong **±1 bin**, kể cả notch vừa do chính lượt `ÁP DỤNG` này đặt. Và độ
+sâu thật đặt xuống là `max(đề xuất, slider DEPTH đang để)` — **cái kẹp cuối
+trước PA**, đọc ở cả hai chỗ gọi `setNotch` (bài học lane G M-B).
+
+#### Phạm vi dọn: sổ per-slot, không phải một `Origin` mới
+
+Mode `SOUNDCHECK` 15 giây thụ động **cũng** sinh notch mang `Origin::Soundcheck`
+(`src/app/NotchController.cpp`, `placeConfirmed`). Một lượt `ÁP DỤNG` dọn "mọi
+notch origin Soundcheck" sẽ **xoá im lặng** lớp bảo vệ người vận hành đã tự khoá
+vào. Vì thế phạm vi dọn là một **sổ `(làn, index, Hz)` mỗi slot** do caller giữ
+(`SoundcheckApplyLedger`, một cái cho mỗi slot, sống suốt đời `MainComponent`),
+khớp theo `active && origin == Soundcheck && |Δhz| ≤ 1 bin`. Notch của mode cũ
+**không bị đụng**.
+
+Giá phải trả, đã ghi trong header: một mục sổ bị mồ côi bởi `CLEAR ALL` hoặc một
+lần đổi width được mang theo vô hạn (chặn trên bởi `kTotalSlots`), và về lý
+thuyết có thể quy một notch origin-Soundcheck tương lai ở cùng `(làn, index)`
+trong ±1 bin về sổ này. `CLEAR ALL` **không** reset sổ.
+
+#### Lane M không ghi và không tiêu "phòng nhớ" của lane G
+
+Đúng hai dòng giữ điều đó, và **cả hai nằm trong `placeConfirmed`** — đó là lý
+do test phủ chúng phải lái một lần đặt của **detector thật**, không phải gọi
+`setNotch`:
+
+- `src/app/NotchController.cpp:1116` — chặn một lần đặt Soundcheck **TIÊU** một
+  mục phòng nhớ;
+- `src/app/NotchController.cpp:1169` — chặn một độ sâu đã nhớ **QUYẾT ĐỊNH** độ
+  sâu của một lần đặt Soundcheck.
+
+#### Bộ tự hủy, bộ từ chối, và cổng nền
+
+**Từ chối chạy** (`Refusal`, trả về từ `arm()`, không phải `bool` — một cú từ
+chối phải nói được lý do): engine chưa `isRunning()`; device không có kênh; slot
+đang tắt; cặp kênh vào/ra không hợp lệ với số kênh **thật**; **`RING RISK` ở băng
+`RISING` trở lên**, viết ra thành danh tính `ringRiskValid && ringRiskScore >=
+kRiskFreezeFraction × ringRiskThreshold` = 0,55 × 0,7 = **0,385** (lấy tích từ
+snapshot, không chép hằng 0,385) — `ringRiskValid == false` **KHÔNG** từ chối;
+tham số không hợp lệ (trần không hữu hạn, sample rate 0); đang chạy rồi; đang có
+ramp tắt chưa xong. Ring-risk được kiểm lại **tại `Arm`**, với cùng một danh
+tính như lúc preflight, vì hộp thoại xác nhận có thể đã mở hàng chục giây.
+
+**Chín lý do tự hủy** (`AbortReason`, tên trong log): `user_stop`, `esc`,
+`engine_stopped`, `device_error`, `device_changed`, `mic_hot`, `room_ringing`,
+`capture_drop`, `noise_floor_unmeasured`. Mỗi lý do trừ hai lý do do ngón tay
+gây ra có **một câu riêng** trên màn hình: mọi abort khác được quyết trên thread
+lane M, thứ **không được phép đụng một component nào**, nên câu đó là chỗ **duy
+nhất** người vận hành từng được biết vì sao một lần chạy biến mất.
+
+**Cổng nền** so độ nhọn phổ của cửa sổ nền 0,5 s với **`getPeakinessThreshold()`
+đang sống của detector** (mặc định 10,0), đọc **một lần trên message thread lúc
+`Arm`** và trao vào qua `RunParams::noiseFloorGate` — thread lane M **không bao
+giờ cầm con trỏ tới `NotchController`**. Cổng chạy trong băng
+`[kSweepLowHz, kTrustedHighHz]`, giống detector, để một tiếng rít 15 kHz của đèn
+LED hay tiếng ù nguồn không hủy lần chạy. Không chấm được khung nào thì cổng
+**hỏng theo hướng ĐÓNG**: dừng với `noise_floor_unmeasured`, không đoán là phòng
+sạch.
+
+> **Đơn vị.** `peakinessAt` là một **tỉ số không chặn trên** (nhiễu đo được
+> ~7,35; tone 1 kHz ~131,70). `CandidateScorer::kConfirmScore = 0.7f` là ngưỡng
+> của một **tích 0..1**. So hai thứ đó với nhau — như spec rev 2 từng viết —
+> **hủy mọi lần chạy ở mọi phòng**. Lane R đã sai đúng kiểu này ở chiều ngược
+> lại ba tuần trước đó. **Nêu đơn vị của cả hai vế, trong comment, ngay tại chỗ
+> so sánh.**
+
+**Kênh ngõ ra chỉ được arm SAU khi cổng nền nói phòng đã yên.** Trong pha nền,
+`scOutChannel_` vẫn là −1 — không có đồng hồ audio nào đang chạy về 0 để một lần
+poll trễ đua với. Gate qua rồi thì `scSampleIndex_` được publish ở
+**`−kSweepLeadInMs` = −20 ms** và **sau đó** kênh mới được arm, nên mẫu phát đầu
+tiên luôn là index 0, đúng đầu ramp raised-cosine, với **mọi** buffer size. Giá:
+0,5 s im khai báo thành **0,52 s**, tức **4,52 s mỗi kênh** thay vì 4,5 s
+(+0,3 s cho 16 kênh). Mọi deadline sau đó được **đóng dấu lại từ lần poll của
+cổng**, không cộng dồn từ deadline của pha nền — nếu không, một lần poll trễ `L`
+sẽ rút ngắn đuôi đi `L`, và với `L > 700 ms` sẽ **nhả một kênh chưa im**, tức
+một cú cắt phựt.
+
+**Độ trễ dừng xấu nhất** (từ lúc bấm `DỪNG` tới lúc biên độ sweep bằng 0, phía
+app):
+
+| Thành phần | @ buffer 64 / 48 kHz | @ buffer 1024 / 48 kHz |
+|---|---|---|
+| Chờ callback kế đọc cờ | ≤ 1,3 ms | ≤ 21,3 ms |
+| Ramp-out raised-cosine | 30 ms | 30 ms |
+| **Tổng phía app** | **≤ 31,3 ms** | **≤ 51,3 ms** |
+
+Cộng độ trễ ra của driver và amp, thứ app không điều khiển được. **Không có
+đường nào cắt phựt**: ramp do **chính callback** sinh, nên nó chạy xong kể cả khi
+thread lane M đã chết.
+
+#### Khoá console ba mức, và báo cáo giữ màn hình tới khi bấm `BỎ`
+
+`SoundcheckLock` có ba giá trị: `None`; **`Measuring`** (khoá hết) trong lúc đo;
+**`Pending`** trong cửa sổ `Results` và trong báo cáo `Applied` sau `ÁP DỤNG`.
+Ở mức `Pending`, chuyển mode và `CLEAR ALL` **mở** — luôn phải có đường thoát —
+còn `ĐO`, `PRESET LOAD/SAVE`, panel định tuyến (LINK/width/kênh, vì
+`SnapshotBuffer::linked` cũ ~10 ms), panel tuning (`RunParams` đã đóng băng lúc
+`Arm`) và bảng ACTIVE NOTCHES (nút FALSE xoá một notch giữa lúc quét) vẫn
+**khoá**.
+
+Báo cáo `Applied` **giữ console tới khi bấm `BỎ`**, không có timeout: kết quả
+`clearedPrevious > 0 && placed == 0` nghĩa là **đã gỡ notch cũ và không đặt lại
+được cái nào — phòng KÉM an toàn hơn trước khi bấm**, và đó là thứ không bao giờ
+được biến mất im lặng.
+
+Hộp thoại xác nhận chạy async, nên nó mang một **bộ đếm thế hệ**: mọi sự kiện
+làm câu hỏi cũ mất nghĩa (restart device, đổi routing, đổi slot) tăng bộ đếm, và
+một `OK` cũ tự bỏ qua. Kiểm theo "state != Idle" **không đủ** — một lần restart
+lúc đang Idle lọt qua.
+
+Restart thiết bị **không khoá được** (nó tự xảy ra), nên nó đi đường abort:
+`onBeforeRestart` **abort + join** thread lane M **trước** khi stop detector, và
+`micCapture_.clear()` nằm trong cùng khối drain. `abortAndJoin()` **join trước,
+rồi mới** chạy `runOnce()` trên message thread — thứ tự ngược lại để hai thread
+cùng ở trong máy trạng thái, và lane M có thể **arm lại cả một lần quét sau khi
+đã abort**. Trả về `false` (máy không về được `Idle`) có câu riêng, khác hẳn câu
+"phép đo của bạn bị huỷ".
+
+#### Bất đối xứng preset (§4.8) — cùng câu này có ở `GIOI-THIEU.md`
+
+Định dạng preset **không đổi**; notch phòng ngừa là notch bình thường nên
+`savePreset` đã ghi chúng. Nhưng nạp lại đưa chúng vào model với
+**`Origin::Preset`**, nên chúng **tự nhả sau 30 giây yên tĩnh** như mọi notch
+preset khác. Muốn bảo vệ phòng ngừa quay lại đầy đủ thì **chạy `ĐO` lại**. Bất
+đối xứng này (đặt thì vĩnh viễn, nạp lại thì tự nhả) nằm trong danh sách owner
+phải xác nhận.
+
 ## 4. Preset
 
 File JSON `%APPDATA%/AZSoundtech/HandsFree/presets/*.json`: version, device
@@ -470,6 +757,14 @@ một preset viết tay không có khối đó vẫn im lặng nhận trần −
 | Notch sâu hơn −24 dB từ file preset | Kẹp ở `setNotchImpl` cho MỌI Origin, có log (Q12); `pushRetuneLocked` từ chối |
 | "Nhớ phòng" / `deepestDb` cũ vượt trần mới của slider | Kẹp `deepestDb` về trần **mỗi tick** vô điều kiện, VÀ kẹp lại mục tiêu reclamp ngay lúc dùng (M-B) |
 | Nạp preset trần NÔNG hơn kéo notch Detector đang sâu hơn lên ngay (tới +14 dB tại bin đang hú) | Ramp 10 ms giới hạn biên độ một bước; Preset/Manual/Soundcheck mang trần riêng (Q8), không bị kéo; tester được cảnh báo mở âm lượng thấp trước khi LOAD |
+| Sweep vượt mức | `SoundcheckSignal` kẹp `jlimit` vào `kSoundcheckMaxPeak` = 0.1f (−20 dBFS) tại **CẢ** chỗ đặt **lẫn** chỗ dùng; kẹp cuối đường ±1.0f vẫn nằm **SAU** điểm tiêm (`src/app/AudioEngine.cpp:852-880` trước `:911-927`) |
+| Thread lane M chết giữa lúc phát | Ramp-out do **chính callback** sinh; nó tự đặt `scOutChannel_ = -1`. Không cần thread nào khác còn sống |
+| Ramp-out bắt đầu ở envelope 0 = cắt phựt ở buffer lớn | Message thread chỉ **xin** (`scRampOutRequested_`); **callback chốt** `scRampOutAtSample_` ở block đầu tiên nó thấy cờ, nên envelope luôn khởi đúng ở 1.0 |
+| Restart thiết bị giữa lúc đo | `onBeforeRestart` abort + **join** lane M **TRƯỚC** khi stop detector; `micCapture_.clear()` trong cùng khối drain; `audioDeviceAboutToStart` xoá cả tám atomic soundcheck |
+| Chỉ số kênh ngoài phạm vi sau restart | Kiểm lại **MỖI callback** với số kênh của **chính callback đó** (`src/app/AudioEngine.cpp:686-689`) |
+| Tắt làn bằng `continue` đóng băng state DF1 ⇒ "cạch" lúc mở lại | `NotchChain::clearState()` mỗi block cho làn đang tắt — **state-only**, không đụng `rampRemaining_` (dùng `reset()` sẽ làm kẹt ramp độ sâu của lane G) |
+| Phát sweep vào một phòng đang ngân | Cổng nền 0,5 s so với **ngưỡng peakiness sống của detector**, băng 100 Hz–6 kHz, **hỏng theo hướng đóng**; kênh ngõ ra chỉ được arm **SAU** khi cổng qua; và `arm()` từ chối khi RING RISK ≥ RISING |
+| Đề xuất soundcheck nông hơn slider DEPTH đang để | `max(đề xuất, slider)` ở **cả hai** chỗ gọi `setNotch` — kẹp cuối trước PA |
 | Sample/NaN/Inf lọt ra driver | **MỚI 27/08/2026**: output clamp ±1.0 + sanitize NaN/Inf trước khi ghi ra driver |
 | Tràn stack test rig từ khi FFT 2048 | Test binary link `/STACK:8388608` (`tests/CMakeLists.txt`) — state của detector/scorer phình theo FFT rộng |
 | Tràn stack 1 MB của Windows khi dựng MainComponent | 8 NotchController nằm **heap** (`unique_ptr`) — từ lane S (dò theo làn) mỗi controller mang **hai** bộ phân tích: hai `Detector`, hai `CandidateScorer` (mỗi cái history 128×1025 float), hai mảng persistence — ~1.1 MB/controller thay vì ~550 kB; 8 cái by-value là ~8.8 MB thay vì ~4.4 MB, đo được segfault |
@@ -500,6 +795,7 @@ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30
 | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
 | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
 | `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono), `ceiling_applied` (bool, luôn ghi — file có mang khối `notchDefaults` và có slot Global để áp không), `q`/`depth_db` (trần vừa áp, chỉ khi `ceiling_applied` là true — đọc lại SAU clamp, cùng tên/kiểu với sự kiện `tuning`) |
+| `soundcheck_start` / `_output` / `_result` / `_apply` / `_abort` | lane M (1.3.0), khoá dispatch là **`ev`** | xem `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` §4.7. `ring_risk` là **null** khi chưa chấm được khung nào, **không phải 0.0**. `soundcheck_apply` ghi **một dòng mỗi slot**, có trường `slot`, và mang hai tín hiệu lỗi riêng `skipped_other_slot` / `skipped_bad_lane` (`skipped_live` cố tình **không** có: nó là tập con của `refused`). `soundcheck_abort.at_output` là chỉ số lượt đo **đang dở**, không phải lượt cuối đã xong. `tools/logstats.py` không cần nhánh nào cho năm `ev` này |
 | `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
 
 Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
@@ -526,6 +822,8 @@ LINK, **một** lần xác nhận đặt cả cặp nên phát **hai** sự ki�
 với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepFiles = 30` chặn tích lũy.
 
 ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
+
+**1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**), CHƯA merge, CHƯA đóng gói.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).
 
 Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
