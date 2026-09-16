@@ -1,0 +1,472 @@
+# Review package: 119b033..b33d032
+
+## Commits
+b33d032 fix(lane-m): SoundcheckCandidates review round 1 -- validate the ladder, the ceiling and hDb
+
+## Files changed
+ src/dsp/SoundcheckCandidates.cpp     |  56 +++++++++++++++-
+ src/dsp/SoundcheckCandidates.h       |  49 ++++++++++++--
+ tests/test_soundcheck_candidates.cpp | 126 +++++++++++++++++++++++++++++++++--
+ 3 files changed, 221 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/src/dsp/SoundcheckCandidates.cpp b/src/dsp/SoundcheckCandidates.cpp
+index 89b3fd6..57601c2 100644
+--- a/src/dsp/SoundcheckCandidates.cpp
++++ b/src/dsp/SoundcheckCandidates.cpp
+@@ -8,20 +8,28 @@
+ #include "dsp/SoundcheckSignal.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+ 
+ SoundcheckCandidates::Depth
+ SoundcheckCandidates::depthFor (double hDb, double ceilingDb, const Ladder& ladder)
+ {
+     Depth out;
+ 
++    // An empty or null ladder is a CALLER BUG, and the silent failure it would
++    // otherwise cause is the dangerous kind: the rung loop would run zero
++    // times, `found` would stay false, and every proposal would land on
++    // maxDepthDb -- a full -24 dB cut on every bin, from a struct nobody
++    // filled in. Refuse instead, with the rule's own "no proposal" Depth.
++    if (ladder.rungsDb == nullptr || ladder.count <= 0)
++        return out;
++
+     // Both sides dB. needed_dB > 0 means "this many dB must come out".
+     const double needed = hDb + kTargetMarginDb;
+     if (needed < kMinUsefulCutDb)
+         return out;                        // MARK only; depthDb stays 0 and means "no proposal"
+ 
+     const double depthRaw = -needed;       // <= -kMinUsefulCutDb, so strictly negative
+ 
+     // The SHALLOWEST rung at least as deep as depthRaw. Deeper == more negative,
+     // so "at least as deep" is r <= depthRaw, and "shallowest" is the largest
+     // such r. Getting this backwards is spec rev 2's N2 defect.
+@@ -79,37 +87,58 @@ void SoundcheckCandidates::smooth (const float* hDb, float* out, int numBins, do
+     }
+ }
+ 
+ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
+ {
+     Output out;
+ 
+     if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
+         return out;
+ 
++    // Neither of these stops the MARKS: the operator is still shown the room,
++    // and a caller bug must not silently look like a quiet stage. Both stop
++    // every PROPOSAL, because the depth of a cut cannot be decided without a
++    // ladder to quantise onto or a ceiling to clamp against.
++    //
++    // DELIBERATELY REDUNDANT with depthFor's own guard: while both stand, no
++    // test can tell them apart (measured 2026-09-16 -- neutering either one
++    // alone leaves the suite green; removing BOTH turns
++    // EmptyLadderMarksButProposesNothing red). Keep both anyway. depthFor is
++    // public and a later lane may call it directly, and this one states the
++    // refusal where the marks/proposals split actually happens.
++    const bool ladderMissing  = (in.ladder.rungsDb == nullptr || in.ladder.count <= 0);
++    const bool ceilingMissing = ! std::isfinite (in.ceilingDb);
++    out.ceilingMissing = ceilingMissing;
++
+     // Step 4 up front: the prominence test in step 5 needs the smoothed curve,
+     // and smoothing is over the WHOLE array -- a bin outside the trusted band
+     // still contributes to the average of a bin inside it.
+     std::array<float, kNumBins> hs {};
+     smooth (in.hDb, hs.data(), kNumBins, in.sampleRate);
+ 
+     // Top-kMaxPreventivePerLane by H_dB descending, maintained by insertion so
+     // step 7 keeps the HOTTEST six, not the first six found.
+     std::array<Candidate, kMaxPreventivePerLane> best {};
+     int kept = 0;
+ 
+     for (int k = 0; k < kNumBins; ++k)
+     {
+         const auto i  = (std::size_t) k;
+         const double hz = LoopGainEstimator::binToHz (k, in.sampleRate);
+ 
+-        // Step 1: both sides Hz.
++        // Step 1: both sides Hz. Note the low edge is `hz < kSweepLowHz`, so
++        // at 48 kHz bin 4 (93.75 Hz) is EXCLUDED here, while the estimator's
++        // band-SNR window starts at hzToBin(kSweepLowHz) == bin 4 and INCLUDES
++        // it. The two are different things -- an aggregate SNR figure versus a
++        // per-bin proposal gate -- and the one-bin difference has no functional
++        // consequence: see AboveTheTrustedBandIsNeverACandidate on why a bin
++        // that low can never pass step 5 anyway.
+         if (hz < SoundcheckSignal::kSweepLowHz || hz > LoopGainEstimator::kTrustedHighHz)
+             continue;
+ 
+         // Step 2.
+         if (! in.trusted[i])
+             continue;
+ 
+         // Step 3: +-1 bin around anything already notched on this lane (inv 15).
+         // A notch is wider than one bin, so stacking a second cut on the
+         // neighbour of a live one over-cuts the same mode.
+@@ -125,34 +154,57 @@ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
+                     nearLiveNotch = true;
+                     break;
+                 }
+             }
+         }
+         if (nearLiveNotch)
+             continue;
+ 
+         const double h = (double) in.hDb[i];
+ 
++        // A NaN passes EVERY `<` comparison below -- `NaN < x` is false, so a
++        // NaN bin would survive both step 5 gates untouched and reach depthFor,
++        // where `needed < kMinUsefulCutDb` is false too: it would be proposed
++        // at maxDepthDb with saturated == false. Reject it explicitly.
++        //
++        // Also deliberately redundant with the NaN-safe prominence gate below
++        // (a NaN in hDb makes prom NaN too, and that gate rejects it). Removing
++        // EITHER alone leaves the suite green; removing both turns
++        // NonFiniteLoopGainIsNeverMarked red. This one is the explicit,
++        // readable statement of the rule and does not depend on how the
++        // prominence comparison happens to be spelled.
++        if (! std::isfinite (h))
++            continue;
++
+         // Step 5: hot enough to show the operator, AND a peak rather than a
+         // slope. Both sides of both comparisons are dB.
+         if (h < kCandidateMarginDb)
+             continue;
+-        if (h - (double) hs[i] < kMinProminenceDb)
++
++        // Written as `! (prom >= k)` and not `prom < k` so that a NaN REJECTS
++        // the bin. hs[i] is NaN whenever a non-finite bin fell inside this
++        // bin's 1/3-octave window, and with `prom < k` that comparison would be
++        // false and the bin would pass the prominence gate it never satisfied.
++        const double prom = h - (double) hs[i];
++        if (! (prom >= kMinProminenceDb))
+             continue;
+ 
+         out.marked[i] = true;
+         ++out.markedCount;
+ 
+         // Step 6: only a marked bin, and only when the rule returned a cut.
+         // depthDb == 0 is the rule's "no proposal" -- it covers both the
+         // below-kMinUsefulCutDb case and a preset whose ceiling allows no cut
+         // at all, and neither may become a 0 dB notch in a chain slot.
++        if (ladderMissing || ceilingMissing)
++            continue;
++
+         const Depth d = depthFor (h, in.ceilingDb, in.ladder);
+         if (! (d.depthDb < 0.0))
+             continue;
+ 
+         Candidate c;
+         c.hz         = (float) hz;
+         c.marginDb   = (float) -h;          // the GUI's "margin" column: -H_dB
+         c.depthDb    = (float) d.depthDb;
+         c.q          = (float) in.notchQ;
+         c.residualDb = (float) d.residualDb;
+diff --git a/src/dsp/SoundcheckCandidates.h b/src/dsp/SoundcheckCandidates.h
+index 60d1ebf..f13f779 100644
+--- a/src/dsp/SoundcheckCandidates.h
++++ b/src/dsp/SoundcheckCandidates.h
+@@ -40,20 +40,21 @@
+ // THREADING. Pure arithmetic on caller-owned buffers; no state, no allocation
+ // beyond the returned Output, no device. Lane M's controller thread calls it.
+ //
+ // Deliberately in src/dsp/ with no src/app/ include, exactly as
+ // LoopGainEstimator.h is.
+ #pragma once
+ 
+ #include "dsp/LoopGainEstimator.h"
+ 
+ #include <array>
++#include <limits>
+ 
+ class SoundcheckCandidates
+ {
+ public:
+     static constexpr int    kNumBins              = LoopGainEstimator::kNumBins;
+     static constexpr double kCandidateMarginDb    = -6.0;   // MARK threshold, on H_dB
+     static constexpr double kMinUsefulCutDb       =  3.0;   // PROPOSE threshold, on needed_dB
+     static constexpr double kMinProminenceDb      =  6.0;   // H_dB above its own 1/3-octave average
+     static constexpr double kTargetMarginDb       =  6.0;   // dB of headroom a cut aims to leave
+     static constexpr int    kMaxPreventivePerLane =  6;
+@@ -72,59 +73,99 @@ public:
+     struct Depth { double depthDb = 0.0; double residualDb = 0.0; bool saturated = false; };
+ 
+     // The whole depth rule, on one H_dB value. Public so the six worked
+     // examples of spec §4.4 can be asserted directly instead of inferred from
+     // a full pick() run.
+     [[nodiscard]] static Depth depthFor (double hDb, double ceilingDb, const Ladder& ladder);
+ 
+     struct Input
+     {
+         const float* hDb        = nullptr;      // kNumBins, from LoopGainEstimator
+-        const bool*  trusted    = nullptr;      // kNumBins
++        // kNumBins. Pass LoopGainEstimator::Result::trusted VERBATIM: pick()
++        // has no `measured` input and cannot re-derive that gate, and Result
++        // documents that `measured` OVERRIDES `trusted` -- finish() has already
++        // cleared the whole array when the run was unusable. A caller that
++        // rebuilds this array from per-bin SNR instead reintroduces exactly the
++        // hole Task 2's review closed.
++        const bool*  trusted    = nullptr;
+         double sampleRate       = 0.0;
+-        double ceilingDb        = 0.0;          // the running preset's ceiling, <= 0
++        // THREE DISTINCT STATES, and the difference decides whether a PA gets
++        // cut at all:
++        //   NaN  = UNSET. A controller bug, not a preset. pick() computes marks,
++        //          proposes NOTHING, and raises Output::ceilingMissing.
++        //   0.0  = no cut authorised by this preset. Marks only, silently and
++        //          legitimately.
++        //   < 0  = the running preset's ceiling, the shallowest cut allowed.
++        // SoundcheckController MUST write this from the running preset. The
++        // default is NaN rather than 0.0 so a forgotten assignment is
++        // DETECTABLE instead of looking like a preset that allows no cut.
++        double ceilingDb        = std::numeric_limits<double>::quiet_NaN();
+         double notchQ           = 0.0;
+         const float* liveNotchHz = nullptr;     // frequencies of notches already live on this lane
+         int    liveNotchCount    = 0;
+         Ladder ladder {};
+     };
+ 
+     struct Candidate
+     {
+         float hz = 0.0f, marginDb = 0.0f, depthDb = 0.0f, q = 0.0f, residualDb = 0.0f;
+         int   bin = 0;
+     };
+ 
+     struct Output
+     {
+         std::array<Candidate, kMaxPreventivePerLane> candidates {};
+         int candidateCount = 0, markedCount = 0, saturatedBins = 0;
++        // Input::ceilingDb was not finite -- see that field. The run produced
++        // marks and no proposals, and the reason is a BUG in the caller, not a
++        // quiet room: Task 6 must surface it rather than showing an empty
++        // proposal list as a clean result.
++        bool ceilingMissing = false;
+         std::array<bool, kNumBins> marked {};
+     };
+ 
+     // The seven steps of spec §4.4, in order -- reordering them changes results:
+     //   1. drop every bin outside [kSweepLowHz, kTrustedHighHz];
+     //   2. drop every bin with trusted[k] == false;
+     //   3. drop every bin within +-1 bin of a frequency in liveNotchHz (inv 15);
+     //   4. smooth hDb with a 1/3-octave moving average;
+     //   5. MARK when hDb >= kCandidateMarginDb AND hDb - smoothed >= kMinProminenceDb;
+     //   6. PROPOSE only a marked bin whose depthFor() returned a proposal;
+     //   7. sort by hDb DESCENDING, keep at most kMaxPreventivePerLane.
++    //
++    // THREE WAYS pick() REFUSES TO PROPOSE WHILE STILL MARKING. Each is a
++    // caller error that must not be allowed to become a wrong cut, and in each
++    // the operator still gets to SEE the room:
++    //   - Input::ladder has no rungs (rungsDb == nullptr or count <= 0) -- with
++    //     no ladder every proposal would silently land on maxDepthDb;
++    //   - Input::ceilingDb is not finite -- see that field; Output::ceilingMissing;
++    //   - hDb[k] is not finite -- a NaN passes every `<` comparison, so it is
++    //     rejected explicitly before step 5 rather than reaching depthFor.
+     [[nodiscard]] static Output pick (const Input& in);
+ 
+     // 1/3-octave moving average of hDb. Public so a later lane can reuse it;
+     // it has no test of its own and is exercised through pick(), from BOTH
+     // sides (m-19, corrected 2026-09-16 by mutation):
+     //
+     //   too WIDE / too flat -- a smoother returning the whole-array mean makes
+     //     the speaker roll-off look prominent, and SpeakerRolloffIsNotACandidate
+     //     goes red;
+     //   too NARROW / a no-op -- a smoother returning its input makes every
+     //     prominence exactly zero, so NOTHING is ever marked. That does NOT
+     //     turn SpeakerRolloffIsNotACandidate red (it asserts zero candidates
+     //     and would still get zero); the tests that catch it are the ones that
+     //     require a candidate to EXIST -- MarginIsTheNegativeOfLoopGain,
+     //     AtMostSixPerLaneAndTheHottestSurvive, UntrustedBinIsNeverACandidate,
+-    //     SaturatesAtMinusTwentyFourAndReportsResidual and
+-    //     MarkedButNotProposedBelowMinUsefulCut.
++    //     SaturatesAtMinusTwentyFourAndReportsResidual,
++    //     MarkedButNotProposedBelowMinUsefulCut and the control half of
++    //     AboveTheTrustedBandIsNeverACandidate.
++    //
++    // THE WINDOW IS ONE-SIDED IN THE TOP SIXTH OF AN OCTAVE. `hi` is clamped to
++    // numBins - 1, so for a bin above Nyquist / 2^(1/6) the average is taken
++    // over a window that extends below the centre and not above it, and the
++    // result is biased by the local slope. That is harmless as used here --
++    // step 1 has already dropped everything above kTrustedHighHz (6 kHz, far
++    // below the clamp at any supported rate) -- but a later lane that calls
++    // smooth() for its own purposes must treat the result as meaningful only
++    // BELOW kTrustedHighHz.
+     static void smooth (const float* hDb, float* out, int numBins, double sampleRate);
+ };
+diff --git a/tests/test_soundcheck_candidates.cpp b/tests/test_soundcheck_candidates.cpp
+index 6f01f7d..0778905 100644
+--- a/tests/test_soundcheck_candidates.cpp
++++ b/tests/test_soundcheck_candidates.cpp
+@@ -4,20 +4,21 @@
+ // spec §4.4's six worked examples is asserted as an EXACT number here. The
+ // ladder comes from NotchController, not from a copy: a test that quantises
+ // against its own array proves nothing about the app.
+ #include <gtest/gtest.h>
+ 
+ #include "app/NotchController.h"
+ #include "dsp/SoundcheckCandidates.h"
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <limits>
+ #include <vector>
+ 
+ namespace
+ {
+ constexpr double kSr = 48000.0;
+ 
+ SoundcheckCandidates::Ladder shippedLadder()
+ {
+     return { NotchController::kDepthLadderDb,
+              NotchController::kDepthLadderSize,
+@@ -242,30 +243,147 @@ TEST (SoundcheckCandidates, MarginIsTheNegativeOfLoopGain)
+ // RED IF: step 1 of the pick order -- drop every bin outside
+ // [kSweepLowHz, kTrustedHighHz] -- is dropped.
+ //
+ // NOT IN THE TASK BRIEF, added 2026-09-16 after mutation testing: removing the
+ // band test entirely left all twelve of the brief's tests GREEN. In production
+ // LoopGainEstimator already clears trusted[] above kTrustedHighHz, so step 2
+ // hides the gap -- but pick() is a pure function that must not lean on its
+ // caller's invariant, and this fixture is the only one that sets trusted == true
+ // on a bin the sweep never trusted.
+ //
+-// The LOW half of the band test (below kSweepLowHz) is not asserted because it
+-// is unreachable: at 48 kHz a bin below 100 Hz sits at index <= 4, and a
+-// +-2^(1/6) window around it rounds to that single bin, so its prominence is
+-// exactly 0 and step 5 rejects it before step 1 could matter.
++// The LOW half of the band test (below kSweepLowHz) is not asserted here
++// because at THIS sample rate it is unreachable -- and that is a property of
++// the rate, not of the rule:
++//
++//   at sampleRate >= 40.96 kHz every bin below 100 Hz has index <= 4, and a
++//   +-2^(1/6) window around such a bin rounds to that single bin, so its
++//   prominence is exactly 0 and step 5 rejects it before step 1 could matter;
++//
++//   BELOW 40.96 kHz it does not. At 32 kHz the bin spacing is 15.625 Hz, so
++//   93.75 Hz is bin 6, its 1/3-octave window spans bins 5..7, and a real
++//   prominence can be computed there. The low half of step 1 is LOAD-BEARING
++//   at 32 kHz and must not be removed on the strength of this test's silence.
+ TEST (SoundcheckCandidates, AboveTheTrustedBandIsNeverACandidate)
+ {
+     Field f;
+     f.poke (8000.0, 25.0f);   // trusted[] left true on purpose -- see above
+ 
+     const auto out = SoundcheckCandidates::pick (f.input());
+ 
+     EXPECT_EQ (out.candidateCount, 0);
+     EXPECT_EQ (out.markedCount, 0);
+ 
+     // Control: the identical poke INSIDE the band is a candidate, so the zero
+     // above is the band test and not a broken fixture.
+     Field g;
+     g.poke (2000.0, 25.0f);
+     EXPECT_EQ (SoundcheckCandidates::pick (g.input()).candidateCount, 1);
+ }
++
++// RED IF: the Ladder is used without being validated (review I-1). With no
++// rungs the quantiser loop runs zero times, `found` stays false, and EVERY
++// proposal lands on maxDepthDb -- a full -24 dB cut on every bin of a PA,
++// decided by a struct nobody filled in. The marks must survive: a caller bug
++// may not look like a quiet stage.
++TEST (SoundcheckCandidates, EmptyLadderMarksButProposesNothing)
++{
++    const SoundcheckCandidates::Ladder none {};
++    const auto d = SoundcheckCandidates::depthFor (2.0, -24.0, none);
++    EXPECT_DOUBLE_EQ (d.depthDb, 0.0);
++    EXPECT_DOUBLE_EQ (d.residualDb, 0.0);
++    EXPECT_FALSE (d.saturated);
++
++    // A count with no array must be refused BEFORE the loop dereferences it.
++    SoundcheckCandidates::Ladder countOnly {};
++    countOnly.count = 4;
++    EXPECT_DOUBLE_EQ (SoundcheckCandidates::depthFor (2.0, -24.0, countOnly).depthDb, 0.0);
++
++    Field f;
++    f.poke (1000.0, 9.0f);
++    auto in = f.input();
++    in.ladder = SoundcheckCandidates::Ladder {};
++
++    const auto out = SoundcheckCandidates::pick (in);
++    EXPECT_GT (out.markedCount, 0);
++    EXPECT_EQ (out.candidateCount, 0);
++    EXPECT_EQ (out.saturatedBins, 0);
++}
++
++// RED IF: step 6's sentinel (`depthDb >= 0` means no proposal) is widened into
++// a rejection of every off-ladder depth. A ceiling of -2 dB is not a rung and
++// not zero: it is a real, shallow, legitimate cut, and it must be PROPOSED --
++// with the 3 dB it leaves on the table reported. Review I-2.
++TEST (SoundcheckCandidates, ShallowOffLadderCeilingStillCuts)
++{
++    Field f;
++    f.poke (1000.0, -1.0f);                  // needed = 5 dB, rung -6, ceiling -2 wins
++
++    const auto out = SoundcheckCandidates::pick (f.input (-2.0));
++
++    ASSERT_EQ (out.candidateCount, 1);
++    EXPECT_FLOAT_EQ (out.candidates[0].depthDb, -2.0f);
++    EXPECT_FLOAT_EQ (out.candidates[0].residualDb, 3.0f);
++    EXPECT_EQ (out.saturatedBins, 1);
++    EXPECT_FALSE (out.ceilingMissing);
++}
++
++// RED IF: an UNSET ceiling becomes indistinguishable from a preset that
++// authorises no cut. Both produce zero proposals, but one is a controller bug
++// and the other is a valid configuration, and Task 6 has to tell them apart.
++// Review I-3.
++TEST (SoundcheckCandidates, UnsetCeilingIsDetectedAndRefused)
++{
++    Field f;
++    f.poke (1000.0, 9.0f);
++
++    auto in = f.input();
++    in.ceilingDb = SoundcheckCandidates::Input {}.ceilingDb;   // the NaN default
++    ASSERT_FALSE (std::isfinite (in.ceilingDb));
++
++    const auto missing = SoundcheckCandidates::pick (in);
++    EXPECT_TRUE (missing.ceilingMissing);
++    EXPECT_EQ (missing.candidateCount, 0);
++    EXPECT_GT (missing.markedCount, 0);
++
++    // 0.0 is the OTHER state: no cut authorised, and not a bug.
++    const auto zero = SoundcheckCandidates::pick (f.input (0.0));
++    EXPECT_FALSE (zero.ceilingMissing);
++    EXPECT_EQ (zero.candidateCount, 0);
++    EXPECT_GT (zero.markedCount, 0);
++}
++
++// RED IF: a non-finite hDb reaches step 5. `NaN < x` is FALSE for every x, so a
++// NaN bin passes both step 5 gates untouched and then passes
++// `needed < kMinUsefulCutDb` too -- it would be proposed at -24 dB with
++// saturated == false, the single most dangerous output this class can produce.
++// Review M-2.
++//
++// The 1050 Hz bin is the second half of the check: it sits INSIDE the NaN bin's
++// 1/3-octave window, so its smoothed value is NaN as well. The prominence gate
++// is written `! (prom >= k)` precisely so that NaN rejects it; written
++// `prom < k` the comparison is false and the bin sails through a gate it never
++// satisfied.
++TEST (SoundcheckCandidates, NonFiniteLoopGainIsNeverMarked)
++{
++    Field f;
++    f.poke (1000.0, std::numeric_limits<float>::quiet_NaN());
++    f.poke (1050.0, -5.0f);    // inside the NaN's smoothing window
++    f.poke (2000.0,  9.0f);    // outside it -- must be unaffected
++
++    const auto out = SoundcheckCandidates::pick (f.input());
++
++    EXPECT_FALSE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (1000.0, kSr)]);
++    EXPECT_FALSE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (1050.0, kSr)]);
++
++    // Exactly one mark and one proposal survive, and they are the 2 kHz mode.
++    EXPECT_EQ (out.markedCount, 1);
++    ASSERT_EQ (out.candidateCount, 1);
++    EXPECT_NEAR (out.candidates[0].hz, 2000.0f, (float) (kSr / Detector::kFftSize));
++    EXPECT_TRUE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (2000.0, kSr)]);
++
++    // Infinity takes the same path.
++    Field g;
++    g.poke (1000.0, std::numeric_limits<float>::infinity());
++    const auto inf = SoundcheckCandidates::pick (g.input());
++    EXPECT_EQ (inf.markedCount, 0);
++    EXPECT_EQ (inf.candidateCount, 0);
++}

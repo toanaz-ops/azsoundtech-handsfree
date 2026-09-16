@@ -569,6 +569,25 @@ tham số không hợp lệ (trần không hữu hạn, sample rate 0); đang ch
 ramp tắt chưa xong. Ring-risk được kiểm lại **tại `Arm`**, với cùng một danh
 tính như lúc preflight, vì hộp thoại xác nhận có thể đã mở hàng chục giây.
 
+**Cổng ring-risk đọc snapshot XẤU NHẤT của cả dàn, không phải slot đang hiện**
+(final review I-2, 15/09/2026). Cả hai cổng — preflight và `Arm` — trước đây chỉ
+đọc `notchControllers_[displayedSlot_]`, đúng cùng nguồn với chip trên thanh
+analyser. Nhưng chip trả lời câu "slot tôi đang theo dõi đang thế nào", còn cổng
+này trả lời câu **"có an toàn để làm một kênh ngõ ra im và làm mọi detector mù
+trong 72 giây không"**: `arm()` tắt detection trên **mọi** slot và
+`buildSoundcheckTargets()` quét **mọi** slot đang bật, nên một phòng đang ngân ở
+slot 1 trong khi console xem slot 0 vẫn được quét bình thường — với đúng cái
+detector lẽ ra bắt được nó vừa bị tắt.
+
+`MainComponent::worstRingRiskSnapshot()` duyệt **mọi slot đang bật, cộng slot
+đang hiện** (giữ slot đang hiện trong tập để hành vi cũ là tập con: cổng chỉ
+chặt thêm, không bao giờ lỏng ra — luật chung số 10), **bỏ qua** slot có
+`ringRiskValid == false` (detector chưa chấm frame nào publish score 0.0f, để nó
+thắng một phép `max` là giấu mất số thật), và lấy `ringRiskScore` cao nhất. Slot
+mà con số ấy đến từ được ghi vào `soundcheck_start` thành **`ring_risk_slot`**
+(`null` khi chưa slot nào chấm được frame nào): `ring_risk` đứng một mình không
+còn nói được nó đang tả chuỗi nào.
+
 **Chín lý do tự hủy** (`AbortReason`, tên trong log): `user_stop`, `esc`,
 `engine_stopped`, `device_error`, `device_changed`, `mic_hot`, `room_ringing`,
 `capture_drop`, `noise_floor_unmeasured`. Mỗi lý do trừ hai lý do do ngón tay

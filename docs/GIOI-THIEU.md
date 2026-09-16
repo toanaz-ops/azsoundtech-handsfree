@@ -128,7 +128,15 @@ MC đang nói.**
 
 **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng** trong lúc đo — loa của chúng vẫn
 đang phát tiếng mic. Vì vậy app **từ chối bắt đầu** khi chip `RING RISK` đã đọc
-`RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy.
+`RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy. App đọc chip của **mọi
+slot đang bật**, không riêng slot đang hiện trên màn hình — nên một phòng đang
+ngân ở slot 1 vẫn chặn được lần đo, kể cả khi console đang xem slot 0.
+
+**⚠️ Trong suốt phép đo, bộ chống hú TẮT trên MỌI slot** — không phải chỉ kênh
+đang được quét. `ĐO` tắt detection trên cả dàn suốt cả lần chạy (hệ 16 kênh là
+~72 giây), rồi mới trả lại theo mode đang chạy khi kết thúc. Hộp thoại xác nhận
+in đúng câu đó trước khi bạn bấm. **Phòng bắt đầu hú giữa chừng thì bấm `DỪNG`
+ngay** — trong lúc chạy đó là đường thoát.
 
 **App đo gì.** So phổ mic thu được với phổ sweep đã phát, trừ nền nhiễu, ra
 `H_dB` từng bin. Màn hình vẽ **`margin = −H_dB`** — biên còn lại trước khi bin đó

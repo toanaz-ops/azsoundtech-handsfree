@@ -91,7 +91,10 @@ phòng. Đọc hết mục này trước khi cắm vào dàn thật.
 8. **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng trong lúc đo.** Loa của chúng vẫn
    đang phát tiếng mic. Phòng sát ngưỡng ở một kênh khác thì sweep **có thể**
    kích nó hú — đó chính là lý do app **từ chối bắt đầu** khi chip `RING RISK`
-   đã đọc `RISING` trở lên.
+   đã đọc `RISING` trở lên. App đọc chip của **mọi slot đang bật**, không riêng
+   slot đang hiện trên màn hình: bấm `ĐO` mà bị từ chối trong khi chip trên màn
+   hình đang `LOW` thì **đúng là như vậy** — một slot khác đang ngân. Không phải
+   lỗi.
 
 9. **App tự dừng và nói lý do.** Chín lý do, mỗi lý do một câu riêng dưới đáy
    màn hình, ví dụ "tín hiệu mic quá lớn", "phòng đã hú sẵn trước khi phát",
@@ -124,6 +127,12 @@ phòng. Đọc hết mục này trước khi cắm vào dàn thật.
 14. **Độ sâu không bao giờ nông hơn slider DEPTH đang để.** Nếu anh em kéo
     slider sâu hơn trong lúc đang xem kết quả, lúc `ÁP DỤNG` app lấy **cái sâu
     hơn** giữa đề xuất và slider. Đây là cái kẹp cuối trước PA.
+
+15. **⚠️ Trong lúc `ĐO`, bộ chống hú TẮT trên MỌI slot.** Không phải chỉ kênh
+    đang được quét: suốt cả lần chạy (hệ 16 kênh là ~72 giây) **cả dàn không có
+    bảo vệ chống hú**, rồi mới bật lại theo mode đang chạy khi kết thúc. Hộp
+    thoại xác nhận có in đúng câu này trước khi anh em bấm. **Phòng bắt đầu hú
+    thì bấm `DỪNG` ngay** — trong lúc chạy đó là đường thoát.
 
 **Cần báo lại, theo thứ tự giá trị:**
 

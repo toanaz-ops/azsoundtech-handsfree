@@ -1,0 +1,418 @@
+# Review package: 23c99f1..feebf82
+
+## Commits
+feebf82 feat(lane-m): SnapshotNotch carries origin; ClearReason::SoundcheckReplace reaches the log
+
+## Files changed
+ src/app/MainComponent.cpp           |  1 +
+ src/app/NotchController.cpp         |  1 +
+ src/app/NotchController.h           | 14 +++++-
+ tests/CMakeLists.txt                |  5 ++-
+ tests/fixtures/session-sample.jsonl |  2 +
+ tests/test_gui_wiring.cpp           | 30 +++++++++++++
+ tests/test_notchcontroller.cpp      | 87 +++++++++++++++++++++++++++++++++++++
+ tools/logstats.py                   | 13 ++++++
+ 8 files changed, 150 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index d002074..d7bc7be 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -66,20 +66,21 @@ const char* originName (NotchController::Origin o)
+ const char* reasonName (NotchController::ClearReason r)
+ {
+     switch (r)
+     {
+         case NotchController::ClearReason::Manual:             return "manual";
+         case NotchController::ClearReason::ClearAll:           return "clear_all";
+         case NotchController::ClearReason::AutoRelease:        return "auto_release";
+         case NotchController::ClearReason::WidthChange:        return "width_change";
+         case NotchController::ClearReason::VerdictFalse:       return "verdict_false";
+         case NotchController::ClearReason::PartialApplyUnwind: return "partial_apply_unwind";
++        case NotchController::ClearReason::SoundcheckReplace:  return "soundcheck_replace";
+     }
+     return "unknown";
+ }
+ 
+ // Lane G. A FREE function, in the same anonymous namespace as originName and
+ // reasonName above -- notchEventToVar calls it unqualified from this same
+ // translation unit, and a `MainComponent::` member would need a header
+ // declaration it deliberately does not have.
+ const char* retuneReasonName (NotchController::RetuneReason r)
+ {
+diff --git a/src/app/NotchController.cpp b/src/app/NotchController.cpp
+index 262914a..3d5320a 100644
+--- a/src/app/NotchController.cpp
++++ b/src/app/NotchController.cpp
+@@ -570,20 +570,21 @@ void NotchController::runOnce()
+         {
+             const std::lock_guard<std::mutex> lock (modelMutex_);
+             lastDataMs_ = now;
+             for (int c = 0; c < kChannels; ++c)
+                 for (int i = 0; i < kSlots; ++i)
+                 {
+                     const auto& n = model_[slotOf (c, i)];
+                     if (! n.active) continue;
+                     notchList[notchCount++] = { (float) n.frequency, (float) n.Q,
+                                                 (float) n.depthDB, (float) n.deepestDb,
++                                                n.origin,
+                                                 (std::uint8_t) c, (std::uint8_t) i };
+                 }
+         }
+ 
+         // One tick per lockstep drain iteration, BEFORE the per-lane dispatch
+         // below, so every lane processed in this pass reads the same number.
+         // Skipping 0 on wrap keeps the never-placed sentinel in
+         // linkedPlacedAt_ unambiguous (the wrap is ~1.4 years of continuous
+         // 10.7 ms drains away, but a stale stamp matching costs a missed
+         // notch, so it is not left to luck).
+diff --git a/src/app/NotchController.h b/src/app/NotchController.h
+index faf3917..4b328d5 100644
+--- a/src/app/NotchController.h
++++ b/src/app/NotchController.h
+@@ -59,21 +59,27 @@ public:
+     // and impossible to add later if it is not.
+     // KD-7: Soundcheck-origin notches are EXEMPT from auto-release -- they
+     // clear only via an explicit clearNotch/clearAll.
+     enum class Origin { Detector, Preset, Manual, Soundcheck };
+ 
+     // Lane D (data loop). Why a notch left the model -- the session log's
+     // training label depends on it, so the two internal unwind sites MUST say
+     // PartialApplyUnwind rather than hide behind the Manual default.
+     enum class ClearReason : std::uint8_t
+     {
+-        Manual, ClearAll, AutoRelease, WidthChange, VerdictFalse, PartialApplyUnwind
++        Manual, ClearAll, AutoRelease, WidthChange, VerdictFalse, PartialApplyUnwind,
++        // Lane M: the active soundcheck replacing its OWN previous proposal on
++        // this slot. A separate value because the alternative -- reusing Manual
++        // -- makes an automatic cleanup indistinguishable from an operator
++        // pulling a notch by hand, in the one file lane D built to tell them
++        // apart (spec 4.6b, F21).
++        SoundcheckReplace
+     };
+ 
+     static constexpr int kChannels   = 2;
+     static constexpr int kSlots      = 16;
+     static constexpr int kTotalSlots = kChannels * kSlots;
+     static_assert (kChannels == kMaxSlotLanes, "lanes and channels are the same axis");
+ 
+     // Auto-release measures real elapsed time but ONLY while the tap is
+     // delivering audio (owner decision D-06). The gate is "the tap delivered
+     // RECENTLY", not "it delivered this poll" -- see the design doc §4 for
+@@ -394,20 +400,26 @@ public:
+     struct SnapshotNotch
+     {
+         float frequency = 0.0f;
+         float Q         = 0.0f;
+         float depthDB   = 0.0f;   // the depth RUNNING right now
+         // Lane G (Q11): the deepest rung this notch has ever stood on.
+         // savePreset writes THIS rather than depthDB, so a preset saved while
+         // the room is quiet still records what the room NEEDED, not what the
+         // release ladder had wound back to.
+         float deepestDb = 0.0f;
++        // Lane M (spec 4.6, F7): which policy placed this notch. model_ is
++        // private and SnapshotNotch is the only view outward, so without this
++        // field nothing can find the preventive notches of a previous
++        // soundcheck run in order to replace them -- and they never
++        // auto-release (NotchController.cpp:729), so the chain drains.
++        Origin origin = Origin::Detector;
+         std::uint8_t channel = 0;
+         std::uint8_t index   = 0;
+     };
+ 
+     struct SnapshotBuffer
+     {
+         std::array<std::array<float, Detector::kNumBins>, kChannels> magnitudes {};
+         std::uint32_t magnitudeCount = 0;
+         std::uint32_t laneCount = 1;
+         bool          linked = false;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index b3b23cc..82f937e 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -109,16 +109,17 @@ endif()
+ include(GoogleTest)
+ gtest_discover_tests(HandsFreeTests)
+ 
+ # Lane D: the log summary tool runs against a checked-in fixture. Python is
+ # optional on a build box; without it the test SKIPS rather than fails.
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+ if(Python3_Interpreter_FOUND)
+     add_test(NAME logstats_fixture
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-sample.jsonl
+-                --expect-notches 4 --expect-verdicts 3 --expect-false 1
+-                --expect-recurrence-max 2 --expect-retunes 2)
++                --expect-notches 5 --expect-verdicts 3 --expect-false 1
++                --expect-recurrence-max 2 --expect-retunes 2
++                --expect-soundcheck-replaced 1)
+ else()
+     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+ endif()
+\ No newline at end of file
+diff --git a/tests/fixtures/session-sample.jsonl b/tests/fixtures/session-sample.jsonl
+index dbd6f92..a0d10f2 100644
+--- a/tests/fixtures/session-sample.jsonl
++++ b/tests/fixtures/session-sample.jsonl
+@@ -5,11 +5,13 @@
+ {"ev":"notch_retune","t":5301.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-12,"from_db":-6,"origin":"detector","reason":"deepen","age_ms":300.0}
+ {"ev":"notch_set","t":9020.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":0,"score":0.75,"peakiness":15.0,"p_norm":0.06,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":128.0,"now":[0.01,0.02,0.4,0.01],"ref":[0.01,0.02,0.1,0.01]}}
+ {"ev":"verdict","t":11000.0,"slot":0,"lane":0,"index":0,"hz":2437.5,"verdict":"false","age_ms":1980.0}
+ {"ev":"notch_clear","t":11000.5,"slot":0,"lane":0,"index":0,"hz":2437.5,"origin":"detector","reason":"verdict_false","age_ms":1980.5}
+ {"ev":"notch_set","t":20000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":1,"score":0.88,"peakiness":20.0,"p_norm":0.11,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":120.0,"now":[0.01,0.45,0.02,0.01],"ref":[0.01,0.1,0.02,0.01]}}
+ {"ev":"verdict","t":21000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_set","t":30000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"q":30,"depth_db":-12,"origin":"preset"}
+ {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
+ {"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
++{"ev":"notch_set","t":50000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"q":30,"depth_db":-9,"origin":"soundcheck"}
++{"ev":"notch_clear","t":52000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"origin":"soundcheck","reason":"soundcheck_replace","age_ms":2000.0}
+ {"ev":"session_end","t":60000.0,"dropped_events":0}
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index 50e7537..150b0ab 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -1361,20 +1361,50 @@ TEST (GuiWiring, SetAndClearKeepTheirOwnEventNames)
+ 
+     NotchController::NotchEvent clear;
+     clear.kind = NotchController::NotchEvent::Kind::Clear;
+     clear.reason = NotchController::ClearReason::AutoRelease;
+     const juce::var cv = MainComponent::notchEventToVarForTest (clear);
+     EXPECT_EQ (cv["ev"].toString(), "notch_clear");
+     EXPECT_EQ (cv["reason"].toString(), "auto_release");
+     EXPECT_FALSE (cv.getDynamicObject()->hasProperty ("from_db"));
+ }
+ 
++// RED IF: reasonName gains no case for SoundcheckReplace. It falls through to
++// "unknown" and the tester's log says nothing useful -- the same class of defect
++// as lane G's retuneReasonName fallthrough (Task 9 review I2).
++//
++// B-3: this lives HERE because MainComponent::notchEventToVarForTest
++// (MainComponent.h:194) is used from nowhere else in the suite
++// (test_gui_wiring.cpp:1337, 1360, 1365, 1383), and the event is built INLINE --
++// the makeClearEvent helper plan rev 1 assumed does not exist anywhere in the
++// repo.
++TEST (GuiWiring, SoundcheckReplaceReachesTheLogAsItsOwnReason)
++{
++    NotchController::NotchEvent clear;
++    clear.kind   = NotchController::NotchEvent::Kind::Clear;
++    clear.slot   = 0;
++    clear.lane   = 0;
++    clear.index  = 2;
++    clear.hz     = 1000.0f;
++    clear.q      = 30.0f;
++    clear.depthDb = -12.0f;
++    clear.origin = NotchController::Origin::Soundcheck;
++    clear.reason = NotchController::ClearReason::SoundcheckReplace;
++
++    const juce::var v = MainComponent::notchEventToVarForTest (clear);
++
++    EXPECT_EQ (v["ev"].toString(), "notch_clear");
++    EXPECT_EQ (v["reason"].toString(), "soundcheck_replace");
++    EXPECT_NE (v["reason"].toString(), "manual");
++    EXPECT_NE (v["reason"].toString(), "unknown");
++}
++
+ // RED IF a reason name is dropped or renamed -- logstats.py and the tester
+ // notes both read these four strings.
+ TEST (GuiWiring, EveryRetuneReasonHasItsOwnName)
+ {
+     using RR = NotchController::RetuneReason;
+     const RR reasons[] = { RR::Deepen, RR::Release, RR::Reclamp, RR::Ceiling };
+     const char* names[] = { "deepen", "release", "reclamp", "ceiling" };
+     for (int i = 0; i < 4; ++i)
+     {
+         NotchController::NotchEvent e;
+diff --git a/tests/test_notchcontroller.cpp b/tests/test_notchcontroller.cpp
+index 86b6868..6c6cd68 100644
+--- a/tests/test_notchcontroller.cpp
++++ b/tests/test_notchcontroller.cpp
+@@ -3742,10 +3742,97 @@ TEST (NotchControllerLadder, TheMemoryRingReclaimsAConsumedSlotBeforeEvictingALi
+ 
+     h.controller.setDetectionActive (true);
+     for (int i = 0; i < kWarmupBlocks; ++i)
+         pump (h, quiet.hop());
+ 
+     EXPECT_DOUBLE_EQ (probeMemoryAt (h, quiet, 41.0 * binHz), -18.0)
+         << "the head evicted a LIVE entry while a consumed slot sat empty";
+     EXPECT_DOUBLE_EQ (probeMemoryAt (h, quiet, 61.0 * binHz), -18.0)
+         << "the 18th write did not land anywhere findable";
+ }
++
++// ===========================================================================
++// Lane M (active soundcheck): the two ADDITIVE NotchController changes.
++// Appended at file scope -- the anonymous namespaces above have all closed, so
++// Harness (:20) and Recorder (:1471) are both visible here, and nothing lands
++// inside a namespace that already ended (lane G m-E).
++// ===========================================================================
++
++// RED IF: SnapshotNotch loses `origin`, or the aggregate initialiser at
++// NotchController.cpp:578-580 is not updated alongside the struct -- brace
++// elision would then silently shift channel/index by one field. Without this
++// field lane M cannot find the previous run's preventive notches to clear, and
++// they never auto-release (NotchController.cpp:729), so the 16-slot chain
++// drains after a few soundchecks. F7.
++TEST (NotchControllerSoundcheck, SnapshotCarriesOrigin)
++{
++    Harness h;
++    ASSERT_TRUE (h.controller.setNotch (0, 3, 1000.0, 30.0, -12.0,
++                                        NotchController::Origin::Soundcheck));
++    ASSERT_TRUE (h.controller.setNotch (0, 4, 2000.0, 30.0, -12.0,
++                                        NotchController::Origin::Manual));
++
++    // B-1(c): latest_ is written ONLY inside runOnce()'s drain loop, and the
++    // loop body runs only when a block was actually drained off the tap.
++    // Without this the snapshot stays empty forever and the whole test passes
++    // vacuously. Precedent: tests/test_gui_wiring.cpp:1033-1035, and
++    // memory/preset-save-roundtrip-2026-09-05.md.
++    const std::vector<float> block (512, 0.0f);
++    h.tap.write (block.data(), block.size());
++
++    NotchController::SnapshotBuffer snap {};
++    h.controller.runOnce();
++    h.controller.copySnapshot (snap);
++    ASSERT_GT (snap.notchCount, 0u) << "the snapshot never refreshed -- pump the tap";
++
++    bool sawSoundcheck = false, sawManual = false;
++    for (std::uint32_t i = 0; i < snap.notchCount; ++i)
++    {
++        const auto& n = snap.notches[i];
++        if (n.index == 3)
++        {
++            EXPECT_EQ (n.origin, NotchController::Origin::Soundcheck);
++            EXPECT_NEAR (n.frequency, 1000.0f, 0.5f);   // the fields after `origin` still line up
++            EXPECT_EQ ((int) n.channel, 0);
++            sawSoundcheck = true;
++        }
++        if (n.index == 4)
++        {
++            EXPECT_EQ (n.origin, NotchController::Origin::Manual);
++            EXPECT_NEAR (n.frequency, 2000.0f, 0.5f);
++            sawManual = true;
++        }
++    }
++    EXPECT_TRUE (sawSoundcheck);
++    EXPECT_TRUE (sawManual);
++}
++
++// RED IF: SoundcheckReplace is folded into Manual. The log could then not tell
++// "the soundcheck replaced its own previous proposal" from "a human removed a
++// notch" -- the exact mislabelling lane D exists to prevent. F21.
++TEST (NotchControllerSoundcheck, SoundcheckReplaceIsItsOwnClearReason)
++{
++    // B-2, from Recorder's own comment at tests/test_notchcontroller.cpp:1466:
++    //   1. Recorder has NO operator(). The sink comes from rec.sink().
++    //   2. The Recorder must be declared BEFORE the Harness it is wired to. The
++    //      controller's destructor calls stop(), which flushes the remaining
++    //      events through the sink -- into this object. Declaration order is the
++    //      reverse of destruction order.
++    Recorder rec;
++    Harness  h;
++    h.controller.setEventSink (rec.sink());
++
++    ASSERT_TRUE (h.controller.setNotch (0, 2, 1000.0, 30.0, -12.0,
++                                        NotchController::Origin::Soundcheck));
++    h.controller.clearNotch (0, 2, NotchController::ClearReason::SoundcheckReplace);
++
++    const std::vector<float> block (512, 0.0f);   // B-1(c)
++    h.tap.write (block.data(), block.size());
++    h.controller.runOnce();
++
++    ASSERT_FALSE (rec.events.empty());
++    const auto& last = rec.events.back();
++    EXPECT_EQ (last.kind, NotchController::NotchEvent::Kind::Clear);
++    EXPECT_EQ (last.reason, NotchController::ClearReason::SoundcheckReplace);
++    EXPECT_NE (last.reason, NotchController::ClearReason::Manual);
++    EXPECT_FALSE (h.controller.activeForTest (0, 2));   // B-3: `active`, never depth < 0
++}
+diff --git a/tools/logstats.py b/tools/logstats.py
+index 0a4c666..bd74852 100644
+--- a/tools/logstats.py
++++ b/tools/logstats.py
+@@ -102,20 +102,26 @@ def summarise(events: list[dict]) -> dict:
+             groups.append({"hz": n["hz"], "count": 1})
+ 
+     judged = [n for n in notches if n["verdict"] in ("good", "false")]
+     false_count = sum(1 for n in judged if n["verdict"] == "false")
+     return {
+         "header": header, "duration_ms": duration, "modes": modes, "notches": notches,
+         "groups": sorted(groups, key=lambda g: -g["count"]),
+         "verdicts": len(judged), "false": false_count,
+         "unjudged": len(notches) - len(judged),
+         "retunes": sum(n["retunes"] for n in notches),
++        # Lane M: how many notches this session's soundchecks replaced with
++        # their own next proposal. Counted here rather than left to the reason
++        # column because "the soundcheck keeps replacing its own work" is a
++        # pattern worth seeing at a glance, and because a fixture can then pin
++        # that the reason name survives the whole C++ -> JSON -> reader path.
++        "soundcheck_replaced": sum(1 for n in notches if n["reason"] == "soundcheck_replace"),
+         "dropped": end.get("dropped_events"),
+     }
+ 
+ 
+ def print_report(s: dict) -> None:
+     h = s["header"]
+     print(f"session   {fmt_ms(s['duration_ms'])}  app {h.get('app_version', '?')}  os {h.get('os', '?')}")
+     print(f"device    {h.get('device', '?')!r}  {h.get('sample_rate', '?')} Hz  buffer {h.get('buffer_size', '?')}")
+     if s["modes"]:
+         print("modes     " + "  ".join(f"{fmt_ms(t)}:{m}" for t, m in s["modes"]))
+@@ -136,50 +142,57 @@ def print_report(s: dict) -> None:
+         if g["count"] > 1:
+             print(f"  {g['hz']:>8.1f} Hz  x{g['count']}")
+     if not any(g["count"] > 1 for g in s["groups"]):
+         print("  none")
+     print()
+     total = len(s["notches"])
+     v = s["verdicts"]
+     print(f"notches {total}  retunes {s['retunes']}  judged {v}  false {s['false']}"
+           f"  false-rate {(s['false'] / v * 100 if v else 0):.0f}%"
+           f"  unjudged {s['unjudged']} ({(s['unjudged'] / total * 100 if total else 0):.0f}%)")
++    if s["soundcheck_replaced"]:
++        print(f"soundcheck replaced {s['soundcheck_replaced']} notch(es) from an earlier run")
+     if s["dropped"]:
+         print(f"WARNING: logger dropped {s['dropped']} event(s)")
+ 
+ 
+ def main(argv: list[str]) -> int:
+     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+     ap.add_argument("file", type=Path)
+     ap.add_argument("--expect-notches", type=int)
+     ap.add_argument("--expect-verdicts", type=int)
+     ap.add_argument("--expect-false", type=int)
+     ap.add_argument("--expect-recurrence-max", type=int)
+     ap.add_argument("--expect-retunes", type=int)
++    ap.add_argument("--expect-soundcheck-replaced", type=int)
+     args = ap.parse_args(argv)
+ 
+     events = load(args.file)
+     if not events:
+         print("empty or unreadable log", file=sys.stderr)
+         return 2
+     s = summarise(events)
+     print_report(s)
+ 
+     failures = []
+     if args.expect_notches is not None and len(s["notches"]) != args.expect_notches:
+         failures.append(f"notches {len(s['notches'])} != {args.expect_notches}")
+     if args.expect_verdicts is not None and s["verdicts"] != args.expect_verdicts:
+         failures.append(f"verdicts {s['verdicts']} != {args.expect_verdicts}")
+     if args.expect_false is not None and s["false"] != args.expect_false:
+         failures.append(f"false {s['false']} != {args.expect_false}")
+     if args.expect_retunes is not None and s["retunes"] != args.expect_retunes:
+         failures.append(f"retunes {s['retunes']} != {args.expect_retunes}")
++    if (args.expect_soundcheck_replaced is not None
++            and s["soundcheck_replaced"] != args.expect_soundcheck_replaced):
++        failures.append(
++            f"soundcheck-replaced {s['soundcheck_replaced']} != {args.expect_soundcheck_replaced}")
+     if args.expect_recurrence_max is not None:
+         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
+         if recurrence_max != args.expect_recurrence_max:
+             failures.append(f"recurrence-max {recurrence_max} != {args.expect_recurrence_max}")
+     for f in failures:
+         print("EXPECT FAILED: " + f, file=sys.stderr)
+     return 1 if failures else 0
+ 
+ 
+ if __name__ == "__main__":

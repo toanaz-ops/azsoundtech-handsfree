@@ -1,0 +1,161 @@
+# Review package: 8e85484..f8437df
+
+## Commits
+f8437df fix(lane-m): Task 8 review round 1 -- the two apply faults in the log, at_output said out loud
+
+## Files changed
+ src/app/SoundcheckController.cpp    | 14 ++++++++++++++
+ src/app/SoundcheckController.h      |  6 ++++++
+ tests/fixtures/session-sample.jsonl |  2 +-
+ tests/test_soundcheckcontroller.cpp | 18 +++++++++++++++---
+ 4 files changed, 36 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/app/SoundcheckController.cpp b/src/app/SoundcheckController.cpp
+index 36c240c..82875a2 100644
+--- a/src/app/SoundcheckController.cpp
++++ b/src/app/SoundcheckController.cpp
+@@ -1109,20 +1109,26 @@ void SoundcheckController::beginAbort (AbortReason reason)
+ 
+ void SoundcheckController::logAbort (AbortReason reason) const
+ {
+     if (! logEvent)
+         return;
+ 
+     auto ev = SessionLogger::makeEvent ("soundcheck_abort");
+     if (auto* o = objectOf (ev))
+     {
+         o->setProperty ("reason", abortReasonNameForTest (reason));
++        // THE OUTPUT THE RUN WAS ON WHEN IT STOPPED -- the one in progress,
++        // NOT the last one finished. targetIndex_ is advanced by enterTarget()
++        // before that channel emits a sample, so a run aborted anywhere inside
++        // channel 1 (noise floor, sweep, tail or gap) logs at_output 1 even
++        // though only channel 0 produced a result. A reader that treats this as
++        // "channels measured" is off by one on every abort.
+         o->setProperty ("at_output", targetIndex_.load (std::memory_order_relaxed));
+         o->setProperty ("elapsed_ms", round3sf (getElapsedMsInRun()));
+     }
+     logEvent (ev);
+ }
+ 
+ void SoundcheckController::notifyStateChanged() const
+ {
+     if (onStateChanged)
+         onStateChanged();
+@@ -1557,13 +1563,21 @@ SoundcheckApplyStats applySoundcheckResults (
+ }
+ 
+ juce::var makeSoundcheckApplyEvent (const SoundcheckApplyStats& stats)
+ {
+     auto ev = SessionLogger::makeEvent ("soundcheck_apply");
+     if (auto* o = objectOf (ev))
+     {
+         o->setProperty ("placed", stats.placed);
+         o->setProperty ("refused", stats.refused);
+         o->setProperty ("cleared_previous", stats.clearedPrevious);
++        // The two FAULTS, kept out of the three headline counts. Both mean a
++        // result was addressed somewhere it does not belong -- a different
++        // slot, or a lane this slot does not drive -- and neither is visible
++        // anywhere but the GUI without these. skipped_live is deliberately NOT
++        // here: it is a SUBSET of refused (SoundcheckController.h), so logging
++        // it beside the totals would invite a reader to add it to them.
++        o->setProperty ("skipped_other_slot", stats.skippedOtherSlot);
++        o->setProperty ("skipped_bad_lane", stats.skippedBadLane);
+     }
+     return ev;
+ }
+diff --git a/src/app/SoundcheckController.h b/src/app/SoundcheckController.h
+index b8e18a3..c36c71e 100644
+--- a/src/app/SoundcheckController.h
++++ b/src/app/SoundcheckController.h
+@@ -425,20 +425,26 @@ struct SoundcheckApplyStats
+ 
+ // THE FIFTH lane M log event (spec 4.7), and the only one SoundcheckController
+ // cannot emit itself. `placed` / `refused` / `cleared_previous` exist only once
+ // applySoundcheckResults has run on the message thread, and the controller has
+ // no access to that call's return -- nor may it hold a NotchController at all
+ // (inv 17, Task 6 concern C3). So the SHAPE lives here, beside the other four,
+ // and Task 10's AP DUNG lambda does nothing but
+ //
+ //     sessionLogger_.log (makeSoundcheckApplyEvent (total));
+ //
++// It carries the three headline counts plus `skipped_other_slot` and
++// `skipped_bad_lane` -- two FAULTS (a result addressed to another slot, or
++// naming a lane this slot does not drive) that otherwise reach the GUI and
++// nothing else. `skippedLive` is deliberately NOT logged: it is a SUBSET of
++// `refused`, and a number beside the totals invites being added to them.
++//
+ // `ev` is the dispatch key, never `kind` (lane G B-3). Every field is an int,
+ // so the 3-significant-figure rounding the other four apply has nothing to do
+ // here -- and "t" is deliberately NOT set: SessionLogger::log stamps it on a
+ // one-level copy (SessionLogger.h:65-70), so a producer that stamped its own
+ // would be overwritten anyway and would read as authoritative in the meantime.
+ [[nodiscard]] juce::var makeSoundcheckApplyEvent (const SoundcheckApplyStats& stats);
+ 
+ // *** TWO THINGS TASK 9 MUST NOT GET WRONG ***
+ //
+ // 1. `clearedPrevious > 0 && placed == 0` IS A REAL OUTCOME, not a bug and not
+diff --git a/tests/fixtures/session-sample.jsonl b/tests/fixtures/session-sample.jsonl
+index 1dcc470..8df993e 100644
+--- a/tests/fixtures/session-sample.jsonl
++++ b/tests/fixtures/session-sample.jsonl
+@@ -11,14 +11,14 @@
+ {"ev":"notch_set","t":30000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"q":30,"depth_db":-12,"origin":"preset"}
+ {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
+ {"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
+ {"ev":"notch_set","t":50000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"q":30,"depth_db":-9,"origin":"soundcheck"}
+ {"ev":"notch_clear","t":52000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"origin":"soundcheck","reason":"soundcheck_replace","age_ms":2000.0}
+ {"ev":"soundcheck_start","t":53000.0,"outputs":2,"peak_dbfs":-20.0,"sweep_ms":3000.0,"total_ms":9040.0,"mode_before":"auto","ring_risk":0.12,"gate":10.0}
+ {"ev":"soundcheck_output","t":53500.0,"slot":0,"lane":0,"out_ch":0,"in_ch":0,"ok":true,"routing_invalid":false,"snr_db":18.5,"saturated":false,"marked":2,"ceiling_missing":false,"ladder_missing":false,"candidates":[{"hz":312.0,"margin_db":-4.2,"depth_db":-6.0,"residual_db":-1.8}]}
+ {"ev":"soundcheck_output","t":54000.0,"slot":0,"lane":1,"out_ch":1,"in_ch":1,"ok":true,"routing_invalid":false,"snr_db":17.1,"saturated":false,"marked":1,"ceiling_missing":false,"ladder_missing":false,"candidates":[]}
+ {"ev":"soundcheck_result","t":54100.0,"outputs_ok":2,"outputs_failed":0,"marked_total":3,"candidates_total":1}
+-{"ev":"soundcheck_apply","t":55000.0,"placed":2,"refused":1,"cleared_previous":0}
++{"ev":"soundcheck_apply","t":55000.0,"placed":2,"refused":1,"cleared_previous":0,"skipped_other_slot":0,"skipped_bad_lane":0}
+ {"ev":"soundcheck_start","t":56000.0,"outputs":2,"peak_dbfs":-20.0,"sweep_ms":3000.0,"total_ms":9040.0,"mode_before":"auto","ring_risk":null,"gate":10.0}
+ {"ev":"soundcheck_abort","t":57000.0,"reason":"user_stop","at_output":0,"elapsed_ms":1000.0}
+ {"ev":"session_end","t":60000.0,"dropped_events":0}
+diff --git a/tests/test_soundcheckcontroller.cpp b/tests/test_soundcheckcontroller.cpp
+index 7de7b5a..f11f152 100644
+--- a/tests/test_soundcheckcontroller.cpp
++++ b/tests/test_soundcheckcontroller.cpp
+@@ -1982,24 +1982,36 @@ TEST (SoundcheckApply, AResultNamingALaneThisSlotDoesNotDriveIsSkipped)
+ // It is the ONE lane M event SoundcheckController cannot emit itself:
+ // placed / refused / cleared_previous exist only after applySoundcheckResults
+ // has returned, on the message thread (Task 6 concern C3, inv 17). Task 10's
+ // AP DUNG lambda logs exactly the var this builds, so this is where the shape
+ // is pinned down.
+ TEST (SoundcheckApply, TheApplyEventCarriesWhatWasPlacedAndWhatWasCleared)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+ 
+     SoundcheckApplyStats stats;
+-    stats.placed          = 3;
+-    stats.refused         = 2;
+-    stats.clearedPrevious = 4;
++    stats.placed           = 3;
++    stats.refused          = 2;
++    stats.clearedPrevious  = 4;
++    stats.skippedLive      = 1;      // a SUBSET of refused -- must NOT be logged
++    stats.skippedOtherSlot = 5;
++    stats.skippedBadLane   = 6;
+ 
+     const auto v = makeSoundcheckApplyEvent (stats);
+     auto* o = v.getDynamicObject();
+     ASSERT_NE (o, nullptr);
+     EXPECT_EQ (o->getProperty ("ev").toString(), "soundcheck_apply");
+     EXPECT_EQ ((int) o->getProperty ("placed"), 3);
+     EXPECT_EQ ((int) o->getProperty ("refused"), 2);
+     EXPECT_EQ ((int) o->getProperty ("cleared_previous"), 4);
++    // The two FAULTS. A result addressed to another slot, or naming a lane this
++    // slot does not drive, reaches the GUI and nothing else without these -- and
++    // they are DISTINCT values here, so swapping the two writes goes red.
++    EXPECT_EQ ((int) o->getProperty ("skipped_other_slot"), 5);
++    EXPECT_EQ ((int) o->getProperty ("skipped_bad_lane"), 6);
++    // skippedLive is a SUBSET of refused: logging it beside the totals invites a
++    // reader to add it to them. It must stay out of the line entirely.
++    EXPECT_TRUE (o->getProperty ("skipped_live").isVoid())
++        << "skipped_live is a subset of refused and must not be logged";
+     // The LOGGER stamps t, not the producer (SessionLogger.h:65-70).
+     EXPECT_TRUE (o->getProperty ("t").isVoid());
+ }

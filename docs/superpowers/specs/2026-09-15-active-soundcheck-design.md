@@ -740,8 +740,14 @@ M chỉ so sánh với một `float` mà nó đã được đưa, và **không c
 `NotchController` nào cả**.
 
 **f) Không đụng "phòng nhớ".** Lane G đã có cổng không cho Soundcheck tiêu ký ức
-(`src/app/NotchController.cpp:1116`). Lane M không ghi và không tiêu ký ức
+(`src/app/NotchController.cpp:1117`, và trần Soundcheck áp ở
+`src/app/NotchController.cpp:1170`). Lane M không ghi và không tiêu ký ức
 phòng; §5 có test.
+
+> Hai con số này là `:1116` / `:1169` cho tới rev 5; Task 11 mở file trên nhánh
+> `feat/lane-m-active-soundcheck` và đếm lại ra `:1117` / `:1170`. Sửa trong đợt
+> fix cuối 16/09/2026. Bảng §6 dưới đây sửa theo. Các dòng trong nhật ký phản
+> biện vòng 2 (§9) giữ nguyên `:1116` vì chúng ghi lại điều reviewer nói lúc đó.
 
 ### 4.7 Log (lane D)
 
@@ -1074,7 +1080,7 @@ Vào thẳng TESTER-NOTES của bản alpha:
 |---|---|---|
 | **S** | Per-lane = per-output; `width`, `linked` trong snapshot | **Đủ** |
 | **G** | `kDepthLadderDb`, `kMaxDepthDb`, `getNotchQ()`, trần preset, quy tắc lượng tử Q13 | **Đủ** (`src/app/NotchController.h:100-114`, `:362`) |
-| **G** | Cổng không cho Soundcheck tiêu "phòng nhớ" | **Đủ** (`src/app/NotchController.cpp:1116`) |
+| **G** | Cổng không cho Soundcheck tiêu "phòng nhớ" | **Đủ** (`src/app/NotchController.cpp:1117`; trần áp ở `:1170`) |
 | **R** | `ringRiskScore/Valid/Threshold` — **chỉ dùng được ở `Preflight`/`Arm`** | **Đủ**, với giới hạn đã nêu ở §4.3 |
 | **D** | `SessionLogger::makeEvent`, đường `ev` | **Đủ** (`src/app/SessionLogger.h:49-50`) |
 | **D** | `ClearReason::SoundcheckReplace` + một nhánh `logstats.py` | **CHƯA** — cộng thêm, cần owner gật (§4.6b) |

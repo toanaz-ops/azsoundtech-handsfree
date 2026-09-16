@@ -1,0 +1,2424 @@
+# Review package: f8437df..f7a2272
+
+## Commits
+f7a2272 feat(lane-m): DO button, progress overlay with DUNG, results strip, margin overlay on the analyser
+
+## Files changed
+ CMakeLists.txt              |   2 +
+ src/app/MainComponent.cpp   |  47 ++++-
+ src/app/MainComponent.h     |  18 ++
+ src/gui/ModeRail.cpp        |  76 +++++++-
+ src/gui/ModeRail.h          |  39 ++++
+ src/gui/SoundcheckPanel.cpp | 423 ++++++++++++++++++++++++++++++++++++++++++++
+ src/gui/SoundcheckPanel.h   | 191 ++++++++++++++++++++
+ src/gui/SpectrumView.cpp    | 216 ++++++++++++++++++++++
+ src/gui/SpectrumView.h      |  93 ++++++++++
+ tests/test_gui_wiring.cpp   | 197 +++++++++++++++++++++
+ tests/test_moderail.cpp     | 124 +++++++++++++
+ tests/test_spectrumview.cpp | 169 ++++++++++++++++++
+ tools/snapshot.cpp          | 132 ++++++++++++++
+ 13 files changed, 1722 insertions(+), 5 deletions(-)
+
+## Diff
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7349aeb..121276c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -111,20 +111,22 @@ set(HANDSFREE_CORE_SOURCES
+     ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/TuningPanel.h
+     ${CMAKE_SOURCE_DIR}/src/gui/ModeBar.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/ModeBar.h
+     ${CMAKE_SOURCE_DIR}/src/gui/ModeRail.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/ModeRail.h
+     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.h
+     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.h
++    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.cpp
++    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.h
+     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.h
+     ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.h
+     ${CMAKE_SOURCE_DIR}/src/gui/theme/AzTheme.cpp
+     ${CMAKE_SOURCE_DIR}/src/gui/theme/AzTheme.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/Biquad.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/Biquad.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/Detector.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/Detector.h
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index d7bc7be..ef8d4f7 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -198,20 +198,30 @@ MainComponent::MainComponent()
+     // of the plot -- not a trade worth making before anything has measured a
+     // problem.
+     spectrumView_.ringRiskProvider = [this]
+     {
+         NotchController::SnapshotBuffer snapshot {};
+         notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (snapshot);
+         return gui::SpectrumView::riskForScore (snapshot);
+     };
+ 
+     addAndMakeVisible (modeRail_);
++    // LANE M Task 9. Added as a CHILD COMPONENT, not made visible: the panel
++    // starts in Mode::Hidden and shows itself when the owner sets a mode.
++    // Added AFTER spectrumView_ so it paints over the analyser rather than
++    // under it. Nothing here connects it to a SoundcheckController -- that is
++    // Task 10; this console only owns, lays out and renders it.
++    addChildComponent (soundcheckPanel_);
++
++    // The strip takes a band off the analyser rather than covering it, so a
++    // mode change changes the layout and the console has to be told.
++    soundcheckPanel_.onModeChanged = [this] { resized(); };
+     addAndMakeVisible (deviceDrawer_);
+     addAndMakeVisible (slotScroller_);
+     // The notch list is a FIXED bottom strip -- always visible.
+     addAndMakeVisible (notchListPanel_);
+     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
+ 
+     // Lane D: a FALSE verdict is written to the log BEFORE the clear it
+     // causes -- the clear's own notch_clear event carries reason
+     // verdict_false, but the verdict itself (which lane/index/hz a human
+     // rejected) only exists here.
+@@ -1498,21 +1508,56 @@ void MainComponent::resized()
+     modeRail_.setBounds (transport.reduced (kEdgePad, gap + spacing));
+ 
+     //--------------------------------------------------------------------
+     // 3. The floor, carved off the bottom BEFORE the analyser is measured.
+     notchListPanel_.setVisible (true);
+ 
+     auto floor = area.removeFromBottom (floorHeightFor (area.getHeight()));
+ 
+     //--------------------------------------------------------------------
+     // 4. The analyser takes everything that is left.
+-    spectrumView_.setBounds (area.reduced (kEdgePad, 0).withTrimmedBottom (gap));
++    auto analyser = area.reduced (kEdgePad, 0).withTrimmedBottom (gap);
++
++    //--------------------------------------------------------------------
++    // 4b. Lane M's strip TAKES A BAND off the bottom of the analyser; it does
++    //     not lie on top of it.
++    //
++    // Round 1 of this task did lay it over the plot, and the render showed why
++    // that is wrong: the strip buried the whole frequency axis AND the
++    // overlay's own marked-bin rake, which lives along the plot floor. Both
++    // are exactly what an operator reads a results screen for. No test noticed
++    // -- the panel was inside its own bounds and every assertion passed.
++    //
++    // Bounds are set whether or not the strip is visible, so a panel shown
++    // between two layout passes is never drawn at stale coordinates (the bug
++    // that left the routing table an empty black rect on 2026-08-24).
++    //
++    // The analyser keeps kMinSpectrumHeight whatever happens: a window too
++    // short to hold both gets the strip laid over the plot after all, because
++    // a results strip with nowhere to go is a set of proposals the operator
++    // cannot answer.
++    {
++        const int stripH = juce::jmin (gui::SoundcheckPanel::kPanelHeight,
++                                       juce::jmax (0, analyser.getHeight() - gap));
++
++        if (soundcheckPanel_.isVisible()
++            && analyser.getHeight() - stripH >= kMinSpectrumHeight)
++        {
++            soundcheckPanel_.setBounds (analyser.removeFromBottom (stripH));
++        }
++        else
++        {
++            soundcheckPanel_.setBounds (analyser.withTop (analyser.getBottom() - stripH));
++        }
++    }
++
++    spectrumView_.setBounds (analyser);
+ 
+     //--------------------------------------------------------------------
+     // 5. Floor columns: the notch table reads left -- it is the answer -- and
+     //    the rig sits right, because it is the setup you touch once.
+     auto inner = floor.reduced (kEdgePad, gap);
+ 
+     const int notchWidth = juce::roundToInt ((float) inner.getWidth() * kNotchColumnFraction);
+     notchListPanel_.setBounds (inner.removeFromLeft (notchWidth));
+     notchListPanel_.resized();   // re-place the hosted selector at the new width
+     inner.removeFromLeft (2 * gap + 2);   // the painted groove lives in here
+diff --git a/src/app/MainComponent.h b/src/app/MainComponent.h
+index 1e2d021..6e095e9 100644
+--- a/src/app/MainComponent.h
++++ b/src/app/MainComponent.h
+@@ -24,20 +24,21 @@
+ #include "app/SessionLogger.h"
+ #include "app/SlotConfig.h"
+ #include "dsp/ClockSource.h"
+ #include "gui/DeviceDrawer.h"
+ #include "gui/DevicePanel.h"
+ #include "gui/ModeBar.h"
+ #include "gui/ModeRail.h"
+ #include "gui/NotchListPanel.h"
+ #include "gui/SlotPanel.h"
+ #include "gui/SlotTabs.h"
++#include "gui/SoundcheckPanel.h"
+ #include "gui/SpectrumView.h"
+ #include "gui/StatusBar.h"
+ #include "gui/StatusBadge.h"
+ #include "gui/TuningPanel.h"
+ #include "gui/theme/AzTheme.h"
+ 
+ class MainComponent : public juce::Component,
+                       private juce::Timer
+ {
+ public:
+@@ -136,20 +137,25 @@ public:
+     // the UI uses.
+     void changeSlotConfig (int slotIndex, const SlotConfig& config);
+ 
+     // The drawer (device controls + settings row). Public so tests can drive
+     // its controls like any other component interface.
+     [[nodiscard]] gui::DeviceDrawer& getDeviceDrawer() { return deviceDrawer_; }
+ 
+     // TEST ACCESSORS -- let headless tests assert rail/spectrum geometry
+     // without reaching into private members.
+     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
++
++    // Lane M Task 9. The rail itself, not just its bounds: a headless caller
++    // and tools/snapshot.cpp have to put the transport into its LOCKED state
++    // (F10) to render it, and that is three setters on the rail.
++    [[nodiscard]] gui::ModeRail& getModeRailForTest() { return modeRail_; }
+     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
+     [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
+     // The routing table's CONTENT rect -- a zero height here means the
+     // Viewport was never given a sized child (the 2026-08-24 invisible-table
+     // bug), so tests pin it to the panel's preferred height.
+     [[nodiscard]] juce::Rectangle<int> slotTableBoundsForTest() const { return slotPanel_.getBounds(); }
+ 
+     // Which routing slot the analyser and the notch table are showing.
+     //
+     // The app has always had one detector per slot; until the masthead grew a
+@@ -173,20 +179,28 @@ public:
+ 
+     // TEST ACCESSOR ONLY -- lets a headless test drive the routing table's
+     // row count exactly as the "+ Add slot" button does.
+     [[nodiscard]] gui::SlotPanel& getSlotPanelForTest() { return slotPanel_; }
+ 
+     // The two panels that read a published snapshot. Exposed for the same
+     // reason the accessors above are: a headless caller has no timer running,
+     // so it has to drive refreshFromSnapshot() itself. tools/snapshot.cpp uses
+     // these to render the console with real detector output in it.
+     [[nodiscard]] gui::SpectrumView&   getSpectrumViewForTest()   { return spectrumView_; }
++
++    // Lane M Task 9. The strip is a plain-data component: it is laid out and
++    // rendered by this console, but nothing in Task 9 CONNECTS it to a
++    // SoundcheckController -- that wiring (the confirm dialog, the poll, APPLY) is
++    // Task 10. Exposed now so a headless caller and tools/snapshot.cpp can put
++    // the console into a Running or a Results state and look at it, which is
++    // the only way a GUI change gets reported (CLAUDE.md, 2026-08-25).
++    [[nodiscard]] gui::SoundcheckPanel& getSoundcheckPanelForTest() { return soundcheckPanel_; }
+     [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
+ 
+     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
+     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
+     // slot; never null for [0, kMaxSlots).
+     NotchController* getNotchControllerForTest (int slot);
+ 
+     // TEST ACCESSOR ONLY -- the serialiser is otherwise reachable only through
+     // a live detector thread and a real log file. Public here, next to the
+     // controller accessor, because notchEventToVar itself is private (below)
+@@ -290,20 +304,24 @@ private:
+     // Old console components. Kept ALIVE but HIDDEN while the new console UI
+     // lands: other lanes' tests still reference their types, and their status/
+     // mode plumbing keeps running harmlessly off-display. Do not delete yet.
+     gui::StatusBar   statusBar_;
+     gui::ModeBar     modeBar_;
+ 
+     // New console components (Tasks 1-3). Declaration order matters:
+     // SpectrumView reads notchControllers_[0], DeviceDrawer re-parents
+     // devicePanel_ -- both are declared above, so they outlive these.
+     gui::SpectrumView spectrumView_;
++    // Lane M Task 9. An OVERLAY over the analyser, so it is declared AFTER the
++    // view it covers: JUCE paints children in the order they were added, and
++    // a strip that has to be opaque over a live trace must be added second.
++    gui::SoundcheckPanel soundcheckPanel_;
+     gui::ModeRail     modeRail_;
+     gui::StatusBadge  statusBadge_;      // masthead furniture (see the ctor)
+     gui::SlotTabs     slotTabs_;         // masthead furniture likewise
+     gui::DeviceDrawer deviceDrawer_;
+ 
+     // The 8-slot routing table (Task 7). Reads the engine in refresh();
+     // changes come back through onSlotConfigChanged, wired to the §6.5 cycle
+     // below. Hosted in a Viewport so all 8 rows scroll when the window is
+     // too short to show them.
+     gui::SlotPanel   slotPanel_ { engine_ };
+diff --git a/src/gui/ModeRail.cpp b/src/gui/ModeRail.cpp
+index 799cec0..c40b54b 100644
+--- a/src/gui/ModeRail.cpp
++++ b/src/gui/ModeRail.cpp
+@@ -1,14 +1,15 @@
+ #include "gui/ModeRail.h"
+ 
+ #include "gui/theme/AzTheme.h"
+ 
++#include <cmath>
+ #include <utility>
+ 
+ namespace gui
+ {
+ 
+ namespace
+ {
+ // Any non-zero id makes the three mode buttons mutually exclusive and keeps
+ // the pressed one ON when clicked again rather than toggling off.
+ constexpr int kModeRadioGroupId = 1;
+@@ -50,20 +51,59 @@ ModeRail::ModeRail (Orientation orientation)
+         mode.button->getProperties().set (hintProperty, mode.hint);
+         addAndMakeVisible (*mode.button);
+     }
+ 
+     // CLEAR ALL is destructive and is NOT drawn as a switch: an outline that
+     // only fills under the pointer. A filled red slab beside three filled mode
+     // slabs is a slab somebody eventually hits by accident, in the dark.
+     clearAllButton.getProperties().set ("azStyle", "danger");
+     addAndMakeVisible (clearAllButton);
+ 
++    // LANE M -- DO. A MOMENTARY control, deliberately outside the radio group:
++    // it does not latch, it does not un-light whichever mode the engine is
++    // actually in, and a second press while a run is in flight is impossible
++    // because setMeasureEnabled(false) takes it out of reach (F10).
++    //
++    // Its face is the ACCENT rather than a mode lamp, because it is the only
++    // control on this rail that MAKES SOUND COME OUT OF THE PA. The hint says
++    // so in the operator's own language: the legend names the control, the
++    // hint says what it does to the room.
++    measureButton.getProperties().set (hintProperty,
++        // "phat tin hieu" -- explicit UTF-8 bytes; see ModeRail.h on the
++        // measureButton declaration for why nothing here is a source literal.
++        juce::String::fromUTF8 ("ph\xc3\xa1t t\xc3\xadn hi\xe1\xbb\x87u"));
++    measureButton.setColour (juce::TextButton::buttonOnColourId, accent);
++    measureButton.onClick = [this] { if (onMeasure != nullptr) onMeasure(); };
++    addAndMakeVisible (measureButton);
++
++    // MEASURED, not estimated: the widest string this cell must print, set in
++    // the font the LookAndFeel will actually draw it in. A cell narrower than
++    // its legend does not fail a test -- it ships a truncated button
++    // (memory/stereo-lane-lessons-2026-09-05.md).
++    //
++    // Two strings, because the switch face carries both: the uppercase legend
++    // in the tracked silkscreen face, and the hint underneath in mono at
++    // hintFontSize. drawButtonText() reduces the face by `gap` on each side
++    // before fitting either, so that padding is added back here.
++    {
++        const auto legendW = stringWidth (legendFont (switchFontSize, true, trackingSwitch),
++                                          measureButton.getButtonText().toUpperCase());
++        const auto hintW   = stringWidth (monoFont (hintFontSize),
++                                          measureButton.getProperties()
++                                              .getWithDefault (hintProperty, juce::String())
++                                              .toString());
++
++        measureCellWidth_ = juce::jmax (touchTarget,
++                                        (int) std::ceil (juce::jmax (legendW, hintW))
++                                            + 2 * gap);
++    }
++
+     // The countdown is a NUMBER, so it is mono and it is big: it is read at a
+     // glance from across a room while the room is being swept. Its caption is
+     // painted above it (see paint()).
+     countdownLabel.setFont (monoFont (26.0f));
+     countdownLabel.setColour (juce::Label::textColourId, warn);
+     countdownLabel.setJustificationType (juce::Justification::centredLeft);
+     addAndMakeVisible (countdownLabel);
+ 
+     // The radio group deselects the previous mode through setToggleState with
+     // a notification, which would re-fire the OLD mode's callback -- so each
+@@ -125,20 +165,37 @@ ModeRail::~ModeRail()
+ void ModeRail::setDisplayedMode (const Mode mode)
+ {
+     // All three set EXPLICITLY rather than relying on the radio group to clear
+     // the others: the group's own clearing runs through the notification path
+     // this method exists to avoid.
+     soundcheckButton.setToggleState (mode == Mode::Soundcheck, juce::dontSendNotification);
+     autoButton      .setToggleState (mode == Mode::Auto,       juce::dontSendNotification);
+     bypassButton    .setToggleState (mode == Mode::Bypass,     juce::dontSendNotification);
+ }
+ 
++void ModeRail::setModeControlsEnabled (const bool enabled)
++{
++    // DO is NOT in this list. The two locks have different lifetimes: the mode
++    // switches and CLEAR ALL come back the moment the run ends, while DO stays
++    // dead through the whole Results window -- starting a second measurement
++    // on top of an unanswered proposal set would throw the proposals away.
++    soundcheckButton.setEnabled (enabled);
++    autoButton      .setEnabled (enabled);
++    bypassButton    .setEnabled (enabled);
++    clearAllButton  .setEnabled (enabled);
++}
++
++void ModeRail::setMeasureEnabled (const bool enabled)
++{
++    measureButton.setEnabled (enabled);
++}
++
+ void ModeRail::updateCountdown()
+ {
+     using namespace az::theme;
+ 
+     const double remainingMs = (getSoundcheckRemainingMs != nullptr)
+                                    ? getSoundcheckRemainingMs()
+                                    : 0.0;
+     const int seconds = remainingMs > 0.0
+                             ? (int) std::ceil (remainingMs / 1000.0)
+                             : 0;
+@@ -224,48 +281,59 @@ void ModeRail::resized()
+     {
+         auto item = juce::FlexItem (c).withWidth (w).withHeight (h);
+         return vertical ? item.withMargin ({ 0.0f, 0.0f, gapPx, 0.0f })
+                         : item.withMargin ({ 0.0f, gapPx, 0.0f, 0.0f });
+     };
+ 
+     fb.items.add (cell (soundcheckButton, cellW, cellH));
+     fb.items.add (cell (autoButton,       cellW, cellH));
+     fb.items.add (cell (bypassButton,     cellW, cellH));
+ 
++    // LANE M -- DO, immediately after the three modes and before the slack.
++    // Narrower than a mode switch on purpose: a two-character legend in a
++    // 168 px cell reads as a mode somebody forgot to name. In the vertical
++    // orientation every cell is railWidth, so it follows suit there.
++    fb.items.add (cell (measureButton,
++                        vertical ? cellW : (float) measureCellWidth_,
++                        cellH));
++
+     // The countdown takes the slack between the modes and CLEAR ALL, so the
+     // destructive control is always pinned at the far end of the transport --
+     // as far from the three switches a hand reaches for as the row allows.
+     // A BARE spacer, not the countdown label. The countdown is a two-part
+     // block -- a caption over a number -- and FlexBox lays out one component
+     // per item, so the block is positioned by hand out of the gap the spacer
+     // leaves behind. Doing it the other way (label in the flex, caption
+     // offset from the label's bounds) is what put the caption outside the
+     // rail entirely.
+     fb.items.add (juce::FlexItem().withFlex (1.0f)
+                       .withMargin (vertical ? juce::FlexItem::Margin { 0.0f, 0.0f, gapPx, 0.0f }
+                                             : juce::FlexItem::Margin { 0.0f, gapPx, 0.0f, 0.0f }));
+ 
+     fb.items.add (juce::FlexItem (clearAllButton)
+                       .withWidth ((float) (vertical ? railWidth : clearCellWidth))
+                       .withHeight (cellH));
+ 
+     fb.performLayout (getLocalBounds());
+ 
+     // The gap the spacer left, between the last mode switch and CLEAR ALL.
++    // The gap now opens after DO rather than after BYPASS: the spacer flex item
++    // sits between them, and reading it off the wrong neighbour would lay the
++    // countdown block straight over the new cell.
+     auto block = vertical
+-                     ? juce::Rectangle<int> (0, bypassButton.getBottom() + gap,
++                     ? juce::Rectangle<int> (0, measureButton.getBottom() + gap,
+                                              railWidth,
+                                              juce::jmax (0, clearAllButton.getY() - gap
+-                                                            - (bypassButton.getBottom() + gap)))
+-                     : juce::Rectangle<int> (bypassButton.getRight() + gap, 0,
++                                                            - (measureButton.getBottom() + gap)))
++                     : juce::Rectangle<int> (measureButton.getRight() + gap, 0,
+                                              juce::jmax (0, clearAllButton.getX() - gap
+-                                                            - (bypassButton.getRight() + gap)),
++                                                            - (measureButton.getRight() + gap)),
+                                              getHeight());
+ 
+     if (block.getWidth() <= 0 || block.getHeight() <= 0)
+     {
+         countdownCaptionArea_ = {};
+         countdownLabel.setBounds ({});
+         return;
+     }
+ 
+     // Vertically centred as a PAIR inside that gap, so the block sits on the
+diff --git a/src/gui/ModeRail.h b/src/gui/ModeRail.h
+index 654ebf9..898b24e 100644
+--- a/src/gui/ModeRail.h
++++ b/src/gui/ModeRail.h
+@@ -40,20 +40,28 @@ public:
+     std::function<void (std::function<void (bool)>)> confirmHook;
+ 
+     // Polled for the countdown readout (milliseconds); 0 / unset hides it.
+     std::function<double()> getSoundcheckRemainingMs;
+ 
+     std::function<void()> onSoundcheck;
+     std::function<void()> onAuto;
+     std::function<void()> onBypass;
+     std::function<void()> onClearAllConfirmed;
+ 
++    // Lane M (Q16). A SEPARATE request from onSoundcheck, because the two
++    // things are separate: SOUNDCHECK waits 15 s for the room to howl on its
++    // own, DO plays a swept signal into the PA for ~72 s. One button meaning
++    // both, on live-sound equipment, is a hazard -- so this is its own
++    // callback on its own momentary button, never a fourth mode in the radio
++    // group.
++    std::function<void()> onMeasure;
++
+     // Which switch is lit. Named here rather than taken as an AudioEngine::Mode
+     // so the rail keeps knowing nothing about the engine -- the same separation
+     // every other panel in this GUI holds to.
+     enum class Mode { Soundcheck, Auto, Bypass };
+ 
+     // Lights the switch for `mode` and clears the other two, WITHOUT invoking
+     // onSoundcheck/onAuto/onBypass.
+     //
+     // This exists because the engine's mode can change from somewhere other
+     // than these buttons -- it starts in Bypass, a preset can set it, and the
+@@ -66,42 +74,73 @@ public:
+     // Polls getSoundcheckRemainingMs now. The rail also runs a low-rate timer
+     // calling this; owners may call it directly too.
+     //
+     // The label holds the NUMBER only ("7 s"), and an em dash when nothing is
+     // counting. The word SOUNDCHECK is painted above it as a caption instead
+     // of being concatenated into the string: the number is read across a room
+     // and wants to be large, the caption only has to be findable, and one
+     // Label cannot be two sizes.
+     void updateCountdown();
+ 
++    // Lane M F10. While a measurement is in flight every control that could
++    // change what the filter chain is doing under it has to be out of reach:
++    // the run is measuring that chain. DO itself is NOT in here -- it has its
++    // own switch below, because it is also the control that has to stay
++    // unreachable through the Results window while SOUNDCHECK and friends come
++    // back.
++    void setModeControlsEnabled (bool enabled);
++
++    // Lane M. Off while a run or its Results window is open, and off whenever
++    // the rig cannot be measured at all (no device, no enabled slot).
++    void setMeasureEnabled (bool enabled);
++
+     void paint (juce::Graphics& g) override;
+     void resized() override;
+ 
+     // Public: they ARE this component's interface; wiring and headless tests
+     // drive them directly.
+     juce::TextButton soundcheckButton { "SOUNDCHECK" };
++    // Lane M. "DO" with a crossed D: U+0110 U+004F, written as EXPLICIT UTF-8
++    // BYTES rather than as a source literal. This build passes no /utf-8 to
++    // MSVC, so a literal would be decoded with whatever the machine's active
++    // codepage happens to be -- the mojibake that shipped the middle-dot bug
++    // (src/gui/DeviceViewModel.cpp:13 is the precedent).
++    //
++    // ONE argument. juce::TextButton(name, tooltip) changed the meaning of its
++    // second parameter in JUCE 9, so the two-argument form renders a button
++    // with NO TEXT while the build stays green
++    // (memory/juce9-api-traps-2026-08-25.md). Set a tooltip with setTooltip().
++    juce::TextButton measureButton    { juce::String::fromUTF8 ("\xc4\x90O") };
+     juce::TextButton autoButton       { "AUTO" };
+     juce::TextButton bypassButton     { "BYPASS" };
+     juce::TextButton clearAllButton   { "CLEAR ALL" };
+     juce::Label countdownLabel;
+ 
+ private:
+     void timerCallback() override;
+     void handleClearAllClicked();
+ 
+     Orientation orientation_;
+ 
+     // Where paint() draws the SOUNDCHECK caption. Computed in resized() and
+     // stored, rather than derived from countdownLabel's bounds inside paint():
+     // the label is positioned INSIDE this rect, so deriving one from the other
+     // in the opposite direction is circular and drifted by exactly the
+     // caption's height.
+     juce::Rectangle<int> countdownCaptionArea_;
+ 
++    // The DO cell's width, MEASURED in the constructor with the real legend
++    // font and the real hint -- not estimated. A cell narrower than its legend
++    // does not fail a test, it ships a truncated button
++    // (memory/stereo-lane-lessons-2026-09-05.md). Measured once, in the ctor,
++    // because neither string nor font ever changes: measuring in resized()
++    // would buy the same number on every window drag.
++    int measureCellWidth_ = 0;
++
+     // True while a confirmation is still unanswered: a second CLEAR ALL
+     // click must not stack another dialog (and so fire two confirms).
+     bool confirmPending_ = false;
+ 
+     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModeRail)
+ };
+ 
+ } // namespace gui
+diff --git a/src/gui/SoundcheckPanel.cpp b/src/gui/SoundcheckPanel.cpp
+new file mode 100644
+index 0000000..c348a23
+--- /dev/null
++++ b/src/gui/SoundcheckPanel.cpp
+@@ -0,0 +1,423 @@
++#include "gui/SoundcheckPanel.h"
++
++#include "gui/theme/AzTheme.h"
++
++#include <cmath>
++
++namespace gui
++{
++
++namespace
++{
++using namespace az::theme;
++
++// The stripe down the left edge that says "this band is over the analyser, not
++// part of it". Three pixels: a hairline reads as a border, anything wider reads
++// as a second panel.
++constexpr int kAccentBarWidth = 3;
++
++// The caption line above the countdown number, same figure ModeRail reserves
++// for its own caption (ModeRail.cpp kCountdownCaptionHeight).
++constexpr int kCaptionHeight = 16;
++
++// The countdown's own band. The number is the one thing in this strip read
++// from across a room.
++constexpr int kNumberHeight = 40;
++constexpr float kNumberFontSize = 34.0f;
++
++// Line height of one summary sentence, and the two type sizes it carries.
++constexpr int   kSummaryLineHeight = 19;
++constexpr float kHeadlineFontSize  = 15.5f;
++constexpr float kSentenceFontSize  = 13.0f;
++
++// EVERY string below is EXPLICIT UTF-8 BYTES. See the header.
++//
++// Where a byte escape is followed by a character that is itself a hex digit,
++// the literal is SPLIT -- C++ hex escapes are greedy, so "\xa3c" would be read
++// as one escape with three hex digits rather than as a byte and the letter c.
++// That is a silent, compiling, wrong-bytes bug, so the splits are deliberate.
++
++juce::String measuringCaption()        // "DANG DO"  (crossed D)
++{
++    return juce::String::fromUTF8 ("\xc4\x90" "ANG \xc4\x90O");
++}
++
++juce::String channelWord()             // "kenh"
++{
++    return juce::String::fromUTF8 ("k\xc3\xaanh");
++}
++
++juce::String middleDot()               // U+00B7
++{
++    return juce::String::fromUTF8 ("\xc2\xb7");
++}
++
++juce::String foundPrefix()             // "tim thay "
++{
++    return juce::String::fromUTF8 ("t\xc3\xacm th\xe1\xba\xa5y ");
++}
++
++juce::String hotSpotWord()             // " diem de hu"
++{
++    return juce::String::fromUTF8 (" \xc4\x91i\xe1\xbb\x83m d\xe1\xbb\x85 h\xc3\xba");
++}
++
++juce::String nothingFound()            // "khong tim thay diem de hu nao"
++{
++    return juce::String::fromUTF8 ("kh\xc3\xb4ng t\xc3\xacm th\xe1\xba\xa5y "
++                                   "\xc4\x91i\xe1\xbb\x83m d\xe1\xbb\x85 h\xc3\xba "
++                                   "n\xc3\xa0o");
++}
++
++juce::String unmeasuredSentence()      // " kenh khong do duoc"
++{
++    return juce::String::fromUTF8 (" " "k\xc3\xaanh kh\xc3\xb4ng \xc4\x91o "
++                                   "\xc4\x91\xc6\xb0\xe1\xbb\xa3" "c");
++}
++
++juce::String misroutedSentence()       // " kenh sai dinh tuyen"
++{
++    return juce::String::fromUTF8 (" k\xc3\xaanh sai \xc4\x91\xe1\xbb\x8bnh "
++                                   "tuy\xe1\xba\xbfn");
++}
++
++juce::String saturatedSentence()
++{
++    // " diem con vuot sau khi cat sau nhat -- chinh gain, ha tran, hoac doi vi tri mic"
++    return juce::String::fromUTF8 (" \xc4\x91i\xe1\xbb\x83m c\xc3\xb2n "
++                                   "v\xc6\xb0\xe1\xbb\xa3t sau khi c\xe1\xba\xaft "
++                                   "s\xc3\xa2u nh\xe1\xba\xa5t \xe2\x80\x94 "
++                                   "ch\xe1\xbb\x89nh gain, h\xe1\xba\xa1 "
++                                   "tr\xe1\xba\xa7n, ho\xe1\xba\xb7" "c "
++                                   "\xc4\x91\xe1\xbb\x95i v\xe1\xbb\x8b "
++                                   "tr\xc3\xad mic");
++}
++
++juce::String cannotProposeSentence()
++{
++    // " kenh thieu tran cat -- khong de xuat duoc"
++    return juce::String::fromUTF8 (" k\xc3\xaanh thi\xe1\xba\xbfu "
++                                   "tr\xe1\xba\xa7n c\xe1\xba\xaft \xe2\x80\x94 "
++                                   "kh\xc3\xb4ng \xc4\x91\xe1\xbb\x81 xu\xe1\xba\xa5t "
++                                   "\xc4\x91\xc6\xb0\xe1\xbb\xa3" "c");
++}
++
++// The width a legend needs in the font the LookAndFeel will actually draw it
++// in, plus the padding drawButtonText() reduces the face by on each side.
++int cellWidthFor (const juce::String& legend, const juce::Font& font, const int minimum)
++{
++    return juce::jmax (minimum,
++                       (int) std::ceil (stringWidth (font, legend.toUpperCase()))
++                           + 2 * gap);
++}
++} // namespace
++
++//==============================================================================
++
++SoundcheckPanel::SoundcheckPanel()
++{
++    using namespace az::theme;
++
++    // Opaque: this band sits ON TOP of the analyser, and a translucent strip
++    // over a live trace is a strip nobody can read the text on.
++    setOpaque (true);
++
++    // DUNG carries the app's established destructive/stop treatment -- the same
++    // outline-that-fills CLEAR ALL uses -- so "the control that stops this" has
++    // one look everywhere in the console rather than a new one per panel.
++    stopButton.getProperties().set ("azStyle", "danger");
++    stopButton.onClick = [this] { if (onStop != nullptr) onStop(); };
++    addChildComponent (stopButton);
++
++    // AP DUNG is the PRIMARY action, said with the accent rather than with a
++    // bigger slab: it is the sodium the whole console reserves for "this is the
++    // live thing". BO keeps the default dim legend, so the quiet answer looks
++    // quiet -- an operator who is not sure should find BO the easier press.
++    applyButton.setColour (juce::TextButton::textColourOffId, accent);
++    applyButton.onClick = [this] { if (onApply != nullptr) onApply(); };
++    addChildComponent (applyButton);
++
++    dismissButton.onClick = [this] { if (onDismiss != nullptr) onDismiss(); };
++    addChildComponent (dismissButton);
++
++    // The countdown is a NUMBER: mono, so the digits do not shift width while
++    // they count, and big, because it is read at a glance from across a room.
++    countdownLabel_.setFont (monoFont (kNumberFontSize, true));
++    countdownLabel_.setColour (juce::Label::textColourId, accent);
++    countdownLabel_.setJustificationType (juce::Justification::centredLeft);
++    addChildComponent (countdownLabel_);
++
++    // MEASURED with the font each button will really be drawn in, not
++    // estimated. stopButton is danger-styled, so its legend comes back at
++    // dangerFontSize; the other two are plain cells over 40 px tall and get the
++    // switch legend. Getting this wrong does not fail a test -- it ships a
++    // truncated button (memory/stereo-lane-lessons-2026-09-05.md).
++    const auto switchLegend = legendFont (switchFontSize, true, trackingSwitch);
++    const auto dangerLegend = legendFont (dangerFontSize, true, trackingSwitch);
++
++    // DUNG is a SAFETY control, so its floor is generous on purpose: it is the
++    // only way an operator stops a signal that is already going into the PA.
++    stopWidth_    = cellWidthFor (stopButton.getButtonText(),    dangerLegend, 180);
++    applyWidth_   = cellWidthFor (applyButton.getButtonText(),   switchLegend, 168);
++    dismissWidth_ = cellWidthFor (dismissButton.getButtonText(), switchLegend, 110);
++
++    setProgress (0, 0, 0.0);
++    rebuildSummary();
++    setMode (Mode::Hidden);
++}
++
++//==============================================================================
++
++void SoundcheckPanel::setMode (const Mode mode)
++{
++    mode_ = mode;
++
++    const bool running = mode == Mode::Running;
++    const bool results = mode == Mode::Results;
++
++    setVisible (mode != Mode::Hidden);
++
++    stopButton     .setVisible (running);
++    countdownLabel_.setVisible (running);
++    applyButton    .setVisible (results);
++    dismissButton  .setVisible (results);
++
++    // Esc can only arrive at a component that has focus, so the panel asks for
++    // it exactly while the run it can abort is in flight -- and gives it back
++    // afterwards, so the preset name field and the rest of the console are not
++    // fighting a hidden strip for keys (F14).
++    setWantsKeyboardFocus (running);
++    if (running)
++        grabKeyboardFocus();
++
++    resized();
++    repaint();
++
++    // Last, and after this panel is already consistent: the owner's resized()
++    // will set new bounds on it, and it must not be doing that against a
++    // half-applied mode.
++    if (onModeChanged != nullptr)
++        onModeChanged();
++}
++
++void SoundcheckPanel::setProgress (const int channelIndex, const int channelCount,
++                                   const double remainingMs)
++{
++    // 1-BASED for the human: "channel 0 of 4" is not a thing anybody counts.
++    // Clamped rather than trusted, so a stale index from a run that has already
++    // finished cannot print "channel 5/4".
++    const int shown = channelCount > 0
++                          ? juce::jlimit (1, channelCount, channelIndex + 1)
++                          : 0;
++
++    progressCaption_ = channelCount > 0
++                           ? measuringCaption() + " " + middleDot() + " " + channelWord()
++                                 + " " + juce::String (shown) + "/" + juce::String (channelCount)
++                           : measuringCaption();
++
++    // Whole seconds, rounded UP: a countdown that reads 0 while sound is still
++    // coming out of the PA is a countdown that has lied.
++    const int seconds = (int) std::ceil (juce::jmax (0.0, remainingMs) / 1000.0);
++    countdownLabel_.setText (juce::String (seconds) + " s", juce::dontSendNotification);
++
++    repaint();
++}
++
++void SoundcheckPanel::setResultsSummary (const int hotSpots, const int saturatedBins,
++                                         const int unmeasured, const int routingInvalid)
++{
++    Model model;
++    model.hotSpots       = hotSpots;
++    model.saturatedBins  = saturatedBins;
++    model.unmeasured     = unmeasured;
++    model.routingInvalid = routingInvalid;
++    setResults (model);
++}
++
++void SoundcheckPanel::setResults (const Model& model)
++{
++    model_ = model;
++    rebuildSummary();
++    resized();      // the line count changed, so the block it occupies did too
++    repaint();
++}
++
++//==============================================================================
++
++void SoundcheckPanel::addSummaryLine (const juce::String& text, const juce::Colour colour)
++{
++    if (summaryLineCount_ >= kMaxSummaryLines)
++        return;
++
++    summaryLines_[summaryLineCount_].text   = text;
++    summaryLines_[summaryLineCount_].colour = colour;
++    ++summaryLineCount_;
++}
++
++void SoundcheckPanel::rebuildSummary()
++{
++    using namespace az::theme;
++
++    summaryLineCount_ = 0;
++
++    // ceilingMissing / ladderMissing mean pick() had nothing to propose FROM --
++    // a fault in the run's inputs, not a verdict about the room. It is an
++    // ERROR, and it is what replaces the headline when there is nothing else to
++    // put there: "0 hot spots" on a run that judged nothing reads as an
++    // excellent PA (Task 3 I-3).
++    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0;
++
++    if (model_.hotSpots > 0)
++        addSummaryLine (foundPrefix() + juce::String (model_.hotSpots) + hotSpotWord(),
++                        accent);
++    else if (! hasError_ && model_.unmeasured == 0)
++        addSummaryLine (nothingFound(), dim);
++
++    if (model_.cannotPropose > 0)
++        addSummaryLine (juce::String (model_.cannotPropose) + cannotProposeSentence(),
++                        danger);
++
++    // A bin still over after the DEEPEST rung on the ladder cannot be fixed by
++    // another filter, so the sentence names what CAN fix it. A bare count would
++    // leave the operator reaching for the one control that will not help.
++    if (model_.saturatedBins > 0)
++        addSummaryLine (juce::String (model_.saturatedBins) + saturatedSentence(),
++                        warn);
++
++    // Its own sentence, never folded into the headline: "could not measure" is
++    // a VALID result (Q8) and asks the operator to look at the mic and the
++    // gain, which is not what a hot-spot count asks for.
++    if (model_.unmeasured > 0)
++        addSummaryLine (juce::String (model_.unmeasured) + unmeasuredSentence(), warn);
++
++    // And its own sentence again, separate from unmeasured (F26): a wrong patch
++    // is fixed at the desk, not in the room.
++    if (model_.routingInvalid > 0)
++        addSummaryLine (juce::String (model_.routingInvalid) + misroutedSentence(), danger);
++}
++
++juce::String SoundcheckPanel::summaryTextForTest() const
++{
++    juce::StringArray lines;
++    for (std::size_t i = 0; i < summaryLineCount_; ++i)
++        lines.add (summaryLines_[i].text);
++    return lines.joinIntoString ("\n");
++}
++
++//==============================================================================
++
++bool SoundcheckPanel::keyPressed (const juce::KeyPress& key)
++{
++    // Esc aborts a RUN and nothing else. In Results the two answers are AP DUNG
++    // and BO, and an Esc that silently picked one of them would be a guess
++    // about which -- one of those two throws a set of proposals away.
++    if (mode_ == Mode::Running && key == juce::KeyPress (juce::KeyPress::escapeKey))
++    {
++        if (onStop != nullptr)
++            onStop();
++        return true;
++    }
++
++    // Everything else is REFUSED, so the key still reaches whatever else in the
++    // console wants it.
++    return false;
++}
++
++//==============================================================================
++
++void SoundcheckPanel::paint (juce::Graphics& g)
++{
++    using namespace az::theme;
++
++    g.fillAll (panel);
++
++    // The stripe: sodium while a run is live, dim once it is only a report.
++    if (! accentBar_.isEmpty())
++    {
++        g.setColour (mode_ == Mode::Running ? accent : dim);
++        g.fillRect (accentBar_);
++    }
++
++    g.setColour (border);
++    g.drawRect (getLocalBounds(), 1);
++
++    if (mode_ == Mode::Running)
++    {
++        if (! captionArea_.isEmpty())
++            drawCaption (g, progressCaption_, captionArea_, dim);
++
++        return;
++    }
++
++    if (summaryArea_.isEmpty())
++        return;
++
++    // The summary is PAINTED rather than pushed into a Label because its lines
++    // carry DIFFERENT colours -- an error is not the same red-orange as a
++    // warning, and one Label cannot be two colours. Geometry comes from
++    // resized(); nothing here computes a layout.
++    auto row = summaryArea_.withHeight (kSummaryLineHeight);
++    for (std::size_t i = 0; i < summaryLineCount_; ++i)
++    {
++        if (row.getBottom() > summaryArea_.getBottom())
++            break;
++
++        // The first line is THE answer and is set one step up from the
++        // qualifications under it, for the same reason the countdown is bigger
++        // than its caption: one is read across the room, the rest are read
++        // once somebody has walked over.
++        g.setFont (baseFont (i == 0 ? kHeadlineFontSize : kSentenceFontSize));
++        g.setColour (summaryLines_[i].colour);
++        g.drawText (summaryLines_[i].text, row, juce::Justification::centredLeft, false);
++        row.translate (0, kSummaryLineHeight);
++    }
++}
++
++void SoundcheckPanel::resized()
++{
++    using namespace az::theme;
++
++    auto area = getLocalBounds().reduced (gap, spacing);
++
++    if (area.getWidth() <= 0 || area.getHeight() <= 0)
++    {
++        captionArea_ = summaryArea_ = accentBar_ = {};
++        countdownLabel_.setBounds ({});
++        return;
++    }
++
++    accentBar_ = area.removeFromLeft (kAccentBarWidth);
++    area.removeFromLeft (gap);
++
++    const int buttonH = juce::jmin (area.getHeight(), buttonCellHeight);
++
++    // The controls are carved off the RIGHT before anything else claims space,
++    // so the text block can never run underneath them -- a results line half
++    // covered by AP DUNG is a line nobody reads before pressing it.
++    auto placeRight = [&area, buttonH] (juce::Component& c, int width)
++    {
++        const auto cell = area.removeFromRight (juce::jmin (width, area.getWidth()));
++        c.setBounds (cell.withSizeKeepingCentre (cell.getWidth(), buttonH));
++        area.removeFromRight (gap);
++    };
++
++    if (mode_ == Mode::Running)
++    {
++        placeRight (stopButton, stopWidth_);
++
++        captionArea_ = area.removeFromTop (kCaptionHeight);
++        countdownLabel_.setBounds (area.removeFromTop (juce::jmin (area.getHeight(),
++                                                                   kNumberHeight)));
++        summaryArea_ = {};
++        return;
++    }
++
++    placeRight (dismissButton, dismissWidth_);
++    placeRight (applyButton,   applyWidth_);
++
++    captionArea_ = {};
++    countdownLabel_.setBounds ({});
++    summaryArea_  = area;
++}
++
++} // namespace gui
+diff --git a/src/gui/SoundcheckPanel.h b/src/gui/SoundcheckPanel.h
+new file mode 100644
+index 0000000..c2d00dc
+--- /dev/null
++++ b/src/gui/SoundcheckPanel.h
+@@ -0,0 +1,191 @@
++// SoundcheckPanel -- lane M Task 9. The interactive chrome of an active
++// soundcheck: the progress overlay with its big DUNG, and the results strip
++// with AP DUNG / BO.
++//
++// WHY THIS IS NOT PART OF SpectrumView
++// ====================================
++// SpectrumView.h is already ~500 lines carrying its own toolbar, a ring-risk
++// chip and a notch age ledger. Two modal-ish states with three buttons and a
++// five-line summary would make a big file bigger for no reuse. SpectrumView
++// gains only the DATA overlay (the margin curve and its markers); everything a
++// finger touches lives here.
++//
++// THIS COMPONENT IS DRIVEN BY PLAIN DATA, NEVER BY A CONTROLLER
++// =============================================================
++// It holds no pointer to SoundcheckController and calls nothing on one. The
++// owner (Task 10) pushes a Mode, a progress triple and a Model; the panel
++// formats and draws. That is what lets every state in here be rendered
++// headless -- by a test, and by tools/snapshot.cpp -- without a device, a
++// thread or a run.
++//
++// It also means the DIALOG STATES ARE NOT SoundcheckController::State. That
++// machine never enters Preflight / Confirm / Arm (SoundcheckController.h:124-129)
++// -- those three live entirely on the message thread, so a GUI that switched on
++// getState() would show nothing at all while the operator was reading the
++// confirmation. Mode below is the GUI's own vocabulary, deliberately smaller.
++//
++// THE COUNTDOWN IS LANE M'S OWN (F12)
++// ===================================
++// setProgress takes a remainingMs the owner reads from
++// SoundcheckController::getRemainingMsInRun(). It must NEVER be fed
++// NotchController::getSoundcheckRemainingMs(), which reports the PASSIVE 15 s
++// window and measures it in liveMs_ -- frozen while the taps are suspended, so
++// it would show a number that stands still or reads 0 for the whole run.
++//
++// DUNG IS THE OFFICIAL STOP; Esc IS BEST EFFORT (F14)
++// ===================================================
++// keyPressed only sees a key when this component has focus, and the preset name
++// field takes keys too (MainComponent.cpp:255-290). So the button is the path
++// that is always there, and Esc is the shortcut for whoever happens to have
++// focus here. Esc is refused outside Running: once the run is over the only two
++// answers are AP DUNG and BO, and an Esc that silently meant one of them would
++// be a guess about which.
++//
++// EVERY VIETNAMESE STRING IS EXPLICIT UTF-8 BYTES. This build passes no /utf-8
++// to MSVC and only one file in the tree carries a BOM, so a source literal is
++// decoded with whatever the machine's active codepage happens to be. That is
++// the mojibake middle dot all over again; src/gui/DeviceViewModel.cpp:13 is the
++// precedent being followed.
++
++#pragma once
++
++#include <juce_gui_basics/juce_gui_basics.h>
++
++#include <array>
++#include <cstddef>
++#include <functional>
++
++namespace gui
++{
++
++class SoundcheckPanel : public juce::Component
++{
++public:
++    SoundcheckPanel();
++    ~SoundcheckPanel() override = default;
++
++    // The strip's height. Fixed rather than derived: it is an OVERLAY over the
++    // analyser, and a band whose height moved with the window would cover a
++    // different amount of the plot at every size.
++    static constexpr int kPanelHeight = 104;
++
++    enum class Mode { Hidden, Running, Results };
++
++    void setMode (Mode mode);
++    [[nodiscard]] Mode getMode() const { return mode_; }
++
++    // channelIndex is 0-BASED (it comes straight from
++    // SoundcheckController::getCurrentTargetIndex()); the caption prints it
++    // 1-based, because "channel 0 of 4" is not a thing an operator counts.
++    void setProgress (int channelIndex, int channelCount, double remainingMs);
++
++    // What the results strip says. Every field is a COUNT of a different
++    // thing, and they are deliberately not summable:
++    //
++    //   hotSpots       candidates the run would place if AP DUNG is pressed
++    //   saturatedBins  bins still over after the DEEPEST cut on the ladder --
++    //                  a filter cannot fix these, the gain structure has to
++    //   unmeasured     OutputResult::measured == false. "Could not measure",
++    //                  which is a VALID result (Q8) and NOT "the room is clean"
++    //   routingInvalid OutputResult::routingInvalid. A DIFFERENT sentence from
++    //                  unmeasured: it asks the operator to fix the patch, not
++    //                  to look at the room (F26)
++    //   cannotPropose  OutputResult::ceilingMissing || ladderMissing. pick()
++    //                  had nothing to propose FROM. Reported as an ERROR and
++    //                  never as an empty proposal list, because an empty list
++    //                  reads as an excellent room (Task 3 I-3)
++    struct Model
++    {
++        int hotSpots       = 0;
++        int saturatedBins  = 0;
++        int unmeasured     = 0;
++        int routingInvalid = 0;
++        int cannotPropose  = 0;
++    };
++
++    void setResults (const Model& model);
++
++    // The four-field convenience the brief names. Kept because it is the
++    // common case; it fills a Model and forwards.
++    void setResultsSummary (int hotSpots, int saturatedBins,
++                            int unmeasured, int routingInvalid);
++
++    std::function<void()> onStop, onApply, onDismiss;
++
++    // Fired by setMode AFTER the new mode is in force. The owner re-lays its
++    // own console out: this strip is not an overlay ON the analyser, it TAKES
++    // a band off the bottom of it. Laid over the plot instead, it buried the
++    // frequency axis and the overlay's own marked-bin rake -- which no test
++    // noticed and one render did (CLAUDE.md, 2026-08-25).
++    std::function<void()> onModeChanged;
++
++    bool keyPressed (const juce::KeyPress& key) override;
++    void paint (juce::Graphics& g) override;
++    void resized() override;
++
++    // Public: they ARE this component's interface, exactly as ModeRail's are.
++    // Headless tests and the snapshot tool drive them directly, and onClick()
++    // is invoked rather than triggerClick() -- the latter POSTS a message and
++    // this suite pumps no loop (memory/data-loop-lessons-2026-09-05.md).
++    //
++    // ONE argument each. juce::TextButton(name, tooltip) changed the meaning of
++    // its second parameter in JUCE 9, so the two-argument form renders a button
++    // with NO TEXT while the build stays green
++    // (memory/juce9-api-traps-2026-08-25.md).
++    juce::TextButton stopButton    { juce::String::fromUTF8 ("D\xe1\xbb\xaaNG") };
++    juce::TextButton applyButton   { juce::String::fromUTF8 ("\xc3\x81P D\xe1\xbb\xa4NG") };
++    juce::TextButton dismissButton { juce::String::fromUTF8 ("B\xe1\xbb\x8e") };
++
++    // TEST ACCESSORS ONLY.
++    [[nodiscard]] juce::String summaryTextForTest() const;
++    [[nodiscard]] juce::String progressTextForTest() const  { return progressCaption_; }
++    [[nodiscard]] juce::String countdownTextForTest() const { return countdownLabel_.getText(); }
++    [[nodiscard]] juce::Rectangle<int> summaryBoundsForTest() const { return summaryArea_; }
++    [[nodiscard]] bool hasErrorForTest() const { return hasError_; }
++
++private:
++    // At most: the headline, the cannot-propose error, the saturation warning,
++    // the unmeasured sentence and the routing sentence. A fixed array rather
++    // than a vector so nothing in the summary path can grow.
++    static constexpr std::size_t kMaxSummaryLines = 5;
++
++    struct SummaryLine
++    {
++        juce::String text;
++        juce::Colour colour;
++    };
++
++    void rebuildSummary();
++    void addSummaryLine (const juce::String& text, juce::Colour colour);
++
++    Mode mode_ = Mode::Hidden;
++
++    Model model_ {};
++    bool  hasError_ = false;
++
++    std::array<SummaryLine, kMaxSummaryLines> summaryLines_ {};
++    std::size_t summaryLineCount_ = 0;
++
++    // The caption and the number are TWO things, not one string. The number is
++    // read across a room and wants to be large; the caption only has to be
++    // findable, and one juce::Label cannot be two sizes -- the same reasoning
++    // already written at ModeRail.h:66-72. So the caption is PAINTED (it is
++    // re-drawn per frame anyway) and only the number gets a Label.
++    juce::String progressCaption_;
++    juce::Label  countdownLabel_;
++
++    // Computed in resized(), read by paint(). Layout never happens inside
++    // paint(): the same discipline SpectrumView is held to.
++    juce::Rectangle<int> captionArea_;
++    juce::Rectangle<int> summaryArea_;
++    juce::Rectangle<int> accentBar_;
++
++    // MEASURED in the constructor with the font the LookAndFeel will actually
++    // use, not estimated -- a button narrower than its legend does not fail a
++    // test, it ships truncated (memory/stereo-lane-lessons-2026-09-05.md).
++    int stopWidth_ = 0, applyWidth_ = 0, dismissWidth_ = 0;
++
++    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SoundcheckPanel)
++};
++
++} // namespace gui
+diff --git a/src/gui/SpectrumView.cpp b/src/gui/SpectrumView.cpp
+index 2601f79..05e77c8 100644
+--- a/src/gui/SpectrumView.cpp
++++ b/src/gui/SpectrumView.cpp
+@@ -32,20 +32,41 @@ constexpr float kWedgeMaxLength    = 46.0f;  // -24 dB, the deepest the DSP allo
+ 
+ constexpr float kFlagHeight        = 13.0f;
+ constexpr float kFlagPad           = 5.0f;
+ constexpr float kFlagDigitWidth    = 6.0f;   // one mono digit at 10 px
+ constexpr float kStemAlphaSettled  = 0.22f;  // an old stem is nearly a whisper
+ constexpr float kStemAlphaFresh    = 0.60f;
+ constexpr float kGlowRadius        = 16.0f;
+ constexpr float kGlowAlpha         = 0.40f;
+ constexpr float kGlowFloor         = 0.05f;  // below this heat, no blur at all
+ 
++// LANE M -- the soundcheck overlay.
++//
++// The markers are a RAKE ALONG THE FLOOR of the plot, not full-height stems.
++// During the console rebuild a render caught markers burying the trace they
++// were annotating (memory/ui-rebuild-sodium-rack-2026-08-25.md); a marked bin
++// here is a frequency, and a short tick on the axis says a frequency without
++// covering anything above it. The margin curve itself already peaks there.
++constexpr float kOverlayTickHeight  = 12.0f;
++constexpr float kOverlayTickWidth   = 2.5f;
++constexpr float kOverlayCurveWidth  = 1.6f;
++
++// The low-confidence veil. It is drawn in the ENGRAVED-HAIRLINE grey and
++// LIGHTENS the band, which is the opposite of what "dimmed" suggests and is
++// the only thing that can work here: the plot ground is already near-black, so
++// a darker wash over it is invisible. Round 1 used `shade` at 0.20 and then at
++// 0.42 and the render showed nothing at all either time -- `shade` is two
++// values darker than `background`, so the band simply was not there. A band
++// nobody can see is a caveat nobody reads, and the operator is left with a
++// measurement that stops dead at 6 kHz with no explanation.
++constexpr float kLowConfidenceAlpha = 0.22f;
++
+ // Non-zero ids make each segmented group mutually exclusive.
+ constexpr int kBandRadioGroupId    = 11;
+ constexpr int kAverageRadioGroupId = 12;
+ 
+ // The signal's area fill. Sodium, and deliberately faint: it gives the trace
+ // body without turning the lower half of the plot into a solid block.
+ constexpr float kFillTopAlpha      = 0.24f;
+ constexpr float kFillMidAlpha      = 0.07f;
+ 
+ // A marker sits ON the trace, and now that the trace is sodium too, hue alone
+@@ -109,20 +130,24 @@ SpectrumView::SpectrumView (const NotchController& controller)
+     bandEdgeLowHz_.reserve   ((std::size_t) 31);
+     bandEdgeHighHz_.reserve  ((std::size_t) 31);
+ 
+     // Sized for a dashed vertical stem over the tallest plot this view is
+     // ever asked to draw (a 2000px-tall 4K plot, plus a 25% margin) -- see
+     // kDashedStemReserveFloats's derivation comment in the header. One
+     // preallocateSpace here keeps the paint path's first-frame growth off
+     // the steady-state no-allocation guarantee.
+     dashedStemPath_.preallocateSpace (kDashedStemReserveFloats);
+ 
++    // LANE M: one element per bin, same reasoning and the same units -- see
++    // kSoundcheckOverlayReserveFloats in the header.
++    soundcheckOverlayPath_.preallocateSpace (kSoundcheckOverlayReserveFloats);
++
+     // Toolbar, in the study's order: the display groups sit LEFT next to the
+     // section caption, ring risk sits far right. Nothing here reaches the
+     // audio engine, the detector or the notch chain.
+     bandGroup_.onSelected = [this] (int index)
+     {
+         bandMode_ = static_cast<rta::BandMode> (index);
+         applyBandMode();
+         repaint();   // stale data keeps showing until the next frame lands
+     };
+ 
+@@ -875,20 +900,192 @@ float SpectrumView::yForDb (const float db, const juce::Rectangle<float>& plot)
+     return plot.getY() + t * plot.getHeight();
+ }
+ 
+ double SpectrumView::ageMsOf (const NotchController::SnapshotNotch& notch,
+                               const double nowMs) const
+ {
+     const auto it = firstSeenMs_.find (notchKey (notch.channel, notch.index, notch.frequency));
+     return it != firstSeenMs_.end() ? juce::jmax (0.0, nowMs - it->second) : 0.0;
+ }
+ 
++void SpectrumView::setSoundcheckOverlay (const float* marginDb, const bool* marked,
++                                         const bool* trusted, const int numBins,
++                                         const double sampleRate)
++{
++    // A null array or a rate of zero cannot be drawn on any axis, so it is
++    // REFUSED rather than drawn as a flat line at the bottom of the plot -- a
++    // flat line at maximum margin reads as an excellent room.
++    if (marginDb == nullptr || marked == nullptr || trusted == nullptr
++        || numBins <= 0 || sampleRate <= 0.0)
++    {
++        clearSoundcheckOverlay();
++        return;
++    }
++
++    const int n = juce::jmin (numBins, Detector::kNumBins);
++
++    soundcheckMarkedCount_ = 0;
++    for (int k = 0; k < n; ++k)
++    {
++        soundcheckMarginDb_[(std::size_t) k] = marginDb[k];
++        soundcheckMarked_  [(std::size_t) k] = marked[k];
++        soundcheckTrusted_ [(std::size_t) k] = trusted[k];
++
++        if (marked[k])
++            ++soundcheckMarkedCount_;
++    }
++
++    soundcheckBins_       = n;
++    soundcheckSampleRate_ = sampleRate;
++    hasSoundcheckOverlay_ = true;
++    repaint();
++}
++
++void SpectrumView::clearSoundcheckOverlay()
++{
++    hasSoundcheckOverlay_  = false;
++    soundcheckBins_        = 0;
++    soundcheckMarkedCount_ = 0;
++    soundcheckSampleRate_  = 0.0;
++    repaint();
++}
++
++void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
++                                           const juce::Rectangle<float>& plot)
++{
++    using namespace az::theme;
++
++    if (! hasSoundcheckOverlay_ || soundcheckBins_ <= 0 || soundcheckSampleRate_ <= 0.0)
++        return;
++
++    //----------------------------------------------------------------------
++    // 1. The band LoopGainEstimator does not trust. Dimmed and LABELLED, not
++    //    hidden: a measurement that quietly stops at 6 kHz looks like a room
++    //    with no top end.
++    const float lowConfX = xForHz (kLowConfidenceAboveHz, plot);
++    if (lowConfX < plot.getRight() && highHz_ > kLowConfidenceAboveHz)
++    {
++        const auto band = plot.withLeft (juce::jmax (plot.getX(), lowConfX));
++
++        g.setColour (border.withAlpha (kLowConfidenceAlpha));
++        g.fillRect (band);
++        g.setColour (border);
++        g.drawLine (band.getX(), band.getY(), band.getX(), band.getBottom(), 1.0f);
++
++        // "do tin cay thap" -- EXPLICIT UTF-8 BYTES. No /utf-8 reaches MSVC in
++        // this build, so a source literal would be decoded with the machine's
++        // active codepage; that is the mojibake middle dot again
++        // (src/gui/DeviceViewModel.cpp:13 is the precedent).
++        g.setColour (dim);
++        g.setFont (monoFont (segmentFontSize));
++        g.drawText (juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x99 tin c\xe1\xba\xady "
++                                            "th\xe1\xba\xa5p"),
++                    band.toNearestInt().reduced (spacing, spacing),
++                    juce::Justification::topRight, false);
++    }
++
++    //----------------------------------------------------------------------
++    // 2. The margin curve. ONE colour straight from the palette, never an
++    //    interpolation between the sodium accent and the ice: the midpoints of
++    //    that blend come out an olive mud that reads as a fault
++    //    (memory/ui-rebuild-sodium-rack-2026-08-25.md).
++    //
++    //    `text` -- the silkscreen white -- and deliberately NOT `peak`, which
++    //    already means "the peak-hold ceiling of this same trace" on this same
++    //    plot, nor `cooling`/`settled`, which are two stops of the notch age
++    //    ramp. A second meaning bolted onto any of those is exactly how `ice`
++    //    would have degraded into decoration. `text` is the app's plain
++    //    foreground and claims nothing, which is what a measured line wants.
++    //
++    //    Only TRUSTED bins are drawn, and an untrusted run BREAKS the line
++    //    rather than being interpolated across. A curve drawn through bins the
++    //    estimator refused to believe is a line the operator has no reason to
++    //    believe either -- and the gap says so without a legend.
++    soundcheckOverlayPath_.clear();
++
++    const auto binHz = [this] (int k)
++    {
++        return (float) ((double) k * soundcheckSampleRate_ / (double) Detector::kFftSize);
++    };
++
++    const float marginSpan = kMarginSafeDb - kMarginAtRiskDb;
++    bool penDown = false;
++
++    for (int k = 0; k < soundcheckBins_; ++k)
++    {
++        if (! soundcheckTrusted_[(std::size_t) k])
++        {
++            penDown = false;
++            continue;
++        }
++
++        const float hz = binHz (k);
++        if (hz < lowHz_ || hz > highHz_)
++        {
++            penDown = false;
++            continue;
++        }
++
++        const float t = juce::jlimit (0.0f, 1.0f,
++                                      (soundcheckMarginDb_[(std::size_t) k] - kMarginAtRiskDb)
++                                          / marginSpan);
++        const float x = xForHz (hz, plot);
++        const float y = plot.getY() + t * plot.getHeight();
++
++        if (! penDown)
++        {
++            soundcheckOverlayPath_.startNewSubPath (x, y);
++            penDown = true;
++        }
++        else
++        {
++            soundcheckOverlayPath_.lineTo (x, y);
++        }
++    }
++
++    if (! soundcheckOverlayPath_.isEmpty())
++    {
++        // A dark keyline under the curve, the same trick the notch stems use,
++        // so it stays readable where it crosses the lit area fill.
++        g.setColour (background.withAlpha (0.8f));
++        g.strokePath (soundcheckOverlayPath_,
++                      juce::PathStrokeType (kOverlayCurveWidth + kKeylineWidth));
++
++        g.setColour (text);
++        g.strokePath (soundcheckOverlayPath_, juce::PathStrokeType (kOverlayCurveWidth));
++    }
++
++    //----------------------------------------------------------------------
++    // 3. The marked bins, as a rake along the FLOOR. Short ticks on the axis,
++    //    never stems through the plot: markers burying the trace is a defect a
++    //    render caught once already, and it passed the whole suite.
++    //
++    //    `danger` rather than the sodium accent: these are the frequencies the
++    //    run says will ring, and the accent already means "the live signal" on
++    //    this plot. Numbers appear on hover, not here -- a row of printed
++    //    frequencies along the axis is a smear nobody reads.
++    g.setColour (danger);
++    for (int k = 0; k < soundcheckBins_; ++k)
++    {
++        if (! soundcheckMarked_[(std::size_t) k])
++            continue;
++
++        const float hz = binHz (k);
++        if (hz < lowHz_ || hz > highHz_)
++            continue;
++
++        const float x = std::round (xForHz (hz, plot));
++        g.fillRect (x - kOverlayTickWidth * 0.5f, plot.getBottom() - kOverlayTickHeight,
++                    kOverlayTickWidth, kOverlayTickHeight);
++    }
++}
++
+ void SpectrumView::paint (juce::Graphics& g)
+ {
+     using namespace az::theme;
+ 
+     g.fillAll (background);
+ 
+     auto bounds            = getLocalBounds().toFloat();
+     const float labelH     = tickFont_.getHeight() + 2.0f * (float) spacing;
+     const float leftGutter = (float) kLeftGutter;
+ 
+@@ -993,20 +1190,32 @@ void SpectrumView::paint (juce::Graphics& g)
+         g.drawText (yTickLabels_[i],
+                     0, (int) (y - 8.0f), (int) leftGutter - spacing, 16,
+                     juce::Justification::centredRight);
+     }
+ 
+     //--------------------------------------------------------------------
+     // Empty state (spec section 5): grid only, no trace, no markers. Copy
+     // says what the app is doing, not what is absent.
+     if (snapshot_.sequence == 0)
+     {
++        // LANE M: the run suspends the taps for its whole 72 s, so a soundcheck
++        // started on a window that has not published a frame yet would show an
++        // empty grid for the entire measurement. The overlay is lane M's OWN
++        // data and does not depend on a published snapshot, so it is drawn
++        // here too -- and it replaces the "waiting for signal" copy, which
++        // would be describing a tap that is suspended on purpose.
++        if (hasSoundcheckOverlay_)
++        {
++            paintSoundcheckOverlay (g, plot);
++            return;
++        }
++
+         // Same reasoning as the notch table's empty state: a label, not prose.
+         g.setColour (dim);
+         g.setFont (legendFont (captionFontSize, true, trackingCaption));
+         g.drawText (noSignalLabel_.toUpperCase(), plot, juce::Justification::centred);
+         return;
+     }
+ 
+     //--------------------------------------------------------------------
+     // The trace is MONOCHROME on purpose. Colour in this plot means one thing
+     // -- a notch, on the hot-to-ice ramp -- so the signal itself is drawn in
+@@ -1078,20 +1287,27 @@ void SpectrumView::paint (juce::Graphics& g)
+         for (std::size_t i = 1; i < n; ++i)
+         {
+             const auto a = peakPoints_[i - 1];
+             const auto b = peakPoints_[i];
+             g.drawLine (plot.getX() + a.x * plotW, plot.getY() + a.y * plotH,
+                         plot.getX() + b.x * plotW, plot.getY() + b.y * plotH,
+                         1.0f);
+         }
+     }
+ 
++    //--------------------------------------------------------------------
++    // LANE M's overlay: after the spectrum polyline so the trace reads as the
++    // ground truth underneath it, and BEFORE the notch markers so a stem the
++    // detector placed is never hidden by a curve describing a measurement.
++    if (hasSoundcheckOverlay_)
++        paintSoundcheckOverlay (g, plot);
++
+     //--------------------------------------------------------------------
+     // THE MARKERS. Per notch: a stem, a depth wedge, and a numbered flag, all
+     // on the age ramp. Paths are members and cleared rather than rebuilt, so
+     // this allocates nothing in the steady state.
+     const double now = juce::Time::getMillisecondCounterHiRes();
+     const std::uint32_t notchCount = std::min<std::uint32_t> (
+         snapshot_.notchCount, (std::uint32_t) snapshot_.notches.size());
+ 
+     glowPath_.clear();
+     float hottest = 0.0f;
+diff --git a/src/gui/SpectrumView.h b/src/gui/SpectrumView.h
+index 345c762..7ec6961 100644
+--- a/src/gui/SpectrumView.h
++++ b/src/gui/SpectrumView.h
+@@ -37,20 +37,21 @@
+ // Module headers rather than <JuceHeader.h>: same reason as ModeBar.h --
+ // JuceHeader.h only exists for juce_add_* targets, so including it here would
+ // break compilation into the plain add_executable test target.
+ #include <juce_gui_basics/juce_gui_basics.h>
+ #include <melatonin_blur/melatonin_blur.h>
+ 
+ #include "gui/SegmentedControl.h"
+ 
+ #include "app/NotchController.h"
+ #include "dsp/Detector.h"
++#include "dsp/LoopGainEstimator.h"
+ #include "gui/RtaProcessing.h"
+ 
+ #include <array>
+ #include <cstddef>
+ #include <functional>
+ #include <cstdint>
+ #include <map>
+ #include <vector>
+ 
+ namespace gui
+@@ -195,20 +196,89 @@ public:
+     }
+ 
+     // Which lane's magnitudes rebuildGeometry() reads: 0 = L, 1 = R. Clamped
+     // into [0, 1] and forced back to 0 whenever the controller turns out to
+     // be mono (refreshFromSnapshot()). Selecting a lane rebuilds the polyline
+     // immediately rather than waiting for the next timer tick, so the click
+     // reads as instant.
+     void setDisplayLane (int lane);
+     [[nodiscard]] int getDisplayLane() const { return displayLane_; }
+ 
++    //==========================================================================
++    // LANE M -- the active-soundcheck overlay (Task 9).
++    //
++    // A DATA overlay only: the margin curve, a marker per marked bin, and the
++    // dimmed band above kLowConfidenceAboveHz. Everything a finger touches is
++    // in gui::SoundcheckPanel.
++    //
++    // IT IS FED LANE M'S OWN ARRAYS, NEVER copySnapshot(). The detector's
++    // publish happens inside NotchController's drain loop
++    // (NotchController.cpp:568-582 builds the list, :617-650 publishes), and
++    // lane M runs with the taps SUSPENDED -- so nothing is drained and
++    // copySnapshot() returns the SAME frozen frame for the whole 72 s run.
++    // An overlay sourced from it would be showing the room as it was before
++    // the measurement started (spec section 4.1).
++    //
++    // The three arrays are COPIED, not borrowed: SoundcheckController's results
++    // vector lives behind its stateMutex_ and is rebuilt per run, so holding
++    // pointers into it would outlive what they point at.
++    //
++    // marginDb is SoundcheckController::OutputResult::marginDb (= -H_dB, so
++    // LOW means close to feeding back); marked and trusted are the per-bin
++    // arrays of the same struct. numBins is clamped to Detector::kNumBins.
++    void setSoundcheckOverlay (const float* marginDb, const bool* marked, const bool* trusted,
++                               int numBins, double sampleRate);
++    void clearSoundcheckOverlay();
++    [[nodiscard]] bool hasSoundcheckOverlay() const { return hasSoundcheckOverlay_; }
++
++    // Above this, LoopGainEstimator does not trust its own numbers, so the band
++    // is drawn dimmed and labelled rather than left looking like a measurement.
++    // ALIASED, not re-stated: a second 6000.0 here would be free to drift away
++    // from the one the estimator actually gates on.
++    static constexpr float kLowConfidenceAboveHz = (float) LoopGainEstimator::kTrustedHighHz;
++
++    // The margin window the curve is drawn against, in dB of headroom before
++    // the loop rings. It is NOT the plot's own -90..0 dB magnitude axis -- that
++    // axis measures a different quantity -- so the curve carries its own scale
++    // and the two are read as two things.
++    //
++    // Oriented the same way round as the trace, which is the whole reason for
++    // these two numbers rather than the obvious ones: LOW margin draws HIGH on
++    // the plot, so the curve rises exactly where the trace does and an operator
++    // reads "up = about to howl" once for both.
++    static constexpr float kMarginAtRiskDb = 0.0f;    // at the plot ceiling
++    static constexpr float kMarginSafeDb   = 24.0f;   // at the plot floor
++
++    // soundcheckOverlayPath_'s ctor reservation. Same units and the same
++    // caveat as kDashedStemReserveFloats above: Path::preallocateSpace()
++    // reserves COORDS, not elements, at roughly three floats per lineTo or
++    // startNewSubPath. The worst case here is one element per bin --
++    // Detector::kNumBins = 1025, every one of them trusted and in range -- so
++    // 1025 * 3 = 3075, rounded up for the subpath breaks an untrusted run
++    // inserts and for a clean constant.
++    static constexpr int kSoundcheckOverlayReserveFloats = 3300;
++
++    // TEST ACCESSORS ONLY -- the no-allocation-in-paint guarantee, proved for
++    // the overlay path exactly as dashedStemPathElementCountForTest proves it
++    // for the dashed stem, and carrying the same honest caveat: juce::Path
++    // exposes no capacity getter, so the element count walked with
++    // Path::Iterator is the closest available proxy for "did not grow".
++    [[nodiscard]] std::size_t soundcheckOverlayPathElementCountForTest() const
++    {
++        std::size_t count = 0;
++        juce::Path::Iterator it (soundcheckOverlayPath_);
++        while (it.next())
++            ++count;
++        return count;
++    }
++    [[nodiscard]] int soundcheckMarkedCountForTest() const { return soundcheckMarkedCount_; }
++
+     //==========================================================================
+     // RING RISK -- how close the room is to ringing right now.
+     //
+     // The number comes from the DETECTOR, never from anything derived here:
+     // NotchController::SnapshotBuffer publishes ringRiskScore / ringRiskValid
+     // / ringRiskThreshold (task R1). A GUI-side peakiness of its own would put
+     // a SECOND, different number on screen next to the one the filters
+     // actually follow, and the operator would have no way to tell which.
+     //
+     // This class turns that number into a state (riskForScore) and keeps the
+@@ -394,20 +464,27 @@ private:
+     // it reads the operator's chosen range, so every consumer -- the trace,
+     // the octave bars, the notch stems -- follows the axis automatically.
+     [[nodiscard]] float xForHz (float hz, const juce::Rectangle<float>& plot) const;
+     [[nodiscard]] float hzForX (float x, const juce::Rectangle<float>& plot) const;
+ 
+     static float yForDb (float db, const juce::Rectangle<float>& plot);
+ 
+     // The axis gutter under the plot, where the range is dragged.
+     [[nodiscard]] juce::Rectangle<int> axisGutter() const;
+ 
++    // LANE M. Drawn from TWO places in paint() -- once in the empty-state
++    // branch and once after the trace -- because the overlay has to survive a
++    // console that has never published a frame: the taps are suspended for the
++    // whole run, so a soundcheck started on a freshly-opened window would
++    // otherwise show 72 s of empty grid.
++    void paintSoundcheckOverlay (juce::Graphics& g, const juce::Rectangle<float>& plot);
++
+     // Ticks that actually fall inside the current window, chosen from a fixed
+     // 1-2-5 ladder so they stay on round numbers as the range changes.
+     void rebuildTicks();
+ 
+     void applyRangeFromEditors();
+     void pushRangeToEditors();
+ 
+     float lowHz_  = kDefaultLowHz;
+     float highHz_ = kDefaultHighHz;
+ 
+@@ -439,20 +516,36 @@ private:
+     juce::Path markerPath_;
+     juce::Path tracePath_;
+     juce::Path fillPath_;
+     // Lane-1 (R) notch stems are dashed instead of solid, so a stereo trace
+     // reads which channel a marker belongs to without a second legend.
+     // createDashedStroke() writes into a DESTINATION path rather than
+     // allocating its own -- reusing this member keeps that write inside
+     // memory this object already owns, same as markerPath_ above.
+     juce::Path dashedStemPath_;
+ 
++    // LANE M. One reused path for the margin curve, following markerPath_'s
++    // pattern: Path::clear() resets the element count without releasing
++    // storage, so a rebuild writes into memory this object already owns.
++    juce::Path soundcheckOverlayPath_;
++
++    // Lane M's own copy of the run's per-bin arrays. Fixed std::arrays, so
++    // taking a result costs no allocation and paint() reads members rather
++    // than chasing a pointer into somebody else's vector.
++    std::array<float, (std::size_t) Detector::kNumBins> soundcheckMarginDb_ {};
++    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckMarked_ {};
++    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckTrusted_ {};
++    bool   hasSoundcheckOverlay_ = false;
++    int    soundcheckBins_       = 0;
++    int    soundcheckMarkedCount_ = 0;
++    double soundcheckSampleRate_ = 0.0;
++
+     // Tuning-toolbar state (display-only: changing these never restarts the
+     // audio engine, detector or notch chain).
+     rta::BandMode bandMode_       { rta::BandMode::Line };
+     rta::AverageMode avgMode_     { rta::AverageMode::Off };
+     bool peakHold_                = false;
+ 
+     // Per-frame display buffers, reserved once in the constructor. newDb_ is
+     // this frame's raw dB; displayDb_ is what gets drawn (raw or EMA-smoothed
+     // towards it); peakDb_ is the decaying peak-hold trace; displayLin_
+     // mirrors displayDb_ back to linear so rta::bandLevelsDb can power-sum
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index 150b0ab..6ffcc53 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -1789,10 +1789,207 @@ TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
+     app.stopSessionLog();
+     const auto events = parsedLines (file);
+ 
+     const auto* load = firstEvent (events, "preset_load");
+     ASSERT_NE (load, nullptr);
+     EXPECT_FALSE ((bool) (*load)["ceiling_applied"]);
+     EXPECT_TRUE (load->getDynamicObject()->hasProperty ("ceiling_applied"));
+     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
+     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
+ }
++
++//==============================================================================
++// Lane M Task 9 -- gui::SoundcheckPanel.
++//
++// Vietnamese labels are compared against EXPLICIT UTF-8 BYTES written out here
++// independently of the ones in src/gui/SoundcheckPanel.cpp. Sharing a constant
++// between the assertion and the thing asserted would make these tests
++// incapable of failing; and a raw source literal would depend on MSVC's
++// source-charset guess, which is what produced the mojibake middle dot
++// (src/gui/DeviceViewModel.cpp:13 is the byte-escape precedent).
++
++TEST (SoundcheckPanel, StopIsTheOfficialPathAndEscIsTheSecondOne)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 120);
++    panel.resized();
++
++    int stops = 0;
++    panel.onStop = [&stops] { ++stops; };
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Running);
++    EXPECT_TRUE (panel.getWantsKeyboardFocus());
++
++    panel.stopButton.onClick();
++    EXPECT_EQ (stops, 1);
++
++    // Esc is BEST EFFORT and second, not first: a key press only reaches the
++    // component that currently has focus and the preset name field also takes
++    // keys (MainComponent.cpp:255-290). F14.
++    EXPECT_TRUE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
++    EXPECT_EQ (stops, 2);
++
++    // Anything the panel does not own must be REFUSED so it still reaches
++    // whatever else wants it.
++    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::returnKey)));
++    EXPECT_EQ (stops, 2);
++
++    // And Esc must not be a stop button in disguise once the run is over: in
++    // Results the only two answers are AP DUNG and BO.
++    panel.setMode (gui::SoundcheckPanel::Mode::Results);
++    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
++    EXPECT_EQ (stops, 2);
++}
++
++TEST (SoundcheckPanel, ModesShowTheRightControlsWithRealLabels)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 120);
++
++    // RED IF the three buttons carry no text (the JUCE 9 two-argument
++    // TextButton(name, tooltip) trap), or if AP DUNG is shown mid-run.
++    EXPECT_EQ (panel.stopButton.getButtonText(),
++               juce::String::fromUTF8 ("D\xe1\xbb\xaaNG"));                 // DUNG
++    EXPECT_EQ (panel.applyButton.getButtonText(),
++               juce::String::fromUTF8 ("\xc3\x81P D\xe1\xbb\xa4NG"));       // AP DUNG
++    EXPECT_EQ (panel.dismissButton.getButtonText(),
++               juce::String::fromUTF8 ("B\xe1\xbb\x8e"));                   // BO
++
++    EXPECT_FALSE (panel.stopButton.getButtonText().isEmpty());
++    EXPECT_FALSE (panel.applyButton.getButtonText().isEmpty());
++    EXPECT_FALSE (panel.dismissButton.getButtonText().isEmpty());
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Running);
++    panel.resized();
++    EXPECT_TRUE  (panel.isVisible());
++    EXPECT_TRUE  (panel.stopButton.isVisible());
++    EXPECT_FALSE (panel.applyButton.isVisible());
++    EXPECT_FALSE (panel.dismissButton.isVisible());
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Results);
++    panel.resized();
++    EXPECT_FALSE (panel.stopButton.isVisible());
++    EXPECT_TRUE  (panel.applyButton.isVisible());
++    EXPECT_TRUE  (panel.dismissButton.isVisible());
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
++    EXPECT_FALSE (panel.isVisible());
++    EXPECT_FALSE (panel.getWantsKeyboardFocus());
++}
++
++TEST (SoundcheckPanel, EveryVisibleControlIsInsideThePanelAndNoneOverlap)
++{
++    // RED IF a button is laid off the panel's own bounds -- invisible in every
++    // test and obvious in a render (memory/gui-console-lessons-2026-08-24.md:
++    // headless setSize() has no peer, so resized() is driven by hand).
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, gui::SoundcheckPanel::kPanelHeight);
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Running);
++    panel.resized();
++    EXPECT_TRUE (panel.getLocalBounds().contains (panel.stopButton.getBounds()));
++    EXPECT_GT   (panel.stopButton.getWidth(), 0);
++    EXPECT_GE   (panel.stopButton.getHeight(), az::theme::touchTarget);
++
++    panel.setMode (gui::SoundcheckPanel::Mode::Results);
++    panel.resized();
++    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.applyButton.getBounds()));
++    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.dismissButton.getBounds()));
++    EXPECT_FALSE (panel.applyButton.getBounds().intersects (panel.dismissButton.getBounds()));
++
++    // The summary must not run under the two buttons: a results line that is
++    // half-covered by AP DUNG is a line nobody reads before pressing it.
++    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.applyButton.getBounds()));
++    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.dismissButton.getBounds()));
++
++    // Both legends must FIT, measured with the real font rather than guessed
++    // (memory/stereo-lane-lessons-2026-09-05.md).
++    const auto font = az::theme::legendFont (az::theme::switchFontSize, true,
++                                             az::theme::trackingSwitch);
++    EXPECT_GE ((float) panel.applyButton.getWidth(),
++               az::theme::stringWidth (font, panel.applyButton.getButtonText().toUpperCase())
++                   + 2.0f * (float) az::theme::gap);
++}
++
++TEST (SoundcheckPanel, UnmeasuredAndMisroutedAreSeparateSentences)
++{
++    // RED IF an unmeasured channel or a mis-routed one is folded into the
++    // headline count. They are DIFFERENT sentences for the operator: "could
++    // not measure" and "the routing is wrong" ask for different actions (F26).
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 120);
++    panel.setMode (gui::SoundcheckPanel::Mode::Results);
++    panel.setResultsSummary (/*hotSpots*/ 3, /*saturated*/ 1,
++                             /*unmeasured*/ 2, /*routingInvalid*/ 1);
++    panel.resized();
++
++    const juce::String text = panel.summaryTextForTest();
++    EXPECT_TRUE (text.contains ("3"));
++    EXPECT_TRUE (text.containsIgnoreCase (
++        juce::String::fromUTF8 ("kh\xc3\xb4ng \xc4\x91o \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c")));  // khong do duoc
++    EXPECT_TRUE (text.containsIgnoreCase (
++        juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x8bnh tuy\xe1\xba\xbfn")));                  // dinh tuyen
++
++    // The two faults are separate LINES, not one run-on sentence.
++    EXPECT_GE (juce::StringArray::fromLines (text).size(), 4);
++
++    // And the saturated warning names the action to take, not just the fact.
++    EXPECT_TRUE (text.containsIgnoreCase (juce::String ("gain")));
++}
++
++TEST (SoundcheckPanel, AMissingCeilingIsAnErrorAndNeverReadsAsACleanRoom)
++{
++    // SoundcheckController::OutputResult::ceilingMissing / ladderMissing mean
++    // "pick() had nothing to propose FROM" -- a fault in the setup, not a
++    // verdict about the room. Reporting that as zero hot spots would tell an
++    // operator their PA is clean when nothing was actually judged.
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 120);
++
++    gui::SoundcheckPanel::Model model;
++    model.hotSpots      = 0;
++    model.cannotPropose = 2;
++    panel.setResults (model);
++
++    const juce::String text = panel.summaryTextForTest();
++    EXPECT_TRUE (panel.hasErrorForTest());
++    EXPECT_TRUE (text.containsIgnoreCase (
++        juce::String::fromUTF8 ("thi\xe1\xba\xbfu tr\xe1\xba\xa7n c\xe1\xba\xaft")));   // thieu tran cat
++
++    // A genuinely clean room says so, and is NOT an error.
++    const gui::SoundcheckPanel::Model clean;
++    panel.setResults (clean);
++    EXPECT_FALSE (panel.hasErrorForTest());
++}
++
++TEST (SoundcheckPanel, ProgressShowsLaneMsOwnCountdownAndTheChannelItIsOn)
++{
++    // F12: the number is lane M's OWN remaining-ms, never
++    // getSoundcheckRemainingMs() -- that one measures the PASSIVE 15 s window
++    // in liveMs_, which is frozen while the taps are suspended and would show
++    // a number that stands still. The panel is fed a double and formats it;
++    // nothing here reaches for the controller.
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 120);
++    panel.setMode (gui::SoundcheckPanel::Mode::Running);
++    panel.setProgress (/*channelIndex*/ 1, /*channelCount*/ 4, /*remainingMs*/ 47200.0);
++    panel.resized();
++
++    // Caption and number are two different sizes, so they are two different
++    // things -- one Label cannot be two sizes (ModeRail.h:66-72).
++    const auto caption = panel.progressTextForTest();
++    EXPECT_TRUE (caption.contains ("2/4"));                     // 1-based for a human
++    EXPECT_TRUE (caption.containsIgnoreCase (
++        juce::String::fromUTF8 ("k\xc3\xaanh")));               // kenh
++    EXPECT_FALSE (caption.contains ("48"));                     // the number is NOT in here
++
++    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("48 s"));   // ceil(47.2)
++
++    panel.setProgress (3, 4, 0.0);
++    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("0 s"));
++}
+diff --git a/tests/test_moderail.cpp b/tests/test_moderail.cpp
+index 41c1a6b..30e242b 100644
+--- a/tests/test_moderail.cpp
++++ b/tests/test_moderail.cpp
+@@ -9,20 +9,21 @@
+ // (juce_Button.cpp:359-362) and would need a pumped message loop this suite
+ // deliberately never runs. The CLEAR ALL guard is exercised through an
+ // injected fake confirm hook (R-3) -- the default native box is never opened
+ // here, so driving its non-toggling button means invoking its onClick
+ // directly, which is where the whole guard lives.
+ 
+ #include <gtest/gtest.h>
+ 
+ #include "gui/ModeRail.h"
+ #include "gui/StatusBadge.h"
++#include "gui/theme/AzTheme.h"
+ 
+ #include <vector>
+ 
+ //==============================================================================
+ 
+ TEST (ModeRail, ClickingAutoFiresOnAutoExactlyOnce)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+ 
+     gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
+@@ -237,10 +238,133 @@ TEST (ModeRail, SetDisplayedModeNeverRequestsTheModeItIsShowing)
+     rail.onBypass     = [&bypasses]    { ++bypasses; };
+ 
+     rail.setDisplayedMode (gui::ModeRail::Mode::Bypass);
+     rail.setDisplayedMode (gui::ModeRail::Mode::Auto);
+     rail.setDisplayedMode (gui::ModeRail::Mode::Soundcheck);
+ 
+     EXPECT_EQ (soundchecks, 0);
+     EXPECT_EQ (autos,       0);
+     EXPECT_EQ (bypasses,    0);
+ }
++
++//==============================================================================
++// Lane M Task 9 -- the DO button.
++//
++// EVERY Vietnamese literal below is written as EXPLICIT UTF-8 BYTES, never as
++// a source-file literal. This build passes no /utf-8 to MSVC and only ONE of
++// the files involved carries a BOM, so a raw "\u0110O" in a source file is
++// decoded with whatever the machine's active codepage happens to be. That is
++// exactly the mojibake that shipped the middle-dot bug
++// (memory/ui-rebuild-sodium-rack-2026-08-25.md); src/gui/DeviceViewModel.cpp:13
++// is the precedent this follows.
++//
++// The bytes here are written out INDEPENDENTLY of the ones in src/. If the two
++// were a shared helper these tests could not fail on a wrong label, which is
++// the whole point of them.
++
++TEST (ModeRail, MeasureButtonHasItsLabel)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
++
++    // "DO" with a crossed D: U+0110 U+004F.
++    EXPECT_EQ (rail.measureButton.getButtonText(), juce::String::fromUTF8 ("\xc4\x90O"));
++    EXPECT_NE (rail.measureButton.getButtonText(), rail.soundcheckButton.getButtonText());
++
++    // RED IF the button is constructed as TextButton(name, tooltip). In JUCE 9
++    // the SECOND argument of that two-argument constructor is NOT the tooltip,
++    // so the button renders with NO TEXT AT ALL -- and the build stays green.
++    // This is memory/juce9-api-traps-2026-08-25.md, and it shipped once
++    // already. The explicit emptiness check says so out loud: the EXPECT_EQ
++    // above already covers it, but a future edit that loosens the comparison
++    // must still trip over this one.
++    EXPECT_FALSE (rail.measureButton.getButtonText().isEmpty());
++}
++
++TEST (ModeRail, MeasureIsItsOwnButtonAndItsOwnCallback)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
++
++    int measures = 0, soundchecks = 0;
++    rail.onMeasure    = [&measures]    { ++measures; };
++    rail.onSoundcheck = [&soundchecks] { ++soundchecks; };
++
++    // onClick(), not triggerClick(): triggerClick is async and the headless
++    // suite pumps no message loop (memory/data-loop-lessons-2026-09-05.md).
++    rail.measureButton.onClick();
++    EXPECT_EQ (measures, 1);
++    EXPECT_EQ (soundchecks, 0);
++
++    // Q16: DO is a MOMENTARY action, not a fourth latching mode. If it ever
++    // joined the radio group, pressing it would silently un-light whichever
++    // mode the engine is actually in -- the lamp would lie about the engine.
++    EXPECT_FALSE (rail.measureButton.getClickingTogglesState());
++    EXPECT_EQ    (rail.measureButton.getRadioGroupId(), 0);
++}
++
++TEST (ModeRail, MeasureButtonIsInsideTheRail)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
++    rail.setSize (140, 620);
++    rail.resized();   // JUCE headless setSize() has no peer, so resized() must be
++                      // called by hand (memory/gui-console-lessons-2026-08-24.md)
++
++    EXPECT_TRUE (rail.getLocalBounds().contains (rail.measureButton.getBounds()));
++    EXPECT_GT (rail.measureButton.getWidth(), 0);
++    EXPECT_GT (rail.measureButton.getHeight(), 0);
++    EXPECT_FALSE (rail.measureButton.getBounds().intersects (rail.soundcheckButton.getBounds()));
++    EXPECT_FALSE (rail.measureButton.getBounds().intersects (rail.clearAllButton.getBounds()));
++}
++
++TEST (ModeRail, MeasureButtonIsWideEnoughForItsOwnLegendInTheHorizontalRail)
++{
++    // RED IF the cell is sized by eyeballing instead of by measuring. The rail
++    // is horizontal in the only shipping layout, and a cell narrower than its
++    // legend does not fail a test -- it ships a truncated button
++    // (memory/stereo-lane-lessons-2026-09-05.md: measure with the REAL font
++    // and the widest string the formatter can print).
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    az::theme::AzLookAndFeel lnf;
++    juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
++
++    gui::ModeRail rail (gui::ModeRail::Orientation::Horizontal);
++    rail.setSize (1360, az::theme::transportHeight);
++    rail.resized();
++
++    const auto legend = rail.measureButton.getButtonText().toUpperCase();
++    const auto font   = az::theme::legendFont (az::theme::switchFontSize, true,
++                                               az::theme::trackingSwitch);
++
++    EXPECT_GE ((float) rail.measureButton.getWidth(),
++               az::theme::stringWidth (font, legend) + 2.0f * (float) az::theme::gap);
++
++    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
++}
++
++TEST (ModeRail, LockingTheRailDisablesEveryControlThatCouldDisturbARun)
++{
++    // F10: while a measurement is in flight, SOUNDCHECK / AUTO / BYPASS and
++    // CLEAR ALL must not be reachable -- each of them changes what the filter
++    // chain is doing underneath a run that is measuring it. DO itself is
++    // locked through its own setter, because it is also the control that must
++    // stay lit-but-dead in Results.
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::ModeRail rail (gui::ModeRail::Orientation::Horizontal);
++
++    rail.setModeControlsEnabled (false);
++    EXPECT_FALSE (rail.soundcheckButton.isEnabled());
++    EXPECT_FALSE (rail.autoButton.isEnabled());
++    EXPECT_FALSE (rail.bypassButton.isEnabled());
++    EXPECT_FALSE (rail.clearAllButton.isEnabled());
++    EXPECT_TRUE  (rail.measureButton.isEnabled());   // its own switch, not this one
++
++    rail.setMeasureEnabled (false);
++    EXPECT_FALSE (rail.measureButton.isEnabled());
++
++    rail.setModeControlsEnabled (true);
++    rail.setMeasureEnabled (true);
++    EXPECT_TRUE (rail.soundcheckButton.isEnabled());
++    EXPECT_TRUE (rail.clearAllButton.isEnabled());
++    EXPECT_TRUE (rail.measureButton.isEnabled());
++}
+diff --git a/tests/test_spectrumview.cpp b/tests/test_spectrumview.cpp
+index b184d6d..5709595 100644
+--- a/tests/test_spectrumview.cpp
++++ b/tests/test_spectrumview.cpp
+@@ -823,10 +823,179 @@ TEST (SpectrumView, RingRiskDisplayedFieldDoesNotSurviveASlotSwitch)
+     // it in -- the same way timerCallback() would have, without needing a
+     // live provider or a timer tick.
+     view.ringRiskForTest() = Risk::Critical;
+     ASSERT_EQ (view.getRingRisk(), Risk::Critical);
+ 
+     view.setController (slotB.controller);
+ 
+     // The very next paint() must not still show slot A's alarm.
+     EXPECT_EQ (view.getRingRisk(), Risk::Unavailable);
+ }
++
++//==============================================================================
++// Lane M Task 9 -- the soundcheck overlay.
++
++// RED IF: the overlay is fed from copySnapshot(). The publish sits inside the
++// drain loop (NotchController.cpp:617-650), so with the taps suspended the
++// snapshot is FROZEN for the whole run and the overlay would show the frame
++// from before the run started. Section 4.1.
++TEST (SpectrumView, SoundcheckOverlayCarriesLaneMData)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    LockFreeRingBuffer<float> tap { 8192 };
++    LockFreeRingBuffer<NotchCommand> cmds { 128 };
++    JuceMonotonicClock clock;
++    NotchController controller { tap, cmds, clock };
++
++    gui::SpectrumView view { controller };
++    view.setSize (900, 420);
++    view.resized();
++
++    EXPECT_FALSE (view.hasSoundcheckOverlay());
++
++    std::vector<float> margin (Detector::kNumBins, 12.0f);
++    std::vector<char>  marked (Detector::kNumBins, 0);
++    std::vector<char>  trusted (Detector::kNumBins, 1);
++    marked[300] = 1;
++
++    view.setSoundcheckOverlay (margin.data(),
++                               reinterpret_cast<const bool*> (marked.data()),
++                               reinterpret_cast<const bool*> (trusted.data()),
++                               Detector::kNumBins, 48000.0);
++    EXPECT_TRUE (view.hasSoundcheckOverlay());
++
++    // The view holds lane M's OWN numbers, not a re-read of the controller:
++    // nothing was ever pumped into this controller, so its snapshot is empty
++    // and an overlay sourced from it would have nothing in it at all.
++    EXPECT_EQ (view.snapshotNotchCountForTest(), 0u);
++    EXPECT_EQ (view.soundcheckMarkedCountForTest(), 1);
++
++    view.clearSoundcheckOverlay();
++    EXPECT_FALSE (view.hasSoundcheckOverlay());
++    EXPECT_EQ (view.soundcheckMarkedCountForTest(), 0);
++}
++
++// RED IF: the overlay is hidden behind the "no signal" empty state. The taps
++// are SUSPENDED for the whole run (section 4.1), so on a console that has not
++// published a frame yet the snapshot sequence is still 0 -- and the operator
++// would be shown an empty grid for 72 s while the measurement they started
++// ran invisibly.
++TEST (SpectrumView, SoundcheckOverlayDrawsEvenWithNoPublishedSpectrum)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    LockFreeRingBuffer<float> tap { 8192 };
++    LockFreeRingBuffer<NotchCommand> cmds { 128 };
++    JuceMonotonicClock clock;
++    NotchController controller { tap, cmds, clock };
++
++    gui::SpectrumView view { controller };
++    view.setSize (900, 420);
++    view.resized();
++
++    ASSERT_EQ (view.getSequenceSeen(), 0u);   // the empty state
++
++    std::vector<float> margin (Detector::kNumBins, 6.0f);
++    std::vector<char>  marked (Detector::kNumBins, 0);
++    std::vector<char>  trusted (Detector::kNumBins, 1);
++    marked[200] = 1;
++    marked[410] = 1;
++
++    view.setSoundcheckOverlay (margin.data(),
++                               reinterpret_cast<const bool*> (marked.data()),
++                               reinterpret_cast<const bool*> (trusted.data()),
++                               Detector::kNumBins, 48000.0);
++
++    juce::Image img { juce::Image::ARGB, 900, 420, true };
++    { juce::Graphics g { img }; view.paint (g); }
++
++    // Something was actually stroked: the curve reached the path rather than
++    // the paint returning at the empty-state guard.
++    EXPECT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
++}
++
++// RED IF: an untrusted bin is drawn as if it had been measured. LoopGainEstimator
++// only trusts bins inside [kSweepLowHz, kTrustedHighHz] that also cleared the SNR
++// gates; a curve drawn straight through the rest is a line the operator has no
++// reason to believe.
++TEST (SpectrumView, UntrustedBinsBreakTheCurveRatherThanBeingDrawnThrough)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    LockFreeRingBuffer<float> tap { 8192 };
++    LockFreeRingBuffer<NotchCommand> cmds { 128 };
++    JuceMonotonicClock clock;
++    NotchController controller { tap, cmds, clock };
++
++    gui::SpectrumView view { controller };
++    view.setSize (900, 420);
++    view.resized();
++
++    std::vector<float> margin (Detector::kNumBins, 9.0f);
++    std::vector<char>  marked (Detector::kNumBins, 0);
++    std::vector<char>  allTrusted (Detector::kNumBins, 1);
++
++    view.setSoundcheckOverlay (margin.data(),
++                               reinterpret_cast<const bool*> (marked.data()),
++                               reinterpret_cast<const bool*> (allTrusted.data()),
++                               Detector::kNumBins, 48000.0);
++
++    juce::Image img { juce::Image::ARGB, 900, 420, true };
++    { juce::Graphics g { img }; view.paint (g); }
++    const auto elementsWhenAllTrusted = view.soundcheckOverlayPathElementCountForTest();
++
++    // Half the band never cleared the SNR gate. Those bins must not appear.
++    std::vector<char> halfTrusted (Detector::kNumBins, 1);
++    for (std::size_t k = (std::size_t) Detector::kNumBins / 2; k < halfTrusted.size(); ++k)
++        halfTrusted[k] = 0;
++
++    view.setSoundcheckOverlay (margin.data(),
++                               reinterpret_cast<const bool*> (marked.data()),
++                               reinterpret_cast<const bool*> (halfTrusted.data()),
++                               Detector::kNumBins, 48000.0);
++
++    { juce::Graphics g { img }; view.paint (g); }
++    EXPECT_LT (view.soundcheckOverlayPathElementCountForTest(), elementsWhenAllTrusted);
++    EXPECT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
++}
++
++// RED IF: paint() starts allocating when the overlay is on. The whole view is
++// built on "paint allocates nothing" (SpectrumView.h:10, :119-138) and the
++// overlay must not be the exception.
++TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    LockFreeRingBuffer<float> tap { 8192 };
++    LockFreeRingBuffer<NotchCommand> cmds { 128 };
++    JuceMonotonicClock clock;
++    NotchController controller { tap, cmds, clock };
++
++    gui::SpectrumView view { controller };
++    view.setSize (900, 420);
++    view.resized();
++
++    std::vector<float> margin (Detector::kNumBins, 3.0f);
++    std::vector<char>  marked (Detector::kNumBins, 0);
++    std::vector<char>  trusted (Detector::kNumBins, 1);
++    for (int k = 100; k < 700; k += 37) marked[(std::size_t) k] = 1;
++
++    view.setSoundcheckOverlay (margin.data(),
++                               reinterpret_cast<const bool*> (marked.data()),
++                               reinterpret_cast<const bool*> (trusted.data()),
++                               Detector::kNumBins, 48000.0);
++
++    juce::Image img { juce::Image::ARGB, 900, 420, true };
++    { juce::Graphics g { img }; view.paint (g); }
++
++    const auto elementsAfterFirst = view.soundcheckOverlayPathElementCountForTest();
++    const auto pointCapacity      = view.spectrumPointCapacityForTest();
++
++    // The path must never have GROWN past what the ctor reserved -- the only
++    // proxy juce::Path allows for "did not reallocate" (see the accessor's own
++    // caveat, and dashedStemPathElementCountForTest above it).
++    EXPECT_GT (elementsAfterFirst, (std::size_t) 0);
++    EXPECT_LE (elementsAfterFirst * 3,
++               (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
++
++    for (int i = 0; i < 100; ++i) { juce::Graphics g { img }; view.paint (g); }
++
++    EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsAfterFirst);
++    EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
++}
+diff --git a/tools/snapshot.cpp b/tools/snapshot.cpp
+index ad9f4aa..66ab923 100644
+--- a/tools/snapshot.cpp
++++ b/tools/snapshot.cpp
+@@ -17,20 +17,31 @@
+ // What it renders
+ // ===============
+ //   console-idle.png   the state the app opens in -- no signal, no notches
+ //   console-live.png   a real published spectrum with three notches placed at
+ //                      staggered ages, so the sodium-to-ice ramp that the whole
+ //                      design is built around is actually visible -- two of
+ //                      them on lane 0 (L) and one on lane 1 (R), so the LANE
+ //                      column, the dashed R stem and the L/R picker all render
+ //                      with something real behind them, plus a RING RISK chip
+ //                      STAGED to Critical (see the note where it is set)
++//   console-soundcheck-running.png
++//                      lane M mid-measurement: the DO cell locked, the strip
++//                      showing which output channel is being swept and how
++//                      long is left, and the big DUNG that stops it
++//   console-soundcheck-results.png
++//                      the same run finished -- the margin curve and its
++//                      marked bins over the analyser, the low-confidence band
++//                      above 6 kHz dimmed, and the results strip carrying a
++//                      hot-spot count plus the three sentences that are NOT a
++//                      hot-spot count (saturated / could not measure / bad
++//                      routing)
+ //   console-preset-music.png
+ //                      console-live's frame with the notch defaults set to
+ //                      presets/Music.json's OFF-LIST pair (Q 25, depth -10 dB),
+ //                      so the DEPTH and Q cells render the fba2626 behaviour:
+ //                      a value that sits on no combo rung is shown as text
+ //                      rather than leaving the combo blank
+ //
+ // The live shot uses the REAL path: audio is written into BOTH of slot 0's tap
+ // rings and the controller's runOnce() publishes genuine two-lane snapshots,
+ // exactly as tests/test_spectrumview.cpp does. Nothing here hand-writes a
+@@ -41,20 +52,21 @@
+ // Usage:
+ //   HandsFreeSnapshot <out-dir> [width] [height] [--fast]
+ //
+ // --fast skips the real-time waits that age the notches. The ramp needs wall
+ // time to be visible (a notch cools over ~22 s), so the default run is slow on
+ // purpose; --fast is for checking layout, where age does not matter.
+ 
+ #include <juce_gui_basics/juce_gui_basics.h>
+ 
+ #include "app/MainComponent.h"
++#include "app/SoundcheckController.h"
+ #include "dsp/Detector.h"
+ 
+ #include <cmath>
+ #include <cstdlib>
+ #include <iostream>
+ #include <vector>
+ 
+ namespace
+ {
+ constexpr double kSampleRate = 48000.0;
+@@ -350,20 +362,140 @@ int main (int argc, char** argv)
+     // (MainComponent.RingRiskGoesCriticalWhenTheMonitoredSlotsDetectorConfirms).
+     app.getSpectrumViewForTest().ringRiskForTest()
+         = gui::SpectrumView::RingRisk::Critical;
+     std::cout << "console-live: RING RISK chip STAGED to Critical "
+                  "(not measured -- see the comment in tools/snapshot.cpp)"
+               << std::endl;
+ 
+     if (! shoot (app, outDir.getChildFile ("console-live.png")))
+         return 1;
+ 
++    //--------------------------------------------------------------------
++    // LANE M (Task 9): the two soundcheck states.
++    //
++    // Both are STAGED, and said so on stdout. Task 9 builds the components and
++    // the overlay API; nothing in it connects them to a live
++    // SoundcheckController (that is Task 10), and a real run would need a
++    // device, an output channel and 72 s of sweep into a PA. What these two
++    // pictures prove is what the console LOOKS like in each state --
++    // legibility, whether the Vietnamese renders, whether AP DUNG fits its
++    // button, whether the markers bury the trace. That the panel is DRIVEN
++    // correctly is proven by tests, not here.
++    //
++    // The numbers are a plausible OutputResult rather than round figures: a
++    // margin curve built from a constant would be a straight line and would
++    // say nothing about how the overlay reads against a real trace.
++    {
++        auto& panel = app.getSoundcheckPanelForTest();
++
++        // RUNNING. Channel 2 of 4, 47.2 s left -- lane M's OWN countdown
++        // (getRemainingMsInRun), never the passive 15 s window, which is
++        // frozen while the taps are suspended.
++        panel.setProgress (1, 4, 47200.0);
++        panel.setMode (gui::SoundcheckPanel::Mode::Running);
++
++        // F10: while a run is in flight every control that could change the
++        // chain underneath it is out of reach, and so is DO itself.
++        app.getModeRailForTest().setModeControlsEnabled (false);
++        app.getModeRailForTest().setMeasureEnabled (false);
++        app.resized();
++
++        std::cout << "console-soundcheck-running: panel STAGED to Running "
++                     "(no device, no sweep -- see the comment in tools/snapshot.cpp)"
++                  << std::endl;
++
++        if (! shoot (app, outDir.getChildFile ("console-soundcheck-running.png")))
++            return 1;
++
++        //----------------------------------------------------------------
++        // RESULTS. A synthetic OutputResult pushed into the overlay and the
++        // strip: two outputs' worth of findings, a handful of marked bins, one
++        // saturated candidate and one channel that could not be measured.
++        SoundcheckController::OutputResult result;
++        result.slot = 0; result.lane = 0; result.outChannel = 0; result.inChannel = 0;
++        result.measured = true;
++
++        // A margin that dips towards zero around the partials the live shot's
++        // programme material actually carries, so the curve peaks where the
++        // trace does and a reviewer can see whether the two are separable.
++        static const double hotHz[] = { 247.0, 660.0, 1240.0, 1920.0, 3400.0 };
++
++        for (int k = 0; k < (int) result.marginDb.size(); ++k)
++        {
++            const double hz = (double) k * kSampleRate / (double) Detector::kFftSize;
++
++            // Baseline headroom, falling with frequency the way a real room's
++            // does, plus a notch of margin at each hot spot.
++            double margin = 19.0 - 4.0 * std::log10 (juce::jmax (20.0, hz) / 100.0);
++            for (const double f : hotHz)
++            {
++                const double octaves = std::log2 (juce::jmax (1.0, hz) / f);
++                margin -= 17.0 * std::exp (-(octaves * octaves) / 0.0016);
++            }
++
++            result.marginDb[(std::size_t) k] = (float) margin;
++
++            // LoopGainEstimator only trusts the swept band; everything else is
++            // drawn as a gap rather than as a line nobody should believe.
++            result.trusted[(std::size_t) k] =
++                hz >= SoundcheckController::kSweepLowHz
++                && hz <= SoundcheckController::kTrustedHighHz;
++        }
++
++        // The marked bins: the peak of each dip, which is what
++        // SoundcheckCandidates would have picked.
++        int marked = 0;
++        for (const double f : hotHz)
++        {
++            const int bin = (int) std::lround (f * (double) Detector::kFftSize / kSampleRate);
++            if (bin > 0 && bin < (int) result.marked.size())
++            {
++                result.marked[(std::size_t) bin] = true;
++                ++marked;
++            }
++        }
++        result.markedCount    = marked;
++        result.candidateCount = marked;
++        result.saturatedBins  = 1;      // one still over after the deepest rung
++
++        app.getSpectrumViewForTest().setSoundcheckOverlay (
++            result.marginDb.data(), result.marked.data(), result.trusted.data(),
++            (int) result.marginDb.size(), kSampleRate);
++
++        panel.setResultsSummary (/*hotSpots*/ result.candidateCount,
++                                 /*saturated*/ result.saturatedBins,
++                                 /*unmeasured*/ 1,
++                                 /*routingInvalid*/ 1);
++        panel.setMode (gui::SoundcheckPanel::Mode::Results);
++
++        // The mode switches come back the moment the run ends; DO does NOT,
++        // because a second measurement on top of an unanswered proposal set
++        // would throw the proposals away.
++        app.getModeRailForTest().setModeControlsEnabled (true);
++        app.resized();
++
++        std::cout << "console-soundcheck-results: " << marked
++                  << " marked bins STAGED into the overlay, strip showing "
++                     "hot spots + saturated + unmeasured + misrouted"
++                  << std::endl;
++
++        if (! shoot (app, outDir.getChildFile ("console-soundcheck-results.png")))
++            return 1;
++
++        // Back to a resting console, so the shot that follows is console-live's
++        // frame and not this one with a strip across it.
++        panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
++        app.getSpectrumViewForTest().clearSoundcheckOverlay();
++        app.getModeRailForTest().setMeasureEnabled (true);
++        app.resized();
++    }
++
+     //--------------------------------------------------------------------
+     // The off-list-ceiling shot (final review, I-4).
+     //
+     // fba2626 changed what the tuning strip DISPLAYS when the values handed
+     // to it do not sit on a combo's fixed rungs: before it, an off-list value
+     // left the combo BLANK (idForValue returned 0), and the operator's next
+     // touch on any of the five combos pushed Q 10 / -6 dB onto every Global
+     // slot -- a ceiling nobody asked for, on a live rig. After it, the value
+     // is shown as text and currentParams() reports it back unchanged.
+     //
