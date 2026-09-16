@@ -384,7 +384,7 @@ lần đầu tiên app là một **nguồn tín hiệu**, không chỉ là một
 2. **Tắt làn** (`:769`): `if (scOut >= 0 && outIdx == scOut)` — mọi làn có kênh
    ra trùng kênh đang đo bị bỏ qua, và `chain.clearState()` được gọi mỗi block
    cho làn đó.
-3. **Tiêm sweep** (`:852-880`): cộng mẫu sweep vào đúng một kênh, `scOut`.
+3. **Tiêm sweep** (`:852-893`): cộng mẫu sweep vào đúng một kênh, `scOut`.
 4. **Ghi ring thu** (`:954-957`): chỉ khi `scCaptureActive` và `capSource` khác
    null.
 
@@ -404,8 +404,8 @@ việc gì ở đây. Nhưng nó vẫn phải nằm sau, và không được b�
 
 #### Tắt theo KÊNH NGÕ RA, không theo `(slot, làn)`
 
-Callback xoá trắng mọi kênh ra (`:565-577`) đúng để DSP **cộng dồn** `out[n] +=
-v` (`:621`). Nhiều slot cộng dồn lên **cùng một** kênh ra. Vì thế tắt một
+Callback xoá trắng mọi kênh ra (`:790-800`) đúng để DSP **cộng dồn** `out[n] +=
+v` (`:846`). Nhiều slot cộng dồn lên **cùng một** kênh ra. Vì thế tắt một
 `(slot, làn)` **không mở được** vòng hú của kênh đó: kênh vẫn mang tiếng mic từ
 slot khác, và phép đo sẽ đo cả tiếng mic lẫn sweep. Chỉ có tắt **mọi làn có
 `outIdx == scOutChannel_`** mới cho kênh đó mang **duy nhất** sweep.
@@ -552,9 +552,9 @@ trong ±1 bin về sổ này. `CLEAR ALL` **không** reset sổ.
 do test phủ chúng phải lái một lần đặt của **detector thật**, không phải gọi
 `setNotch`:
 
-- `src/app/NotchController.cpp:1116` — chặn một lần đặt Soundcheck **TIÊU** một
+- `src/app/NotchController.cpp:1117` — chặn một lần đặt Soundcheck **TIÊU** một
   mục phòng nhớ;
-- `src/app/NotchController.cpp:1169` — chặn một độ sâu đã nhớ **QUYẾT ĐỊNH** độ
+- `src/app/NotchController.cpp:1170` — chặn một độ sâu đã nhớ **QUYẾT ĐỊNH** độ
   sâu của một lần đặt Soundcheck.
 
 #### Bộ tự hủy, bộ từ chối, và cổng nền
@@ -757,7 +757,7 @@ một preset viết tay không có khối đó vẫn im lặng nhận trần −
 | Notch sâu hơn −24 dB từ file preset | Kẹp ở `setNotchImpl` cho MỌI Origin, có log (Q12); `pushRetuneLocked` từ chối |
 | "Nhớ phòng" / `deepestDb` cũ vượt trần mới của slider | Kẹp `deepestDb` về trần **mỗi tick** vô điều kiện, VÀ kẹp lại mục tiêu reclamp ngay lúc dùng (M-B) |
 | Nạp preset trần NÔNG hơn kéo notch Detector đang sâu hơn lên ngay (tới +14 dB tại bin đang hú) | Ramp 10 ms giới hạn biên độ một bước; Preset/Manual/Soundcheck mang trần riêng (Q8), không bị kéo; tester được cảnh báo mở âm lượng thấp trước khi LOAD |
-| Sweep vượt mức | `SoundcheckSignal` kẹp `jlimit` vào `kSoundcheckMaxPeak` = 0.1f (−20 dBFS) tại **CẢ** chỗ đặt **lẫn** chỗ dùng; kẹp cuối đường ±1.0f vẫn nằm **SAU** điểm tiêm (`src/app/AudioEngine.cpp:852-880` trước `:911-927`) |
+| Sweep vượt mức | `SoundcheckSignal` kẹp `jlimit` vào `kSoundcheckMaxPeak` = 0.1f (−20 dBFS) tại **CẢ** chỗ đặt **lẫn** chỗ dùng; kẹp cuối đường ±1.0f vẫn nằm **SAU** điểm tiêm (`src/app/AudioEngine.cpp:852-893` trước `:911-927`) |
 | Thread lane M chết giữa lúc phát | Ramp-out do **chính callback** sinh; nó tự đặt `scOutChannel_ = -1`. Không cần thread nào khác còn sống |
 | Ramp-out bắt đầu ở envelope 0 = cắt phựt ở buffer lớn | Message thread chỉ **xin** (`scRampOutRequested_`); **callback chốt** `scRampOutAtSample_` ở block đầu tiên nó thấy cờ, nên envelope luôn khởi đúng ở 1.0 |
 | Restart thiết bị giữa lúc đo | `onBeforeRestart` abort + **join** lane M **TRƯỚC** khi stop detector; `micCapture_.clear()` trong cùng khối drain; `audioDeviceAboutToStart` xoá cả tám atomic soundcheck |
