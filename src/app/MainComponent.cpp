@@ -157,6 +157,40 @@ const char* kScWorseOffTail =
 // The confirmation. "HA MASTER TRUOC" is the title; the body states the level
 // HONESTLY (spec 4.3 / F13: no SPL figure, because the app cannot know one)
 // and the real cost in seconds.
+// "Bo qua xac nhan cu: bang dieu khien da doi tu luc hoi. Bam DO lai."
+const char* kScStaleConfirmation =
+    "B\xe1\xbb\x8f qua x\xc3\xa1" "c nh\xe1\xba\xadn c\xc5\xa9: b\xe1\xba\xa3ng \xc4\x91i\xe1\xbb\x81u khi\xe1\xbb\x83n \xc4\x91\xc3\xa3 \xc4\x91\xe1\xbb\x95i t\xe1\xbb\xab l\xc3\xba" "c h\xe1\xbb\x8fi. B\xe1\xba\xa5m \xc4\x90O l\xe1\xba\xa1i.";
+// "Dang cho xac nhan. Tra loi hop thoai truoc."
+const char* kScConfirmAlreadyOpen =
+    "\xc4\x90" "ang ch\xe1\xbb\x9d x\xc3\xa1" "c nh\xe1\xba\xadn. Tr\xe1\xba\xa3 l\xe1\xbb\x9di h\xe1\xbb\x99p tho\xe1\xba\xa1i tr\xc6\xb0\xe1\xbb\x9b" "c.";
+
+// ONE SENTENCE PER ABORT REASON. Every abort but the two a finger causes is
+// decided on the lane M thread, which may not touch a component -- so this is
+// the only place the operator is ever told WHY a run vanished, and "a mic that
+// was too hot" and "a room that was already ringing" want different answers
+// from them. DUNG and Esc get nothing: they already know.
+// "Da dung do: tin hieu mic qua lon. Ha gain dau vao roi do lai."
+const char* kScAbortMicHot =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: t\xc3\xadn hi\xe1\xbb\x87u mic qu\xc3\xa1 l\xe1\xbb\x9bn. H\xe1\xba\xa1 gain \xc4\x91\xe1\xba\xa7u v\xc3\xa0o r\xe1\xbb\x93i \xc4\x91o l\xe1\xba\xa1i.";
+// "Da dung do: phong da hu san truoc khi phat. Ha gain roi do lai."
+const char* kScAbortRoomRinging =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: ph\xc3\xb2ng \xc4\x91\xc3\xa3 h\xc3\xba s\xe1\xba\xb5n tr\xc6\xb0\xe1\xbb\x9b" "c khi ph\xc3\xa1t. H\xe1\xba\xa1 gain r\xe1\xbb\x93i \xc4\x91o l\xe1\xba\xa1i.";
+// "Da dung do: thiet bi am thanh da dung."
+const char* kScAbortEngineStopped =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: thi\xe1\xba\xbft b\xe1\xbb\x8b \xc3\xa2m thanh \xc4\x91\xc3\xa3 d\xe1\xbb\xabng.";
+// "Da dung do: thiet bi bao loi."
+const char* kScAbortDeviceError =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: thi\xe1\xba\xbft b\xe1\xbb\x8b b\xc3\xa1o l\xe1\xbb\x97i.";
+// "Da dung do: thiet bi hoac dinh tuyen doi giua chung."
+const char* kScAbortDeviceChanged =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: thi\xe1\xba\xbft b\xe1\xbb\x8b ho\xe1\xba\xb7" "c \xc4\x91\xe1\xbb\x8bnh tuy\xe1\xba\xbfn \xc4\x91\xe1\xbb\x95i gi\xe1\xbb\xaf" "a ch\xe1\xbb\xabng.";
+// "Da dung do: mat du lieu mic. Tang buffer roi do lai."
+const char* kScAbortCaptureDrop =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: m\xe1\xba\xa5t d\xe1\xbb\xaf li\xe1\xbb\x87u mic. T\xc4\x83ng buffer r\xe1\xbb\x93i \xc4\x91o l\xe1\xba\xa1i.";
+// "Da dung do: khong do duoc nen nhieu. Kiem tra kenh mic."
+const char* kScAbortNoiseFloor =
+    "\xc4\x90\xc3\xa3 d\xe1\xbb\xabng \xc4\x91o: kh\xc3\xb4ng \xc4\x91o \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c n\xe1\xbb\x81n nhi\xe1\xbb\x85u. Ki\xe1\xbb\x83m tra k\xc3\xaanh mic.";
+
 const char* kScConfirmTitle  = "H\xe1\xba\xa0 MASTER TR\xc6\xaf\xe1\xbb\x9a" "C";
 const char* kScConfirmOk     = "\xc4\x90O";
 const char* kScConfirmCancel = "H\xe1\xbb\xa6Y";
@@ -535,6 +569,13 @@ MainComponent::MainComponent()
         //
         // It is also the moment that makes the injected callbacks safe to touch
         // again (I-10) -- not that this hook touches them.
+        // C-1 (round 2). EVERY CONFIRMATION ASKED BEFORE THIS POINT IS NOW
+        // STALE, and the state checks alone cannot see that: with the machine
+        // Idle and the box open, this hook tears the console down and puts the
+        // lock back to None, so a later OK would find "Idle, unlocked, fine"
+        // and arm with targets captured against the PREVIOUS device's routing.
+        ++soundcheckConsoleGeneration_;
+
         // WAS THERE A MEASUREMENT TO LOSE? Mode::Applied is NOT one (review
         // M-2): the run is over, its proposals are placed, and the report on
         // screen is a record of work already done. Saying "your measurement was
@@ -1024,10 +1065,20 @@ void MainComponent::applyModeGating (int slotIndex)
     if (slotIndex < 0 || slotIndex >= kMaxSlots)
         return;
 
-    if (! engine_.getSlotConfig (slotIndex).enabled)
-        return;
-
     auto& controller = *notchControllers_[(std::size_t) slotIndex];
+
+    // A DISABLED SLOT IS GATED OFF, not skipped (lane M round 2, I-2). It used
+    // to return here, which was harmless while nothing ever armed detection
+    // behind this function's back -- and then lane M's restore did exactly
+    // that, with one unconditional store per slot (inv 17 allows it nothing
+    // else). A disabled slot has no live chain to protect, and a detector
+    // scoring one is a notch waiting to be placed in a chain nobody is
+    // listening to.
+    if (! engine_.getSlotConfig (slotIndex).enabled)
+    {
+        controller.setDetectionActive (false);
+        return;
+    }
 
     switch (engine_.getMode())
     {
@@ -1130,16 +1181,24 @@ SoundcheckController::RunParams MainComponent::buildSoundcheckRunParams() const
 
 int MainComponent::distinctOutputCount (const std::vector<SoundcheckController::Target>& targets)
 {
-    // At most kMaxSlots * kMaxSlotLanes targets, so a flat scan is cheaper than
-    // anything with an allocation in it.
-    std::vector<int> seen;
-    seen.reserve (targets.size());
+    // At most kMaxSlots * kMaxSlotLanes = 16 targets, so the quadratic scan is
+    // cheaper than the allocation it replaces -- and the comment now matches the
+    // code, which the first version did not: it claimed "no allocation" over a
+    // std::vector.
+    int count = 0;
 
-    for (const auto& t : targets)
-        if (std::find (seen.begin(), seen.end(), t.outChannel) == seen.end())
-            seen.push_back (t.outChannel);
+    for (std::size_t i = 0; i < targets.size(); ++i)
+    {
+        bool seenEarlier = false;
 
-    return (int) seen.size();
+        for (std::size_t j = 0; j < i; ++j)
+            seenEarlier = seenEarlier || targets[j].outChannel == targets[i].outChannel;
+
+        if (! seenEarlier)
+            ++count;
+    }
+
+    return count;
 }
 
 juce::String MainComponent::soundcheckConfirmText (const int passCount, const int distinctOutputs)
@@ -1199,7 +1258,14 @@ void MainComponent::beginSoundcheck()
     // finished -- start a SECOND sweep nobody asked for. ModeRail::
     // handleClearAllClicked carries exactly this guard for exactly this reason.
     if (soundcheckConfirmPending_)
+    {
+        // A dead button that also says nothing is a button the operator presses
+        // twice and then distrusts. DO is disabled here too (updateMeasureEnabled
+        // shares this exact condition), so this only fires when something drove
+        // the callback directly -- but it costs one line to be honest about it.
+        showMessage (juce::String::fromUTF8 (kScConfirmAlreadyOpen));
         return;
+    }
 
     if (soundcheck_.getState() != SoundcheckController::State::Idle)
     {
@@ -1257,16 +1323,18 @@ void MainComponent::askForSoundcheckConfirmation (
     // DOES arm, the Measuring lock takes ownership of the button before this
     // one would have restored it.
     soundcheckConfirmPending_ = true;
-    modeRail_.setMeasureEnabled (false);
+    updateMeasureEnabled();
 
     // The answer arrives after this returns, possibly after the window has been
     // closed, so it crosses back through a SafePointer -- the same pattern the
     // preset choosers use.
     const juce::Component::SafePointer<MainComponent> safe (this);
+    // THE CONSOLE THIS QUESTION WAS ASKED ABOUT (C-1, round 2).
+    const auto generation = soundcheckConsoleGeneration_;
 
     soundcheckConfirmHook (soundcheckConfirmText ((int) targets.size(),
                                                   distinctOutputCount (targets)),
-        [safe, targets] (bool confirmed)
+        [safe, targets, generation] (bool confirmed)
         {
             if (safe == nullptr)
                 return;
@@ -1275,19 +1343,25 @@ void MainComponent::askForSoundcheckConfirmation (
 
             if (! confirmed)
             {
-                safe->restoreMeasureEnabled();
+                safe->updateMeasureEnabled();
                 return;
             }
 
-            // A STALE OK. The console moved on while the box was open -- another
-            // run started, or a device restart left results pending -- and the
-            // targets in this lambda describe a rig that may no longer be the
-            // one on screen. arm() re-validates them (I-4), but it must not be
-            // asked to: the answer is simply too old to act on.
-            if (safe->soundcheck_.getState() != SoundcheckController::State::Idle
+            // A STALE OK -- and the GENERATION is what catches it, not the
+            // state. The console can be torn down and put back to Idle and
+            // unlocked while the box is open (a device restart does exactly
+            // that), and a state check would then see nothing wrong and arm
+            // with `targets` captured against the previous device's routing.
+            // The state checks stay as a second line: another run may have
+            // started from somewhere else entirely.
+            if (generation != safe->soundcheckConsoleGeneration_
+                || safe->soundcheck_.getState() != SoundcheckController::State::Idle
                 || safe->soundcheckLock_ != SoundcheckLock::None)
             {
-                safe->restoreMeasureEnabled();
+                safe->updateMeasureEnabled();
+                // SAY SO. An OK that does nothing, silently, teaches the
+                // operator that the button is unreliable.
+                safe->showMessage (juce::String::fromUTF8 (kScStaleConfirmation));
                 return;
             }
 
@@ -1318,7 +1392,7 @@ void MainComponent::armSoundcheck (const std::vector<SoundcheckController::Targe
         // brief sketched, would leave the operator shut out of their own mode
         // buttons because of a refusal.
         showMessage (soundcheckRefusalMessage (refusal));
-        restoreMeasureEnabled();
+        updateMeasureEnabled();
         return;
     }
 
@@ -1346,8 +1420,9 @@ void MainComponent::setSoundcheckLock (const SoundcheckLock lock)
     modeRail_.setModeControlsEnabled (! measuring);
 
     // DO does NOT come back with them. A second run while proposals are pending
-    // would throw them away without asking, and arm() would refuse it anyway.
-    modeRail_.setMeasureEnabled (! held);
+    // would throw them away without asking, and arm() would refuse it anyway --
+    // and an open confirmation holds it down too, whatever the lock says.
+    updateMeasureEnabled();
 
     // PRESET LOAD, PRESET SAVE and every device control that would restart the
     // engine live in the drawer -- devicePanel_ is re-parented INTO it, and
@@ -1381,9 +1456,59 @@ void MainComponent::setSoundcheckLock (const SoundcheckLock lock)
     notchListPanel_.setEnabled (! held);
 }
 
-void MainComponent::restoreMeasureEnabled()
+void MainComponent::updateMeasureEnabled()
 {
-    modeRail_.setMeasureEnabled (soundcheckLock_ == SoundcheckLock::None);
+    // ONE PREDICATE (C-1, round 2). The button and beginSoundcheck's own guard
+    // are now the same condition, so they cannot disagree: before this, a
+    // device restart during a confirmation unlocked the console and lit DO back
+    // up with the box still on screen -- a button that looked pressable and did
+    // nothing, over a dialog whose OK was about to be dropped.
+    modeRail_.setMeasureEnabled (soundcheckLock_ == SoundcheckLock::None
+                                 && ! soundcheckConfirmPending_);
+}
+
+juce::String MainComponent::soundcheckAbortMessage (const SoundcheckController::AbortReason r)
+{
+    using Reason = SoundcheckController::AbortReason;
+
+    switch (r)
+    {
+        // THE OPERATOR DID THIS. They pressed DUNG, or Esc; saying "the
+        // measurement was stopped" back at them is noise on a status strip that
+        // has to stay worth reading.
+        case Reason::UserStop:
+        case Reason::Esc:                  return {};
+
+        case Reason::MicHot:               return juce::String::fromUTF8 (kScAbortMicHot);
+        case Reason::RoomRinging:          return juce::String::fromUTF8 (kScAbortRoomRinging);
+        case Reason::EngineStopped:        return juce::String::fromUTF8 (kScAbortEngineStopped);
+        case Reason::DeviceError:          return juce::String::fromUTF8 (kScAbortDeviceError);
+        case Reason::DeviceChanged:        return juce::String::fromUTF8 (kScAbortDeviceChanged);
+        case Reason::CaptureDrop:          return juce::String::fromUTF8 (kScAbortCaptureDrop);
+        case Reason::NoiseFloorUnmeasured: return juce::String::fromUTF8 (kScAbortNoiseFloor);
+    }
+
+    // An enumerator added without a sentence here falls back to the generic
+    // one rather than silently borrowing somebody else's reason -- the same
+    // discipline originName/reasonName follow.
+    return juce::String::fromUTF8 (kScAbortedByRestart);
+}
+
+void MainComponent::announceSoundcheckAbort()
+{
+    if (! soundcheck_.hasLastAbortReason())
+        return;
+
+    const auto message = soundcheckAbortMessage (soundcheck_.getLastAbortReason());
+
+    if (message.isNotEmpty())
+        showMessage (message);
+}
+
+void MainComponent::applyModeGatingToAllSlots()
+{
+    for (int i = 0; i < kMaxSlots; ++i)
+        applyModeGating (i);
 }
 
 gui::SoundcheckPanel::Model MainComponent::soundcheckResultsModel() const
@@ -1492,6 +1617,11 @@ void MainComponent::applySoundcheckProposals()
 
 void MainComponent::endSoundcheckSession (const gui::SoundcheckPanel::Mode panelMode)
 {
+    // Anything asked before this teardown is answering about a console that no
+    // longer exists (C-1). One counter, bumped at every teardown, is what a
+    // confirmation's answer is checked against.
+    ++soundcheckConsoleGeneration_;
+
     // An APPLIED report is still a pending thing: its proposals are placed, but
     // the strip is on screen and the ledger, the routing and the ceiling they
     // were computed against must not move under the operator until they dismiss
@@ -1507,20 +1637,26 @@ void MainComponent::endSoundcheckSession (const gui::SoundcheckPanel::Mode panel
     // "what should this slot be doing", and it runs here, on the message
     // thread, exactly once per session end.
     //
-    // THE WINDOW IS BOUNDED AND ACCEPTED (review M-3). Between the controller's
-    // own restore -- which happens on the lane M thread inside finishRun() or
-    // beginAbort() -- and this line, detection is ON everywhere, including in
-    // BYPASS and on slots the engine has disabled. The gap is at most one
-    // status tick (kStatusRefreshMs = 200 ms), and on the paths a finger drives
-    // (AP DUNG, BO, a device restart) it is zero, because those call this
-    // synchronously. 200 ms of a detector scoring a chain it is not supposed to
-    // be scoring cannot place a notch: placement needs persistenceBlocks
+    // THE WINDOW, NOW THAT BOTH EDGES CLOSE IT (M-3, rewritten in round 2).
+    //
+    // The controller restores detection on its own thread with one
+    // unconditional store per slot -- inv 17 allows it nothing else -- so
+    // between that store and a message-thread correction, BYPASS detects and a
+    // disabled slot is armed. There are exactly two machine-driven paths, and
+    // BOTH are corrected within one status tick (kStatusRefreshMs = 200 ms):
+    //
+    //   finishRun() -> Results : syncSoundcheckUi's Results edge gates (I-2)
+    //   beginAbort() -> Idle   : syncSoundcheckUi's Idle edge lands here
+    //
+    // On every finger-driven path -- AP DUNG, BO, a device restart -- the gap is
+    // ZERO, because those call this synchronously. The previous version of this
+    // comment claimed the bound while the Results window, all 20 s of it, was
+    // still running ungated; that hole is what I-2 closed.
+    //
+    // Even at 200 ms nothing can be placed: placement needs persistenceBlocks
     // consecutive confirmations at ~10.7 ms a hop AND a score over threshold,
-    // and a BYPASSED chain is not ringing. The alternative -- having the lane M
-    // thread apply the gating itself -- would put a NotchController call on that
-    // thread, which inv 17 forbids outright.
-    for (int i = 0; i < kMaxSlots; ++i)
-        applyModeGating (i);
+    // and a bypassed chain is not ringing.
+    applyModeGatingToAllSlots();
 
     if (panelMode == gui::SoundcheckPanel::Mode::Hidden)
         spectrumView_.clearSoundcheckOverlay();
@@ -1578,6 +1714,16 @@ void MainComponent::syncSoundcheckUi()
             // preset row, the routing table, the DETECTION strip and the notch
             // verdicts stay dead while proposals are on screen (review I-3).
             setSoundcheckLock (SoundcheckLock::Pending);
+
+            // I-2 (round 2). DETECTION GOES BACK UNDER THE MODE'S RULES HERE
+            // TOO, not only when the strip is dismissed. finishRun() restored it
+            // with one unconditional store per slot -- that is all the lane M
+            // thread may do (inv 17) -- so BYPASS would detect, and a slot the
+            // engine has disabled would be armed, for the whole 20 s Results
+            // window. This runs on the message thread, so it may call a
+            // NotchController.
+            applyModeGatingToAllSlots();
+
             soundcheckPanel_.setResults (soundcheckResultsModel());
             soundcheckPanel_.setMode (Mode::Results);
             refreshSoundcheckOverlay();
@@ -1589,7 +1735,16 @@ void MainComponent::syncSoundcheckUi()
     // a BO, or the 20 s Results timeout. Applied is left alone -- its report is
     // the operator's to dismiss, and it was already stood down by the apply.
     if (changed && soundcheckPanel_.getMode() != Mode::Applied)
+    {
+        // WHY IT ENDED, BEFORE THE STRIP GOES AWAY. beginAbort() decided this
+        // on the lane M thread and could not say a word about it from there;
+        // this is the only place the operator is ever told that the mic was too
+        // hot, or that the room was already ringing. Announced BEFORE the
+        // teardown, because endSoundcheckSession() is also what a device
+        // restart calls -- and that path has its own sentence.
+        announceSoundcheckAbort();
         endSoundcheckSession (Mode::Hidden);
+    }
 }
 
 bool MainComponent::loadPreset (const juce::File& file)

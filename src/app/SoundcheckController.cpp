@@ -241,6 +241,9 @@ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
     dropsAtArm_    = engine_.getMicCaptureDropCount();
     micHotSinceMs_ = -1.0;
     stopRequested_.store (false, std::memory_order_relaxed);
+    // A NEW RUN OWNS THE ANSWER TO "why did it end". Left standing, the last
+    // run's reason would be shown again when this one finishes normally.
+    lastAbortValid_.store (false, std::memory_order_relaxed);
     worstPeakiness_.store (0.0f, std::memory_order_relaxed);
     runStartedAtMs_.store (clock_.nowMs(), std::memory_order_relaxed);
 
@@ -1103,8 +1106,24 @@ void SoundcheckController::beginAbort (AbortReason reason)
 
     logAbort (reason);
 
+    // PUBLISHED BEFORE THE STATE (see the accessors in the header): the owner
+    // notices the run ended by seeing Idle, and must find the reason already
+    // there when it looks.
+    lastAbortReason_.store (reason, std::memory_order_relaxed);
+    lastAbortValid_.store (true, std::memory_order_relaxed);
+
     state_.store (State::Idle, std::memory_order_release);
     notifyStateChanged();
+}
+
+bool SoundcheckController::hasLastAbortReason() const
+{
+    return lastAbortValid_.load (std::memory_order_relaxed);
+}
+
+SoundcheckController::AbortReason SoundcheckController::getLastAbortReason() const
+{
+    return lastAbortReason_.load (std::memory_order_relaxed);
 }
 
 void SoundcheckController::logAbort (AbortReason reason) const

@@ -231,6 +231,26 @@ public:
     // slots and calls applySoundcheckResults once per slot's NotchController.
     [[nodiscard]] std::vector<OutputResult> copyResultsForSlot (int slot) const;
 
+    // WHY THE LAST RUN ENDED -- and it is NOT a test accessor. Every abort but
+    // one is decided on the lane M thread, inside beginAbort(), which may not
+    // touch a component; and the abort that a finger causes (DUNG / Esc) is the
+    // one the operator already knows about. So without this the owner can see
+    // that a run vanished and has no way to say WHY -- a mic that was too hot
+    // and a room that was already ringing want different answers from the
+    // soundman, and "the strip disappeared" is not one of them.
+    //
+    // hasLastAbortReason() is false for a fresh object, false for a run that
+    // FINISHED (reaching Results is not an abort), and is cleared by arm().
+    // It stays true after the owner has read it: nothing here knows when the
+    // message has been seen, and a flag cleared by a reader would be a flag
+    // that reports differently to the second reader.
+    //
+    // ORDERING: beginAbort() publishes the reason BEFORE it stores State::Idle
+    // with release semantics, so a reader that has seen Idle through
+    // getState()'s acquire load is guaranteed to see the reason with it.
+    [[nodiscard]] bool        hasLastAbortReason() const;
+    [[nodiscard]] AbortReason getLastAbortReason() const;
+
     // Injected so this class holds NO NotchController pointer (inv 17). The
     // owner's lambda does nothing but relaxed atomic stores
     // (NotchController::setDetectionActive).
@@ -332,6 +352,13 @@ private:
     std::uint64_t dropsAtArm_ = 0;
     std::atomic<bool> stopRequested_ { false };
     std::atomic<AbortReason> stopReason_ { AbortReason::UserStop };
+
+    // Why the last run ENDED (see the accessors above). Distinct from
+    // stopReason_, which only carries a REQUESTED stop: MicHot, RoomRinging,
+    // DeviceChanged and NoiseFloorUnmeasured reach beginAbort() directly and
+    // never pass through stopReason_ at all.
+    std::atomic<bool>        lastAbortValid_  { false };
+    std::atomic<AbortReason> lastAbortReason_ { AbortReason::UserStop };
 
 
     // Sample bookkeeping for the CURRENT target, lane M thread only.

@@ -272,6 +272,18 @@ public:
         { askForSoundcheckConfirmation (targets); }
     [[nodiscard]] bool soundcheckConfirmPendingForTest() const { return soundcheckConfirmPending_; }
 
+    // ONE tick of the message-thread mirror. The headless suite pumps no
+    // message loop, so timerCallback() never fires on its own and this is the
+    // only way to drive an edge (the precedent is
+    // RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory, which drives
+    // one poll by hand for the same reason).
+    void syncSoundcheckUiForTest() { syncSoundcheckUi(); }
+
+    // The teardown, so a test can assert which lock each ending leaves behind
+    // (an Applied report still holds the console; a Hidden strip does not).
+    void endSoundcheckSessionForTest (gui::SoundcheckPanel::Mode panelMode)
+        { endSoundcheckSession (panelMode); }
+
     // The targets a press of DO would measure, and the RunParams it would
     // freeze. Both are exposed because neither is observable anywhere else:
     // arm() copies RunParams into a private member and no getter reports it, so
@@ -395,9 +407,22 @@ private:
 
     // F10 / I-3. The ONE place the console's three lock states are applied.
     void setSoundcheckLock (SoundcheckLock lock);
-    // DO's enabled state under the CURRENT lock, so the confirmation path can
-    // hand it back without having to know which state that is.
-    void restoreMeasureEnabled();
+    // DO's enabled state, from ONE predicate. It is the lock AND the open
+    // dialog: a device restart in the middle of a confirmation used to unlock
+    // the console and light DO back up with the box still on screen, so the
+    // button and beginSoundcheck's own guard disagreed about whether a press
+    // could do anything (round 2, C-1).
+    void updateMeasureEnabled();
+
+    // One sentence per abort reason, or empty for the two the operator caused
+    // themselves (DUNG and Esc -- they already know).
+    [[nodiscard]] static juce::String soundcheckAbortMessage (SoundcheckController::AbortReason r);
+    // Puts the reason for the run that just ended in front of the operator.
+    void announceSoundcheckAbort();
+
+    // applyModeGating over every slot, as one named thing: it is run at BOTH
+    // edges that can follow lane M's unconditional detection restore.
+    void applyModeGatingToAllSlots();
 
     // Message-thread mirror of the machine's state, driven by the status timer.
     void syncSoundcheckUi();
@@ -523,6 +548,18 @@ private:
     // against targets the first already consumed. ModeRail::handleClearAllClicked
     // carries the same guard for the same reason (review I-2).
     bool soundcheckConfirmPending_ = false;
+
+    // BUMPED EVERY TIME THE CONSOLE'S LANE M STATE IS TORN DOWN -- a device
+    // restart, and every end of session. A confirmation captures it when it is
+    // asked and its answer is DROPPED if the number has moved (round 2, C-1).
+    //
+    // The state checks alone were not enough: a device restart while the
+    // machine was Idle with the box open ran endSoundcheckSession(), which put
+    // the lock back to None -- so a later OK saw "Idle, unlocked, fine" and
+    // armed with targets captured against the PREVIOUS device's routing. A
+    // counter cannot be fooled that way, because it records that something
+    // happened rather than what the state looks like afterwards.
+    unsigned soundcheckConsoleGeneration_ = 0;
 
     // A message the GUI itself produced -- a setting the hardware refused.
     // Device errors come from the engine and take precedence over it.
