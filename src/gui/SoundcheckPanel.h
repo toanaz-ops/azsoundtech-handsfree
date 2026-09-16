@@ -117,6 +117,20 @@ public:
         int placed         = 0;
         int clearedPrevious = 0;
 
+        // THE SAME OUTCOME, SEEN PER SLOT (final review I-3). placed and
+        // clearedPrevious are sums across every slot, and a sum HIDES the very
+        // thing worseOff() exists to catch: slot 0 loses 3 notches and gets
+        // none back while slot 1 places 6, and the totals read 6 placed / 3
+        // cleared -- a success. Slot 0's chain is still less protected than it
+        // was, and on a PA that is the slot that howls.
+        //
+        // Set by the owner, which is the only code that ever sees the per-slot
+        // SoundcheckApplyStats. It cannot be DERIVED here, because the two
+        // counts it would be derived from are exactly the ones the sum
+        // destroyed -- so unlike worseOff() this one is a field, and
+        // MainComponent::applySoundcheckProposals is its single writer.
+        bool anySlotWorseOff = false;
+
         // THE outcome that must never be shown as success: the apply removed
         // notches that were holding and placed nothing in their place, so the
         // room is worse than it was before the operator touched anything.
@@ -127,6 +141,14 @@ public:
         [[nodiscard]] bool worseOff() const
         {
             return clearedPrevious > 0 && placed == 0;
+        }
+
+        // What the STRIP asks. Either the rig as a whole came out worse, or
+        // one of its chains did; both have to reach the operator, and the
+        // second one is invisible in the totals (final review I-3).
+        [[nodiscard]] bool showWorseOff() const
+        {
+            return worseOff() || anySlotWorseOff;
         }
     };
 
@@ -191,8 +213,10 @@ private:
     // the unmeasured sentence and the routing sentence. A fixed array rather
     // than a vector so nothing in the summary path can grow.
     // Headline, cannot-propose, saturation, unmeasured, routing -- and the
-    // worse-off line, which can appear beside any of them.
-    static constexpr std::size_t kMaxSummaryLines = 6;
+    // worse-off line, which can appear beside any of them. SEVEN since I-3:
+    // when one slot came out worse while the totals still placed something,
+    // the danger line and the "placed N" line are both true and both show.
+    static constexpr std::size_t kMaxSummaryLines = 7;
 
     struct SummaryLine
     {
@@ -201,7 +225,11 @@ private:
     };
 
     void rebuildSummary();
-    void addSummaryLine (const juce::String& text, juce::Colour colour);
+    // `line`, not `text`: this TU opens with `using namespace az::theme;`, and
+    // that namespace has a Colour called `text`. A parameter of that name
+    // shadows it -- MSVC C4459, which the build was carrying silently until
+    // the final review's verifier counted warnings.
+    void addSummaryLine (const juce::String& line, juce::Colour colour);
 
     Mode mode_ = Mode::Hidden;
 

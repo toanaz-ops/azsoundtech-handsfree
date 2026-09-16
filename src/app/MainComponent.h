@@ -393,6 +393,13 @@ private:
     [[nodiscard]] std::vector<SoundcheckController::Target> buildSoundcheckTargets() const;
     [[nodiscard]] SoundcheckController::RunParams buildSoundcheckRunParams() const;
 
+    // The ring-risk snapshot BOTH gates read (final review I-2): the highest
+    // ringRiskScore among the slots that have a valid one, over every enabled
+    // slot plus the displayed one. `slotOut` comes back as the slot it was
+    // taken from, or -1 when no slot has scored a frame yet -- which is what
+    // soundcheck_start logs beside the score.
+    [[nodiscard]] NotchController::SnapshotBuffer worstRingRiskSnapshot (int& slotOut) const;
+
     // The sentence the operator reads before anything is emitted. TWO counts,
     // because they differ and the difference is the operator's time: a PASS is
     // one (slot, lane) measurement, and two slots feeding one output produce

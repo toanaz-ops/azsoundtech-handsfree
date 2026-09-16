@@ -2089,6 +2089,76 @@ TEST (SoundcheckPanel, AnApplyThatClearedAndPlacedNothingIsReportedAsWorseOff)
     EXPECT_FALSE (panel.applyButton.isVisible());
 }
 
+// RED IF the worse-off verdict is taken from the TOTALS (final review I-3).
+// The counts the strip is given are sums over every slot, and a sum hides the
+// one outcome this report exists to refuse to hide: slot 0 loses three notches
+// and gets none back while slot 1 places six, and `3 cleared / 6 placed` reads
+// as an unqualified success. Slot 0's chain is the one that howls.
+//
+// The APPLY path itself cannot be driven headless (it needs State::Results,
+// which needs a real device and >= 4.5 s per output -- see
+// AnAppliedReportHoldsTheConsoleAndADismissedOneDoesNot), so what is pinned
+// here is the contract between the per-slot stats and the strip: the sum, the
+// flag the owner sets beside it, and what the panel then says.
+TEST (SoundcheckPanel, AWorseOffSlotIsNotMaskedByAnotherSlotsSuccess)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 200);
+    panel.setMode (gui::SoundcheckPanel::Mode::Applied);
+
+    // TWO SLOTS' real stats, summed exactly as applySoundcheckProposals sums
+    // them -- and the per-slot verdict taken with the same identity, before the
+    // sum destroys it.
+    SoundcheckApplyStats slot0;      // cleared three, put nothing back
+    slot0.clearedPrevious = 3;
+    slot0.placed          = 0;
+
+    SoundcheckApplyStats slot1;      // a clean six
+    slot1.clearedPrevious = 0;
+    slot1.placed          = 6;
+
+    gui::SoundcheckPanel::Model model;
+    model.placed          = slot0.placed          + slot1.placed;
+    model.clearedPrevious = slot0.clearedPrevious + slot1.clearedPrevious;
+    model.anySlotWorseOff = (slot0.clearedPrevious > 0 && slot0.placed == 0)
+                         || (slot1.clearedPrevious > 0 && slot1.placed == 0);
+
+    // THE MASK ITSELF, asserted rather than assumed: on the totals alone this
+    // run looks fine, which is exactly why the flag has to exist.
+    ASSERT_FALSE (model.worseOff());
+    ASSERT_TRUE  (model.anySlotWorseOff);
+    EXPECT_TRUE  (model.showWorseOff());
+
+    panel.setResults (model);
+    panel.resized();
+
+    EXPECT_TRUE (panel.hasErrorForTest())
+        << "a slot that came out worse is an ERROR, whatever the totals say";
+
+    const auto text = panel.summaryTextForTest();
+    // "KEM an toan hon truoc" -- the danger sentence, in the operator's own
+    // words, on a run the totals called a success.
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")))
+        << text.toStdString();
+    // And the six that WERE placed are still reported: the operator needs both
+    // halves, not the warning instead of the count.
+    EXPECT_TRUE (text.contains ("6")) << text.toStdString();
+    EXPECT_TRUE (text.contains ("3")) << text.toStdString();
+
+    // The control: with neither slot worse off, nothing changes about the
+    // existing success report.
+    gui::SoundcheckPanel::Model clean;
+    clean.placed          = 6;
+    clean.clearedPrevious = 3;
+    EXPECT_FALSE (clean.showWorseOff());
+    panel.setResults (clean);
+    EXPECT_FALSE (panel.hasErrorForTest());
+    EXPECT_FALSE (panel.summaryTextForTest().containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")));
+}
+
 // RED IF "no hot spots" is printed beside a finding that contradicts it. A
 // saturated bin is one the DEEPEST rung on the ladder could not fix -- the
 // opposite of a clean room -- and round 1 printed both lines together.
@@ -2563,6 +2633,18 @@ TEST (MainComponentSoundcheck, TheConfirmationSaysHaMasterTruocAndTheRealDuratio
         << "expected " << totalSec << " s in: " << text.toStdString();
     EXPECT_TRUE (text.contains (juce::String (SoundcheckController::kPerTargetMs / 1000.0, 1)))
         << "the per-pass silence has to be stated too";
+
+    // DETECTION OFF ON EVERY SLOT, FOR THE WHOLE RUN (final review I-1). arm()
+    // calls setDetectionActiveOnAllSlots(false), so the operator is agreeing to
+    // ~72 seconds with no feedback protection anywhere in the rig -- and the
+    // dialog said nothing about it. Mutation-checked: deleting the
+    // kScConfirmDetectionOff term from soundcheckConfirmText fails here.
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "b\xe1\xbb\x99 ch\xe1\xbb\x91ng h\xc3\xba T\xe1\xba\xaeT tr\xc3\xaan m\xe1\xbb\x8di slot")))   // "bo chong hu TAT tren moi slot"
+        << "the dialog must say the protection goes off on EVERY slot: "
+        << text.toStdString();
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 ("D\xe1\xbb\xaaNG")))   // "DUNG"
+        << "...and name the way out";
 }
 
 // RED IF: DUNG / Esc is not wired. SoundcheckPanel routes BOTH through onStop
@@ -2955,6 +3037,72 @@ TEST (MainComponentSoundcheck, AnAppliedReportHoldsTheConsoleAndADismissedOneDoe
     // throughout, and is timing-flaky. The edge calls setSoundcheckLock(Pending)
     // and applyModeGatingToAllSlots(), both of which are asserted directly here
     // and in TheModeDecidesDetectionAgainWhenARunEnds.
+}
+
+// RED IF the ring-risk gate only ever looks at the slot on screen. arm()
+// disarms detection on EVERY slot and buildSoundcheckTargets() sweeps EVERY
+// enabled slot, so "is this room safe to sweep" is a question about the whole
+// rig -- but both gates read notchControllers_[displayedSlot_] and nothing
+// else (final review I-2). Here slot 1 is ringing and the console is showing
+// slot 0: before the fix the run was armed, with the one detector that could
+// have caught the howl switched off by arm() a moment later.
+TEST (MainComponentSoundcheck, RingRiskOnAnUndisplayedSlotRefusesTheRun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    makeEngineLookRunning (app);         // slot 0 enabled, 2 in / 2 out, running
+
+    // A SECOND enabled slot, on the same patch: two mics round the same
+    // speakers is the ordinary case, and the run would sweep both.
+    SlotConfig second;
+    second.enabled = true;
+    second.width   = 2;
+    second.inputChannels[0]  = 0; second.inputChannels[1]  = 1;
+    second.outputChannels[0] = 0; second.outputChannels[1] = 1;
+    app.getAudioEngine().setSlotConfig (1, second);
+
+    ASSERT_EQ (app.getDisplayedSlot(), 0) << "precondition: the console shows slot 0";
+
+    const float best = ringRiskDriveSlotToCritical (app, 1);
+
+    NotchController::SnapshotBuffer onScreen {};
+    app.getNotchControllerForTest (0)->copySnapshot (onScreen);
+    ASSERT_FALSE (onScreen.ringRiskValid)
+        << "precondition: the DISPLAYED slot has scored nothing, so the old "
+           "gate saw no risk at all";
+
+    NotchController::SnapshotBuffer ringing {};
+    app.getNotchControllerForTest (1)->copySnapshot (ringing);
+    ASSERT_TRUE (ringing.ringRiskValid) << "slot 1's detector never scored a frame";
+    ASSERT_GE (ringing.ringRiskScore,
+               NotchController::kRiskFreezeFraction * ringing.ringRiskThreshold)
+        << "highest score seen on slot 1 was " << best;
+
+    bool confirmAsked = false;
+    app.soundcheckConfirmHook = [&confirmAsked] (const juce::String&,
+                                                 std::function<void (bool)>)
+    {
+        confirmAsked = true;
+    };
+
+    app.getModeRailForTest().onMeasure();
+
+    // The dialog is NEVER reached: this is a preflight refusal, so the operator
+    // is not asked to drop their master for a run that must not happen.
+    EXPECT_FALSE (confirmAsked);
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // "nguy co hu" -- the ring-risk sentence, not some other refusal.
+    EXPECT_TRUE  (app.lastMessageForTest().contains (
+        juce::String::fromUTF8 ("nguy c\xc6\xa1 h\xc3\xba")))
+        << app.lastMessageForTest().toStdString();
+    // A refusal does not leave the console locked.
+    EXPECT_TRUE  (app.getModeRailForTest().measureButton.isEnabled());
 }
 
 // RED IF an abort ends a run in silence. Every abort but the two a finger

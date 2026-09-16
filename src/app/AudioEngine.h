@@ -296,6 +296,12 @@ public:
     // and sampleAt both clamp -- so this is the only route by which the
     // +-1.0f output clamp can be SHOWN to still cover the sweep path
     // (invariant 4). Same shape as lane G's setRingRiskOverrideForTest.
+    //
+    // TEST SEAM -- no production caller; grep before adding one. The only
+    // caller in the tree is tests/test_audioengine.cpp, and that is the whole
+    // design: this is the one route by which an UNCLAMPED amplitude reaches the
+    // sweep path, so a production call site would be a real level bug wearing a
+    // test name. A non-finite argument is refused outright (final review M-3).
     void setSoundcheckGainUnclampedForTest (float gain);
 
     // Command channel FROM the detector threads INTO the audio thread (bridge

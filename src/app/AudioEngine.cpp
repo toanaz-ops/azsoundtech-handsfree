@@ -450,6 +450,15 @@ void AudioEngine::setRunningForTest (bool running)
 
 void AudioEngine::setSoundcheckGainUnclampedForTest (float gain)
 {
+    // A NaN OR AN INFINITY IS NOT A TEST, IT IS A BROKEN ONE (final review
+    // M-3). This seam deliberately bypasses SoundcheckSignal's clamps, which
+    // makes it the one route by which a non-finite multiplier could reach the
+    // +-1.0f output clamp -- and std::clamp on a NaN returns the NaN. Refusing
+    // it here leaves the previous (finite) value standing, so a fat-fingered
+    // test fails on its own assertion instead of poisoning the sweep path.
+    if (! std::isfinite (gain))
+        return;
+
     // TEST SEAM ONLY (B-5, F17). Applied at insertion point 3 to the sample
     // AFTER SoundcheckSignal has clamped it, because a seam on the PEAK
     // achieves nothing -- the signal constructor and sampleAt both clamp, so
@@ -960,6 +969,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
     else
+    {
     for (int slot = 0; slot < kMaxSlots; ++slot)
         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
         {
@@ -987,6 +997,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 tapDropCounts_[(std::size_t) slot][(std::size_t) lane]
                     .fetch_add (requested - written, std::memory_order_relaxed);
         }
+    }
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)

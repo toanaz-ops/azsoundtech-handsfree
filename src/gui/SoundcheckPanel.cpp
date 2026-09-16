@@ -299,12 +299,15 @@ void SoundcheckPanel::setResults (const Model& model)
 
 //==============================================================================
 
-void SoundcheckPanel::addSummaryLine (const juce::String& text, const juce::Colour colour)
+// `line`, not `text`: `using namespace az::theme;` at the top of this TU brings
+// a Colour named `text` into scope, and a parameter of that name shadows it --
+// MSVC C4459 (final review, verifier).
+void SoundcheckPanel::addSummaryLine (const juce::String& line, const juce::Colour colour)
 {
     if (summaryLineCount_ >= kMaxSummaryLines)
         return;
 
-    summaryLines_[summaryLineCount_].text   = text;
+    summaryLines_[summaryLineCount_].text   = line;
     summaryLines_[summaryLineCount_].colour = colour;
     ++summaryLineCount_;
 }
@@ -320,15 +323,22 @@ void SoundcheckPanel::rebuildSummary()
     // ERROR, and it is what replaces the headline when there is nothing else to
     // put there: "0 hot spots" on a run that judged nothing reads as an
     // excellent PA (Task 3 I-3).
-    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0 || model_.worseOff();
+    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0 || model_.showWorseOff();
 
     // THE line that must never be silent, and it goes FIRST: an apply that
     // removed notches and placed none left the room worse than it found it.
-    if (model_.worseOff())
+    // showWorseOff(), not worseOff(): ONE slot can come out worse while the
+    // TOTALS still placed something, and the sum hides it (final review I-3).
+    if (model_.showWorseOff())
         addSummaryLine (clearedPrefix() + juce::String (model_.clearedPrevious)
                             + worseOffSentence(),
                         danger);
-    else if (mode_ == Mode::Applied)
+
+    // And when something WAS placed, both lines are true and both are printed:
+    // the operator needs the warning AND the count. Suppressed only when
+    // nothing was placed anywhere, where the danger line above already says
+    // everything a "da dat 0 notch moi" line would.
+    if (mode_ == Mode::Applied && ! model_.worseOff())
         addSummaryLine (appliedPrefix() + juce::String (model_.placed) + placedSentence(),
                         accent);
 

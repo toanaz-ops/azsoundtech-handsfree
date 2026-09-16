@@ -213,6 +213,18 @@ const char* kScConfirmSilence2 = " gi\xc3\xa2y. ";
 const char* kScConfirmPasses   = " l\xc6\xb0\xe1\xbb\xa3t \xc4\x91o tr\xc3\xaan ";
 const char* kScConfirmTotal    = " k\xc3\xaanh ng\xc3\xb5 ra, t\xe1\xbb\x95ng kho\xe1\xba\xa3ng ";
 const char* kScConfirmTotal2   = " gi\xc3\xa2y.";
+// "Trong suot phep do, bo chong hu TAT tren moi slot. Neu phong bat dau hu,
+//  bam DUNG ngay."
+//
+// THE FACT THE DIALOG DID NOT STATE (final review I-1). arm() calls
+// setDetectionActiveOnAllSlots(false) -- EVERY slot, for the WHOLE run, not
+// only the channel being swept -- so for up to ~72 seconds the rig has no
+// feedback protection on any chain. The operator is being asked to drop their
+// master; they are owed the fact that the safety net goes down with it, and
+// the one escape that is left. Leading blank line so it lands as its own
+// paragraph and not as a footnote to the duration.
+const char* kScConfirmDetectionOff =
+    "\x0a\x0aTrong su\xe1\xbb\x91t ph\xc3\xa9p \xc4\x91o, b\xe1\xbb\x99 ch\xe1\xbb\x91ng h\xc3\xba T\xe1\xba\xaeT tr\xc3\xaan m\xe1\xbb\x8di slot. N\xe1\xba\xbfu ph\xc3\xb2ng b\xe1\xba\xaft \xc4\x91\xe1\xba\xa7u h\xc3\xba, b\xe1\xba\xa5m D\xe1\xbb\xaaNG ngay.";
 
 // "LOI: phep do khong dung duoc khi thiet bi khoi dong lai. Kiem tra lai thiet
 //  bi truoc khi do tiep."  DISTINCT from the normal abort sentence (review M-4):
@@ -1225,7 +1237,48 @@ juce::String MainComponent::soundcheckConfirmText (const int passCount, const in
          + juce::String (outputs)
          + juce::String::fromUTF8 (kScConfirmTotal)
          + juce::String (totalSec, 1)
-         + juce::String::fromUTF8 (kScConfirmTotal2);
+         + juce::String::fromUTF8 (kScConfirmTotal2)
+         + juce::String::fromUTF8 (kScConfirmDetectionOff);
+}
+
+NotchController::SnapshotBuffer MainComponent::worstRingRiskSnapshot (int& slotOut) const
+{
+    // THE WORST VALID SNAPSHOT over every slot the run can touch (final review
+    // I-2). Reading only the DISPLAYED slot was a real hole: arm() disarms
+    // detection on EVERY slot and buildSoundcheckTargets() sweeps EVERY enabled
+    // slot, so a room ringing on slot 1 while the console showed slot 0 was
+    // swept anyway -- with the one detector that could have caught it already
+    // switched off.
+    //
+    // The displayed slot stays in the set even when it is disabled, so this can
+    // only ever refuse MORE runs than the old read did, never fewer. A gate is
+    // not somewhere to trade safety for tidiness (global rule 10).
+    //
+    // ringRiskValid == false is skipped rather than compared: an unscored
+    // detector publishes score 0.0f, and letting that win a max() would hide a
+    // real reading behind a slot that has never measured anything.
+    NotchController::SnapshotBuffer worst {};
+    slotOut = -1;
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+    {
+        if (! engine_.getSlotConfig (slot).enabled && slot != displayedSlot_)
+            continue;
+
+        NotchController::SnapshotBuffer snap {};
+        notchControllers_[(std::size_t) slot]->copySnapshot (snap);
+
+        if (! snap.ringRiskValid)
+            continue;
+
+        if (slotOut < 0 || snap.ringRiskScore > worst.ringRiskScore)
+        {
+            worst   = snap;
+            slotOut = slot;
+        }
+    }
+
+    return worst;
 }
 
 juce::String MainComponent::soundcheckRefusalMessage (const SoundcheckController::Refusal r)
@@ -1286,11 +1339,12 @@ void MainComponent::beginSoundcheck()
 
     const auto targets = buildSoundcheckTargets();
 
-    // The RING RISK the dialog is answered against comes from the detector of
-    // the slot the console is MONITORING -- the same source the on-screen chip
-    // uses, so the two can never disagree (lane R, A-R6).
-    NotchController::SnapshotBuffer risk {};
-    notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (risk);
+    // THE WORST RISK IN THE RIG, not the one on screen (final review I-2). The
+    // chip answers "what is the slot I am monitoring doing"; this question is
+    // "is it safe to silence a whole output and blind every detector for 72
+    // seconds", and the answer has to cover every chain the run touches.
+    int        riskSlot = -1;
+    const auto risk     = worstRingRiskSnapshot (riskSlot);
 
     const auto refusal = soundcheck_.preflight (targets, risk);
     if (refusal != SoundcheckController::Refusal::None)
@@ -1373,8 +1427,11 @@ void MainComponent::armSoundcheck (const std::vector<SoundcheckController::Targe
 {
     // S-1: a FRESH risk snapshot. preflight ran before the dialog and a room can
     // start ringing while the operator reads it; this is the read arm() logs.
-    NotchController::SnapshotBuffer risk {};
-    notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (risk);
+    // Worst-over-slots, for the same reason preflight is (final review I-2) --
+    // and the slot it came from goes into the log beside the score, so a
+    // refusal a week later names the chain that caused it.
+    int        riskSlot = -1;
+    const auto risk     = worstRingRiskSnapshot (riskSlot);
 
     // The poll thread must exist BEFORE the machine leaves Idle: arm() enters
     // the first target itself and every phase after that is a poll. start() is
@@ -1383,7 +1440,7 @@ void MainComponent::armSoundcheck (const std::vector<SoundcheckController::Targe
     // and covers the path where a device was opened without it.
     soundcheck_.start();
 
-    const auto refusal = soundcheck_.arm (targets, buildSoundcheckRunParams(), risk);
+    const auto refusal = soundcheck_.arm (targets, buildSoundcheckRunParams(), risk, riskSlot);
 
     if (refusal != SoundcheckController::Refusal::None)
     {
@@ -1563,6 +1620,12 @@ void MainComponent::applySoundcheckProposals()
         return;
 
     SoundcheckApplyStats total;
+    // PER SLOT, because the totals cannot say it (final review I-3). A slot that
+    // lost every notch it had and got none back is a chain that is now LESS
+    // protected than before the operator pressed AP DUNG -- and adding its 0
+    // placed to another slot's 6 turns that into a success on the strip. This
+    // is the one outcome the report exists to refuse to hide.
+    bool anySlotWorseOff = false;
 
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
@@ -1586,6 +1649,11 @@ void MainComponent::applySoundcheckProposals()
         total.skippedOtherSlot += stats.skippedOtherSlot;
         total.skippedBadLane   += stats.skippedBadLane;
 
+        // The SAME identity SoundcheckPanel::Model::worseOff() uses, evaluated
+        // where the per-slot numbers still exist, one slot at a time.
+        anySlotWorseOff = anySlotWorseOff
+                       || (stats.clearedPrevious > 0 && stats.placed == 0);
+
         // The FIFTH lane M event, in the shape Task 8 owns -- never a second
         // one inlined here. One per slot applied, so a reader can see WHICH
         // chain the counts belong to; `slot` is the only field added.
@@ -1605,11 +1673,15 @@ void MainComponent::applySoundcheckProposals()
     auto model = soundcheckResultsModel();
     model.placed          = total.placed;
     model.clearedPrevious = total.clearedPrevious;
+    model.anySlotWorseOff = anySlotWorseOff;
     soundcheckPanel_.setResults (model);
 
     endSoundcheckSession (gui::SoundcheckPanel::Mode::Applied);
 
-    if (model.worseOff())
+    // showWorseOff(), not worseOff(): the strip and the message say the same
+    // thing about the same run, and a slot-level regression the strip flags in
+    // danger red is not one to leave out of the sentence under it (I-3).
+    if (model.showWorseOff())
         showMessage (juce::String::fromUTF8 (kScWorseOffHead)
                      + juce::String (model.clearedPrevious)
                      + juce::String::fromUTF8 (kScWorseOffTail));

@@ -202,8 +202,16 @@ public:
     // Returns Refusal::None on success. Any other value means NOT ONE SAMPLE
     // was emitted and the state is still Idle (inv 19); Task 9 shows the
     // reason, which is why this returns a Refusal and not a bool.
+    //
+    // `riskSlot` is only ever a LABEL for the log: the slot `risk` was copied
+    // from, or -1 when nothing has scored a frame. It changes no decision here
+    // -- the refusal identity reads the snapshot and nothing else -- but a
+    // refusal that names the chain is a refusal a soundman can act on, and the
+    // caller now takes the WORST snapshot across slots (final review I-2), so
+    // without it the logged score belongs to a slot nobody can identify.
     [[nodiscard]] Refusal arm (std::vector<Target> targets, const RunParams& params,
-                               const NotchController::SnapshotBuffer& risk);
+                               const NotchController::SnapshotBuffer& risk,
+                               int riskSlot = -1);
     void  applyRequested();          // Results -> Idle, after Task 7 has placed
     void  dismissRequested();        // BO
     // Stops the SOUND on the calling thread and lifts the tap suspension --

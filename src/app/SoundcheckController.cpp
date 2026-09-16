@@ -160,7 +160,8 @@ SoundcheckController::refuseOnRingRisk (const NotchController::SnapshotBuffer& r
 
 SoundcheckController::Refusal
 SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
-                           const NotchController::SnapshotBuffer& riskSnapshot)
+                           const NotchController::SnapshotBuffer& riskSnapshot,
+                           const int riskSlot)
 {
     if (state_.load (std::memory_order_acquire) != State::Idle)
         return Refusal::AlreadyRunning;
@@ -274,6 +275,14 @@ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
                             riskSnapshot.ringRiskValid
                                 ? juce::var (round3sf ((double) riskSnapshot.ringRiskScore))
                                 : juce::var());
+            // WHICH SLOT that number came from. The owner takes the worst
+            // reading across every slot the run touches, not the one on screen
+            // (final review I-2), so "ring_risk: 0.31" alone no longer says
+            // whose chain it describes. null, not -1, for the same reason
+            // ring_risk is null when nothing has scored: absent and "slot -1"
+            // are different claims.
+            o->setProperty ("ring_risk_slot",
+                            riskSlot >= 0 ? juce::var (riskSlot) : juce::var());
             o->setProperty ("gate", round3sf ((double) params_.noiseFloorGate));
         }
         logEvent (ev);
@@ -812,7 +821,13 @@ void SoundcheckController::enterTarget (int index)
 
     // Whatever the previous target left behind is not this target's noise
     // floor. Safe as a consumer-side operation: capture is OFF at this point
-    // (Gap turned it off, or the run has not started), so nothing is writing.
+    // (Gap turned it off, or the run has not started), so nothing is writing --
+    // and the one clause that makes that true is the GAP (M-2): the callback
+    // snapshots scCaptureActive_ ONCE at the top of its block, so it is one
+    // block behind the store, and a callback already in flight when enterGap()
+    // ran can still write one more block after it returned. kGapMs = 300 ms
+    // stands between that late block and this clear(), which is orders of
+    // magnitude longer than the longest supported buffer.
     engine_.getMicCaptureBuffer().clear();
 
     // LISTEN ONLY (C-1). The capture gate opens; the OUTPUT CHANNEL DOES NOT.
