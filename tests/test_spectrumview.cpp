@@ -1008,6 +1008,40 @@ TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
 
     EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsAfterFirst);
     EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
+
+    //--------------------------------------------------------------------
+    // AND AT A WIDTH NO MONITOR HAS. This is the round-2 defect, and it was a
+    // real one: the dash used to be an absolute PIXEL period, so the number of
+    // dashes -- and with it the path's element count -- grew with the plot's
+    // width. The reservation was derived from an assumed 2560 px maximum that
+    // nothing enforces: src/main.cpp:59-61 calls
+    // setResizeLimits(..., 16384, 16384). On a 5120 px ultrawide the path
+    // would have overrun its reservation and juce::Path would have
+    // REALLOCATED INSIDE paint().
+    //
+    // kMarginDashPeriods removes width from the arithmetic, so the count is a
+    // constant. 8192 px is double the widest display sold and still half the
+    // limit main.cpp actually permits.
+    view.setSize (8192, 420);
+    view.resized();
+
+    juce::Image wide { juce::Image::ARGB, 8192, 420, true };
+    { juce::Graphics g { wide }; view.paint (g); }
+
+    const auto elementsWhenVeryWide = view.soundcheckOverlayPathElementCountForTest();
+    EXPECT_GT (elementsWhenVeryWide, (std::size_t) 0);
+    EXPECT_LE (elementsWhenVeryWide * 3,
+               (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
+
+    // The count must be about the same as at 900 px, not six times it -- that
+    // equivalence IS the fix, and an assertion only on the ceiling would still
+    // pass a version that merely happened to fit.
+    EXPECT_LT (elementsWhenVeryWide, elementsAfterFirst * 2);
+
+    // Painting wide must not have grown anything either.
+    { juce::Graphics g { wide }; view.paint (g); }
+    EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsWhenVeryWide);
+    EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
 }
 
 // RED IF the dash swallows part of the curve. This is not hypothetical: the

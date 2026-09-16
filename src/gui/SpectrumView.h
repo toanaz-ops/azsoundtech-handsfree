@@ -254,30 +254,54 @@ public:
     // peak hold ON an operator would be looking at two pale traces with no way
     // to tell which is the measurement. The dash is what tells them apart.
     //
-    // Measured in PIXELS OF X TRAVEL, not in bins. The axis is logarithmic, so
-    // a bin-counted dash is long at 100 Hz and invisible at 10 kHz -- the exact
-    // place the eye needs it most.
-    static constexpr float kMarginDashOnPx  = 7.0f;
-    static constexpr float kMarginDashOffPx = 5.0f;
+    // Counted as a FIXED NUMBER OF PERIODS ACROSS THE PLOT, not in absolute
+    // pixels, and this is a correctness requirement before it is a visual one.
+    //
+    // An absolute pixel period makes the dash COUNT proportional to the plot's
+    // width, and nothing in this app bounds that width:
+    // src/main.cpp:59-61 calls setResizeLimits(..., 16384, 16384). Round 2 of
+    // this task reserved the path against an assumed 2560 px maximum, which is
+    // not a maximum of anything -- on a 5120 px ultrawide the dash count would
+    // have overrun the reservation and juce::Path would have reallocated
+    // INSIDE paint(), which is the one thing this whole view is built not to
+    // do. Periods-across-the-plot removes the width from the arithmetic
+    // entirely, so the bound below holds at 1440 px and at 16384 px alike.
+    //
+    // It is also the better picture: the dash keeps the same visual density at
+    // every window size instead of turning into a dotted line on a big screen.
+    // 110 periods over the ~1330 px plot of a 1440 px window is a 12.1 px
+    // period, which is what the fixed 7 + 5 was, so nothing about how it reads
+    // at the default size has changed.
+    static constexpr int   kMarginDashPeriods   = 110;
+    static constexpr float kMarginDashDutyCycle = 7.0f / 12.0f;   // on / (on + off)
 
     // soundcheckOverlayPath_'s ctor reservation. Same units and the same
     // caveat as kDashedStemReserveFloats above: Path::preallocateSpace()
     // reserves COORDS, not elements, at roughly three floats per lineTo or
-    // startNewSubPath. Worst case, summed:
+    // startNewSubPath.
     //
-    //   - one element per bin, Detector::kNumBins = 1025, every one trusted
-    //     and inside the displayed range;
-    //   - plus the DASH. Each dash costs a startNewSubPath and its dashes are
-    //     counted in x pixels, so the widest plot this view is asked to draw
-    //     bounds it: 2560 px of x / (7 + 5) px period = ~214 dashes, and a
-    //     dash that begins part-way along a segment adds its own endpoint --
-    //     call it 2 elements each, 428;
-    //   - plus a subpath break per untrusted run.
+    // WIDTH DOES NOT APPEAR IN THIS DERIVATION, and that is the point. Round 2
+    // derived it from an assumed 2560 px plot; nothing enforces such a maximum
+    // (src/main.cpp:59-61 allows 16384), so on a wide enough monitor the path
+    // would have grown past the reservation and reallocated inside paint().
+    // With kMarginDashPeriods the dash count is a constant, so both terms below
+    // are constants:
     //
-    // (1025 + 428) * 3 = 4359 coords, rounded up for the breaks and for a
-    // clean constant. The test asserts the realised count against this, so an
-    // undersized figure fails rather than quietly reallocating.
-    static constexpr int kSoundcheckOverlayReserveFloats = 5000;
+    //   - one element per bin: Detector::kNumBins = 1025, worst case every one
+    //     trusted and inside the displayed range;
+    //   - plus the dash: kMarginDashPeriods = 110 dashes, each costing a
+    //     startNewSubPath plus the lineTo that ends it part-way along a
+    //     segment -- 2 elements each, 220. (Bin points falling INSIDE a dash
+    //     are already counted in the 1025.)
+    //   - a subpath break for an untrusted run costs nothing extra: the next
+    //     dash's startNewSubPath is already in the 220.
+    //
+    // (1025 + 220) * 3 = 3735 coords. Rounded to 4200 for headroom against
+    // juce::Path's own per-element accounting. The test paints at 8192 px --
+    // wider than any monitor sold -- and asserts the realised count against
+    // this constant, so an undersized figure fails rather than quietly
+    // reallocating.
+    static constexpr int kSoundcheckOverlayReserveFloats = 4200;
 
     // TEST ACCESSORS ONLY -- the no-allocation-in-paint guarantee, proved for
     // the overlay path exactly as dashedStemPathElementCountForTest proves it

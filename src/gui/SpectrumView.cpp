@@ -1051,6 +1051,14 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
     // gap whose length is known.
     const float marginSpan = kMarginSafeDb - kMarginAtRiskDb;
 
+    // The dash lengths in pixels for THIS plot width. Derived rather than
+    // fixed, so the number of dashes -- and therefore the number of path
+    // elements -- is the same on a 1440 px window and on a 16384 px one. See
+    // kMarginDashPeriods; the reservation depends on it.
+    const float dashPeriod = juce::jmax (1.0f, plot.getWidth() / (float) kMarginDashPeriods);
+    const float dashOnPx   = dashPeriod * kMarginDashDutyCycle;
+    const float dashOffPx  = juce::jmax (0.5f, dashPeriod - dashOnPx);
+
     bool  penDown   = false;
     bool  inDash    = true;     // a dash, not a gap, at the start of every run
     float dashTaken = 0.0f;     // x already spent inside the current dash/gap
@@ -1108,7 +1116,7 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
         float travelled = 0.0f;
         while (travelled < dx)
         {
-            const float period = inDash ? kMarginDashOnPx : kMarginDashOffPx;
+            const float period = inDash ? dashOnPx : dashOffPx;
             const float take   = juce::jmin (period - dashTaken, dx - travelled);
 
             if (inDash)
