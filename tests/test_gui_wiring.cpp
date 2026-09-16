@@ -2256,6 +2256,30 @@ TEST (MainComponentSoundcheck, DeviceRestartUnlocksTheConsoleAndSaysWhatHappened
     EXPECT_TRUE (app.lastMessageForTest().isNotEmpty());
 }
 
+// RED IF a restart claims a measurement was stopped when there was none. M-2:
+// Mode::Applied is a record of work that FINISHED -- its proposals are placed --
+// so "your measurement was stopped" there is a lie about a success.
+TEST (MainComponentSoundcheck, ARestartWithNothingMeasuringSaysNothing)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Applied);
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+    app.showMessage ({});
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    EXPECT_TRUE (app.lastMessageForTest().isEmpty())
+        << "an applied report is not a measurement in flight";
+
+    // And a plain idle console says nothing either.
+    MainComponent idle;
+    idle.showMessage ({});
+    idle.getDevicePanelForTest().onBeforeRestart();
+    EXPECT_TRUE (idle.lastMessageForTest().isEmpty());
+}
+
 // RED IF: PRESET LOAD stays live while proposals are pending. adoptPreset uses
 // the FILE's indices and overwrites without checking n.active
 // (NotchController.cpp -> setNotchImpl), so it would silently erase every
@@ -2301,6 +2325,21 @@ TEST (MainComponentSoundcheck, ModeAndClearAllAreLockedWhileRunning)
     const juce::ScopedJuceInitialiser_GUI juceInit;
     MainComponent app;
 
+    // A REAL notch, so the verdict buttons below exist to be asserted on. Same
+    // recipe as FalseVerdictLogsVerdictThenClearsWithVerdictFalse above: place
+    // it, feed one hop to both taps, pump runOnce() to publish the snapshot.
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1234.0, 30.0, -12.0, NotchController::Origin::Manual));
+    std::vector<float> hop (512, 0.1f);
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();
+
+    auto& list = app.getNotchListPanelForTest();
+    list.refreshFromSnapshot();
+    ASSERT_EQ (list.rowCountForTest(), 1);
+
     app.setSoundcheckControlsLockedForTest (true);
     auto& rail = app.getModeRailForTest();
 
@@ -2322,6 +2361,19 @@ TEST (MainComponentSoundcheck, ModeAndClearAllAreLockedWhileRunning)
     EXPECT_FALSE (row.outLanes[0].isEnabled());
     EXPECT_FALSE (row.link.isEnabled());
 
+    // I-1: the DETECTION strip. RunParams are frozen at Arm, but the ceiling
+    // APPLY clamps against is read live, so a DEPTH move here would hand the
+    // operator cuts the results strip never described.
+    EXPECT_FALSE (app.getTuningPanel().isEnabled());
+
+    // C-1, CRITICAL: the notch table's FALSE verdict is one click from
+    // clearNotch(VerdictFalse) -- a partial CLEAR ALL mid-sweep, on the very
+    // chain being measured. Asserted on the REAL button, not on the panel.
+    EXPECT_FALSE (list.isEnabled());
+    ASSERT_NE   (list.falseButtonForTest (0), nullptr);
+    EXPECT_FALSE (list.falseButtonForTest (0)->isEnabled());
+    EXPECT_FALSE (list.goodButtonForTest (0)->isEnabled());
+
     app.setSoundcheckControlsLockedForTest (false);
     EXPECT_TRUE (rail.measureButton.isEnabled());
     EXPECT_TRUE (rail.clearAllButton.isEnabled());
@@ -2332,6 +2384,8 @@ TEST (MainComponentSoundcheck, ModeAndClearAllAreLockedWhileRunning)
     // they are what proves the unlock reached the rows.
     EXPECT_TRUE (row.enable.isEnabled());
     EXPECT_TRUE (row.link.isEnabled());
+    EXPECT_TRUE (app.getTuningPanel().isEnabled());
+    EXPECT_TRUE (list.falseButtonForTest (0)->isEnabled());
 }
 
 // RED IF: the restore-detection lambda grows past a relaxed atomic store per
@@ -2484,20 +2538,30 @@ TEST (MainComponentSoundcheck, TheConfirmationSaysHaMasterTruocAndTheRealDuratio
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
 
-    const auto text = MainComponent::soundcheckConfirmTextForTest (16);
+    // 16 PASSES over 10 distinct output channels -- the shape a rig gets when
+    // some slots are summed onto shared outputs. The two counts differ, and
+    // both have to be in the sentence (review M-1).
+    const auto text = MainComponent::soundcheckConfirmTextForTest (16, 10);
 
     EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
         "H\xe1\xba\xa0 MASTER TR\xc6\xaf\xe1\xbb\x9a" "C")))   // "HA MASTER TRUOC"
         << "the confirmation must tell the operator to drop the master";
     EXPECT_TRUE (text.contains ("20 dB")) << "the level statement is the point";
 
-    // 16 outputs x kPerTargetMs. The number is DERIVED from the constant, so
-    // this asserts the arithmetic rather than a second copy of "72".
+    // "16 luot do tren 10 kenh ngo ra" -- the passes and the channels, in that
+    // order and as different numbers.
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "16 l\xc6\xb0\xe1\xbb\xa3t \xc4\x91o tr\xc3\xaan 10 k\xc3\xaanh")))
+        << text.toStdString();
+
+    // 16 PASSES x kPerTargetMs -- the machine spends the time per pass, not per
+    // channel. DERIVED from the constant, so this asserts the arithmetic rather
+    // than a second copy of "72".
     const double totalSec = SoundcheckController::kPerTargetMs * 16.0 / 1000.0;
     EXPECT_TRUE (text.contains (juce::String (totalSec, 1)))
         << "expected " << totalSec << " s in: " << text.toStdString();
     EXPECT_TRUE (text.contains (juce::String (SoundcheckController::kPerTargetMs / 1000.0, 1)))
-        << "the per-channel silence has to be stated too";
+        << "the per-pass silence has to be stated too";
 }
 
 // RED IF: DUNG / Esc is not wired. SoundcheckPanel routes BOTH through onStop
@@ -2544,4 +2608,158 @@ TEST (MainComponentSoundcheck, EverySlotHasItsOwnApplyLedgerAndClearAllDoesNotRe
 
     for (int slot = 0; slot < kMaxSlots; ++slot)
         EXPECT_TRUE (app.soundcheckLedgerForTest (slot).entries.empty()) << "slot " << slot;
+}
+
+// RED IF the console stays fully locked once the sweep has stopped. I-3 /
+// spec 4.3: BYPASS is how a soundman saves a show, and a results strip is not a
+// reason to take it away. What must STAY dead is everything that would
+// invalidate or silently consume the proposals on screen.
+TEST (MainComponentSoundcheck, BypassIsReachableDuringResultsButMeasureIsNot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+    auto& rail = app.getModeRailForTest();
+
+    // BACK: the emergency controls.
+    EXPECT_TRUE (rail.bypassButton.isEnabled());
+    EXPECT_TRUE (rail.autoButton.isEnabled());
+    EXPECT_TRUE (rail.soundcheckButton.isEnabled());
+    EXPECT_TRUE (rail.clearAllButton.isEnabled());
+
+    // STILL DEAD: a second run would throw the proposals away...
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+    // ...adoptPreset would erase them...
+    EXPECT_FALSE (app.getDeviceDrawer().loadButton.isEnabled());
+    // ...and these three would change what they were computed against.
+    EXPECT_FALSE (app.getSlotPanelForTest().getRowForTest (0).link.isEnabled());
+    EXPECT_FALSE (app.getTuningPanel().isEnabled());
+    EXPECT_FALSE (app.getNotchListPanelForTest().isEnabled());
+
+    juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("lane-m-results-lock.json");
+    tmp.replaceWithText ("{\"version\":\"1.0\",\"notches\":[]}");
+    EXPECT_FALSE (app.loadPreset (tmp)) << "PRESET LOAD is refused through Results too";
+    tmp.deleteFile();
+
+    // Applied is the SAME state: its proposals are placed, but the ledger, the
+    // routing and the ceiling they were computed against must not move until
+    // the operator dismisses the report.
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Results);
+    app.getSoundcheckPanelForTest().onDismiss();
+    EXPECT_EQ   (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+    EXPECT_TRUE (rail.measureButton.isEnabled());
+    EXPECT_TRUE (app.getTuningPanel().isEnabled());
+}
+
+// RED IF DO stays live while its own confirmation is open. I-2: two stacked
+// dialogs are two arms, and a stale OK arriving after the console moved on
+// would start a sweep against a rig that is no longer the one on screen.
+TEST (MainComponentSoundcheck, MeasureIsDeadWhileItsOwnConfirmationIsOpen)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    int asked = 0;
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&asked, &answer] (const juce::String&,
+                                                   std::function<void (bool)> cb)
+    {
+        ++asked;
+        answer = std::move (cb);
+    };
+
+    auto& rail = app.getModeRailForTest();
+    const auto targets = app.soundcheckTargetsForTest();
+    ASSERT_FALSE (targets.empty());
+
+    // The confirmation step on its own: preflight refuses before the dialog
+    // with no device, and no test may open one (this engine passes input to
+    // output -- a device opened in a test suite is a feedback path).
+    app.askSoundcheckConfirmationForTest (targets);
+
+    EXPECT_EQ    (asked, 1);
+    EXPECT_TRUE  (app.soundcheckConfirmPendingForTest());
+    EXPECT_FALSE (rail.measureButton.isEnabled()) << "DO must be dead while its box is up";
+
+    // A second press stacks NOTHING.
+    app.askSoundcheckConfirmationForTest (targets);
+    app.getModeRailForTest().onMeasure();
+    EXPECT_EQ (asked, 1);
+
+    // HUY hands the button back and arms nothing.
+    ASSERT_NE (answer, nullptr);
+    answer (false);
+    EXPECT_FALSE (app.soundcheckConfirmPendingForTest());
+    EXPECT_TRUE  (rail.measureButton.isEnabled());
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+}
+
+// RED IF a STALE OK arms. The box was open while the console moved on -- here,
+// into a Results window -- and the targets in that callback describe a rig the
+// operator is no longer looking at.
+TEST (MainComponentSoundcheck, AStaleConfirmationDoesNotArm)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&answer] (const juce::String&,
+                                           std::function<void (bool)> cb)
+    {
+        answer = std::move (cb);
+    };
+
+    app.askSoundcheckConfirmationForTest (app.soundcheckTargetsForTest());
+    ASSERT_NE (answer, nullptr);
+
+    // The console moved on while the box was up.
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+
+    answer (true);
+
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // DO stays dead, because the lock -- not the dialog -- owns it now.
+    EXPECT_FALSE (app.getModeRailForTest().measureButton.isEnabled());
+}
+
+// RED IF an armed run can be left with no poll thread. arm() enters the first
+// target itself and every phase after that is a poll, so a run whose thread was
+// never started sits in NoiseFloor for ever with the taps suspended and
+// detection off. armSoundcheck starts it idempotently before arming.
+//
+// (The same line in startAudio() is deliberately NOT covered by a test: the only
+// way to reach it opens the machine's default audio device, and this engine
+// passes input to output -- a feedback path in a test suite. See the fix report.)
+TEST (MainComponentSoundcheck, ArmingAlwaysLeavesAPollThreadRunning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_FALSE (sc.isPollThreadRunningForTest());
+
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&answer] (const juce::String&,
+                                           std::function<void (bool)> cb)
+    {
+        answer = std::move (cb);
+    };
+
+    app.askSoundcheckConfirmationForTest (app.soundcheckTargetsForTest());
+    ASSERT_NE (answer, nullptr);
+    answer (true);   // arm() itself refuses -- no device -- but the thread is up
+
+    EXPECT_TRUE (sc.isPollThreadRunningForTest());
+    EXPECT_EQ   (sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // A refused arm hands DO back rather than leaving it dead.
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+
+    sc.stop (2000);
 }

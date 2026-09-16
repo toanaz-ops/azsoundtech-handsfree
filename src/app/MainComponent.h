@@ -130,6 +130,33 @@ public:
     std::function<void (std::function<void (const juce::File&)> onPicked)> presetLoadChooser;
     std::function<void (std::function<void (const juce::File&)> onPicked)> presetSaveChooser;
 
+    // LANE M. THE CONSOLE HAS THREE LOCK STATES, NOT TWO (spec 4.3, review
+    // I-3). "Locked" as a bool put the operator's emergency control behind a
+    // results strip: BYPASS is how a show is saved when something goes wrong,
+    // and it must come back the moment the sweep stops.
+    enum class SoundcheckLock
+    {
+        // Idle with nothing on the strip. Everything is live.
+        None,
+
+        // A run is in flight. Everything that could move the chain the run is
+        // measuring is dead: the mode switches, CLEAR ALL, DO, the preset row,
+        // the device controls, the routing table, the DETECTION strip and the
+        // notch table's verdict buttons (a FALSE verdict is a one-click
+        // clearNotch -- a partial CLEAR ALL by another name).
+        Measuring,
+
+        // Results, and the Applied report that follows an AP DUNG. The sound
+        // has stopped, so the MODE SWITCHES AND CLEAR ALL COME BACK. What stays
+        // dead is everything that would invalidate or silently consume the
+        // proposals still on screen: DO itself, PRESET LOAD (adoptPreset
+        // overwrites without checking n.active), the routing table (Task 7's
+        // stale-linked ruling), the DETECTION strip (RunParams were frozen at
+        // Arm, so a DEPTH move here would have APPLY writing against a ceiling
+        // the run never saw) and the verdict buttons.
+        Pending
+    };
+
     // LANE M Task 10. The confirmation the operator answers before ONE SAMPLE
     // is emitted (spec 4.3). Injectable exactly as presetLoadChooser is, and for
     // the same reason: JUCE_MODAL_LOOPS_PERMITTED is off, so a headless test
@@ -230,7 +257,20 @@ public:
     // not-a-crash, so a test can read the sentence the operator would.
     [[nodiscard]] juce::String lastMessageForTest() const { return panelMessage_; }
 
-    void setSoundcheckControlsLockedForTest (bool locked) { setSoundcheckControlsLocked (locked); }
+    // true == Measuring (the full lock), false == None. Kept as it was so the
+    // tests written against the two-state lock still say what they said.
+    void setSoundcheckControlsLockedForTest (bool locked)
+        { setSoundcheckLock (locked ? SoundcheckLock::Measuring : SoundcheckLock::None); }
+    void setSoundcheckLockForTest (SoundcheckLock lock) { setSoundcheckLock (lock); }
+    [[nodiscard]] SoundcheckLock soundcheckLockForTest() const { return soundcheckLock_; }
+
+    // Drives the confirmation step on its own, which is the only way a headless
+    // test can hold a dialog open: preflight refuses before the dialog whenever
+    // no device is running, and no test may open one (this engine passes input
+    // to output -- a device opened in a test suite is a feedback path).
+    void askSoundcheckConfirmationForTest (const std::vector<SoundcheckController::Target>& targets)
+        { askForSoundcheckConfirmation (targets); }
+    [[nodiscard]] bool soundcheckConfirmPendingForTest() const { return soundcheckConfirmPending_; }
 
     // The targets a press of DO would measure, and the RunParams it would
     // freeze. Both are exposed because neither is observable anywhere else:
@@ -252,8 +292,9 @@ public:
     // The exact sentence the operator is asked to agree to. Exposed because
     // the honest level statement (spec 4.3 / F13) is a REQUIREMENT, and a
     // requirement nothing asserts is a requirement that quietly goes missing.
-    [[nodiscard]] static juce::String soundcheckConfirmTextForTest (int targetCount)
-        { return soundcheckConfirmText (targetCount); }
+    [[nodiscard]] static juce::String soundcheckConfirmTextForTest (int passCount,
+                                                                    int distinctOutputs)
+        { return soundcheckConfirmText (passCount, distinctOutputs); }
 
     // One slot's apply ledger. It lives for this component's whole lifetime and
     // CLEAR ALL does not reset it -- see SoundcheckController.h, which calls
@@ -325,6 +366,10 @@ private:
 
     // The DO press: preflight, then the confirmation, then arm.
     void beginSoundcheck();
+    // The confirmation step alone. Separate so there is ONE place that puts DO
+    // out of reach for the life of its own dialog and ONE place that gives it
+    // back (review I-2).
+    void askForSoundcheckConfirmation (const std::vector<SoundcheckController::Target>& targets);
     // The OK half of the confirmation. Separate because it crosses an async
     // boundary and re-reads everything the dialog could have invalidated.
     void armSoundcheck (const std::vector<SoundcheckController::Target>& targets);
@@ -336,15 +381,23 @@ private:
     [[nodiscard]] std::vector<SoundcheckController::Target> buildSoundcheckTargets() const;
     [[nodiscard]] SoundcheckController::RunParams buildSoundcheckRunParams() const;
 
-    // The sentence the operator reads before anything is emitted.
-    [[nodiscard]] static juce::String soundcheckConfirmText (int targetCount);
+    // The sentence the operator reads before anything is emitted. TWO counts,
+    // because they differ and the difference is the operator's time: a PASS is
+    // one (slot, lane) measurement, and two slots feeding one output produce
+    // two passes on ONE channel. The duration follows the passes; the channel
+    // count is what the operator recognises on their patch (review M-1).
+    [[nodiscard]] static juce::String soundcheckConfirmText (int passCount, int distinctOutputs);
+    // Distinct outputChannel values in `targets`.
+    [[nodiscard]] static int distinctOutputCount (const std::vector<SoundcheckController::Target>& targets);
     // Each refusal its OWN sentence: "no device" and "the room is ringing" are
     // different problems with different answers (inv 19, F26).
     [[nodiscard]] static juce::String soundcheckRefusalMessage (SoundcheckController::Refusal r);
 
-    // F10: mode rail, CLEAR ALL, PRESET LOAD/SAVE, and every slot control that
-    // could change the chain the run is measuring.
-    void setSoundcheckControlsLocked (bool locked);
+    // F10 / I-3. The ONE place the console's three lock states are applied.
+    void setSoundcheckLock (SoundcheckLock lock);
+    // DO's enabled state under the CURRENT lock, so the confirmation path can
+    // hand it back without having to know which state that is.
+    void restoreMeasureEnabled();
 
     // Message-thread mirror of the machine's state, driven by the status timer.
     void syncSoundcheckUi();
@@ -463,7 +516,13 @@ private:
 
     // What syncSoundcheckUi last saw, so an edge is an edge. Message thread.
     SoundcheckController::State lastSoundcheckState_ = SoundcheckController::State::Idle;
-    bool soundcheckLocked_ = false;
+    SoundcheckLock soundcheckLock_ = SoundcheckLock::None;
+
+    // True while a confirmation is still unanswered. A second DO must not stack
+    // a second dialog -- two OKs are two arms, and the later one would arm
+    // against targets the first already consumed. ModeRail::handleClearAllClicked
+    // carries the same guard for the same reason (review I-2).
+    bool soundcheckConfirmPending_ = false;
 
     // A message the GUI itself produced -- a setting the hardware refused.
     // Device errors come from the engine and take precedence over it.
