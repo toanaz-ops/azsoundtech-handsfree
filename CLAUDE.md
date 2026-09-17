@@ -59,6 +59,28 @@ directory.
 - Submodules: clone with `--recursive`. If a submodule path is empty, run
   `git submodule update --init --recursive` before blaming the build.
 
+## Phần dùng chung phải là thư viện
+
+Owner's standing instruction, 2026-09-06. Hands-free là sản phẩm đầu tiên
+trên một nền tảng sẽ có thêm sản phẩm khác (voice isolator kiểu Voxis, cùng
+điểm insert mic vox — xem `docs/research/2026-09-06-cedar-realtime-plugins.md`
+§7). Vì vậy:
+
+- Bất kỳ phần nào **dự kiến dùng chung** giữa các sản phẩm phải được thiết kế
+  và implement **tách ra thành thư viện** (target CMake riêng, không phụ
+  thuộc ngược vào app), không nằm lẫn trong mã sản phẩm. Ứng viên hiện tại:
+  JUCE host shell + ASIO bridge, `LockFreeRingBuffer`, `SessionLogger`,
+  `LicenseManager`, theme Sodium Rack (`src/gui/theme`), installer +
+  `release-alpha.ps1`.
+- Phần **đặc thù sản phẩm** (detector, notch chain, scorer, console GUI) ở lại
+  trong app.
+- Lý do tách phải nêu ở spec của thay đổi; một thứ chỉ một sản phẩm dùng thì
+  không tách cho "phòng xa" — tách khi có sản phẩm thứ hai thật hoặc khi spec
+  nói rõ sản phẩm nào sẽ dùng.
+- Ranh giới thư viện đồng thời là ranh giới cho bản VST3 sau này: DSP core
+  không được include `juce_audio_devices` (đã đúng hôm nay, `src/dsp/` chỉ
+  dùng `juce_dsp`; `AudioEngine` là lớp host duy nhất chạm device).
+
 ## Every finished change ships a build to the testers
 
 Owner's standing instruction, 2026-08-26. When a change is DONE -- built,
