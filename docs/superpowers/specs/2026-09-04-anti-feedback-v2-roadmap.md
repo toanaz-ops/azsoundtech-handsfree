@@ -61,6 +61,8 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
    commit khi hành vi user-visible đổi.
 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
    gửi tester nêu rõ lane vừa đổi gì.
+7. PR lên `origin/main`, CI xanh (dán `gh pr checks`), merge qua PR — không
+   merge local vào main. Xem `docs/GIT-WORKFLOW.md`.
 
 ## Trạng thái
 
