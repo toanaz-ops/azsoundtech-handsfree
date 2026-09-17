@@ -3,7 +3,7 @@ name: Build
 on:
   pull_request:
     branches: [ main, develop ]
-    # Docs-only changes never touch the C++ build -- skip the matrix for them.
+    # Docs-only changes never touch the C++ build -- skip for them.
     # NOTE: if this later becomes a REQUIRED check under branch protection, a
     # docs-only PR will sit with the check "expected" and block merge. Handle it
     # then with a companion always-green job, not by deleting these filters.
@@ -13,58 +13,79 @@ on:
       - 'memory/**'
       - 'LICENSE'
       - '.gitignore'
-  # Post-merge verification is on-demand now, instead of an automatic SECOND
-  # matrix on every push to main: the PR already built the same squashed content.
   workflow_dispatch:
+  schedule:
+    # macOS là cross-build smoke check (hệ số 10x phút) -> chạy 1 lần/tuần,
+    # thứ Hai 08:00 giờ VN = 01:00 UTC. Chỉ job `macos` đọc lịch này.
+    - cron: '0 1 * * 1'
 
-# One run per branch. A PR that gets three pushes in ten minutes used to leave
-# three 25-minute matrix builds racing, and the stale ones told nobody anything.
+# One run per ref. A PR pushed three times in ten minutes used to leave three
+# matrix builds racing; the stale ones told nobody anything.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+# --- MỨC CI: B, có van hạ về A ---------------------------------------------
+# Mặc định (B): Windows chạy MỌI pull_request; macOS chỉ weekly + bấm tay.
+# Van hạ về A khi vướng/sắp vướng quota -- đặt biến repo CI_HEAVY=off:
+#     gh variable set CI_HEAVY -R toanaz-ops/azsoundtech-handsfree -b off
+#   -> PR-Windows và macOS-weekly đều DỪNG; chỉ còn workflow_dispatch (bấm tay).
+# Bật lại B:  gh variable set CI_HEAVY -b on   (hoặc xoá biến -- unset = B).
+# Gate cứng thật nằm ở máy dev (.githooks); CI ở đây là ĐÈN BÁO.
+
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-
+  # Bản Windows LÀ sản phẩm thật (JUCE_ASIO chỉ compile trên Windows) -> mọi PR,
+  # và luôn chạy khi bấm tay. Hạ về A (CI_HEAVY=off) thì PR không chạy job này.
+  windows:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && vars.CI_HEAVY != 'off')
+    runs-on: windows-latest
     steps:
-    - name: Checkout code with submodules
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - name: Checkout code with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    # The generator is deliberately NOT pinned.
-    #
-    # This step used to say -G "Visual Studio 17 2022". On 2026-08-22, the first
-    # time this workflow ever ran, it failed in 27 seconds with "could not find
-    # any instance of Visual Studio": windows-latest had moved to image
-    # windows-2025-vs2026, which ships Visual Studio 2026, and VS 2022 is simply
-    # not on the box any more.
-    #
-    # With no -G, CMake selects the newest Visual Studio it finds, so the next
-    # image bump does not break the build again. -A x64 still applies -- the
-    # auto-selected generator on a Windows image with VS installed IS a Visual
-    # Studio generator, which is what makes the platform flag valid.
-    #
-    # Do not re-pin this to a version number.
-    # Windows: -A x64 applies because the auto-selected generator is a Visual
-    # Studio generator. macOS: plain configure, no ASIO SDK -- JUCE_ASIO
-    # compiles only on Windows, so nothing external is needed there.
-    - name: Configure CMake (Windows)
-      if: matrix.os == 'windows-latest'
-      run: cmake -B build -A x64
+      # Generator KHÔNG pin. 2026-08-22 lần chạy đầu fail 27s "could not find any
+      # instance of Visual Studio": windows-latest đã nhảy sang image có VS 2026,
+      # VS 2022 không còn trên box. Không -G -> CMake tự chọn VS mới nhất nên image
+      # bump sau không phá build. -A x64 vẫn hợp lệ vì generator tự chọn là VS
+      # generator. ĐỪNG pin lại về số phiên bản.
+      - name: Configure CMake
+        run: cmake -B build -A x64
 
-    - name: Configure CMake (macOS)
-      if: matrix.os == 'macos-latest'
-      run: cmake -B build
+      - name: Build
+        run: cmake --build build --config Release
 
-    - name: Build
-      run: cmake --build build --config Release
+      - name: Run tests
+        run: |
+          cd build
+          ctest -C Release --output-on-failure
 
-    - name: Run tests
-      run: |
-        cd build
-        ctest -C Release --output-on-failure
+  # macOS: KHÔNG có ASIO -> chỉ smoke check "còn build được trên clang không".
+  # Hệ số 10x nên KHÔNG chạy mỗi PR: chỉ weekly (trừ khi hạ về A) và khi bấm tay.
+  macos:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.CI_HEAVY != 'off')
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: cmake -B build
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest -C Release --output-on-failure
