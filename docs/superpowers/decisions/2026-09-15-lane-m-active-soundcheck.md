@@ -569,3 +569,12 @@ Sổ này viết theo `.claude/skills/recording-design-decisions/SKILL.md`, vớ
 sai lệch cố ý và đã khai báo: **không có owner để trả lời**, nên mọi
 `**Chọn:**` là lựa chọn tạm của điều phối. Khi owner duyệt (hoặc đổi), **không
 sửa mục cũ** — thêm mục `Q<n> (lật lại <ngày>)` như skill quy định.
+
+## Q24 — Owner nói gì về 15 mục chốt tạm trước release 1.3.0? (2026-09-17)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | Giữ nguyên mọi phương án khuyên dùng (Q2, Q3↺, Q6, Q7+Q9, Q15↺, Q16, Q18–Q23, `kResultsTimeoutMs`, `SoundcheckReplace`, `SnapshotNotch::origin`) và release 1.3.0 alpha; nghe trên rig theo checklist rồi lật lại từng mục nếu cần | khuyên dùng |
+| 2 | Chờ owner trả lời từng mục trước khi merge/release | |
+
+**Chọn: 1.** Owner, 2026-09-17, nguyên văn: *"merge, chạy tiếp cho tới khi xong."* — sau khi điều phối đã trình danh sách 15 mục và nói rõ release đang chờ các mục đó. Điều phối hiểu là chấp nhận tạm mọi phương án khuyên dùng cho bản alpha (cùng cách owner nói "hấp thụ, sang plan luôn" ở lane G); mỗi mục vẫn lật lại được sau khi nghe trên rig, ghi thành `Q<n> (lật lại <ngày>)`.
