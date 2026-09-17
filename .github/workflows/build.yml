@@ -1,10 +1,21 @@
 name: Build
 
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+    # Docs-only changes never touch the C++ build -- skip the matrix for them.
+    # NOTE: if this later becomes a REQUIRED check under branch protection, a
+    # docs-only PR will sit with the check "expected" and block merge. Handle it
+    # then with a companion always-green job, not by deleting these filters.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'memory/**'
+      - 'LICENSE'
+      - '.gitignore'
+  # Post-merge verification is on-demand now, instead of an automatic SECOND
+  # matrix on every push to main: the PR already built the same squashed content.
+  workflow_dispatch:
 
 # One run per branch. A PR that gets three pushes in ten minutes used to leave
 # three 25-minute matrix builds racing, and the stale ones told nobody anything.
