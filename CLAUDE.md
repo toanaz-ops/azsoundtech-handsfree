@@ -59,6 +59,28 @@ directory.
 - Submodules: clone with `--recursive`. If a submodule path is empty, run
   `git submodule update --init --recursive` before blaming the build.
 
+## Phần dùng chung phải là thư viện
+
+Owner's standing instruction, 2026-09-06. Hands-free là sản phẩm đầu tiên
+trên một nền tảng sẽ có thêm sản phẩm khác (voice isolator kiểu Voxis, cùng
+điểm insert mic vox — xem `docs/research/2026-09-06-cedar-realtime-plugins.md`
+§7). Vì vậy:
+
+- Bất kỳ phần nào **dự kiến dùng chung** giữa các sản phẩm phải được thiết kế
+  và implement **tách ra thành thư viện** (target CMake riêng, không phụ
+  thuộc ngược vào app), không nằm lẫn trong mã sản phẩm. Ứng viên hiện tại:
+  JUCE host shell + ASIO bridge, `LockFreeRingBuffer`, `SessionLogger`,
+  `LicenseManager`, theme Sodium Rack (`src/gui/theme`), installer +
+  `release-alpha.ps1`.
+- Phần **đặc thù sản phẩm** (detector, notch chain, scorer, console GUI) ở lại
+  trong app.
+- Lý do tách phải nêu ở spec của thay đổi; một thứ chỉ một sản phẩm dùng thì
+  không tách cho "phòng xa" — tách khi có sản phẩm thứ hai thật hoặc khi spec
+  nói rõ sản phẩm nào sẽ dùng.
+- Ranh giới thư viện đồng thời là ranh giới cho bản VST3 sau này: DSP core
+  không được include `juce_audio_devices` (đã đúng hôm nay, `src/dsp/` chỉ
+  dùng `juce_dsp`; `AudioEngine` là lớp host duy nhất chạm device).
+
 ## Every finished change ships a build to the testers
 
 Owner's standing instruction, 2026-08-26. When a change is DONE -- built,
@@ -131,6 +153,8 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    `config.yaml`; unused from Claude Code's side, but `.opencode/skills/openspec-*`
    wires OpenCode's `/opsx-*` commands to it — do not delete it. Verified
    2026-09-04, see `memory/docs-drift-audit-2026-08-27.md`.)
+5. `docs/GIT-WORKFLOW.md` — quy ước git: `origin/main` là sự thật, mọi lane
+   lên main qua Pull Request + CI xanh. Owner decision 2026-09-15.
 
 ## Definition of done
 
@@ -141,6 +165,10 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    and call the change out in whatever note reaches the testers.
 3. `memory/` note if the work taught something non-obvious, indexed in
    `memory/MEMORY.md`.
-4. Commit with explicit paths. Merge only if the user said "merge".
+4. Commit with explicit paths, push the branch at the FIRST commit, and open a
+   Pull Request against `origin/main`. Merge through the PR — with CI green and
+   its output pasted — and only if the user said "merge". Never merge locally
+   into `main`: local `main` moves only by `git pull --ff-only`. The full
+   convention, including the worktree-teardown traps, is `docs/GIT-WORKFLOW.md`.
 5. A change to DSP constants, topology, or user-visible behavior also updates
    `docs/GIOI-THIEU.md` and `docs/KY-THUAT-CHONG-HU.md` in the same change.

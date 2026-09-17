@@ -25,6 +25,7 @@ Thứ tự đi theo **cái gì nuôi cái gì**, không theo độ hấp dẫn t
 | C | **Classifier nhỏ** trên detector thread (RTNeural), phân loại hú vs nốt nhạc, feature L/R từ S | Không (chỉ quyết định, không xử lý) | D (nhãn), S (feature) | viết khi D có ≥ vài trăm nhãn từ alpha |
 | L | **LLM copilot**: đọc telemetry qua tool call, gợi ý cho soundman | Không | D (telemetry) | viết khi D hạ cánh; chạy song song C |
 | A | **AFC**: NLMS + PEM, watchdog + fallback notch — fallback notch = thang G (đặt −6, đào 6 dB/300 ms, nhả 30 s + 10 s/bậc) | Có, nặng nhất | M (đo loa→mic), G (fallback) | viết cuối cùng |
+| U | **Hai chế độ giao diện**: Dumb mode (≤ 3 nút) ⇄ Geek mode (console đầy đủ hiện tại) — quyết định owner 06/09/2026 | Không | G (G định nghĩa 3 nút là gì) | brainstorm trước; xem [`../../research/2026-09-06-cedar-realtime-plugins.md`](../../research/2026-09-06-cedar-realtime-plugins.md) §6 |
 
 Tùy chọn không xếp lane riêng, gắn vào lane gần nhất khi có nhu cầu:
 frequency shift 3–5 Hz cho mode Speech (gắn G), delay modulation (gắn A).
@@ -60,6 +61,8 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
    commit khi hành vi user-visible đổi.
 6. `pwsh -File installer\release-alpha.ps1` đưa build cho tester, note
    gửi tester nêu rõ lane vừa đổi gì.
+7. PR lên `origin/main`, CI xanh (dán `gh pr checks`), merge qua PR — không
+   merge local vào main. Xem `docs/GIT-WORKFLOW.md`.
 
 ## Trạng thái
 
@@ -72,6 +75,7 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
 | L | chờ D | |
 | A | **chờ M merge** (G đã merge: fallback notch dùng thang G). M **cấp** cho A: loop gain theo bin của toàn bộ phần vật lý của vòng (`H_dB[k]`, `margin = −H_dB`), băng tin cậy 100 Hz–6 kHz, trên cùng FFT 2048 / hop 512 mà detector dùng. M **KHÔNG cấp**: **trễ vòng loa→mic** — phép đo của M là một tỉ số **năng lượng theo bin**, cố tình không tương quan theo thời gian và cố tình không ước lượng trễ (spec §4.4, §6). Lane A phải tự đo trễ | 2026-09-16 |
+| U | chờ G; chưa brainstorm | 2026-09-06 |
 
 **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
 plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút

@@ -5,6 +5,13 @@ created, junction made, clean configure, full build of both targets, **70/70
 tests passing inside the lane**, `git status` clean, a commit made and rolled
 back, and the main repo confirmed unaffected afterwards.
 
+**Phạm vi của chữ "verified" đó, sau 2026-09-15.** Cái được chạy thật là *cơ
+chế*: junction, `git config --worktree`, build ngoài repo, teardown. Các **đường
+dẫn** trong §3–§6 đã đổi hôm nay (worktree về `.claude/worktrees/`, nhánh ra từ
+`origin/main`) và **chưa ai chạy lại end-to-end ở dạng mới**. Cơ chế không đổi
+nên rủi ro thấp, nhưng lane đầu tiên dùng công thức này hãy kiểm từng bước một
+và sửa lại đây nếu lệch.
+
 The parallel execution plan §0 asked for exactly this check before any lane
 depended on it (*"budget one throwaway lane"*). This is the result. The plan's
 own two-line recipe is **incomplete** — it works only with the extra step in
@@ -24,6 +31,12 @@ JUCE is read-only vendored code, so one checkout can be shared by junction.
 ---
 
 ## The procedure
+
+**Đâu là thẩm quyền của cái gì.** Việc nhánh ra từ đâu, push khi nào, merge
+bằng đường nào là của [`docs/GIT-WORKFLOW.md`](../../GIT-WORKFLOW.md) — runbook
+này chỉ giữ phần **cơ khí** của một worktree: junction `external/JUCE`,
+`git config --worktree`, và thư mục build nằm ngoài repo. Nếu hai tài liệu có
+vẻ đá nhau về nhánh/merge, `GIT-WORKFLOW.md` đúng.
 
 ### 1. One-time, in the main repo
 
@@ -71,33 +84,49 @@ cd <main repo>     && git submodule status        # must have a LEADING SPACE,
 
 ### 3. Create a lane
 
+Từ checkout gốc. `git fetch origin` trước, và nhánh ra từ **`origin/main`** chứ
+không từ `main` local — lý do ở `GIT-WORKFLOW.md` §2 bước 1.
+
 ```bash
 git config extensions.worktreeConfig true                    # once, main repo
 
-git worktree add D:/hf-lanes/<lane> -b <branch>
-rm -rf D:/hf-lanes/<lane>/external/JUCE                      # empty placeholder
+git fetch origin
+git worktree add .claude/worktrees/<lane>-<mmdd> -b <type>/<lane> origin/main
+rm -rf .claude/worktrees/<lane>-<mmdd>/external/JUCE          # empty placeholder
 ```
 
 ```powershell
 New-Item -ItemType Junction `
-  -Path   'D:\hf-lanes\<lane>\external\JUCE' `
+  -Path   'D:\DEV CAVE EP3\PROJECT005-AZ-handsfree\.claude\worktrees\<lane>-<mmdd>\external\JUCE' `
   -Target 'D:\DEV CAVE EP3\PROJECT005-AZ-handsfree\external\JUCE'
 ```
 
 ```bash
-cd D:/hf-lanes/<lane>
+cd .claude/worktrees/<lane>-<mmdd>
 git config --worktree submodule."external/JUCE".active false
 git config --worktree submodule."external/JUCE".ignore all
 git status --short          # must be clean
 ```
 
+Worktree nằm **trong** repo (`.claude/worktrees/`) chứ không còn ở
+`D:/hf-lanes/`: một chỗ duy nhất để `git worktree list` và mọi phiên nhìn thấy
+nhau. Thư mục **build** thì vẫn ở ngoài repo trên đường dẫn ngắn — xem §5, và
+đường dẫn worktree dài hơn trước làm điều đó quan trọng hơn chứ không kém.
+
 ### 4. Build the lane
 
 ```powershell
-cmake -S D:\hf-lanes\<lane> -B D:\hf-lanes\bld-<lane> -G "Visual Studio 18 2026" -A x64
+cmake -S 'D:\DEV CAVE EP3\PROJECT005-AZ-handsfree\.claude\worktrees\<lane>-<mmdd>' -B D:\hf-lanes\bld-<lane> -G "Visual Studio 18 2026" -A x64
 cmake --build D:\hf-lanes\bld-<lane> --config Release
 ctest --test-dir D:\hf-lanes\bld-<lane> -C Release
 ```
+
+**Đường dẫn nguồn phải được đóng nháy.** `DEV CAVE EP3` có dấu cách; một `-S`
+không nháy sẽ vỡ ngay chứ không âm thầm, nhưng vỡ ở chỗ khó đọc.
+
+Trước khi build trong lane, nhớ `external/asiosdk` và `installer/vendor` **không**
+đi theo `git worktree add` (bị gitignore) — chép từ checkout gốc, xem
+`GIT-WORKFLOW.md` §6.
 
 Configure takes ~71 s (JUCE + a googletest fetch). Measured, not estimated.
 
@@ -125,6 +154,11 @@ which has bitten two agents on this project. `.gitignore` also has `build-*/`, s
 an in-repo lane build directory would be invisible to `git status` — the exact
 condition that let a stale `JuceHeader.h` survive.
 
+Đây là chỗ **duy nhất** còn dùng `D:/hf-lanes/`, và nó cố ý. Worktree đã chuyển
+vào `.claude/worktrees/`, nghĩa là đường dẫn nguồn dài thêm ~50 ký tự — ngân
+sách `FTK1011` vì thế hẹp hơn trước, nên thư mục build càng phải ngắn và càng
+phải nằm ngoài repo. Đừng "cho gọn" bằng cách build vào trong worktree.
+
 ### 6. Tear down — ⚠ THE MOST DANGEROUS STEP
 
 **Remove the junction BEFORE removing the worktree.** A junction is a directory
@@ -143,8 +177,14 @@ The rule in §"Rules for anyone working in a lane" says never write to
 `external/JUCE`. Teardown *is* a write, and it is the one nobody thinks of.
 
 ```bash
+# 0. PROVE nobody is living here. The directory NAME is not evidence -- the
+#    desktop app reuses old lane names for new branches. See
+#    memory/worktree-prune-killed-live-session-2026-09-05.md
+git worktree list           # real path + real branch, for every worktree
+#    then check the cwd of every running session before touching anything.
+
 # 1. Unlink the junction FIRST. rmdir removes the LINK; rm -rf follows it.
-cmd //c rmdir "D:\hf-lanes\<lane>\external\JUCE"
+cmd //c rmdir "D:\DEV CAVE EP3\PROJECT005-AZ-handsfree\.claude\worktrees\<lane>-<mmdd>\external\JUCE"
 
 # 2. PROVE the shared checkout survived before going any further.
 ls "D:/DEV CAVE EP3/PROJECT005-AZ-handsfree/external/JUCE/modules" | wc -l
@@ -152,10 +192,14 @@ ls "D:/DEV CAVE EP3/PROJECT005-AZ-handsfree/external/JUCE/modules" | wc -l
 #    git submodule update --init --recursive external/JUCE
 
 # 3. Only now is it safe to remove the worktree.
-git worktree remove --force D:/hf-lanes/<lane>
-git branch -D <branch>
+git worktree remove --force .claude/worktrees/<lane>-<mmdd>
 rm -rf D:/hf-lanes/bld-<lane>
 ```
+
+Nhánh thì **không** xoá ở đây nữa: `gh pr merge --delete-branch` đã xoá nó lúc
+merge. Chỉ khi bỏ một lane giữa chừng mới cần xoá tay, và khi đó dùng
+`git branch -d` (nó TỪ CHỐI nhánh chưa merge) — đọc `git log main..<branch>`
+trước, `-D` chỉ sau khi đã đọc.
 
 ---
 
@@ -174,6 +218,12 @@ rm -rf D:/hf-lanes/bld-<lane>
 ---
 
 ## Lane map — what can actually run at once
+
+> ⚠ **Ảnh chụp 08/2026, đã lạc hậu.** Phần dưới đây nói về các task 1–32 của kế
+> hoạch cũ, trước cả lane S/D/G. Trạng thái lane hiện hành nằm ở bảng "Trạng
+> thái" trong `docs/superpowers/specs/2026-09-04-anti-feedback-v2-roadmap.md`.
+> Giữ lại vì phần "không song song được" và "chặn bởi thứ không sửa bằng kỹ
+> thuật" vẫn đúng về mặt phụ thuộc.
 
 State: Tasks 1–11 done, plus this session's depth fix and test debt.
 Open: 5, 12–32.
