@@ -1,0 +1,337 @@
+# Review package: ead1760..5153694
+
+## Commits
+5153694 fix(lane-m): Task 7 review round 2 -- no orphaned ledger entries, the unwind strike under test
+
+## Files changed
+ src/app/SoundcheckController.cpp    |  72 ++++++++++++++++++++++++-
+ src/app/SoundcheckController.h      |  19 +++++++
+ tests/test_soundcheckcontroller.cpp | 102 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 191 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/app/SoundcheckController.cpp b/src/app/SoundcheckController.cpp
+index 1a456f5..735a5eb 100644
+--- a/src/app/SoundcheckController.cpp
++++ b/src/app/SoundcheckController.cpp
+@@ -1310,71 +1310,120 @@ SoundcheckApplyStats applySoundcheckResults (
+     std::vector<SoundcheckApplyLedger::Entry> placedThisCall;
+     placedThisCall.reserve (ledger.entries.size() + 4);
+ 
+     // The entry snapshot. laneCount comes from here and is read ONCE: it is
+     // analysedLanes() (NotchController.h:667, published at .cpp:637), which only
+     // moves on setWidth(), and setWidth() requires the detector thread stopped.
+     NotchController::SnapshotBuffer entrySnap {};
+     controller.copySnapshot (entrySnap);
+     const int laneCount = juce::jlimit (1, NotchController::kChannels, (int) entrySnap.laneCount);
+ 
++    // The two halves of "how many lanes, and together or apart?" come from
++    // DIFFERENT clocks, deliberately: linkedNow is LIVE (the controller's own
++    // predicate, read microseconds ago) while laneCount is SNAPSHOT-SOURCED and
++    // may be up to one hop old. That asymmetry is safe only because laneCount
++    // moves solely on setWidth(), which requires the detector thread stopped --
++    // so it cannot change under this call the way the atomic LINK switch can.
++
+     // --- (b) replace THIS SLOT's previous proposals, and ONLY those (C-2) ----
+     // Origin::Soundcheck has two producers: this function, and the legacy 15 s
+     // soundcheck MODE (placeConfirmed, NotchController.cpp:1093, turned on at
+     // MainComponent.cpp:802-803). Clearing by origin alone would delete a notch
+     // the operator locked in by hand, at the moment they pressed AP DUNG. So
+     // the ledger -- what the PREVIOUS apply placed on this slot -- is the
+     // authority, and an entry only counts if the notch still sitting at that
+     // (lane, index) is still Soundcheck-origin and still within +-1 bin of the
+     // frequency the ledger recorded. Anything else at that address is somebody
+     // else's notch on a reused slot.
++    std::vector<SoundcheckApplyLedger::Entry> carriedForward;
++
+     for (const auto& e : ledger.entries)
+     {
++        bool matched = false;
+         for (std::uint32_t i = 0; i < entrySnap.notchCount; ++i)
+         {
+             const auto& n = entrySnap.notches[i];
+             if ((int) n.channel != e.lane || (int) n.index != e.index)
+                 continue;
+             if (n.origin != NotchController::Origin::Soundcheck)
+                 break;
+-            if (! (entrySnap.sampleRate > 0.0)
+-                || std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, entrySnap.sampleRate)
++            // N-1(a): the address and the origin are the STRONG half of the
++            // match; the frequency is the tie-breaker that catches a slot
++            // reused by another soundcheck-origin notch. So when the rate is
++            // unknown the tie-breaker is treated as PASSED rather than as
++            // failed -- refusing to clear on a missing rate would strand a
++            // preventive notch that never auto-releases (KD-7), which is the
++            // very chain drain this ledger exists to prevent.
++            //
++            // Unreachable today and kept anyway: Detector::setSampleRate
++            // refuses a non-positive rate (Detector.cpp:29-32), so a PUBLISHED
++            // snapshot always carries a positive one, and an unpublished
++            // snapshot carries no notches for the address match to find. There
++            // is therefore no test behind this branch; see the task report.
++            const bool rateKnown = entrySnap.sampleRate > 0.0;
++            if (rateKnown
++                && std::abs (LoopGainEstimator::hzToBin ((double) n.frequency, entrySnap.sampleRate)
+                              - LoopGainEstimator::hzToBin ((double) e.hz, entrySnap.sampleRate)) > 1)
+                 break;
+ 
+             controller.clearNotch (e.lane, e.index,
+                                    NotchController::ClearReason::SoundcheckReplace);
+             ++stats.clearedPrevious;
+             clearedThisCall[flatSlot (e.lane, e.index)] = true;
++            matched = true;
+ 
+             // N-5: the INDEX is not marked free here, and that is deliberate.
+             // takenThisCall starts all-false, so clearing it would be a no-op
+             // anyway; and an index freed HERE is not reusable by THIS call,
+             // because the snapshot each placement re-reads still lists the
+             // cleared notch for up to ~10.7 ms. Conservative is the right side
+             // to be on when the alternative is two writers on one index.
+             break;
+         }
++
++        // N-1(b): an entry this pass could not match is NOT dropped. The
++        // commonest reason it fails to match is that the snapshot is one hop
++        // stale -- press AP DUNG twice inside ~10.7 ms and the first run's
++        // notches are not in it yet. Dropping the entry there would orphan a
++        // preventive notch that never auto-releases, with nothing left that
++        // knows its address: the chain drains one soundcheck at a time. Carried
++        // forward, a later apply reclaims it. If it is unmatched because the
++        // notch really is gone (CLEAR ALL, a width change), carrying it costs
++        // one struct and it simply never matches again.
++        if (! matched)
++            carriedForward.push_back (e);
+     }
+ 
+     for (const auto& result : results)
+     {
+         // I-1: a result belonging to another slot must never reach THIS slot's
+         // chain. copyResultsForSlot() already filters, but this function is
+         // also reachable with copyResults(), and a leak here places one slot's
+         // proposals on another's filters.
+         if (result.slot != slot)
+         {
+             ++stats.skippedOtherSlot;
+             continue;
+         }
+ 
++        // result.lane is about to index takenThisCall and reach setNotch, and
++        // it arrives from a Target the GUI built -- so it is checked here
++        // rather than trusted. setNotch would itself refuse a lane >= width_
++        // (NotchController.cpp:199), but takenThisCall is indexed BEFORE that,
++        // and a lane 1 result on a mono slot is a routing fault worth naming
++        // rather than a silent no-op.
++        if (result.lane < 0 || result.lane >= laneCount)
++        {
++            ++stats.skippedBadLane;
++            continue;
++        }
++
+         if (! result.measured || result.routingInvalid)
+             continue;                        // a VALID result that places nothing (Q8, F26)
+ 
+         for (int c = 0; c < result.candidateCount; ++c)
+         {
+             const auto& cand = result.candidates[(std::size_t) c];
+ 
+             // (a) RE-READ before EVERY setNotch. DEFENCE IN DEPTH, not the
+             // allocator (I-3): it is here to catch a DETECTOR placement that
+             // landed since entry, and the detector runs on its own thread at
+@@ -1473,17 +1522,36 @@ SoundcheckApplyStats applySoundcheckResults (
+                     ++stats.refused;
+                     break;
+                 }
+                 takenThisCall[(std::size_t) result.lane][(std::size_t) index] = true;
+                 placedThisCall.push_back ({ result.lane, index, cand.hz });
+                 ++stats.placed;
+             }
+         }
+     }
+ 
++    // N-1(b): the entries this call could not match join what it placed. They
++    // are appended HERE, after the placement loop, and never earlier:
++    // placedThisCall doubles as invariant 15's "already placed on this lane"
++    // list, and a carried entry may name a notch that is no longer on the
++    // chain at all -- letting it block a proposal would be refusing to protect
++    // the room on the strength of a notch nobody can find.
++    //
++    // An entry whose (lane, index) THIS call has just reused is dropped: two
++    // ledger rows for one address would have the next apply clear it twice and
++    // report the second as a real removal.
++    for (const auto& e : carriedForward)
++    {
++        bool reused = false;
++        for (const auto& p : placedThisCall)
++            reused = reused || (p.lane == e.lane && p.index == e.index);
++        if (! reused)
++            placedThisCall.push_back (e);
++    }
++
+     // C-2: the ledger is what THIS call placed, replacing what the last one
+     // did. It is overwritten even when nothing was placed -- the previous
+     // entries were cleared above, so remembering them would make the NEXT
+     // apply try to clear notches that are already gone.
+     ledger.entries = std::move (placedThisCall);
+     return stats;
+ }
+diff --git a/src/app/SoundcheckController.h b/src/app/SoundcheckController.h
+index d7c000e..3e89d26 100644
+--- a/src/app/SoundcheckController.h
++++ b/src/app/SoundcheckController.h
+@@ -409,20 +409,39 @@ struct SoundcheckApplyStats
+     int clearedPrevious = 0;
+     // Invariant 15, and it is enforced by Task 7 rather than by Task 6's call
+     // into SoundcheckCandidates::pick: that call passes liveNotchHz EMPTY
+     // because the lane M thread may not read a NotchController (inv 17). So
+     // the +-1 FFT bin test -- against the live notches AND against what this
+     // very call has already placed (C-1) -- happens here.
+     int skippedLive = 0;
+     // RESULTS whose .slot named a different slot (I-1). Results, not
+     // candidates: the whole result is skipped before its candidates are read.
+     int skippedOtherSlot = 0;
++    // RESULTS naming a lane this slot does not drive -- lane 1 on a mono slot,
++    // or anything outside [0, laneCount). Kept apart from skippedOtherSlot
++    // because it is a different fault with different words on screen: "these
++    // results are not for this slot" versus "this slot has no such output".
++    int skippedBadLane = 0;
+ };
+ 
++// *** TWO THINGS TASK 9 MUST NOT GET WRONG ***
++//
++// 1. `clearedPrevious > 0 && placed == 0` IS A REAL OUTCOME, not a bug and not
++//    a success. It is what a re-run on an already-full chain looks like: the
++//    previous proposals went, and there was no room to put the new ones back.
++//    The operator is LESS protected than before they pressed the button, and
++//    the GUI has to say so.
++// 2. CLEAR ALL DOES NOT RESET A LEDGER, and nothing makes it. That is
++//    harmless: the next apply looks for each entry at its (lane, index), finds
++//    nothing active there, matches nothing and clears nothing -- the entries
++//    are then carried forward and quietly stop matching for good. It is called
++//    out because "the ledger can name notches that no longer exist" is a
++//    property of the design, not a leak to be fixed.
++
+ // `slot` is the slot these results and this ledger belong to; a result naming
+ // any other slot is skipped (I-1). `ledger` is read for the replace pass and
+ // then OVERWRITTEN with what this call placed.
+ SoundcheckApplyStats applySoundcheckResults (
+     NotchController& controller,
+     int slot,
+     const std::vector<SoundcheckController::OutputResult>& results,
+     SoundcheckApplyLedger& ledger);
+diff --git a/tests/test_soundcheckcontroller.cpp b/tests/test_soundcheckcontroller.cpp
+index 7b44816..839ffce 100644
+--- a/tests/test_soundcheckcontroller.cpp
++++ b/tests/test_soundcheckcontroller.cpp
+@@ -1773,10 +1773,112 @@ TEST (SoundcheckApply, ARoutingInvalidResultPlacesNothing)
+ {
+     NotchRig rig { 1 };
+     auto r = oneCandidate (0, 0, 1000.0, -12.0);
+     r.measured = true;
+     r.routingInvalid = true;
+ 
+     const auto stats = rig.apply ({ r });
+     EXPECT_EQ (stats.placed, 0);
+     EXPECT_FALSE (rig.controller->activeForTest (0, 15));
+ }
++
++// RED IF: an unmatched ledger entry is dropped. N-1(b). The commonest way an
++// entry fails to match is not exotic at all -- the entry snapshot is one hop
++// stale, so a second AP DUNG inside ~10.7 ms cannot see the first one's
++// notches. Dropping the entry there orphans a preventive notch that never
++// auto-releases (KD-7) with nothing left that knows its address, and the
++// 16-slot chain drains one soundcheck at a time. This test never pumps between
++// the first two applies, which is exactly that window.
++TEST (SoundcheckApply, UnmatchedLedgerEntriesAreCarriedForward)
++{
++    NotchRig rig { 1 };
++
++    ASSERT_EQ (rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0) }).placed, 1);
++    ASSERT_EQ (rig.ledger.entries.size(), 1u);
++
++    // A second AP DUNG before the snapshot has caught up, and this one has
++    // nothing to place -- a re-run whose mic went dead (Q8). NO pump, so the
++    // ledger entry cannot be matched: the notch is in the model but not yet in
++    // any published frame. Nothing reuses its address either, which is what
++    // makes this the pure carry-forward case.
++    auto dead = oneCandidate (0, 0, 2000.0, -12.0);
++    dead.measured = false;
++    const auto second = rig.apply ({ dead });
++    EXPECT_EQ (second.clearedPrevious, 0) << "it is genuinely unmatchable here";
++    EXPECT_EQ (second.placed, 0);
++    ASSERT_EQ (rig.ledger.entries.size(), 1u)
++        << "the unmatched entry is carried forward, not dropped";
++
++    // Now let the snapshot catch up. The next apply must be able to reclaim
++    // it -- which it can only do if the entry survived the call above.
++    rig.pump();
++    const auto third = rig.apply ({ oneCandidate (0, 0, 3000.0, -12.0) });
++    EXPECT_EQ (third.clearedPrevious, 1)
++        << "without the carry-forward the 1000 Hz notch is orphaned for good";
++    EXPECT_EQ (rig.countSoundcheckNotches(), 1)
++        << "and the chain drains by one notch per soundcheck instead";
++}
++
++// RED IF: the linked unwind does not strike its entries out of placedThisCall.
++// N-2. The index stays reserved -- the snapshot cannot show it gone yet -- but
++// the LEDGER must not record a pair that was rolled back, or the next apply
++// spends a clear on a notch that was never there.
++TEST (SoundcheckApply, LinkedUnwindDoesNotBlockLaterProposals)
++{
++    NotchRig rig { 2 };
++    rig.controller->setLinked (true);
++    ASSERT_TRUE (rig.controller->effectiveLinked());
++
++    // Two RESULTS, not two candidates: a linked failure stops the result it is
++    // in (N4), so the second proposal has to arrive in a result of its own.
++    // 1000 Hz is bin 43 and 2000 Hz is bin 85 -- far apart, so nothing here
++    // depends on the frequency test.
++    rig.controller->failNextSetNotchOnLaneForTest (1);
++    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0),
++                                    oneCandidate (0, 0, 2000.0, -12.0) });
++
++    EXPECT_EQ (stats.placed, 2) << "the second pair still lands";
++    EXPECT_GE (stats.refused, 1);
++    EXPECT_FALSE (rig.controller->activeForTest (0, 15)) << "the first pair was unwound";
++    EXPECT_TRUE  (rig.controller->activeForTest (0, 14));
++    EXPECT_TRUE  (rig.controller->activeForTest (1, 14));
++    EXPECT_EQ (rig.ledger.entries.size(), 2u)
++        << "the ledger holds the surviving pair ONLY -- the unwound lane-0 "
++           "write must not be remembered as placed";
++    for (const auto& e : rig.ledger.entries)
++        EXPECT_EQ (e.index, 14);
++}
++
++// RED IF: the unwind frees the INDEX but not the FREQUENCY. The same strike
++// covers both, and this is the half that reaches a PA: a proposal refused
++// because an identical notch is "already there" when that notch was rolled
++// back leaves the room unprotected at exactly the frequency it was howling at.
++TEST (SoundcheckApply, LinkedUnwindFreesTheFrequencyItPlacedOn)
++{
++    NotchRig rig { 2 };
++    rig.controller->setLinked (true);
++
++    rig.controller->failNextSetNotchOnLaneForTest (1);
++    const auto stats = rig.apply ({ oneCandidate (0, 0, 1000.0, -12.0),
++                                    oneCandidate (0, 0, 1000.0, -12.0) });
++
++    EXPECT_EQ (stats.skippedLive, 0) << "the unwound 1000 Hz is not a live notch";
++    EXPECT_EQ (stats.placed, 2);
++    EXPECT_TRUE (rig.controller->activeForTest (0, 14));
++    EXPECT_TRUE (rig.controller->activeForTest (1, 14));
++}
++
++// RED IF: result.lane is trusted. It indexes takenThisCall before setNotch ever
++// sees it, and a lane 1 result on a mono slot is a routing fault the operator
++// should be told about rather than a silent no-op.
++TEST (SoundcheckApply, AResultNamingALaneThisSlotDoesNotDriveIsSkipped)
++{
++    NotchRig rig { 1 };                       // mono: lane 1 does not exist here
++
++    const auto stats = rig.apply ({ oneCandidate (0, 1, 1000.0, -12.0),
++                                    oneCandidate (0, 0, 2000.0, -12.0) });
++
++    EXPECT_EQ (stats.skippedBadLane, 1);
++    EXPECT_EQ (stats.skippedOtherSlot, 0) << "a different fault, a different word";
++    EXPECT_EQ (stats.placed, 1) << "the lane-0 result still lands";
++    EXPECT_FALSE (rig.controller->activeForTest (1, 15));
++}

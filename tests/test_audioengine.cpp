@@ -19,10 +19,13 @@
 #include "app/AudioEngine.h"
 #include "app/SlotConfig.h"
 #include "dsp/LockFreeRingBuffer.h"
+#include "dsp/SoundcheckSignal.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace
@@ -59,6 +62,60 @@ struct CallbackDriver
     float*       outs[2] {};
     int          frames;
 };
+
+// Like CallbackDriver but with a configurable channel count and per-channel
+// input, so a test can prove that only ONE output channel changed.
+struct MultiDriver
+{
+    MultiDriver (int channels, int numSamples, float inputLevel = 0.25f)
+        : frames (numSamples)
+    {
+        in.assign  ((std::size_t) channels, std::vector<float> ((std::size_t) numSamples, inputLevel));
+        out.assign ((std::size_t) channels, std::vector<float> ((std::size_t) numSamples, 0.0f));
+        for (auto& v : in)  inPtr.push_back (v.data());
+        for (auto& v : out) outPtr.push_back (v.data());
+    }
+
+    void operator() (AudioEngine& engine)
+    {
+        for (auto& v : out) std::fill (v.begin(), v.end(), 0.0f);
+        const juce::AudioIODeviceCallbackContext context {};
+        // declaredChannels defaults to every allocated channel. Setting it
+        // LOWER allocates real, readable guard buffers the callback is told
+        // nothing about (M-2): an index the engine failed to bounds-check
+        // lands in one of them and the test can assert on it, instead of the
+        // test depending on undefined behaviour to crash at the right moment.
+        const int declared = (declaredChannels > 0) ? declaredChannels : (int) outPtr.size();
+        engine.audioDeviceIOCallbackWithContext (inPtr.data(), declared,
+                                                 outPtr.data(), declared,
+                                                 frames, context);
+    }
+
+    float peakOn (int channel) const
+    {
+        float m = 0.0f;
+        for (float v : out[(std::size_t) channel]) m = std::max (m, std::abs (v));
+        return m;
+    }
+
+    std::vector<std::vector<float>> in, out;
+    std::vector<const float*> inPtr;
+    std::vector<float*>       outPtr;
+    int frames;
+    int declaredChannels = 0;   // 0 = tell the engine about every channel
+};
+
+// Slot `s` enabled, mono, inCh -> outCh. SlotConfig's field names come from
+// src/app/SlotConfig.h.
+void routeMono (AudioEngine& engine, int s, int inCh, int outCh)
+{
+    SlotConfig c;
+    c.enabled = true;
+    c.width   = 1;
+    c.inputChannels[0]  = inCh;
+    c.outputChannels[0] = outCh;
+    engine.setSlotConfig (s, c);
+}
 } // namespace
 
 // B1. getTapBuffer() was DECLARED in AudioEngine.h and never DEFINED in
@@ -1291,4 +1348,767 @@ TEST (AudioEngine, OutputIsClampedToFullScaleAndNonFiniteBecomesSilence)
         for (int i = 0; i < d.frames; ++i)
             ASSERT_FLOAT_EQ (d.out[0][(std::size_t) i], 1.0f) << "sample " << i;
     }
+}
+
+// ===================================================================
+// Lane M -- active soundcheck (Task 5). The engine's side of the sweep:
+// injection before the output clamp, mute by OUTPUT CHANNEL, a raw-mic capture
+// ring, a callback-generated ramp-out, tap suspension, and a single snapshot of
+// every soundcheck atomic per callback.
+// ===================================================================
+
+// RED IF: the mute condition is written as "(slot, lane) matches" instead of
+// "outIdx == scOutChannel_". Several slots SUM onto one output channel
+// (AudioEngine.cpp clears every channel, then the DSP accumulates), so muting
+// one pair leaves the feedback loop through that channel CLOSED -- spec rev 1's
+// blocker F2. inv 8.
+TEST (AudioEngineSoundcheck, SweptChannelCarriesOnlyTheSweep)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);              // B-4
+    engine.setMode (AudioEngine::Mode::Bypass);   // Bypass copies in->out: loudest case
+
+    routeMono (engine, 0, 0, 1);
+    routeMono (engine, 1, 2, 1);   // a SECOND slot onto the same output channel
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 4, 256, 0.5f };
+    d (engine);
+
+    SoundcheckSignal::Params p;
+    p.sampleRate = engine.getCurrentSampleRateHz();
+    p.peak       = SoundcheckSignal::kSoundcheckMaxPeak;
+    const SoundcheckSignal expected { p };
+
+    for (int n = 0; n < 256; ++n)
+        ASSERT_NEAR (d.out[1][(std::size_t) n], expected.sampleAt (n), 1.0e-6f)
+            << "sample " << n << " carries something other than the sweep";
+}
+
+// RED IF: the injection point is moved BELOW the output clamp.
+//
+// B-5: the seam must sit PAST SoundcheckSignal, not before it. A seam on the
+// PEAK would skip only the setter's clamp -- but the SoundcheckSignal
+// constructor clamps the peak and sampleAt clamps the sample, so |v| <= 0.1
+// whatever the setter was handed, sawSomething would never be set, and the test
+// would assert nothing at all. The gain seam multiplies the ALREADY-CLAMPED
+// sample at point 3, which is the only way to put something over full scale in
+// front of the output clamp. inv 4, F17.
+TEST (AudioEngineSoundcheck, OutputClampStillCoversTheSweepPath)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckGainUnclampedForTest (50.0f);   // 0.1 * 50 = 5x full scale
+    // PAST the 30 ms ramp-in, deliberately. Measured 2026-09-16: starting at
+    // sample 0 the raised-cosine ramp-in holds the sweep to 0.01557 over the
+    // first 512 samples, so 50x is only 0.778 -- over this test's 0.5 bar but
+    // NEVER over full scale, and the test then passed with the +-1.0f clamp
+    // DELETED. That is plan rev 1's "the test asserts nothing" defect one level
+    // up. rampSamples = 30 ms * 48 kHz / 1000 = 1440, and from there w == 1, so
+    // the sweep reaches 0.0999999 and 50x is 5.0 -- five times full scale, which
+    // the clamp cannot silently survive.
+    engine.setSoundcheckSampleIndex (1440);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 2, 512 };
+    d (engine);
+
+    bool sawSomething = false;
+    bool sawTheClampEngage = false;
+    for (float v : d.out[1])
+    {
+        ASSERT_LE (std::abs (v), 1.0f) << "a sample escaped the +-1.0f clamp";
+        ASSERT_TRUE (std::isfinite (v));
+        if (std::abs (v) > 0.5f) sawSomething = true;
+        // The clamp did not merely permit this block -- it ACTED on it. Without
+        // this the test cannot tell "the signal stayed under full scale" from
+        // "the clamp caught it", and only the second proves invariant 4.
+        if (std::abs (v) >= 1.0f - 1.0e-6f) sawTheClampEngage = true;
+    }
+    EXPECT_TRUE (sawSomething)
+        << "the seam produced nothing over 0.5 -- the test proves nothing, and "
+           "that is exactly what plan rev 1's peak seam did";
+    EXPECT_TRUE (sawTheClampEngage)
+        << "nothing reached the +-1.0f bound, so this block never exercised the "
+           "clamp at all";
+}
+
+// RED IF: any other output channel receives a sample from the soundcheck path.
+// It is the ONLY test for invariant 5. N6.
+TEST (AudioEngineSoundcheck, SweepTouchesOnlyTheMeasuredChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Bypass);
+
+    for (int ch = 0; ch < 4; ++ch)
+        routeMono (engine, ch, ch, ch);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (2);
+
+    MultiDriver d { 4, 256, 0.25f };
+    d (engine);
+
+    // Channels 0, 1, 3 still pass their own input through, untouched.
+    for (int ch : { 0, 1, 3 })
+        for (int n = 0; n < 256; ++n)
+            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) n], 0.25f)
+                << "channel " << ch << " sample " << n;
+}
+
+// RED IF: the ramp-out is driven from the controller thread instead of being
+// generated inside the callback. Nothing but the callback runs here -- no
+// controller, no poll -- and the sweep must still reach exactly zero and release
+// the channel on its own. inv 9, F8.
+TEST (AudioEngineSoundcheck, AbortRampsDownInTheCallbackAlone)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (4800);         // mid-sweep
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 2, 64 };
+    d (engine);
+    ASSERT_GT (d.peakOn (1), 0.0f);
+
+    engine.requestSoundcheckRampOut();
+
+    // kRampOutMs = 30 ms; at 48 kHz that is 1440 samples = 23 callbacks of 64.
+    for (int i = 0; i < 40; ++i)
+        d (engine);
+
+    EXPECT_FLOAT_EQ (d.peakOn (1), 0.0f);
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1)
+        << "the callback must release the channel itself";
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+}
+
+// RED IF: tap writes continue while a run is in flight.
+//
+// I-1: the MEASURED channel's own lane proves nothing here. It is muted, so it
+// never sets tapSource and never writes a tap whether the suspension works or
+// not -- the original version of this test asserted on that lane alone and was
+// therefore green against a broken suspension. The lane that matters is one
+// routed to an UNMEASURED output: it is processing normally, it HAS a
+// tapSource, and the only thing keeping its ring empty is scSuspendTaps_.
+// inv 10.
+TEST (AudioEngineSoundcheck, TapsAreSuspendedDuringARun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);   // the MEASURED channel -- muted, no tapSource
+    routeMono (engine, 1, 1, 1);   // UNMEASURED -- normal programme, normal tap
+
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (0);
+    engine.setSoundcheckSampleIndex (0);
+
+    MultiDriver d { 2, 256 };
+    for (int i = 0; i < 8; ++i) d (engine);
+
+    EXPECT_EQ (engine.getTapBuffer (1, 0).getAvailableRead(), 0u)
+        << "the UNMEASURED lane was tapped during the run -- the detector is "
+           "being fed while the sweep is in the room";
+    EXPECT_EQ (engine.getTapBuffer (0, 0).getAvailableRead(), 0u);
+    EXPECT_EQ (engine.getTapDropCount (1, 0), 0u)
+        << "a SKIP is not a DROP -- tapDropCounts_ must not move";
+
+    // Control: the same lane DOES tap once the suspension is lifted, so the
+    // assertion above is not passing merely because the route is broken.
+    engine.setSoundcheckTapsSuspended (false);
+    engine.setSoundcheckOutputChannel (-1);
+    d (engine);
+    EXPECT_GT (engine.getTapBuffer (1, 0).getAvailableRead(), 0u)
+        << "the unmeasured lane never taps at all, so this test proves nothing";
+}
+
+// RED IF: tap suspension is keyed on scOutChannel_ rather than on
+// scSuspendTaps_. scOutChannel_ goes to -1 at every Gap, so the taps would come
+// back for 300 ms between channels, restarting lane G's ~420 ms tapAlive window
+// per channel: ~0.72 s each, ~11.5 s over 16 channels, past kReleaseStepMs =
+// 10 s. inv 10, N3.
+TEST (AudioEngineSoundcheck, TapsStaySuspendedAcrossTheGap)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);   // measured
+    routeMono (engine, 1, 1, 1);   // unmeasured -- the lane that can actually tap
+
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (0);
+    engine.setSoundcheckSampleIndex (0);
+
+    MultiDriver d { 2, 256 };
+    for (int i = 0; i < 8; ++i) d (engine);
+    ASSERT_EQ (engine.getTapBuffer (1, 0).getAvailableRead(), 0u);
+
+    // The Gap: the channel is released, the suspend flag is NOT.
+    engine.setSoundcheckOutputChannel (-1);
+    const auto before0 = engine.getTapBuffer (0, 0).getAvailableRead();
+    const auto before1 = engine.getTapBuffer (1, 0).getAvailableRead();
+    for (int i = 0; i < 64; ++i) d (engine);    // 64 x 256 = 16384 samples ~ 341 ms > kGapMs
+    EXPECT_EQ (engine.getTapBuffer (0, 0).getAvailableRead(), before0)
+        << "a tap was written during the Gap";
+    EXPECT_EQ (engine.getTapBuffer (1, 0).getAvailableRead(), before1)
+        << "the unmeasured lane was tapped during the Gap";
+
+    EXPECT_EQ (engine.getTapDropCount (0, 0), 0u)
+        << "a SKIP is not a DROP -- tapDropCounts_ must not move";
+    EXPECT_EQ (engine.getTapDropCount (1, 0), 0u);
+}
+
+// RED IF: capture is gated on scOutChannel_ instead of on its own flag, or the
+// noise-floor phase emits. The NoiseFloor phase has a live channel, capture on,
+// and a NEGATIVE sample index. inv 6, F5.
+TEST (AudioEngineSoundcheck, NoiseFloorCapturesWithoutEmitting)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckCaptureChannel (1);
+    engine.setSoundcheckCaptureActive (true);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (0);
+    engine.setSoundcheckSampleIndex (-24000);          // 0.5 s before the sweep
+
+    MultiDriver d { 2, 256, 0.3f };
+    d (engine);
+
+    EXPECT_EQ (d.peakOn (0), 0.0f) << "the noise-floor phase emitted";
+    EXPECT_GE (engine.getMicCaptureBuffer().getAvailableRead(), 256u);
+
+    // And with capture off, nothing arrives even though the channel is live.
+    engine.setSoundcheckCaptureActive (false);
+    const auto have = engine.getMicCaptureBuffer().getAvailableRead();
+    d (engine);
+    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), have);
+}
+
+// RED IF: the per-callback bounds check is dropped. A device restart onto fewer
+// channels would then be an out-of-bounds write on the realtime thread. inv 3,
+// F3.
+TEST (AudioEngineSoundcheck, OutOfRangeChannelIsIgnored)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckCaptureActive (true);
+
+    // THREE allocated channels, but the engine is told about TWO (M-2). Channel
+    // 2 is a guard buffer: it exists and is readable, so an unchecked write to
+    // the out-of-range index lands somewhere this test can assert on, rather
+    // than in undefined behaviour that may or may not crash on the day.
+    MultiDriver d { 3, 128 };
+    d.declaredChannels = 2;
+
+    engine.setSoundcheckOutputChannel (2);       // == numOutputChannels
+    engine.setSoundcheckCaptureChannel (9);
+    d (engine);
+    EXPECT_EQ (d.peakOn (0), 0.25f);             // slot 0 still passes through
+    EXPECT_EQ (d.peakOn (1), 0.0f);
+    EXPECT_EQ (d.peakOn (2), 0.0f)
+        << "the sweep was written to a channel this callback was never given";
+    EXPECT_EQ (engine.getSoundcheckSampleIndex(), 0)
+        << "an out-of-range channel must behave as if no soundcheck were "
+           "running -- the sweep clock must not advance either";
+
+    engine.setSoundcheckOutputChannel (-5);
+    d (engine);
+    EXPECT_EQ (d.peakOn (2), 0.0f);
+    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
+}
+
+// RED IF: the atomics are read at more than one point in the callback. A flip
+// between the mute decision and the tap decision produces a callback that BOTH
+// injects the sweep AND taps it into the detector -- the poisoning case this
+// lane exists to prevent. inv 7, F4.
+TEST (AudioEngineSoundcheck, AtomicsAreSnapshottedOnce)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+
+    MultiDriver d { 2, 64 };
+
+    // Callbacks driven while another thread flips the channel and the suspend
+    // flag as fast as it can. Each callback must be internally consistent: if
+    // it emitted, it must NOT have tapped, and vice versa.
+    //
+    // 20000, not the 200 this test was first written with. Measured 2026-09-16
+    // against two deliberate mutants -- a re-read of scOutChannel_ at the mute
+    // decision, and one at the injection point -- 200 callbacks caught them in
+    // roughly 1 run out of 60: a guard that fires 2% of the time is not a
+    // guard. The first disagreement typically lands near callback 200, i.e.
+    // once the flipper thread has actually been scheduled, so the old bound sat
+    // exactly on the edge. At 20000 the two mutants are caught 10/10 and 9/10
+    // over separate processes, the real code passed 15/15, and the whole test
+    // still runs in 0.10 s.
+    std::atomic<bool> stop { false };
+    std::thread flipper ([&engine, &stop]
+    {
+        while (! stop.load())
+        {
+            engine.setSoundcheckOutputChannel (0);
+            engine.setSoundcheckTapsSuspended (true);
+            engine.setSoundcheckOutputChannel (-1);
+            engine.setSoundcheckTapsSuspended (false);
+        }
+    });
+
+    for (int i = 0; i < 20000; ++i)
+    {
+        // M-1: the callback advances scSampleIndex_ on every emitting block, so
+        // after ~2250 of them the index runs past totalSamples_ (3.0 s x 48 kHz
+        // = 144000), sampleAt() returns 0 for the rest of the run, `emitted` is
+        // never true again and the assertion below becomes vacuous -- it would
+        // pass against anything. Rewinding every 1000 iterations keeps the
+        // index under 64000 and the test honest.
+        if (i % 1000 == 0)
+            engine.setSoundcheckSampleIndex (0);
+
+        const auto tapBefore = engine.getTapBuffer (0, 0).getAvailableRead();
+        d (engine);
+        const auto tapAfter  = engine.getTapBuffer (0, 0).getAvailableRead();
+        const bool tapped    = tapAfter != tapBefore;
+        const bool emitted   = d.peakOn (0) > 0.0f && d.peakOn (0) != 0.25f;
+
+        ASSERT_FALSE (tapped && emitted)
+            << "callback " << i << " both injected and tapped -- the atomics were re-read";
+        engine.getTapBuffer (0, 0).clear();
+    }
+
+    stop.store (true);
+    flipper.join();
+}
+
+// RED IF: an idle engine emits anything, OR mutes a lane. inv 6.
+TEST (AudioEngineSoundcheck, IdleEngineEmitsNoSweepAndMutesNoLane)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Bypass);
+    routeMono (engine, 0, 0, 0);
+    routeMono (engine, 1, 1, 1);
+
+    MultiDriver d { 2, 256, 0.4f };
+    d (engine);
+
+    // Both lanes contributed normally; nothing was muted and nothing injected.
+    for (int ch : { 0, 1 })
+        for (int n = 0; n < 256; ++n)
+            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) n], 0.4f) << "ch " << ch;
+
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1);
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+}
+
+// RED IF: micCapture_.clear() is left out of audioDeviceAboutToStart's drain
+// block. Audio captured at the PREVIOUS device's sample rate would be spliced
+// onto the front of the next run's first analysis windows -- the same defect the
+// tap rings are already cleared to avoid. F15.
+TEST (AudioEngineSoundcheck, DeviceRestartDrainsTheCaptureRing)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckCaptureChannel (1);
+    engine.setSoundcheckCaptureActive (true);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckOutputChannel (0);
+    engine.setSoundcheckSampleIndex (-1000);
+
+    MultiDriver d { 2, 256, 0.3f };
+    d (engine);
+    ASSERT_GT (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
+
+    engine.audioDeviceAboutToStart (nullptr);
+    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
+}
+
+// ===================================================================
+// Review round 1 additions: what happens AROUND the four insertion points.
+// ===================================================================
+
+// RED IF: the soundcheck atomics survive a device stop (C-1). None of them
+// belongs to a device, and MainComponent aborts and JOINS the controller before
+// a restart reaches audioDeviceAboutToStart -- so if that function does not
+// stand them down, nothing does, and the next device to open emits sweep on
+// channel N and mutes every lane routed there with nobody left to stop it.
+TEST (AudioEngineSoundcheck, DeviceRestartClearsTheSoundcheckAtomics)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Bypass);
+    routeMono (engine, 0, 0, 0);
+
+    // A run in full flight: emitting, capturing, taps suspended.
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckCaptureChannel (1);
+    engine.setSoundcheckCaptureActive (true);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (1522);
+    engine.setSoundcheckOutputChannel (0);
+    engine.requestSoundcheckRampOut();
+
+    MultiDriver d { 2, 256, 0.3f };
+    d (engine);
+    ASSERT_GT (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
+
+    // The device goes away and comes back.
+    engine.audioDeviceAboutToStart (nullptr);
+
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1);
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+
+    d (engine);
+
+    // Lane 0 is un-muted and passes its input through; nothing was emitted,
+    // nothing captured, and the taps are running again.
+    for (int n = 0; n < 256; ++n)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
+            << "sample " << n << " -- the channel is still muted or still swept";
+    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), 0u)
+        << "capture is still armed after the device restarted";
+    EXPECT_GT (engine.getTapBuffer (0, 0).getAvailableRead(), 0u)
+        << "the taps are still suspended after the device restarted";
+}
+
+// RED IF: the ramp-out anchor is latched by the message thread instead of by
+// the callback (I-2). rampOut(anchor, anchor, R) is exactly 1.0, so latching in
+// the callback opens the envelope at full scale at EVERY buffer size. An anchor
+// taken from the message thread's view of the index can be a full buffer behind
+// the block that first applies it, opening the envelope at
+// 0.5*(1 + cos(pi*N/R)) instead: 0.999 at 64 samples, 0.720 at 512, and EXACTLY
+// 0 at 2048 -- a hard cut, which is the click the ramp exists to prevent.
+TEST (AudioEngineSoundcheck, RampOutStartsAtFullScaleAtAnyBufferSize)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 1522: past the sweep's own 1440-sample ramp-in, and chosen because
+    // |sampleAt(1522)| = 0.0999989 -- within 1e-6 of the full -20 dBFS peak. A
+    // start index where the sweep happens to cross zero would make the
+    // comparison below true for any envelope at all.
+    const std::int64_t start = 1522;
+
+    for (int frames : { 64, 512, 2048 })
+    {
+        AudioEngine plain;
+        plain.setRunningForTest (true);
+        routeMono (plain, 0, 0, 0);
+        plain.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+        plain.setSoundcheckTapsSuspended (true);
+        plain.setSoundcheckSampleIndex (start);
+        plain.setSoundcheckOutputChannel (1);
+
+        MultiDriver ref { 2, frames };
+        ref (plain);
+
+        AudioEngine ramped;
+        ramped.setRunningForTest (true);
+        routeMono (ramped, 0, 0, 0);
+        ramped.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+        ramped.setSoundcheckTapsSuspended (true);
+        ramped.setSoundcheckSampleIndex (start);
+        ramped.setSoundcheckOutputChannel (1);
+        ramped.requestSoundcheckRampOut();      // BETWEEN callbacks
+
+        MultiDriver d { 2, frames };
+        d (ramped);
+
+        ASSERT_GT (std::abs (ref.out[1][0]), 1.0e-3f)
+            << "frames " << frames << ": the un-ramped reference sample is ~0, "
+               "so the comparison below would prove nothing";
+        EXPECT_GE (std::abs (d.out[1][0]), 0.99f * std::abs (ref.out[1][0]))
+            << "frames " << frames << ": the ramp-out envelope did not open at "
+               "full scale -- the first sample is a step, not a fade";
+    }
+}
+
+// RED IF: a ramp-out anchor left behind by an aborted run survives into the
+// next one (C-2). The abort path that produces it is real: the controller
+// requests the ramp-out, then the device changes and the channel index stops
+// being valid, so NO emitting callback ever runs to clear the anchor itself.
+// setSoundcheckOutputChannel() is what must clear it, on any value.
+TEST (AudioEngineSoundcheck, StaleRampAnchorDoesNotTruncateTheNextRun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (1440);
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 2, 256 };
+    d (engine);                                 // emitting; index -> 1696
+
+    // The abort the callback can never finish.
+    engine.requestSoundcheckRampOut();
+    engine.setSoundcheckOutputChannel (7);      // device_changed: out of range
+    d (engine);                                 // scOut == -1: nothing happens
+
+    // Re-arm a fresh run from the top of the flat part of the sweep.
+    engine.setSoundcheckSampleIndex (1440);
+    engine.setSoundcheckOutputChannel (1);
+
+    SoundcheckSignal::Params p;
+    p.sampleRate = engine.getCurrentSampleRateHz();
+    p.peak       = SoundcheckSignal::kSoundcheckMaxPeak;
+    const SoundcheckSignal expected { p };
+
+    // Two blocks: the first covers 1440-1695, which is still BEFORE the stale
+    // anchor at 1696 and would pass even with the bug. The second crosses it.
+    for (int block = 0; block < 2; ++block)
+    {
+        d (engine);
+        for (int n = 0; n < 256; ++n)
+            ASSERT_NEAR (d.out[1][(std::size_t) n],
+                         expected.sampleAt (1440 + block * 256 + n), 1.0e-6f)
+                << "block " << block << " sample " << n
+                << " -- the new run is being faded by the previous run's anchor";
+    }
+    EXPECT_TRUE (engine.soundcheckIsEmitting());
+}
+
+// RED IF: a muted lane's notch chain keeps its filter state (C-3). Muting by
+// skipping the lane freezes the biquads' persistent Direct Form I state for as
+// long as the mute lasts -- up to 4.5 s per channel -- and on un-mute that
+// stored energy discharges as a free response on top of live programme: a click
+// on every channel the soundcheck touched. Resetting the chain on every muted
+// block makes the un-mute resume from zero state, so silence in is silence out.
+TEST (AudioEngineSoundcheck, UnmuteResumesFromZeroFilterState)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Auto);   // Bypass would skip the chain
+    routeMono (engine, 0, 0, 0);
+
+    // A high-Q notch: the narrower it is, the longer its stored energy rings.
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 0, 1000.0f, 30.0f, -18.0f, 0 };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    MultiDriver d { 2, 256 };
+
+    // Charge the filter state with a tone AT the notch frequency.
+    for (int n = 0; n < 256; ++n)
+        d.in[0][(std::size_t) n] = 0.5f * std::sin (2.0f * 3.14159265f * 1000.0f
+                                                    * (float) n / 48000.0f);
+    for (int i = 0; i < 4; ++i) d (engine);
+    ASSERT_GT (d.peakOn (0), 0.0f) << "the chain never saw any signal";
+
+    // Mute: the soundcheck takes this output channel. A NEGATIVE sample index
+    // keeps it in the noise-floor phase, so the channel is silent rather than
+    // swept and the assertion below is about the mute, not about the sweep.
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-48000);
+    engine.setSoundcheckOutputChannel (0);
+    for (int i = 0; i < 4; ++i) d (engine);
+    ASSERT_EQ (d.peakOn (0), 0.0f) << "the muted channel was not silent";
+
+    // Un-mute into SILENCE. With the chain reset on every muted block there is
+    // no stored state left, so a zero input can only produce a zero output.
+    for (auto& v : d.in) std::fill (v.begin(), v.end(), 0.0f);
+    engine.setSoundcheckOutputChannel (-1);
+    engine.setSoundcheckTapsSuspended (false);
+    d (engine);
+
+    for (int n = 0; n < 256; ++n)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.0f)
+            << "sample " << n << " is the free response of stale filter state -- "
+               "on a PA that is a click on every channel the soundcheck touched";
+}
+
+// ===================================================================
+// Review round 2 additions.
+// ===================================================================
+
+// RED IF: a muted lane's chain is reset() instead of clearState() (N-1).
+// reset() also zeroes rampRemaining_, so on a mute that can last 4.5 s it
+// cancels an in-flight lane-G depth ramp on EVERY block -- and command draining
+// is NOT suspended during a run, so a retune landing mid-mute is entirely
+// normal. The filter would strand at the intermediate depth while
+// NotchInfo.depthDB already reads the target: the rare NaN-heal GAP turned into
+// routine behaviour.
+TEST (AudioEngineSoundcheck, MuteDoesNotCancelAnInFlightDepthRamp)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Auto);   // Bypass would skip the chain
+    routeMono (engine, 0, 0, 0);
+
+    auto& q = engine.getCommandQueue();
+    const NotchCommand place { NotchCommandType::Set, 0, 0, 1000.0f, 8.0f, -6.0f, 0 };
+    ASSERT_EQ (q.write (&place, 1), 1u);
+
+    MultiDriver d { 2, 64 };
+    d (engine);                     // the notch is placed
+
+    // A depth-only retune of the SAME notch (same freq, same Q): NotchChain
+    // ::setNotch takes the rampNotchDepth path, kRampMs = 10 ms = 480 samples
+    // at 48 kHz.
+    const NotchCommand deepen { NotchCommandType::Set, 0, 0, 1000.0f, 8.0f, -18.0f, 0 };
+    ASSERT_EQ (q.write (&deepen, 1), 1u);
+    d (engine);                     // 64 of the 480 ramp samples are spent
+
+    const NotchChain& chain = engine.getNotchChainForTest (0, 0);
+    const int remainingBeforeMute = chain.getFilterForTest (0).rampRemainingForTest();
+    ASSERT_EQ (remainingBeforeMute, 480 - 64)
+        << "the retune did not start a depth ramp, so this test proves nothing";
+
+    // Mute the lane for a while. A negative sweep index keeps the soundcheck in
+    // its noise-floor phase, so the channel is silent rather than swept.
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-48000);
+    engine.setSoundcheckOutputChannel (0);
+    for (int i = 0; i < 20; ++i) d (engine);
+
+    EXPECT_EQ (chain.getFilterForTest (0).rampRemainingForTest(), remainingBeforeMute)
+        << "the mute cancelled the in-flight depth ramp -- reset() was called "
+           "where clearState() belongs";
+
+    // Un-mute and let the ramp finish: 416 samples left, 8 blocks of 64.
+    engine.setSoundcheckOutputChannel (-1);
+    engine.setSoundcheckTapsSuspended (false);
+    for (int i = 0; i < 8; ++i) d (engine);
+
+    EXPECT_EQ (chain.getFilterForTest (0).rampRemainingForTest(), 0)
+        << "the ramp did not finish after the un-mute";
+
+    // ...and it landed on the TARGET design, not on an intermediate one.
+    Biquad target;
+    ASSERT_TRUE (target.setNotchFilter (1000.0, 8.0, 48000.0, -18.0));
+    const Biquad::Coeffs want = target.coeffsForTest();
+    const Biquad::Coeffs got  = chain.getFilterForTest (0).coeffsForTest();
+    EXPECT_DOUBLE_EQ (got.b0, want.b0);
+    EXPECT_DOUBLE_EQ (got.b1, want.b1);
+    EXPECT_DOUBLE_EQ (got.b2, want.b2);
+    EXPECT_DOUBLE_EQ (got.a1, want.a1);
+    EXPECT_DOUBLE_EQ (got.a2, want.a2);
+}
+
+// Pins what an abort requested during the NOISE-FLOOR phase actually does,
+// because it is not what anyone reading the callback assumes at first glance.
+//
+// The sweep index is NEGATIVE during the noise floor, so the anchor the
+// callback latches is negative too -- and -1 is also the "no anchor" sentinel,
+// so `rampAt >= 0` is false: the envelope is neither applied nor completed, and
+// the request is simply re-latched on each block until the index reaches 0.
+// Nothing is EMITTED in the meantime (sampleAt returns 0 for a negative index),
+// but the channel stays muted and the taps stay suspended for the rest of the
+// noise floor -- up to ~0.5 s.
+//
+// That is why the controller's abort backstop is setSoundcheckOutputChannel(-1)
+// and not requestSoundcheckRampOut() alone. This test exists so the comment on
+// the atomics cannot drift away from the code.
+TEST (AudioEngineSoundcheck, AbortDuringTheNoiseFloorIsDeferredUntilTheSweepStarts)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-24000);   // 0.5 s of noise floor still to run
+    engine.setSoundcheckOutputChannel (1);
+
+    MultiDriver d { 2, 256 };
+    d (engine);                                 // index -> -23744
+    ASSERT_TRUE (engine.soundcheckIsEmitting());
+
+    engine.requestSoundcheckRampOut();
+
+    // 50 blocks = 12800 samples: still 10944 samples of noise floor to go.
+    for (int i = 0; i < 50; ++i) d (engine);
+    EXPECT_TRUE (engine.soundcheckIsEmitting())
+        << "the deferral this test documents is gone -- if the negative-anchor "
+           "case was fixed, replace this test with the immediate-abort one";
+    EXPECT_EQ (d.peakOn (1), 0.0f) << "the noise-floor phase emitted";
+
+    int blocks = 0;
+    while (engine.soundcheckIsEmitting() && blocks < 400)
+    {
+        d (engine);
+        ++blocks;
+    }
+
+    EXPECT_FALSE (engine.soundcheckIsEmitting()) << "the abort was never honoured";
+    // 10944 samples of noise floor = 43 blocks of 256, then the anchor latches
+    // at the first non-negative index and one ramp length (kRampOutMs = 30 ms =
+    // 1440 samples = 6 blocks) finishes it. A couple of blocks of slack.
+    EXPECT_LE (blocks, 43 + 8)
+        << "the abort took longer than the remaining noise floor plus one ramp";
+}
+
+// The backstop that makes the deferral above harmless: one store puts the
+// soundcheck side of the engine back to idle, with no callback needed.
+TEST (AudioEngineSoundcheck, SettingTheChannelToMinusOneIsTheAbortBackstop)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    engine.setMode (AudioEngine::Mode::Bypass);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckTapsSuspended (true);
+    engine.setSoundcheckSampleIndex (-24000);
+    engine.setSoundcheckOutputChannel (0);
+
+    MultiDriver d { 2, 256, 0.3f };
+    d (engine);
+    ASSERT_TRUE (engine.soundcheckIsEmitting());
+    ASSERT_EQ (d.peakOn (0), 0.0f) << "the lane should be muted here";
+
+    engine.requestSoundcheckRampOut();
+    engine.setSoundcheckOutputChannel (-1);     // the backstop
+
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+
+    d (engine);
+    for (int n = 0; n < 256; ++n)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
+            << "sample " << n << " -- the lane is still muted after the abort";
 }

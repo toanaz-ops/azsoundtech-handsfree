@@ -1,0 +1,1296 @@
+# fix-wave diff f9dbad3..ed4d74d (code + docs, SDD reports excluded)
+ed4d74d docs(soundcheck): detection-off, worst-slot ring-risk gate, spec line numbers
+94489a6 test(soundcheck): portable noise fixtures (M-1), M-5 comment, M-7 fixture
+0bb5bda fix(soundcheck): final-review fixes I-1/I-2/I-3 + M-2/M-3/M-6 + C4459
+
+ docs/GIOI-THIEU.md                                 |  10 +-
+ docs/KY-THUAT-CHONG-HU.md                          |  19 +++
+ .../specs/2026-09-15-active-soundcheck-design.md   |  10 +-
+ installer/TESTER-NOTES.md                          |  11 +-
+ src/app/AudioEngine.cpp                            |  11 ++
+ src/app/AudioEngine.h                              |   6 +
+ src/app/MainComponent.cpp                          |  92 +++++++++++--
+ src/app/MainComponent.h                            |   7 +
+ src/app/SoundcheckController.cpp                   |  19 ++-
+ src/app/SoundcheckController.h                     |  10 +-
+ src/gui/SoundcheckPanel.cpp                        |  20 ++-
+ src/gui/SoundcheckPanel.h                          |  34 ++++-
+ tests/fixtures/session-sample.jsonl                |   2 +-
+ tests/test_gui_wiring.cpp                          | 148 +++++++++++++++++++++
+ tests/test_loopgainestimator.cpp                   |  25 +++-
+ tests/test_soundcheckcontroller.cpp                |  32 ++++-
+ 16 files changed, 425 insertions(+), 31 deletions(-)
+
+diff --git a/docs/GIOI-THIEU.md b/docs/GIOI-THIEU.md
+index 7565e41..8e41425 100644
+--- a/docs/GIOI-THIEU.md
++++ b/docs/GIOI-THIEU.md
+@@ -121,21 +121,29 @@ lặng → **sweep log 100 Hz – 10 kHz trong 3,0 giây** → 0,7 s đuôi (đo
+ → 0,3 s nghỉ. Tổng **4,52 giây mỗi kênh ngõ ra**, và trong suốt 4,52 giây đó
+ kênh ấy **im hoàn toàn**: **mọi làn của mọi slot** định tuyến vào kênh đó đều bị
+ tắt, không phải chỉ một `(slot, làn)` — vì nhiều slot cộng dồn lên cùng một kênh
+ ra, tắt một cặp thì vòng hú của kênh đó vẫn đóng. Hệ 4 ngõ ra mất khoảng **18
+ giây**; hệ 8 slot stereo (16 kênh ngõ ra) mất khoảng **72 giây**. Hộp thoại xác
+ nhận in đúng con số của rig đang cắm trước khi bạn bấm. **Đừng bấm `ĐO` giữa lúc
+ MC đang nói.**
+ 
+ **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng** trong lúc đo — loa của chúng vẫn
+ đang phát tiếng mic. Vì vậy app **từ chối bắt đầu** khi chip `RING RISK` đã đọc
+-`RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy.
++`RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy. App đọc chip của **mọi
++slot đang bật**, không riêng slot đang hiện trên màn hình — nên một phòng đang
++ngân ở slot 1 vẫn chặn được lần đo, kể cả khi console đang xem slot 0.
++
++**⚠️ Trong suốt phép đo, bộ chống hú TẮT trên MỌI slot** — không phải chỉ kênh
++đang được quét. `ĐO` tắt detection trên cả dàn suốt cả lần chạy (hệ 16 kênh là
++~72 giây), rồi mới trả lại theo mode đang chạy khi kết thúc. Hộp thoại xác nhận
++in đúng câu đó trước khi bạn bấm. **Phòng bắt đầu hú giữa chừng thì bấm `DỪNG`
++ngay** — trong lúc chạy đó là đường thoát.
+ 
+ **App đo gì.** So phổ mic thu được với phổ sweep đã phát, trừ nền nhiễu, ra
+ `H_dB` từng bin. Màn hình vẽ **`margin = −H_dB`** — biên còn lại trước khi bin đó
+ hú; `H_dB ≥ 0` nghĩa là bin đó **đã** hú được. **Băng tin cậy là 100 Hz – 6
+ kHz**: sweep đi tới 10 kHz nhưng một sweep log biên độ hằng bơm vào mỗi bin ở
+ 10 kHz **ít hơn 20 dB** so với ở 100 Hz, nên 6–10 kHz được **vẽ mờ** kèm nhãn
+ "độ tin cậy thấp" và **không bao giờ được đề xuất**.
+ 
+ **App chỉ ĐỀ XUẤT — không đặt gì cả cho tới khi bạn bấm `ÁP DỤNG`.** `BỎ`, hoặc
+ để hết 20 giây, ném đề xuất đi và không đụng vào notch nào. Khi `ÁP DỤNG`:
+diff --git a/docs/KY-THUAT-CHONG-HU.md b/docs/KY-THUAT-CHONG-HU.md
+index a36582f..1c37294 100644
+--- a/docs/KY-THUAT-CHONG-HU.md
++++ b/docs/KY-THUAT-CHONG-HU.md
+@@ -562,20 +562,39 @@ do test phủ chúng phải lái một lần đặt của **detector thật**, k
+ **Từ chối chạy** (`Refusal`, trả về từ `arm()`, không phải `bool` — một cú từ
+ chối phải nói được lý do): engine chưa `isRunning()`; device không có kênh; slot
+ đang tắt; cặp kênh vào/ra không hợp lệ với số kênh **thật**; **`RING RISK` ở băng
+ `RISING` trở lên**, viết ra thành danh tính `ringRiskValid && ringRiskScore >=
+ kRiskFreezeFraction × ringRiskThreshold` = 0,55 × 0,7 = **0,385** (lấy tích từ
+ snapshot, không chép hằng 0,385) — `ringRiskValid == false` **KHÔNG** từ chối;
+ tham số không hợp lệ (trần không hữu hạn, sample rate 0); đang chạy rồi; đang có
+ ramp tắt chưa xong. Ring-risk được kiểm lại **tại `Arm`**, với cùng một danh
+ tính như lúc preflight, vì hộp thoại xác nhận có thể đã mở hàng chục giây.
+ 
++**Cổng ring-risk đọc snapshot XẤU NHẤT của cả dàn, không phải slot đang hiện**
++(final review I-2, 15/09/2026). Cả hai cổng — preflight và `Arm` — trước đây chỉ
++đọc `notchControllers_[displayedSlot_]`, đúng cùng nguồn với chip trên thanh
++analyser. Nhưng chip trả lời câu "slot tôi đang theo dõi đang thế nào", còn cổng
++này trả lời câu **"có an toàn để làm một kênh ngõ ra im và làm mọi detector mù
++trong 72 giây không"**: `arm()` tắt detection trên **mọi** slot và
++`buildSoundcheckTargets()` quét **mọi** slot đang bật, nên một phòng đang ngân ở
++slot 1 trong khi console xem slot 0 vẫn được quét bình thường — với đúng cái
++detector lẽ ra bắt được nó vừa bị tắt.
++
++`MainComponent::worstRingRiskSnapshot()` duyệt **mọi slot đang bật, cộng slot
++đang hiện** (giữ slot đang hiện trong tập để hành vi cũ là tập con: cổng chỉ
++chặt thêm, không bao giờ lỏng ra — luật chung số 10), **bỏ qua** slot có
++`ringRiskValid == false` (detector chưa chấm frame nào publish score 0.0f, để nó
++thắng một phép `max` là giấu mất số thật), và lấy `ringRiskScore` cao nhất. Slot
++mà con số ấy đến từ được ghi vào `soundcheck_start` thành **`ring_risk_slot`**
++(`null` khi chưa slot nào chấm được frame nào): `ring_risk` đứng một mình không
++còn nói được nó đang tả chuỗi nào.
++
+ **Chín lý do tự hủy** (`AbortReason`, tên trong log): `user_stop`, `esc`,
+ `engine_stopped`, `device_error`, `device_changed`, `mic_hot`, `room_ringing`,
+ `capture_drop`, `noise_floor_unmeasured`. Mỗi lý do trừ hai lý do do ngón tay
+ gây ra có **một câu riêng** trên màn hình: mọi abort khác được quyết trên thread
+ lane M, thứ **không được phép đụng một component nào**, nên câu đó là chỗ **duy
+ nhất** người vận hành từng được biết vì sao một lần chạy biến mất.
+ 
+ **Cổng nền** so độ nhọn phổ của cửa sổ nền 0,5 s với **`getPeakinessThreshold()`
+ đang sống của detector** (mặc định 10,0), đọc **một lần trên message thread lúc
+ `Arm`** và trao vào qua `RunParams::noiseFloorGate` — thread lane M **không bao
+diff --git a/docs/superpowers/specs/2026-09-15-active-soundcheck-design.md b/docs/superpowers/specs/2026-09-15-active-soundcheck-design.md
+index e6b375e..316b91e 100644
+--- a/docs/superpowers/specs/2026-09-15-active-soundcheck-design.md
++++ b/docs/superpowers/specs/2026-09-15-active-soundcheck-design.md
+@@ -733,23 +733,29 @@ Vì vậy: **`SoundcheckController` (thread riêng) không bao giờ gọi
+ Điều đó bao gồm cả **ngưỡng cổng nền**. §4.3 nói cổng so với
+ `controller.getPeakinessThreshold()`; nếu thread lane M tự gọi hàm đó thì nó vừa
+ phá quy tắc vừa phá invariant 17 — `getPeakinessThreshold()` là một accessor
+ chính sách, cùng họ với những hàm mà header khai là message-thread
+ (`src/app/NotchController.h:13-14`). Nên: **message thread đọc ngưỡng đúng một
+ lần ở `Arm`** và trao nó vào qua `RunParams::noiseFloorGate` (§4.3). Thread lane
+ M chỉ so sánh với một `float` mà nó đã được đưa, và **không cầm con trỏ tới
+ `NotchController` nào cả**.
+ 
+ **f) Không đụng "phòng nhớ".** Lane G đã có cổng không cho Soundcheck tiêu ký ức
+-(`src/app/NotchController.cpp:1116`). Lane M không ghi và không tiêu ký ức
++(`src/app/NotchController.cpp:1117`, và trần Soundcheck áp ở
++`src/app/NotchController.cpp:1170`). Lane M không ghi và không tiêu ký ức
+ phòng; §5 có test.
+ 
++> Hai con số này là `:1116` / `:1169` cho tới rev 5; Task 11 mở file trên nhánh
++> `feat/lane-m-active-soundcheck` và đếm lại ra `:1117` / `:1170`. Sửa trong đợt
++> fix cuối 16/09/2026. Bảng §6 dưới đây sửa theo. Các dòng trong nhật ký phản
++> biện vòng 2 (§9) giữ nguyên `:1116` vì chúng ghi lại điều reviewer nói lúc đó.
++
+ ### 4.7 Log (lane D)
+ 
+ Năm sự kiện, khoá dispatch là **`ev`** — không phải `kind` (bài học lane G A.7).
+ 
+ | `ev` | Khi | Trường |
+ |---|---|---|
+ | `soundcheck_start` | vào `Arm` | `outputs`, `peak_dbfs`, `sweep_ms`, `total_ms`, `mode_before` |
+ | `soundcheck_output` | hết `Analyse` | `slot`, `lane`, `out_ch`, `in_ch`, `ok`, `routing_invalid`, `snr_db`, `saturated`, `candidates[]` (`hz`, `margin_db`, `depth_db`, `residual_db`) |
+ | `soundcheck_result` | vào `Results` | `outputs_ok`, `outputs_failed`, `marked_total`, `candidates_total` |
+ | `soundcheck_apply` | sau khi đặt | `placed`, `refused`, `cleared_previous` |
+@@ -1067,21 +1073,21 @@ Vào thẳng TESTER-NOTES của bản alpha:
+ 6. Trong phòng ồn thì bao nhiêu kênh ra "không đo được"?
+ 7. Ứng viên lane M có trùng với bin detector **thật sự** notch trong show sau đó
+    không? Dữ liệu đối chiếu cho lane C.
+ 
+ ## 6. Cần gì từ lane G / R / S / D
+ 
+ | Lane | Cần gì | Đã có chưa |
+ |---|---|---|
+ | **S** | Per-lane = per-output; `width`, `linked` trong snapshot | **Đủ** |
+ | **G** | `kDepthLadderDb`, `kMaxDepthDb`, `getNotchQ()`, trần preset, quy tắc lượng tử Q13 | **Đủ** (`src/app/NotchController.h:100-114`, `:362`) |
+-| **G** | Cổng không cho Soundcheck tiêu "phòng nhớ" | **Đủ** (`src/app/NotchController.cpp:1116`) |
++| **G** | Cổng không cho Soundcheck tiêu "phòng nhớ" | **Đủ** (`src/app/NotchController.cpp:1117`; trần áp ở `:1170`) |
+ | **R** | `ringRiskScore/Valid/Threshold` — **chỉ dùng được ở `Preflight`/`Arm`** | **Đủ**, với giới hạn đã nêu ở §4.3 |
+ | **D** | `SessionLogger::makeEvent`, đường `ev` | **Đủ** (`src/app/SessionLogger.h:49-50`) |
+ | **D** | `ClearReason::SoundcheckReplace` + một nhánh `logstats.py` | **CHƯA** — cộng thêm, cần owner gật (§4.6b) |
+ | **G/S** | `Origin origin` trong `SnapshotNotch` | **CHƯA** — cộng thêm, một trường + một dòng init (§4.6) |
+ | **A** | Round-trip delay của vòng hú | **Lane M KHÔNG cung cấp** (§4.4). Lane A tự lo, hoặc mở nhánh giải chập (Q5 PA 3) |
+ 
+ Hai thay đổi "CHƯA" là **toàn bộ** phần lane M chạm vào code của lane khác. Ngoài
+ chúng, lane M chỉ **thêm**: bốn điểm chèn ở `AudioEngine`, hai lớp `src/dsp/`,
+ một lớp `src/app/`, một nút, một overlay, một `micCapture_.clear()` trong khối
+ drain có sẵn của `audioDeviceAboutToStart`, và hai dòng trong
+diff --git a/installer/TESTER-NOTES.md b/installer/TESTER-NOTES.md
+index 0ea32b0..d7781c2 100644
+--- a/installer/TESTER-NOTES.md
++++ b/installer/TESTER-NOTES.md
+@@ -84,21 +84,24 @@ phòng. Đọc hết mục này trước khi cắm vào dàn thật.
+    có đường thoát. Đó là thiết kế, không phải app treo: **`BỎ` là một cú bấm.**
+ 
+ 7. **Băng tin cậy dừng ở 6 kHz.** Sweep đi tới 10 kHz, nhưng một sweep log biên
+    độ hằng bơm vào mỗi bin ở 10 kHz **ít hơn 20 dB** so với ở 100 Hz, nên phần
+    6–10 kHz app **vẽ mờ** kèm nhãn "độ tin cậy thấp" và **không bao giờ đề
+    xuất** cắt ở đó. **Cho chúng tôi biết có đáng mở rộng lên không.**
+ 
+ 8. **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng trong lúc đo.** Loa của chúng vẫn
+    đang phát tiếng mic. Phòng sát ngưỡng ở một kênh khác thì sweep **có thể**
+    kích nó hú — đó chính là lý do app **từ chối bắt đầu** khi chip `RING RISK`
+-   đã đọc `RISING` trở lên.
++   đã đọc `RISING` trở lên. App đọc chip của **mọi slot đang bật**, không riêng
++   slot đang hiện trên màn hình: bấm `ĐO` mà bị từ chối trong khi chip trên màn
++   hình đang `LOW` thì **đúng là như vậy** — một slot khác đang ngân. Không phải
++   lỗi.
+ 
+ 9. **App tự dừng và nói lý do.** Chín lý do, mỗi lý do một câu riêng dưới đáy
+    màn hình, ví dụ "tín hiệu mic quá lớn", "phòng đã hú sẵn trước khi phát",
+    "không đo được nền nhiễu", "mất dữ liệu mic". Hai lý do đầu được quyết trong
+    **0,5 giây đo nền, trước khi một mẫu sweep nào ra loa** — nên một lần chạy
+    trong phòng đang ngân **phải dừng trước khi nghe thấy sweep**. Nghe thấy
+    sweep rồi mới dừng là **báo lại ngay**.
+ 
+ 10. **Ba câu "không phải phòng sạch".** Một kênh trả về **"không đo được"**
+     nghĩa là mic không nghe đủ rõ loa (SNR thấp). **"sai định tuyến"** nghĩa là
+@@ -118,20 +121,26 @@ phòng. Đọc hết mục này trước khi cắm vào dàn thật.
+ 
+ 13. **Preset lưu sau soundcheck có mang notch phòng ngừa, nhưng nạp lại thì
+     chúng tự nhả.** Nạp lại đưa chúng vào với `Origin::Preset`, nên chúng
+     **tự nhả sau 30 giây yên tĩnh** như mọi notch preset khác. Muốn bảo vệ
+     phòng ngừa đầy đủ trở lại thì **chạy `ĐO` lại**.
+ 
+ 14. **Độ sâu không bao giờ nông hơn slider DEPTH đang để.** Nếu anh em kéo
+     slider sâu hơn trong lúc đang xem kết quả, lúc `ÁP DỤNG` app lấy **cái sâu
+     hơn** giữa đề xuất và slider. Đây là cái kẹp cuối trước PA.
+ 
++15. **⚠️ Trong lúc `ĐO`, bộ chống hú TẮT trên MỌI slot.** Không phải chỉ kênh
++    đang được quét: suốt cả lần chạy (hệ 16 kênh là ~72 giây) **cả dàn không có
++    bảo vệ chống hú**, rồi mới bật lại theo mode đang chạy khi kết thúc. Hộp
++    thoại xác nhận có in đúng câu này trước khi anh em bấm. **Phòng bắt đầu hú
++    thì bấm `DỪNG` ngay** — trong lúc chạy đó là đường thoát.
++
+ **Cần báo lại, theo thứ tự giá trị:**
+ 
+ 1. **Mở master lên từng dB cho tới lúc hú, TRƯỚC và SAU `ÁP DỤNG`. Chênh lệch
+    đó là con số DUY NHẤT chứng minh tính năng này hoạt động.**
+ 2. Đường `margin` trên màn hình so với một phép đo tham chiếu (REW / Smaart +
+    mic đo): **lệch bao nhiêu dB, sai bao nhiêu bin?**
+ 3. Bấm `DỪNG` giữa sweep: bao lâu thì im, **và có tiếng "cạch" không?**
+ 4. 4,5 giây im mỗi kênh có vừa quy trình soundcheck của anh em không? ~72 giây
+    có quá dài không?
+ 5. Phòng ồn thì bao nhiêu kênh trả về **"không đo được"**?
+diff --git a/src/app/AudioEngine.cpp b/src/app/AudioEngine.cpp
+index 7807c85..500a711 100644
+--- a/src/app/AudioEngine.cpp
++++ b/src/app/AudioEngine.cpp
+@@ -443,20 +443,29 @@ void AudioEngine::setRunningForTest (bool running)
+ {
+     // TEST SEAM ONLY (B-4). isRunning_ is otherwise written only by start()
+     // and audioDeviceError(); audioDeviceAboutToStart() does not touch it, so
+     // a headless test can never reach a state SoundcheckController::preflight
+     // accepts. It stores the same atomic start() stores.
+     isRunning_.store (running, std::memory_order_release);
+ }
+ 
+ void AudioEngine::setSoundcheckGainUnclampedForTest (float gain)
+ {
++    // A NaN OR AN INFINITY IS NOT A TEST, IT IS A BROKEN ONE (final review
++    // M-3). This seam deliberately bypasses SoundcheckSignal's clamps, which
++    // makes it the one route by which a non-finite multiplier could reach the
++    // +-1.0f output clamp -- and std::clamp on a NaN returns the NaN. Refusing
++    // it here leaves the previous (finite) value standing, so a fat-fingered
++    // test fails on its own assertion instead of poisoning the sweep path.
++    if (! std::isfinite (gain))
++        return;
++
+     // TEST SEAM ONLY (B-5, F17). Applied at insertion point 3 to the sample
+     // AFTER SoundcheckSignal has clamped it, because a seam on the PEAK
+     // achieves nothing -- the signal constructor and sampleAt both clamp, so
+     // the amplitude is already bounded twice before the +-1.0f output clamp
+     // and invariant 4 could not be turned red by any test. Default 1.0f in
+     // every shipping path.
+     scGainUnclampedForTest_.store (gain, std::memory_order_relaxed);
+ }
+ 
+ LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue()
+@@ -953,20 +962,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+     {
+         if (scCaptureActive && capSource != nullptr)
+         {
+             const std::size_t requested = (std::size_t) numSamples;
+             const std::size_t written   = micCapture_.write (capSource, requested);
+             if (written < requested)
+                 micCaptureDrops_.fetch_add (requested - written, std::memory_order_relaxed);
+         }
+     }
+     else
++    {
+     for (int slot = 0; slot < kMaxSlots; ++slot)
+         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+         {
+             const float* src = tapSource[slot][lane];
+             if (src == nullptr)
+                 continue;
+ 
+             const size_t requested = static_cast<size_t> (numSamples);
+             const size_t written   =
+                 tapBuffers_[(std::size_t) slot][(std::size_t) lane].write (src, requested);
+@@ -980,20 +990,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+             // peakiness scorer is built to react to, and a notch would get
+             // placed on a frequency that never fed back.
+             //
+             // One relaxed read-modify-write: lock-free, allocation-free, and
+             // no ordering relationship with anything else, since the count is
+             // only ever read for display.
+             if (written < requested)
+                 tapDropCounts_[(std::size_t) slot][(std::size_t) lane]
+                     .fetch_add (requested - written, std::memory_order_relaxed);
+         }
++    }
+ }
+ 
+ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
+ {
+     if (device != nullptr)
+     {
+         const double sampleRate = device->getCurrentSampleRate();
+         currentSampleRate_.store (sampleRate, std::memory_order_release);
+         currentBufferSize_.store (device->getCurrentBufferSizeSamples(), std::memory_order_release);
+ 
+diff --git a/src/app/AudioEngine.h b/src/app/AudioEngine.h
+index c9772ee..6b7ced3 100644
+--- a/src/app/AudioEngine.h
++++ b/src/app/AudioEngine.h
+@@ -289,20 +289,26 @@ public:
+     // no headless test can reach a state SoundcheckController::preflight
+     // accepts. Stores the same atomic start() stores.
+     void setRunningForTest (bool running);
+ 
+     // TEST SEAM ONLY (B-5, F17). Multiplied into the injected sample AFTER
+     // SoundcheckSignal has clamped it. 1.0f in every shipping path. It exists
+     // because a seam on the PEAK achieves nothing -- the signal's constructor
+     // and sampleAt both clamp -- so this is the only route by which the
+     // +-1.0f output clamp can be SHOWN to still cover the sweep path
+     // (invariant 4). Same shape as lane G's setRingRiskOverrideForTest.
++    //
++    // TEST SEAM -- no production caller; grep before adding one. The only
++    // caller in the tree is tests/test_audioengine.cpp, and that is the whole
++    // design: this is the one route by which an UNCLAMPED amplitude reaches the
++    // sweep path, so a production call site would be a real level bug wearing a
++    // test name. A non-finite argument is refused outright (final review M-3).
+     void setSoundcheckGainUnclampedForTest (float gain);
+ 
+     // Command channel FROM the detector threads INTO the audio thread (bridge
+     // design §2), one queue PER SLOT: the audio callback drains the queues
+     // under ONE SHARED budget of kMaxCommandsPerCallback commands per callback
+     // ACROSS ALL eight queues and applies each command to its slot's notch
+     // chains. The no-argument overload is the legacy surface (slot 0).
+     //
+     // *** CALLER CONTRACT: write() only, and from exactly one thread per queue.
+     // ***
+diff --git a/src/app/MainComponent.cpp b/src/app/MainComponent.cpp
+index 8b85c01..bb84bf0 100644
+--- a/src/app/MainComponent.cpp
++++ b/src/app/MainComponent.cpp
+@@ -206,20 +206,32 @@ const char* kScConfirmHead2 =
+ // (review M-1). A PASS is one (slot, lane) measurement; two slots feeding one
+ // output are two passes on ONE channel. The seconds follow the PASSES -- that
+ // is what the machine actually spends -- while the channel count is what the
+ // operator recognises on their patch. Printing the pass count as "N kenh ngo
+ // ra" overstated how much of their rig goes quiet.
+ const char* kScConfirmSilence  = "M\xe1\xbb\x97i l\xc6\xb0\xe1\xbb\xa3t \xc4\x91o l\xc3\xa0m k\xc3\xaanh ng\xc3\xb5 ra \xc4\x91\xc3\xb3 im ho\xc3\xa0n to\xc3\xa0n ";
+ const char* kScConfirmSilence2 = " gi\xc3\xa2y. ";
+ const char* kScConfirmPasses   = " l\xc6\xb0\xe1\xbb\xa3t \xc4\x91o tr\xc3\xaan ";
+ const char* kScConfirmTotal    = " k\xc3\xaanh ng\xc3\xb5 ra, t\xe1\xbb\x95ng kho\xe1\xba\xa3ng ";
+ const char* kScConfirmTotal2   = " gi\xc3\xa2y.";
++// "Trong suot phep do, bo chong hu TAT tren moi slot. Neu phong bat dau hu,
++//  bam DUNG ngay."
++//
++// THE FACT THE DIALOG DID NOT STATE (final review I-1). arm() calls
++// setDetectionActiveOnAllSlots(false) -- EVERY slot, for the WHOLE run, not
++// only the channel being swept -- so for up to ~72 seconds the rig has no
++// feedback protection on any chain. The operator is being asked to drop their
++// master; they are owed the fact that the safety net goes down with it, and
++// the one escape that is left. Leading blank line so it lands as its own
++// paragraph and not as a footnote to the duration.
++const char* kScConfirmDetectionOff =
++    "\x0a\x0aTrong su\xe1\xbb\x91t ph\xc3\xa9p \xc4\x91o, b\xe1\xbb\x99 ch\xe1\xbb\x91ng h\xc3\xba T\xe1\xba\xaeT tr\xc3\xaan m\xe1\xbb\x8di slot. N\xe1\xba\xbfu ph\xc3\xb2ng b\xe1\xba\xaft \xc4\x91\xe1\xba\xa7u h\xc3\xba, b\xe1\xba\xa5m D\xe1\xbb\xaaNG ngay.";
+ 
+ // "LOI: phep do khong dung duoc khi thiet bi khoi dong lai. Kiem tra lai thiet
+ //  bi truoc khi do tiep."  DISTINCT from the normal abort sentence (review M-4):
+ // abortAndJoin() returning false means the machine did NOT reach Idle, which is
+ // a different and much worse situation than "your measurement was cancelled".
+ const char* kScRestartJoinFailed =
+     "L\xe1\xbb\x96I: ph\xc3\xa9p \xc4\x91o kh\xc3\xb4ng d\xe1\xbb\xabng \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c khi thi\xe1\xba\xbft b\xe1\xbb\x8b kh\xe1\xbb\x9fi \xc4\x91\xe1\xbb\x99ng l\xe1\xba\xa1i. Ki\xe1\xbb\x83m tra l\xe1\xba\xa1i thi\xe1\xba\xbft b\xe1\xbb\x8b tr\xc6\xb0\xe1\xbb\x9b" "c khi \xc4\x91o ti\xe1\xba\xbfp.";
+ 
+ const char* modeName (AudioEngine::Mode m)
+ {
+@@ -1218,21 +1230,62 @@ juce::String MainComponent::soundcheckConfirmText (const int passCount, const in
+          + juce::String (juce::roundToInt (-peakDbfs))
+          + juce::String::fromUTF8 (kScConfirmHead2)
+          + juce::String::fromUTF8 (kScConfirmSilence)
+          + juce::String (perPassSec, 1)
+          + juce::String::fromUTF8 (kScConfirmSilence2)
+          + juce::String (passes)
+          + juce::String::fromUTF8 (kScConfirmPasses)
+          + juce::String (outputs)
+          + juce::String::fromUTF8 (kScConfirmTotal)
+          + juce::String (totalSec, 1)
+-         + juce::String::fromUTF8 (kScConfirmTotal2);
++         + juce::String::fromUTF8 (kScConfirmTotal2)
++         + juce::String::fromUTF8 (kScConfirmDetectionOff);
++}
++
++NotchController::SnapshotBuffer MainComponent::worstRingRiskSnapshot (int& slotOut) const
++{
++    // THE WORST VALID SNAPSHOT over every slot the run can touch (final review
++    // I-2). Reading only the DISPLAYED slot was a real hole: arm() disarms
++    // detection on EVERY slot and buildSoundcheckTargets() sweeps EVERY enabled
++    // slot, so a room ringing on slot 1 while the console showed slot 0 was
++    // swept anyway -- with the one detector that could have caught it already
++    // switched off.
++    //
++    // The displayed slot stays in the set even when it is disabled, so this can
++    // only ever refuse MORE runs than the old read did, never fewer. A gate is
++    // not somewhere to trade safety for tidiness (global rule 10).
++    //
++    // ringRiskValid == false is skipped rather than compared: an unscored
++    // detector publishes score 0.0f, and letting that win a max() would hide a
++    // real reading behind a slot that has never measured anything.
++    NotchController::SnapshotBuffer worst {};
++    slotOut = -1;
++
++    for (int slot = 0; slot < kMaxSlots; ++slot)
++    {
++        if (! engine_.getSlotConfig (slot).enabled && slot != displayedSlot_)
++            continue;
++
++        NotchController::SnapshotBuffer snap {};
++        notchControllers_[(std::size_t) slot]->copySnapshot (snap);
++
++        if (! snap.ringRiskValid)
++            continue;
++
++        if (slotOut < 0 || snap.ringRiskScore > worst.ringRiskScore)
++        {
++            worst   = snap;
++            slotOut = slot;
++        }
++    }
++
++    return worst;
+ }
+ 
+ juce::String MainComponent::soundcheckRefusalMessage (const SoundcheckController::Refusal r)
+ {
+     switch (r)
+     {
+         case SoundcheckController::Refusal::None:               break;
+         case SoundcheckController::Refusal::EngineNotRunning:   return juce::String::fromUTF8 (kScEngineNotRunning);
+         case SoundcheckController::Refusal::NoChannels:         return juce::String::fromUTF8 (kScNoChannels);
+         case SoundcheckController::Refusal::SlotDisabled:       return juce::String::fromUTF8 (kScSlotDisabled);
+@@ -1279,25 +1332,26 @@ void MainComponent::beginSoundcheck()
+     // measurement that cannot happen.
+     const auto deviceError = engine_.getLastDeviceError();
+     if (deviceError.isNotEmpty())
+     {
+         showMessage (juce::String::fromUTF8 (kScDeviceError) + deviceError);
+         return;
+     }
+ 
+     const auto targets = buildSoundcheckTargets();
+ 
+-    // The RING RISK the dialog is answered against comes from the detector of
+-    // the slot the console is MONITORING -- the same source the on-screen chip
+-    // uses, so the two can never disagree (lane R, A-R6).
+-    NotchController::SnapshotBuffer risk {};
+-    notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (risk);
++    // THE WORST RISK IN THE RIG, not the one on screen (final review I-2). The
++    // chip answers "what is the slot I am monitoring doing"; this question is
++    // "is it safe to silence a whole output and blind every detector for 72
++    // seconds", and the answer has to cover every chain the run touches.
++    int        riskSlot = -1;
++    const auto risk     = worstRingRiskSnapshot (riskSlot);
+ 
+     const auto refusal = soundcheck_.preflight (targets, risk);
+     if (refusal != SoundcheckController::Refusal::None)
+     {
+         showMessage (soundcheckRefusalMessage (refusal));
+         return;
+     }
+ 
+     if (soundcheckConfirmHook == nullptr)
+     {
+@@ -1366,31 +1420,34 @@ void MainComponent::askForSoundcheckConfirmation (
+             }
+ 
+             safe->armSoundcheck (targets);
+         });
+ }
+ 
+ void MainComponent::armSoundcheck (const std::vector<SoundcheckController::Target>& targets)
+ {
+     // S-1: a FRESH risk snapshot. preflight ran before the dialog and a room can
+     // start ringing while the operator reads it; this is the read arm() logs.
+-    NotchController::SnapshotBuffer risk {};
+-    notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (risk);
++    // Worst-over-slots, for the same reason preflight is (final review I-2) --
++    // and the slot it came from goes into the log beside the score, so a
++    // refusal a week later names the chain that caused it.
++    int        riskSlot = -1;
++    const auto risk     = worstRingRiskSnapshot (riskSlot);
+ 
+     // The poll thread must exist BEFORE the machine leaves Idle: arm() enters
+     // the first target itself and every phase after that is a poll. start() is
+     // idempotent (juce::Thread::startThread returns false while running), so
+     // this costs nothing on the normal path where startAudio() already ran --
+     // and covers the path where a device was opened without it.
+     soundcheck_.start();
+ 
+-    const auto refusal = soundcheck_.arm (targets, buildSoundcheckRunParams(), risk);
++    const auto refusal = soundcheck_.arm (targets, buildSoundcheckRunParams(), risk, riskSlot);
+ 
+     if (refusal != SoundcheckController::Refusal::None)
+     {
+         // inv 19: not one sample was emitted and the state is still Idle. The
+         // console is therefore NOT locked -- locking before the arm, as the
+         // brief sketched, would leave the operator shut out of their own mode
+         // buttons because of a refusal.
+         showMessage (soundcheckRefusalMessage (refusal));
+         updateMeasureEnabled();
+         return;
+@@ -1556,20 +1613,26 @@ void MainComponent::refreshSoundcheckOverlay()
+     spectrumView_.clearSoundcheckOverlay();
+ }
+ 
+ void MainComponent::applySoundcheckProposals()
+ {
+     // MESSAGE THREAD. This is the ONLY place a preventive notch is written.
+     if (soundcheck_.getState() != SoundcheckController::State::Results)
+         return;
+ 
+     SoundcheckApplyStats total;
++    // PER SLOT, because the totals cannot say it (final review I-3). A slot that
++    // lost every notch it had and got none back is a chain that is now LESS
++    // protected than before the operator pressed AP DUNG -- and adding its 0
++    // placed to another slot's 6 turns that into a success on the strip. This
++    // is the one outcome the report exists to refuse to hide.
++    bool anySlotWorseOff = false;
+ 
+     for (int slot = 0; slot < kMaxSlots; ++slot)
+     {
+         const auto forSlot = soundcheck_.copyResultsForSlot (slot);
+ 
+         if (forSlot.empty())
+             continue;
+ 
+         // ONE LEDGER PER SLOT, alive for this component's lifetime: only what a
+         // previous apply PLACED is ever replaced, so the notches the operator
+@@ -1579,44 +1642,53 @@ void MainComponent::applySoundcheckProposals()
+                                                    slot, forSlot,
+                                                    soundcheckLedgers_[(std::size_t) slot]);
+ 
+         total.placed           += stats.placed;
+         total.refused          += stats.refused;
+         total.clearedPrevious  += stats.clearedPrevious;
+         total.skippedLive      += stats.skippedLive;
+         total.skippedOtherSlot += stats.skippedOtherSlot;
+         total.skippedBadLane   += stats.skippedBadLane;
+ 
++        // The SAME identity SoundcheckPanel::Model::worseOff() uses, evaluated
++        // where the per-slot numbers still exist, one slot at a time.
++        anySlotWorseOff = anySlotWorseOff
++                       || (stats.clearedPrevious > 0 && stats.placed == 0);
++
+         // The FIFTH lane M event, in the shape Task 8 owns -- never a second
+         // one inlined here. One per slot applied, so a reader can see WHICH
+         // chain the counts belong to; `slot` is the only field added.
+         auto ev = makeSoundcheckApplyEvent (stats);
+         if (auto* o = ev.getDynamicObject())
+             o->setProperty ("slot", slot);
+         sessionLogger_.log (ev);
+     }
+ 
+     soundcheck_.applyRequested();
+ 
+     // THE REPORT. `clearedPrevious > 0 && placed == 0` is a REAL outcome, not a
+     // bug and not a success: the previous proposals went and there was no room
+     // to put the new ones back, so the operator is LESS protected than before
+     // they pressed the button. Mode::Applied exists precisely so that cannot
+     // ship silently (SoundcheckPanel.h:72-78).
+     auto model = soundcheckResultsModel();
+     model.placed          = total.placed;
+     model.clearedPrevious = total.clearedPrevious;
++    model.anySlotWorseOff = anySlotWorseOff;
+     soundcheckPanel_.setResults (model);
+ 
+     endSoundcheckSession (gui::SoundcheckPanel::Mode::Applied);
+ 
+-    if (model.worseOff())
++    // showWorseOff(), not worseOff(): the strip and the message say the same
++    // thing about the same run, and a slot-level regression the strip flags in
++    // danger red is not one to leave out of the sentence under it (I-3).
++    if (model.showWorseOff())
+         showMessage (juce::String::fromUTF8 (kScWorseOffHead)
+                      + juce::String (model.clearedPrevious)
+                      + juce::String::fromUTF8 (kScWorseOffTail));
+ }
+ 
+ void MainComponent::endSoundcheckSession (const gui::SoundcheckPanel::Mode panelMode)
+ {
+     // Anything asked before this teardown is answering about a console that no
+     // longer exists (C-1). One counter, bumped at every teardown, is what a
+     // confirmation's answer is checked against.
+diff --git a/src/app/MainComponent.h b/src/app/MainComponent.h
+index b29edcd..88cfa96 100644
+--- a/src/app/MainComponent.h
++++ b/src/app/MainComponent.h
+@@ -386,20 +386,27 @@ private:
+     // boundary and re-reads everything the dialog could have invalidated.
+     void armSoundcheck (const std::vector<SoundcheckController::Target>& targets);
+ 
+     // Every enabled slot's every lane, in slot order. NOT deduplicated by
+     // output channel: two slots feeding one channel are two different loops
+     // (different mics), and the spec's worst case -- 8 stereo slots, 16
+     // outputs, ~72 s -- is exactly this count.
+     [[nodiscard]] std::vector<SoundcheckController::Target> buildSoundcheckTargets() const;
+     [[nodiscard]] SoundcheckController::RunParams buildSoundcheckRunParams() const;
+ 
++    // The ring-risk snapshot BOTH gates read (final review I-2): the highest
++    // ringRiskScore among the slots that have a valid one, over every enabled
++    // slot plus the displayed one. `slotOut` comes back as the slot it was
++    // taken from, or -1 when no slot has scored a frame yet -- which is what
++    // soundcheck_start logs beside the score.
++    [[nodiscard]] NotchController::SnapshotBuffer worstRingRiskSnapshot (int& slotOut) const;
++
+     // The sentence the operator reads before anything is emitted. TWO counts,
+     // because they differ and the difference is the operator's time: a PASS is
+     // one (slot, lane) measurement, and two slots feeding one output produce
+     // two passes on ONE channel. The duration follows the passes; the channel
+     // count is what the operator recognises on their patch (review M-1).
+     [[nodiscard]] static juce::String soundcheckConfirmText (int passCount, int distinctOutputs);
+     // Distinct outputChannel values in `targets`.
+     [[nodiscard]] static int distinctOutputCount (const std::vector<SoundcheckController::Target>& targets);
+     // Each refusal its OWN sentence: "no device" and "the room is ringing" are
+     // different problems with different answers (inv 19, F26).
+diff --git a/src/app/SoundcheckController.cpp b/src/app/SoundcheckController.cpp
+index f5b856d..8a6384c 100644
+--- a/src/app/SoundcheckController.cpp
++++ b/src/app/SoundcheckController.cpp
+@@ -153,21 +153,22 @@ SoundcheckController::refuseOnRingRisk (const NotchController::SnapshotBuffer& r
+     if (riskSnapshot.ringRiskValid
+         && riskSnapshot.ringRiskScore
+              >= NotchController::kRiskFreezeFraction * riskSnapshot.ringRiskThreshold)
+         return Refusal::RingRiskRising;
+ 
+     return Refusal::None;
+ }
+ 
+ SoundcheckController::Refusal
+ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
+-                           const NotchController::SnapshotBuffer& riskSnapshot)
++                           const NotchController::SnapshotBuffer& riskSnapshot,
++                           const int riskSlot)
+ {
+     if (state_.load (std::memory_order_acquire) != State::Idle)
+         return Refusal::AlreadyRunning;
+ 
+     // Everything below is a CALLER BUG, not a room. Refusing here is what
+     // stops a bug from becoming either a wrong cut or a plausible-looking
+     // "room clean" that nobody questions.
+     //
+     // Task 3 I-3: a non-finite ceiling reaches SoundcheckCandidates as "unset"
+     // and produces marks with no proposals -- never distinguishable from a
+@@ -267,20 +268,28 @@ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
+             o->setProperty ("total_ms",
+                             round3sf (kPerTargetMs * targetCount_.load (std::memory_order_relaxed)));
+             o->setProperty ("mode_before", modeName (engine_.getMode()));
+             // null, NOT 0.0: "no frame scored yet" is a different statement
+             // from "the room scored zero", and a soundman reading the log a
+             // week later must be able to tell them apart (R3-2).
+             o->setProperty ("ring_risk",
+                             riskSnapshot.ringRiskValid
+                                 ? juce::var (round3sf ((double) riskSnapshot.ringRiskScore))
+                                 : juce::var());
++            // WHICH SLOT that number came from. The owner takes the worst
++            // reading across every slot the run touches, not the one on screen
++            // (final review I-2), so "ring_risk: 0.31" alone no longer says
++            // whose chain it describes. null, not -1, for the same reason
++            // ring_risk is null when nothing has scored: absent and "slot -1"
++            // are different claims.
++            o->setProperty ("ring_risk_slot",
++                            riskSlot >= 0 ? juce::var (riskSlot) : juce::var());
+             o->setProperty ("gate", round3sf ((double) params_.noiseFloorGate));
+         }
+         logEvent (ev);
+     }
+ 
+     enterTarget (0);
+     return Refusal::None;
+ }
+ 
+ void SoundcheckController::applyRequested()
+@@ -805,21 +814,27 @@ void SoundcheckController::enterTarget (int index)
+     estimator_.pushReference (reference_.data(), (int) reference_.size());
+ 
+     capturedSamples_     = 0;
+     noiseWindowFill_     = 0;
+     micHotSinceMs_       = -1.0;
+     // Everything captured is the noise floor until the gate says otherwise.
+     noiseFloorEndSample_ = std::numeric_limits<std::int64_t>::max();
+ 
+     // Whatever the previous target left behind is not this target's noise
+     // floor. Safe as a consumer-side operation: capture is OFF at this point
+-    // (Gap turned it off, or the run has not started), so nothing is writing.
++    // (Gap turned it off, or the run has not started), so nothing is writing --
++    // and the one clause that makes that true is the GAP (M-2): the callback
++    // snapshots scCaptureActive_ ONCE at the top of its block, so it is one
++    // block behind the store, and a callback already in flight when enterGap()
++    // ran can still write one more block after it returned. kGapMs = 300 ms
++    // stands between that late block and this clear(), which is orders of
++    // magnitude longer than the longest supported buffer.
+     engine_.getMicCaptureBuffer().clear();
+ 
+     // LISTEN ONLY (C-1). The capture gate opens; the OUTPUT CHANNEL DOES NOT.
+     // scOutChannel_ stays -1 through the whole noise floor, so there is no
+     // audio clock counting toward the first sample and a poll that arrives
+     // late -- a loaded message thread, a long GC-like stall, a debugger --
+     // cannot lose a race it is not in. The sweep is armed only by
+     // armSweepForCurrentTarget(), only after the gate has said quiet.
+     engine_.setSoundcheckCaptureChannel (t.inChannel);
+     engine_.setSoundcheckCaptureActive (true);
+diff --git a/src/app/SoundcheckController.h b/src/app/SoundcheckController.h
+index c79502d..df28f2d 100644
+--- a/src/app/SoundcheckController.h
++++ b/src/app/SoundcheckController.h
+@@ -195,22 +195,30 @@ public:
+     // refusal identity is the one preflight uses, evaluated again here on the
+     // message thread with the snapshot still alive -- and it is THIS read that
+     // soundcheck_start logs, never a cached one.
+     //
+     // It re-validates the targets too (I-4): a slot can be disabled, or its
+     // routing changed, during that same dialog.
+     //
+     // Returns Refusal::None on success. Any other value means NOT ONE SAMPLE
+     // was emitted and the state is still Idle (inv 19); Task 9 shows the
+     // reason, which is why this returns a Refusal and not a bool.
++    //
++    // `riskSlot` is only ever a LABEL for the log: the slot `risk` was copied
++    // from, or -1 when nothing has scored a frame. It changes no decision here
++    // -- the refusal identity reads the snapshot and nothing else -- but a
++    // refusal that names the chain is a refusal a soundman can act on, and the
++    // caller now takes the WORST snapshot across slots (final review I-2), so
++    // without it the logged score belongs to a slot nobody can identify.
+     [[nodiscard]] Refusal arm (std::vector<Target> targets, const RunParams& params,
+-                               const NotchController::SnapshotBuffer& risk);
++                               const NotchController::SnapshotBuffer& risk,
++                               int riskSlot = -1);
+     void  applyRequested();          // Results -> Idle, after Task 7 has placed
+     void  dismissRequested();        // BO
+     // Stops the SOUND on the calling thread and lifts the tap suspension --
+     // both in the safe direction, neither waiting for a poll. The state machine
+     // catches up at its next runOnce(), which is what restores detection.
+     void  requestStop (AbortReason reason);
+     // The device-restart path (Task 10). IT JOINS THE POLL THREAD FIRST, then
+     // runs the abort on the CALLER thread: the other order leaves two threads
+     // inside the machine, and a poll thread sitting in Gap can enterTarget()
+     // after the abort and emit a whole sweep with the taps live (C-2). Returns
+diff --git a/src/gui/SoundcheckPanel.cpp b/src/gui/SoundcheckPanel.cpp
+index 7e82d8b..db33f1d 100644
+--- a/src/gui/SoundcheckPanel.cpp
++++ b/src/gui/SoundcheckPanel.cpp
+@@ -292,50 +292,60 @@ int SoundcheckPanel::preferredHeight() const
+ void SoundcheckPanel::setResults (const Model& model)
+ {
+     model_ = model;
+     rebuildSummary();
+     resized();      // the line count changed, so the block it occupies did too
+     repaint();
+ }
+ 
+ //==============================================================================
+ 
+-void SoundcheckPanel::addSummaryLine (const juce::String& text, const juce::Colour colour)
++// `line`, not `text`: `using namespace az::theme;` at the top of this TU brings
++// a Colour named `text` into scope, and a parameter of that name shadows it --
++// MSVC C4459 (final review, verifier).
++void SoundcheckPanel::addSummaryLine (const juce::String& line, const juce::Colour colour)
+ {
+     if (summaryLineCount_ >= kMaxSummaryLines)
+         return;
+ 
+-    summaryLines_[summaryLineCount_].text   = text;
++    summaryLines_[summaryLineCount_].text   = line;
+     summaryLines_[summaryLineCount_].colour = colour;
+     ++summaryLineCount_;
+ }
+ 
+ void SoundcheckPanel::rebuildSummary()
+ {
+     using namespace az::theme;
+ 
+     summaryLineCount_ = 0;
+ 
+     // ceilingMissing / ladderMissing mean pick() had nothing to propose FROM --
+     // a fault in the run's inputs, not a verdict about the room. It is an
+     // ERROR, and it is what replaces the headline when there is nothing else to
+     // put there: "0 hot spots" on a run that judged nothing reads as an
+     // excellent PA (Task 3 I-3).
+-    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0 || model_.worseOff();
++    hasError_ = model_.cannotPropose > 0 || model_.routingInvalid > 0 || model_.showWorseOff();
+ 
+     // THE line that must never be silent, and it goes FIRST: an apply that
+     // removed notches and placed none left the room worse than it found it.
+-    if (model_.worseOff())
++    // showWorseOff(), not worseOff(): ONE slot can come out worse while the
++    // TOTALS still placed something, and the sum hides it (final review I-3).
++    if (model_.showWorseOff())
+         addSummaryLine (clearedPrefix() + juce::String (model_.clearedPrevious)
+                             + worseOffSentence(),
+                         danger);
+-    else if (mode_ == Mode::Applied)
++
++    // And when something WAS placed, both lines are true and both are printed:
++    // the operator needs the warning AND the count. Suppressed only when
++    // nothing was placed anywhere, where the danger line above already says
++    // everything a "da dat 0 notch moi" line would.
++    if (mode_ == Mode::Applied && ! model_.worseOff())
+         addSummaryLine (appliedPrefix() + juce::String (model_.placed) + placedSentence(),
+                         accent);
+ 
+     if (model_.hotSpots > 0)
+         addSummaryLine (foundPrefix() + juce::String (model_.hotSpots) + hotSpotWord(),
+                         accent);
+     else if (! hasError_ && model_.unmeasured == 0 && model_.saturatedBins == 0
+              && mode_ != Mode::Applied)
+         // "no hot spots" is only the same thing as "clean room" when nothing
+         // ELSE went wrong. A saturated bin means the run found something a
+diff --git a/src/gui/SoundcheckPanel.h b/src/gui/SoundcheckPanel.h
+index f43772c..6c7f276 100644
+--- a/src/gui/SoundcheckPanel.h
++++ b/src/gui/SoundcheckPanel.h
+@@ -110,31 +110,53 @@ public:
+     struct Model
+     {
+         int hotSpots       = 0;
+         int saturatedBins  = 0;
+         int unmeasured     = 0;
+         int routingInvalid = 0;
+         int cannotPropose  = 0;
+         int placed         = 0;
+         int clearedPrevious = 0;
+ 
++        // THE SAME OUTCOME, SEEN PER SLOT (final review I-3). placed and
++        // clearedPrevious are sums across every slot, and a sum HIDES the very
++        // thing worseOff() exists to catch: slot 0 loses 3 notches and gets
++        // none back while slot 1 places 6, and the totals read 6 placed / 3
++        // cleared -- a success. Slot 0's chain is still less protected than it
++        // was, and on a PA that is the slot that howls.
++        //
++        // Set by the owner, which is the only code that ever sees the per-slot
++        // SoundcheckApplyStats. It cannot be DERIVED here, because the two
++        // counts it would be derived from are exactly the ones the sum
++        // destroyed -- so unlike worseOff() this one is a field, and
++        // MainComponent::applySoundcheckProposals is its single writer.
++        bool anySlotWorseOff = false;
++
+         // THE outcome that must never be shown as success: the apply removed
+         // notches that were holding and placed nothing in their place, so the
+         // room is worse than it was before the operator touched anything.
+         //
+         // DERIVED, not a field the caller sets. A bool beside the two counts it
+         // is computed from is a bool that can be set to disagree with them, and
+         // the disagreement would be invisible until a show.
+         [[nodiscard]] bool worseOff() const
+         {
+             return clearedPrevious > 0 && placed == 0;
+         }
++
++        // What the STRIP asks. Either the rig as a whole came out worse, or
++        // one of its chains did; both have to reach the operator, and the
++        // second one is invisible in the totals (final review I-3).
++        [[nodiscard]] bool showWorseOff() const
++        {
++            return worseOff() || anySlotWorseOff;
++        }
+     };
+ 
+     void setResults (const Model& model);
+ 
+     // What this strip needs to show every line it is holding WITHOUT cutting
+     // one off. The owner asks rather than assuming kPanelHeight, because the
+     // summary's line count is data-dependent and a fault sentence that is
+     // half-drawn is a fault the operator never reads. Never less than
+     // kPanelHeight, so the Running layout is unaffected.
+     [[nodiscard]] int preferredHeight() const;
+@@ -184,31 +206,37 @@ public:
+     [[nodiscard]] juce::String progressTextForTest() const  { return progressCaption_; }
+     [[nodiscard]] juce::String countdownTextForTest() const { return countdownLabel_.getText(); }
+     [[nodiscard]] juce::Rectangle<int> summaryBoundsForTest() const { return summaryArea_; }
+     [[nodiscard]] bool hasErrorForTest() const { return hasError_; }
+ 
+ private:
+     // At most: the headline, the cannot-propose error, the saturation warning,
+     // the unmeasured sentence and the routing sentence. A fixed array rather
+     // than a vector so nothing in the summary path can grow.
+     // Headline, cannot-propose, saturation, unmeasured, routing -- and the
+-    // worse-off line, which can appear beside any of them.
+-    static constexpr std::size_t kMaxSummaryLines = 6;
++    // worse-off line, which can appear beside any of them. SEVEN since I-3:
++    // when one slot came out worse while the totals still placed something,
++    // the danger line and the "placed N" line are both true and both show.
++    static constexpr std::size_t kMaxSummaryLines = 7;
+ 
+     struct SummaryLine
+     {
+         juce::String text;
+         juce::Colour colour;
+     };
+ 
+     void rebuildSummary();
+-    void addSummaryLine (const juce::String& text, juce::Colour colour);
++    // `line`, not `text`: this TU opens with `using namespace az::theme;`, and
++    // that namespace has a Colour called `text`. A parameter of that name
++    // shadows it -- MSVC C4459, which the build was carrying silently until
++    // the final review's verifier counted warnings.
++    void addSummaryLine (const juce::String& line, juce::Colour colour);
+ 
+     Mode mode_ = Mode::Hidden;
+ 
+     Model model_ {};
+     bool  hasError_ = false;
+ 
+     std::array<SummaryLine, kMaxSummaryLines> summaryLines_ {};
+     std::size_t summaryLineCount_ = 0;
+ 
+     // The caption and the number are TWO things, not one string. The number is
+diff --git a/tests/fixtures/session-sample.jsonl b/tests/fixtures/session-sample.jsonl
+index 8df993e..401e047 100644
+--- a/tests/fixtures/session-sample.jsonl
++++ b/tests/fixtures/session-sample.jsonl
+@@ -8,17 +8,17 @@
+ {"ev":"notch_clear","t":11000.5,"slot":0,"lane":0,"index":0,"hz":2437.5,"origin":"detector","reason":"verdict_false","age_ms":1980.5}
+ {"ev":"notch_set","t":20000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"q":30,"depth_db":-18,"origin":"detector","confirmed_lane":1,"score":0.88,"peakiness":20.0,"p_norm":0.11,"rise":1,"novelty":1,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"ctx":{"bins":4,"bin_hz":23.4375,"ref_age_ms":120.0,"now":[0.01,0.45,0.02,0.01],"ref":[0.01,0.1,0.02,0.01]}}
+ {"ev":"verdict","t":21000.0,"slot":0,"lane":1,"index":1,"hz":1007.8,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_set","t":30000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"q":30,"depth_db":-12,"origin":"preset"}
+ {"ev":"verdict","t":31000.0,"slot":0,"lane":0,"index":2,"hz":482.0,"verdict":"good","age_ms":1000.0}
+ {"ev":"notch_retune","t":35400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"q":30,"depth_db":-6,"from_db":-12,"origin":"detector","reason":"release","age_ms":30399.0}
+ {"ev":"notch_clear","t":45400.0,"slot":0,"lane":1,"index":0,"hz":1007.8,"origin":"detector","reason":"auto_release","age_ms":40399.0}
+ {"ev":"notch_set","t":50000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"q":30,"depth_db":-9,"origin":"soundcheck"}
+ {"ev":"notch_clear","t":52000.0,"slot":0,"lane":0,"index":5,"hz":700.0,"origin":"soundcheck","reason":"soundcheck_replace","age_ms":2000.0}
+ {"ev":"soundcheck_start","t":53000.0,"outputs":2,"peak_dbfs":-20.0,"sweep_ms":3000.0,"total_ms":9040.0,"mode_before":"auto","ring_risk":0.12,"gate":10.0}
+-{"ev":"soundcheck_output","t":53500.0,"slot":0,"lane":0,"out_ch":0,"in_ch":0,"ok":true,"routing_invalid":false,"snr_db":18.5,"saturated":false,"marked":2,"ceiling_missing":false,"ladder_missing":false,"candidates":[{"hz":312.0,"margin_db":-4.2,"depth_db":-6.0,"residual_db":-1.8}]}
++{"ev":"soundcheck_output","t":53500.0,"slot":0,"lane":0,"out_ch":0,"in_ch":0,"ok":true,"routing_invalid":false,"snr_db":18.5,"saturated":false,"marked":2,"ceiling_missing":false,"ladder_missing":false,"candidates":[{"hz":312.0,"margin_db":-4.2,"depth_db":-6.0,"residual_db":0.0}]}
+ {"ev":"soundcheck_output","t":54000.0,"slot":0,"lane":1,"out_ch":1,"in_ch":1,"ok":true,"routing_invalid":false,"snr_db":17.1,"saturated":false,"marked":1,"ceiling_missing":false,"ladder_missing":false,"candidates":[]}
+ {"ev":"soundcheck_result","t":54100.0,"outputs_ok":2,"outputs_failed":0,"marked_total":3,"candidates_total":1}
+ {"ev":"soundcheck_apply","t":55000.0,"placed":2,"refused":1,"cleared_previous":0,"skipped_other_slot":0,"skipped_bad_lane":0}
+ {"ev":"soundcheck_start","t":56000.0,"outputs":2,"peak_dbfs":-20.0,"sweep_ms":3000.0,"total_ms":9040.0,"mode_before":"auto","ring_risk":null,"gate":10.0}
+ {"ev":"soundcheck_abort","t":57000.0,"reason":"user_stop","at_output":0,"elapsed_ms":1000.0}
+ {"ev":"session_end","t":60000.0,"dropped_events":0}
+diff --git a/tests/test_gui_wiring.cpp b/tests/test_gui_wiring.cpp
+index 9beca88..6d10c4f 100644
+--- a/tests/test_gui_wiring.cpp
++++ b/tests/test_gui_wiring.cpp
+@@ -2082,20 +2082,90 @@ TEST (SoundcheckPanel, AnApplyThatClearedAndPlacedNothingIsReportedAsWorseOff)
+     EXPECT_FALSE (panel.hasErrorForTest());
+     EXPECT_TRUE  (panel.summaryTextForTest().contains ("4"));
+ 
+     // BO is still reachable: an outcome the operator cannot clear is an
+     // outcome that covers the analyser until the app restarts.
+     panel.resized();
+     EXPECT_TRUE  (panel.dismissButton.isVisible());
+     EXPECT_FALSE (panel.applyButton.isVisible());
+ }
+ 
++// RED IF the worse-off verdict is taken from the TOTALS (final review I-3).
++// The counts the strip is given are sums over every slot, and a sum hides the
++// one outcome this report exists to refuse to hide: slot 0 loses three notches
++// and gets none back while slot 1 places six, and `3 cleared / 6 placed` reads
++// as an unqualified success. Slot 0's chain is the one that howls.
++//
++// The APPLY path itself cannot be driven headless (it needs State::Results,
++// which needs a real device and >= 4.5 s per output -- see
++// AnAppliedReportHoldsTheConsoleAndADismissedOneDoesNot), so what is pinned
++// here is the contract between the per-slot stats and the strip: the sum, the
++// flag the owner sets beside it, and what the panel then says.
++TEST (SoundcheckPanel, AWorseOffSlotIsNotMaskedByAnotherSlotsSuccess)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    gui::SoundcheckPanel panel;
++    panel.setSize (900, 200);
++    panel.setMode (gui::SoundcheckPanel::Mode::Applied);
++
++    // TWO SLOTS' real stats, summed exactly as applySoundcheckProposals sums
++    // them -- and the per-slot verdict taken with the same identity, before the
++    // sum destroys it.
++    SoundcheckApplyStats slot0;      // cleared three, put nothing back
++    slot0.clearedPrevious = 3;
++    slot0.placed          = 0;
++
++    SoundcheckApplyStats slot1;      // a clean six
++    slot1.clearedPrevious = 0;
++    slot1.placed          = 6;
++
++    gui::SoundcheckPanel::Model model;
++    model.placed          = slot0.placed          + slot1.placed;
++    model.clearedPrevious = slot0.clearedPrevious + slot1.clearedPrevious;
++    model.anySlotWorseOff = (slot0.clearedPrevious > 0 && slot0.placed == 0)
++                         || (slot1.clearedPrevious > 0 && slot1.placed == 0);
++
++    // THE MASK ITSELF, asserted rather than assumed: on the totals alone this
++    // run looks fine, which is exactly why the flag has to exist.
++    ASSERT_FALSE (model.worseOff());
++    ASSERT_TRUE  (model.anySlotWorseOff);
++    EXPECT_TRUE  (model.showWorseOff());
++
++    panel.setResults (model);
++    panel.resized();
++
++    EXPECT_TRUE (panel.hasErrorForTest())
++        << "a slot that came out worse is an ERROR, whatever the totals say";
++
++    const auto text = panel.summaryTextForTest();
++    // "KEM an toan hon truoc" -- the danger sentence, in the operator's own
++    // words, on a run the totals called a success.
++    EXPECT_TRUE (text.containsIgnoreCase (
++        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")))
++        << text.toStdString();
++    // And the six that WERE placed are still reported: the operator needs both
++    // halves, not the warning instead of the count.
++    EXPECT_TRUE (text.contains ("6")) << text.toStdString();
++    EXPECT_TRUE (text.contains ("3")) << text.toStdString();
++
++    // The control: with neither slot worse off, nothing changes about the
++    // existing success report.
++    gui::SoundcheckPanel::Model clean;
++    clean.placed          = 6;
++    clean.clearedPrevious = 3;
++    EXPECT_FALSE (clean.showWorseOff());
++    panel.setResults (clean);
++    EXPECT_FALSE (panel.hasErrorForTest());
++    EXPECT_FALSE (panel.summaryTextForTest().containsIgnoreCase (
++        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")));
++}
++
+ // RED IF "no hot spots" is printed beside a finding that contradicts it. A
+ // saturated bin is one the DEEPEST rung on the ladder could not fix -- the
+ // opposite of a clean room -- and round 1 printed both lines together.
+ TEST (SoundcheckPanel, ASaturatedBinIsNeverAccompaniedByTheCleanRoomLine)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     gui::SoundcheckPanel panel;
+     panel.setSize (900, 140);
+     panel.setMode (gui::SoundcheckPanel::Mode::Results);
+ 
+@@ -2556,20 +2626,32 @@ TEST (MainComponentSoundcheck, TheConfirmationSaysHaMasterTruocAndTheRealDuratio
+         << text.toStdString();
+ 
+     // 16 PASSES x kPerTargetMs -- the machine spends the time per pass, not per
+     // channel. DERIVED from the constant, so this asserts the arithmetic rather
+     // than a second copy of "72".
+     const double totalSec = SoundcheckController::kPerTargetMs * 16.0 / 1000.0;
+     EXPECT_TRUE (text.contains (juce::String (totalSec, 1)))
+         << "expected " << totalSec << " s in: " << text.toStdString();
+     EXPECT_TRUE (text.contains (juce::String (SoundcheckController::kPerTargetMs / 1000.0, 1)))
+         << "the per-pass silence has to be stated too";
++
++    // DETECTION OFF ON EVERY SLOT, FOR THE WHOLE RUN (final review I-1). arm()
++    // calls setDetectionActiveOnAllSlots(false), so the operator is agreeing to
++    // ~72 seconds with no feedback protection anywhere in the rig -- and the
++    // dialog said nothing about it. Mutation-checked: deleting the
++    // kScConfirmDetectionOff term from soundcheckConfirmText fails here.
++    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
++        "b\xe1\xbb\x99 ch\xe1\xbb\x91ng h\xc3\xba T\xe1\xba\xaeT tr\xc3\xaan m\xe1\xbb\x8di slot")))   // "bo chong hu TAT tren moi slot"
++        << "the dialog must say the protection goes off on EVERY slot: "
++        << text.toStdString();
++    EXPECT_TRUE (text.contains (juce::String::fromUTF8 ("D\xe1\xbb\xaaNG")))   // "DUNG"
++        << "...and name the way out";
+ }
+ 
+ // RED IF: DUNG / Esc is not wired. SoundcheckPanel routes BOTH through onStop
+ // (SoundcheckPanel::keyPressed), so this one callback is the whole stop path a
+ // finger can reach.
+ TEST (MainComponentSoundcheck, StopAndDismissAreWiredAndNeitherEmits)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     MainComponent app;
+ 
+@@ -2950,20 +3032,86 @@ TEST (MainComponentSoundcheck, AnAppliedReportHoldsTheConsoleAndADismissedOneDoe
+ 
+     // NOT ASSERTED HERE: that the Results EDGE sets Pending. Reaching
+     // State::Results means arming a real run and letting it finish, and
+     // MainComponent owns a JuceMonotonicClock with no injection seam -- so that
+     // costs >= 4.5 s of wall time per output with blocks driven continuously
+     // throughout, and is timing-flaky. The edge calls setSoundcheckLock(Pending)
+     // and applyModeGatingToAllSlots(), both of which are asserted directly here
+     // and in TheModeDecidesDetectionAgainWhenARunEnds.
+ }
+ 
++// RED IF the ring-risk gate only ever looks at the slot on screen. arm()
++// disarms detection on EVERY slot and buildSoundcheckTargets() sweeps EVERY
++// enabled slot, so "is this room safe to sweep" is a question about the whole
++// rig -- but both gates read notchControllers_[displayedSlot_] and nothing
++// else (final review I-2). Here slot 1 is ringing and the console is showing
++// slot 0: before the fix the run was armed, with the one detector that could
++// have caught the howl switched off by arm() a moment later.
++TEST (MainComponentSoundcheck, RingRiskOnAnUndisplayedSlotRefusesTheRun)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++
++    MainComponent app;
++    app.setSize (1280, 880);
++    app.resized();
++
++    makeEngineLookRunning (app);         // slot 0 enabled, 2 in / 2 out, running
++
++    // A SECOND enabled slot, on the same patch: two mics round the same
++    // speakers is the ordinary case, and the run would sweep both.
++    SlotConfig second;
++    second.enabled = true;
++    second.width   = 2;
++    second.inputChannels[0]  = 0; second.inputChannels[1]  = 1;
++    second.outputChannels[0] = 0; second.outputChannels[1] = 1;
++    app.getAudioEngine().setSlotConfig (1, second);
++
++    ASSERT_EQ (app.getDisplayedSlot(), 0) << "precondition: the console shows slot 0";
++
++    const float best = ringRiskDriveSlotToCritical (app, 1);
++
++    NotchController::SnapshotBuffer onScreen {};
++    app.getNotchControllerForTest (0)->copySnapshot (onScreen);
++    ASSERT_FALSE (onScreen.ringRiskValid)
++        << "precondition: the DISPLAYED slot has scored nothing, so the old "
++           "gate saw no risk at all";
++
++    NotchController::SnapshotBuffer ringing {};
++    app.getNotchControllerForTest (1)->copySnapshot (ringing);
++    ASSERT_TRUE (ringing.ringRiskValid) << "slot 1's detector never scored a frame";
++    ASSERT_GE (ringing.ringRiskScore,
++               NotchController::kRiskFreezeFraction * ringing.ringRiskThreshold)
++        << "highest score seen on slot 1 was " << best;
++
++    bool confirmAsked = false;
++    app.soundcheckConfirmHook = [&confirmAsked] (const juce::String&,
++                                                 std::function<void (bool)>)
++    {
++        confirmAsked = true;
++    };
++
++    app.getModeRailForTest().onMeasure();
++
++    // The dialog is NEVER reached: this is a preflight refusal, so the operator
++    // is not asked to drop their master for a run that must not happen.
++    EXPECT_FALSE (confirmAsked);
++    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
++                  SoundcheckController::State::Idle);
++    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
++    // "nguy co hu" -- the ring-risk sentence, not some other refusal.
++    EXPECT_TRUE  (app.lastMessageForTest().contains (
++        juce::String::fromUTF8 ("nguy c\xc6\xa1 h\xc3\xba")))
++        << app.lastMessageForTest().toStdString();
++    // A refusal does not leave the console locked.
++    EXPECT_TRUE  (app.getModeRailForTest().measureButton.isEnabled());
++}
++
+ // RED IF an abort ends a run in silence. Every abort but the two a finger
+ // causes is decided on the LANE M THREAD, which may not touch a component -- so
+ // if this tick does not say why, nothing ever does, and "the strip vanished"
+ // is what the operator gets for a mic that was too hot.
+ TEST (MainComponentSoundcheck, AnAbortTellsTheOperatorWhy)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     MainComponent app;
+     makeEngineLookRunning (app);
+ 
+diff --git a/tests/test_loopgainestimator.cpp b/tests/test_loopgainestimator.cpp
+index 52a9966..a608e54 100644
+--- a/tests/test_loopgainestimator.cpp
++++ b/tests/test_loopgainestimator.cpp
+@@ -1,19 +1,20 @@
+ // tests/test_loopgainestimator.cpp
+ //
+ // A synthetic room: delay + gain, optionally one resonance. The estimator sees
+ // only sample buffers, so everything here is arithmetic.
+ #include <gtest/gtest.h>
+ 
+ #include "dsp/LoopGainEstimator.h"
+ #include "dsp/SoundcheckSignal.h"
+ 
++#include <algorithm>   // std::max, for the Box-Muller floor in noise()
+ #include <cmath>
+ #include <random>
+ #include <vector>
+ 
+ namespace
+ {
+ constexpr double kSr = 48000.0;
+ 
+ std::vector<float> renderSweep (float peak = SoundcheckSignal::kSoundcheckMaxPeak)
+ {
+@@ -59,26 +60,46 @@ std::vector<float> resonantRoom (const std::vector<float>& x, double hz, double
+     {
+         const double in = (n < x.size()) ? (double) x[n] : 0.0;
+         const double v  = in - a1 * z1 - a2 * z2;
+         y[n] = (float) (gain * (v - z2) * (1.0 - r));
+         z2 = z1;
+         z1 = v;
+     }
+     return y;
+ }
+ 
++// BOX-MULLER, NOT std::normal_distribution (final review M-1). mt19937's
++// sequence is standardised; normal_distribution's mapping of it is not, so the
++// same seed draws a different noise floor under libc++ than under MSVC and the
++// SNR tolerances below were only ever measured on one of them. Same statistics
++// (mean 0, s.d. sigma, independent), same seed, same numbers everywhere.
+ std::vector<float> noise (std::size_t n, float sigma, unsigned seed)
+ {
++    constexpr float kTwoPi = 6.28318530717958647692f;
++
+     std::mt19937 rng { seed };
+-    std::normal_distribution<float> d { 0.0f, sigma };
++    std::uniform_real_distribution<float> u { 0.0f, 1.0f };
+     std::vector<float> out (n);
+-    for (auto& v : out) v = d (rng);
++
++    for (std::size_t i = 0; i < n; i += 2)
++    {
++        // Floored off zero: log(0) is -inf, and a single inf here would reach
++        // every bin of the estimator's noise-floor spectrum.
++        const float u1  = std::max (u (rng), 1.0e-12f);
++        const float mag = sigma * std::sqrt (-2.0f * std::log (u1));
++        const float th  = kTwoPi * u (rng);
++
++        out[i] = mag * std::cos (th);
++        if (i + 1 < n)
++            out[i + 1] = mag * std::sin (th);
++    }
++
+     return out;
+ }
+ 
+ LoopGainEstimator::Result runRoom (const std::vector<float>& reference,
+                                    const std::vector<float>& captured,
+                                    float noiseSigma, unsigned seed = 7)
+ {
+     LoopGainEstimator est { kSr };
+     const auto floorNoise = noise ((std::size_t) (0.5 * kSr), noiseSigma, seed);
+     est.pushNoiseFloor (floorNoise.data(), (int) floorNoise.size());
+diff --git a/tests/test_soundcheckcontroller.cpp b/tests/test_soundcheckcontroller.cpp
+index f11f152..45d8775 100644
+--- a/tests/test_soundcheckcontroller.cpp
++++ b/tests/test_soundcheckcontroller.cpp
+@@ -201,26 +201,52 @@ struct Rig
+         p.peak              = SoundcheckSignal::kSoundcheckMaxPeak;
+         p.sampleRate        = kSr;
+         p.numInputChannels  = channels;
+         p.numOutputChannels = channels;
+         p.ceilingDb         = -24.0;
+         p.notchQ            = 30.0;
+         return p;
+     }
+ };
+ 
++// BOX-MULLER, NOT std::normal_distribution (final review M-1). The standard
++// pins mt19937's sequence but NOT normal_distribution's mapping of it: MSVC and
++// libc++ use different algorithms, so the same seed gives a different noise
++// floor on the macOS runner -- and the flake guards below were measured on MSVC
++// alone. A Box-Muller pair off uniform_real_distribution has the same
++// statistics (mean 0, s.d. sigma, samples independent) and is the same sequence
++// everywhere in practice.
++//
++// NOT a relaxation of anything: the guards are unchanged, and they are what
++// says the fixture still lands where the tests need it.
+ std::vector<float> whiteNoise (std::size_t n, float sigma, unsigned seed = 3)
+ {
++    constexpr float kTwoPi = 6.28318530717958647692f;
++
+     std::mt19937 rng { seed };
+-    std::normal_distribution<float> d { 0.0f, sigma };
++    std::uniform_real_distribution<float> u { 0.0f, 1.0f };
+     std::vector<float> v (n);
+-    for (auto& x : v) x = d (rng);
++
++    for (std::size_t i = 0; i < n; i += 2)
++    {
++        // u1 floored off zero: log(0) is -inf, and one inf in the fixture would
++        // propagate through the FFT into every bin. The floor is far below any
++        // value the generator produces often enough to bias sigma.
++        const float u1  = std::max (u (rng), 1.0e-12f);
++        const float mag = sigma * std::sqrt (-2.0f * std::log (u1));
++        const float th  = kTwoPi * u (rng);
++
++        v[i] = mag * std::cos (th);
++        if (i + 1 < n)
++            v[i + 1] = mag * std::sin (th);
++    }
++
+     return v;
+ }
+ 
+ std::vector<float> noisePlusTone (std::size_t n, float sigma, double hz, float amp)
+ {
+     auto v = whiteNoise (n, sigma);
+     for (std::size_t i = 0; i < n; ++i)
+         v[i] += amp * (float) std::sin (2.0 * 3.14159265358979323846 * hz * (double) i / kSr);
+     return v;
+ }
+@@ -686,21 +712,21 @@ TEST (SoundcheckController, NoiseFloorOfAQuietRoomDoesNotAbort)
+ 
+     EXPECT_NE (r.sc.getState(), SoundcheckController::State::Idle);
+     EXPECT_FALSE (sawEvent (r.log, "soundcheck_abort"));
+ }
+ 
+ // RED IF: the gate is removed, or raised so far that a genuinely ringing room
+ // gets swept anyway. N1.
+ //
+ // It also pins WHEN the gate decides: a ringing room must be refused with the
+ // sweep index still negative, i.e. before the first sample. That is what
+-// kNoiseFloorGuardMs buys, and asserting the output channel stayed at zero for
++// kSweepLeadInMs buys, and asserting the output channel stayed at zero for
+ // the whole fixture is the only way to see it.
+ TEST (SoundcheckController, NoiseFloorWithARingingToneAborts)
+ {
+     Rig r;
+     r.micSource = noisePlusTone (16384, 1.0e-3f, 1000.0, 0.05f);
+ 
+     ASSERT_EQ (r.armWith (r.params (10.0f)), SoundcheckController::Refusal::None);
+ 
+     const double perBlock = r.frames / kSr * 1000.0;
+     bool everArmed = false;

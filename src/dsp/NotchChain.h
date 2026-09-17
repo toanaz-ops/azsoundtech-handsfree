@@ -81,6 +81,15 @@ public:
     // one design while claiming another.
     void   setNotch(int index, double freq, double Q, double depthDB);
     void   clearNotch(int index);
+
+    // Clears the filter STATE of every biquad in the chain, keeping every
+    // coefficient and every in-flight depth ramp (lane M N-1). This is the
+    // call for a lane whose INPUT has been interrupted -- muted for a
+    // soundcheck -- as opposed to reset(), which additionally cancels the
+    // ramps because it means "the past is gone". Allocation-free; the audio
+    // thread calls it once per block on a muted lane.
+    void   clearState();
+
     void   reset();
 
     // Sample-rate retarget: recomputes coefficients for every Active notch
@@ -99,6 +108,12 @@ public:
 
     const NotchInfo& getNotchInfo(int index) const;
     int              getActiveNotchCount() const;
+
+    // TEST ACCESSOR ONLY -- the ramp's whole point is that state and ramp
+    // position SURVIVE, and no black-box measurement can tell a preserved ramp
+    // from a cancelled one (Biquad.h, spec 5.1 M-7). Out-of-range indices clamp
+    // rather than reading past the array.
+    const Biquad& getFilterForTest(int index) const;
 
 private:
     double                       sampleRate_;

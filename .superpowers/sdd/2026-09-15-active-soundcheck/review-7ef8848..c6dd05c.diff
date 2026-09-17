@@ -1,0 +1,218 @@
+# Review package: 7ef8848..c6dd05c
+
+## Commits
+c6dd05c fix(lane-m): Task 9 review round 2 -- the overlay reserve no longer depends on a window width nothing enforces
+
+## Files changed
+ src/gui/SpectrumView.cpp    | 10 +++++++-
+ src/gui/SpectrumView.h      | 60 +++++++++++++++++++++++++++++++--------------
+ tests/test_spectrumview.cpp | 34 +++++++++++++++++++++++++
+ 3 files changed, 85 insertions(+), 19 deletions(-)
+
+## Diff
+diff --git a/src/gui/SpectrumView.cpp b/src/gui/SpectrumView.cpp
+index 2beebcd..18505e6 100644
+--- a/src/gui/SpectrumView.cpp
++++ b/src/gui/SpectrumView.cpp
+@@ -1044,20 +1044,28 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
+     // it -- and the ENTIRE low half of the curve, including the 247 Hz hot spot
+     // the picture exists to show, silently disappeared. Every test still
+     // passed: the path had elements in it, they just drew nothing.
+     //
+     // Subdividing cannot do that. Every bin-to-bin segment is walked in dash-
+     // and gap-length pieces along x, so the pattern is even at 100 Hz and at
+     // 10 kHz, and no measured point is ever dropped -- only hidden inside a
+     // gap whose length is known.
+     const float marginSpan = kMarginSafeDb - kMarginAtRiskDb;
+ 
++    // The dash lengths in pixels for THIS plot width. Derived rather than
++    // fixed, so the number of dashes -- and therefore the number of path
++    // elements -- is the same on a 1440 px window and on a 16384 px one. See
++    // kMarginDashPeriods; the reservation depends on it.
++    const float dashPeriod = juce::jmax (1.0f, plot.getWidth() / (float) kMarginDashPeriods);
++    const float dashOnPx   = dashPeriod * kMarginDashDutyCycle;
++    const float dashOffPx  = juce::jmax (0.5f, dashPeriod - dashOnPx);
++
+     bool  penDown   = false;
+     bool  inDash    = true;     // a dash, not a gap, at the start of every run
+     float dashTaken = 0.0f;     // x already spent inside the current dash/gap
+     bool  havePrev  = false;
+     float prevX = 0.0f, prevY = 0.0f;
+ 
+     const auto breakRun = [&penDown, &inDash, &dashTaken, &havePrev]
+     {
+         // A run of bins the estimator refused to believe BREAKS the line rather
+         // than being interpolated across, and the dash phase starts over on the
+@@ -1101,21 +1109,21 @@ void SpectrumView::paintSoundcheckOverlay (juce::Graphics& g,
+         {
+             // Two bins landing on the same pixel column: nothing to subdivide,
+             // and dividing by it would be a NaN straight into the path.
+             prevX = x; prevY = y;
+             continue;
+         }
+ 
+         float travelled = 0.0f;
+         while (travelled < dx)
+         {
+-            const float period = inDash ? kMarginDashOnPx : kMarginDashOffPx;
++            const float period = inDash ? dashOnPx : dashOffPx;
+             const float take   = juce::jmin (period - dashTaken, dx - travelled);
+ 
+             if (inDash)
+             {
+                 const float t0 = travelled / dx;
+                 const float t1 = (travelled + take) / dx;
+ 
+                 if (! penDown)
+                 {
+                     soundcheckOverlayPath_.startNewSubPath (prevX + dx * t0,
+diff --git a/src/gui/SpectrumView.h b/src/gui/SpectrumView.h
+index 16130e4..76550ac 100644
+--- a/src/gui/SpectrumView.h
++++ b/src/gui/SpectrumView.h
+@@ -247,44 +247,68 @@ public:
+     // reads "up = about to howl" once for both.
+     static constexpr float kMarginAtRiskDb = 0.0f;    // at the plot ceiling
+     static constexpr float kMarginSafeDb   = 24.0f;   // at the plot floor
+ 
+     // The margin curve is DASHED, and peak-hold is solid. Both are near-white
+     // by the time they are drawn on a sodium plot -- `text` and `peak` differ
+     // by about six values -- so colour alone does not separate them, and with
+     // peak hold ON an operator would be looking at two pale traces with no way
+     // to tell which is the measurement. The dash is what tells them apart.
+     //
+-    // Measured in PIXELS OF X TRAVEL, not in bins. The axis is logarithmic, so
+-    // a bin-counted dash is long at 100 Hz and invisible at 10 kHz -- the exact
+-    // place the eye needs it most.
+-    static constexpr float kMarginDashOnPx  = 7.0f;
+-    static constexpr float kMarginDashOffPx = 5.0f;
++    // Counted as a FIXED NUMBER OF PERIODS ACROSS THE PLOT, not in absolute
++    // pixels, and this is a correctness requirement before it is a visual one.
++    //
++    // An absolute pixel period makes the dash COUNT proportional to the plot's
++    // width, and nothing in this app bounds that width:
++    // src/main.cpp:59-61 calls setResizeLimits(..., 16384, 16384). Round 2 of
++    // this task reserved the path against an assumed 2560 px maximum, which is
++    // not a maximum of anything -- on a 5120 px ultrawide the dash count would
++    // have overrun the reservation and juce::Path would have reallocated
++    // INSIDE paint(), which is the one thing this whole view is built not to
++    // do. Periods-across-the-plot removes the width from the arithmetic
++    // entirely, so the bound below holds at 1440 px and at 16384 px alike.
++    //
++    // It is also the better picture: the dash keeps the same visual density at
++    // every window size instead of turning into a dotted line on a big screen.
++    // 110 periods over the ~1330 px plot of a 1440 px window is a 12.1 px
++    // period, which is what the fixed 7 + 5 was, so nothing about how it reads
++    // at the default size has changed.
++    static constexpr int   kMarginDashPeriods   = 110;
++    static constexpr float kMarginDashDutyCycle = 7.0f / 12.0f;   // on / (on + off)
+ 
+     // soundcheckOverlayPath_'s ctor reservation. Same units and the same
+     // caveat as kDashedStemReserveFloats above: Path::preallocateSpace()
+     // reserves COORDS, not elements, at roughly three floats per lineTo or
+-    // startNewSubPath. Worst case, summed:
++    // startNewSubPath.
++    //
++    // WIDTH DOES NOT APPEAR IN THIS DERIVATION, and that is the point. Round 2
++    // derived it from an assumed 2560 px plot; nothing enforces such a maximum
++    // (src/main.cpp:59-61 allows 16384), so on a wide enough monitor the path
++    // would have grown past the reservation and reallocated inside paint().
++    // With kMarginDashPeriods the dash count is a constant, so both terms below
++    // are constants:
+     //
+-    //   - one element per bin, Detector::kNumBins = 1025, every one trusted
+-    //     and inside the displayed range;
+-    //   - plus the DASH. Each dash costs a startNewSubPath and its dashes are
+-    //     counted in x pixels, so the widest plot this view is asked to draw
+-    //     bounds it: 2560 px of x / (7 + 5) px period = ~214 dashes, and a
+-    //     dash that begins part-way along a segment adds its own endpoint --
+-    //     call it 2 elements each, 428;
+-    //   - plus a subpath break per untrusted run.
++    //   - one element per bin: Detector::kNumBins = 1025, worst case every one
++    //     trusted and inside the displayed range;
++    //   - plus the dash: kMarginDashPeriods = 110 dashes, each costing a
++    //     startNewSubPath plus the lineTo that ends it part-way along a
++    //     segment -- 2 elements each, 220. (Bin points falling INSIDE a dash
++    //     are already counted in the 1025.)
++    //   - a subpath break for an untrusted run costs nothing extra: the next
++    //     dash's startNewSubPath is already in the 220.
+     //
+-    // (1025 + 428) * 3 = 4359 coords, rounded up for the breaks and for a
+-    // clean constant. The test asserts the realised count against this, so an
+-    // undersized figure fails rather than quietly reallocating.
+-    static constexpr int kSoundcheckOverlayReserveFloats = 5000;
++    // (1025 + 220) * 3 = 3735 coords. Rounded to 4200 for headroom against
++    // juce::Path's own per-element accounting. The test paints at 8192 px --
++    // wider than any monitor sold -- and asserts the realised count against
++    // this constant, so an undersized figure fails rather than quietly
++    // reallocating.
++    static constexpr int kSoundcheckOverlayReserveFloats = 4200;
+ 
+     // TEST ACCESSORS ONLY -- the no-allocation-in-paint guarantee, proved for
+     // the overlay path exactly as dashedStemPathElementCountForTest proves it
+     // for the dashed stem, and carrying the same honest caveat: juce::Path
+     // exposes no capacity getter, so the element count walked with
+     // Path::Iterator is the closest available proxy for "did not grow".
+     [[nodiscard]] std::size_t soundcheckOverlayPathElementCountForTest() const
+     {
+         std::size_t count = 0;
+         juce::Path::Iterator it (soundcheckOverlayPath_);
+diff --git a/tests/test_spectrumview.cpp b/tests/test_spectrumview.cpp
+index 1cf5ebe..e057eef 100644
+--- a/tests/test_spectrumview.cpp
++++ b/tests/test_spectrumview.cpp
+@@ -1001,20 +1001,54 @@ TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
+     // proxy juce::Path allows for "did not reallocate" (see the accessor's own
+     // caveat, and dashedStemPathElementCountForTest above it).
+     EXPECT_GT (elementsAfterFirst, (std::size_t) 0);
+     EXPECT_LE (elementsAfterFirst * 3,
+                (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
+ 
+     for (int i = 0; i < 100; ++i) { juce::Graphics g { img }; view.paint (g); }
+ 
+     EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsAfterFirst);
+     EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
++
++    //--------------------------------------------------------------------
++    // AND AT A WIDTH NO MONITOR HAS. This is the round-2 defect, and it was a
++    // real one: the dash used to be an absolute PIXEL period, so the number of
++    // dashes -- and with it the path's element count -- grew with the plot's
++    // width. The reservation was derived from an assumed 2560 px maximum that
++    // nothing enforces: src/main.cpp:59-61 calls
++    // setResizeLimits(..., 16384, 16384). On a 5120 px ultrawide the path
++    // would have overrun its reservation and juce::Path would have
++    // REALLOCATED INSIDE paint().
++    //
++    // kMarginDashPeriods removes width from the arithmetic, so the count is a
++    // constant. 8192 px is double the widest display sold and still half the
++    // limit main.cpp actually permits.
++    view.setSize (8192, 420);
++    view.resized();
++
++    juce::Image wide { juce::Image::ARGB, 8192, 420, true };
++    { juce::Graphics g { wide }; view.paint (g); }
++
++    const auto elementsWhenVeryWide = view.soundcheckOverlayPathElementCountForTest();
++    EXPECT_GT (elementsWhenVeryWide, (std::size_t) 0);
++    EXPECT_LE (elementsWhenVeryWide * 3,
++               (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
++
++    // The count must be about the same as at 900 px, not six times it -- that
++    // equivalence IS the fix, and an assertion only on the ceiling would still
++    // pass a version that merely happened to fit.
++    EXPECT_LT (elementsWhenVeryWide, elementsAfterFirst * 2);
++
++    // Painting wide must not have grown anything either.
++    { juce::Graphics g { wide }; view.paint (g); }
++    EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsWhenVeryWide);
++    EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
+ }
+ 
+ // RED IF the dash swallows part of the curve. This is not hypothetical: the
+ // first dash implementation skipped whole BINS, and because the axis is
+ // logarithmic two adjacent bins at 250 Hz are tens of pixels apart, so one step
+ // already exceeded a whole dash period. The state machine then toggled on every
+ // bin and emitted startNewSubPath with no lineTo after it -- the entire low
+ // half of the curve, 247 Hz hot spot included, drew nothing at all. The path
+ // was FULL of elements, so SoundcheckOverlayPaintsWithoutAllocating stayed
+ // green; only the render showed it.

@@ -183,6 +183,16 @@ double Biquad::processSample(double input)
     return output;
 }
 
+void Biquad::clearState()
+{
+    // State only. rampRemaining_ and the five coefficients are deliberately
+    // untouched -- see the header: a muted lane has had its INPUT interrupted,
+    // which says nothing about a depth ramp that is still the right thing to
+    // finish when the input comes back.
+    z1_ = 0.0;
+    z2_ = 0.0;
+}
+
 void Biquad::reset()
 {
     z1_ = 0.0;

@@ -16,6 +16,7 @@
 
 #include "gui/ModeRail.h"
 #include "gui/StatusBadge.h"
+#include "gui/theme/AzTheme.h"
 
 #include <vector>
 
@@ -243,4 +244,128 @@ TEST (ModeRail, SetDisplayedModeNeverRequestsTheModeItIsShowing)
     EXPECT_EQ (soundchecks, 0);
     EXPECT_EQ (autos,       0);
     EXPECT_EQ (bypasses,    0);
+}
+
+//==============================================================================
+// Lane M Task 9 -- the DO button.
+//
+// EVERY Vietnamese literal below is written as EXPLICIT UTF-8 BYTES, never as
+// a source-file literal. This build passes no /utf-8 to MSVC and only ONE of
+// the files involved carries a BOM, so a raw "\u0110O" in a source file is
+// decoded with whatever the machine's active codepage happens to be. That is
+// exactly the mojibake that shipped the middle-dot bug
+// (memory/ui-rebuild-sodium-rack-2026-08-25.md); src/gui/DeviceViewModel.cpp:13
+// is the precedent this follows.
+//
+// The bytes here are written out INDEPENDENTLY of the ones in src/. If the two
+// were a shared helper these tests could not fail on a wrong label, which is
+// the whole point of them.
+
+TEST (ModeRail, MeasureButtonHasItsLabel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
+
+    // "DO" with a crossed D: U+0110 U+004F.
+    EXPECT_EQ (rail.measureButton.getButtonText(), juce::String::fromUTF8 ("\xc4\x90O"));
+    EXPECT_NE (rail.measureButton.getButtonText(), rail.soundcheckButton.getButtonText());
+
+    // RED IF the label is wrong in ANY way, which is the only defence that
+    // works here. The two-argument juce::TextButton(name, tooltip) is the trap
+    // (memory/juce9-api-traps-2026-08-25.md), and its mechanism is exactly
+    // this: param 2 IS the tooltip (juce_TextButton.cpp:46-49), so what ships
+    // blank is `{ {}, "LABEL" }` -- an empty NAME with the legend put in the
+    // tooltip slot. The build stays green either way. The emptiness check
+    // below says that case out loud; the EXPECT_EQ above catches it and every
+    // other wrong label too.
+    EXPECT_FALSE (rail.measureButton.getButtonText().isEmpty());
+}
+
+TEST (ModeRail, MeasureIsItsOwnButtonAndItsOwnCallback)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
+
+    int measures = 0, soundchecks = 0;
+    rail.onMeasure    = [&measures]    { ++measures; };
+    rail.onSoundcheck = [&soundchecks] { ++soundchecks; };
+
+    // onClick(), not triggerClick(): triggerClick is async and the headless
+    // suite pumps no message loop (memory/data-loop-lessons-2026-09-05.md).
+    rail.measureButton.onClick();
+    EXPECT_EQ (measures, 1);
+    EXPECT_EQ (soundchecks, 0);
+
+    // Q16: DO is a MOMENTARY action, not a fourth latching mode. If it ever
+    // joined the radio group, pressing it would silently un-light whichever
+    // mode the engine is actually in -- the lamp would lie about the engine.
+    EXPECT_FALSE (rail.measureButton.getClickingTogglesState());
+    EXPECT_EQ    (rail.measureButton.getRadioGroupId(), 0);
+}
+
+TEST (ModeRail, MeasureButtonIsInsideTheRail)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::ModeRail rail (gui::ModeRail::Orientation::Vertical);
+    rail.setSize (140, 620);
+    rail.resized();   // JUCE headless setSize() has no peer, so resized() must be
+                      // called by hand (memory/gui-console-lessons-2026-08-24.md)
+
+    EXPECT_TRUE (rail.getLocalBounds().contains (rail.measureButton.getBounds()));
+    EXPECT_GT (rail.measureButton.getWidth(), 0);
+    EXPECT_GT (rail.measureButton.getHeight(), 0);
+    EXPECT_FALSE (rail.measureButton.getBounds().intersects (rail.soundcheckButton.getBounds()));
+    EXPECT_FALSE (rail.measureButton.getBounds().intersects (rail.clearAllButton.getBounds()));
+}
+
+TEST (ModeRail, MeasureButtonIsWideEnoughForItsOwnLegendInTheHorizontalRail)
+{
+    // RED IF the cell is sized by eyeballing instead of by measuring. The rail
+    // is horizontal in the only shipping layout, and a cell narrower than its
+    // legend does not fail a test -- it ships a truncated button
+    // (memory/stereo-lane-lessons-2026-09-05.md: measure with the REAL font
+    // and the widest string the formatter can print).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    az::theme::AzLookAndFeel lnf;
+    juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
+
+    gui::ModeRail rail (gui::ModeRail::Orientation::Horizontal);
+    rail.setSize (1360, az::theme::transportHeight);
+    rail.resized();
+
+    const auto legend = rail.measureButton.getButtonText().toUpperCase();
+    const auto font   = az::theme::legendFont (az::theme::switchFontSize, true,
+                                               az::theme::trackingSwitch);
+
+    EXPECT_GE ((float) rail.measureButton.getWidth(),
+               az::theme::stringWidth (font, legend) + 2.0f * (float) az::theme::gap);
+
+    juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+}
+
+TEST (ModeRail, LockingTheRailDisablesEveryControlThatCouldDisturbARun)
+{
+    // F10: while a measurement is in flight, SOUNDCHECK / AUTO / BYPASS and
+    // CLEAR ALL must not be reachable -- each of them changes what the filter
+    // chain is doing underneath a run that is measuring it. DO itself is
+    // locked through its own setter, because it is also the control that must
+    // stay lit-but-dead in Results.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::ModeRail rail (gui::ModeRail::Orientation::Horizontal);
+
+    rail.setModeControlsEnabled (false);
+    EXPECT_FALSE (rail.soundcheckButton.isEnabled());
+    EXPECT_FALSE (rail.autoButton.isEnabled());
+    EXPECT_FALSE (rail.bypassButton.isEnabled());
+    EXPECT_FALSE (rail.clearAllButton.isEnabled());
+    EXPECT_TRUE  (rail.measureButton.isEnabled());   // its own switch, not this one
+
+    rail.setMeasureEnabled (false);
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+
+    rail.setModeControlsEnabled (true);
+    rail.setMeasureEnabled (true);
+    EXPECT_TRUE (rail.soundcheckButton.isEnabled());
+    EXPECT_TRUE (rail.clearAllButton.isEnabled());
+    EXPECT_TRUE (rail.measureButton.isEnabled());
 }

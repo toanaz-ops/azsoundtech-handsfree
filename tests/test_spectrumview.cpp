@@ -830,3 +830,293 @@ TEST (SpectrumView, RingRiskDisplayedFieldDoesNotSurviveASlotSwitch)
     // The very next paint() must not still show slot A's alarm.
     EXPECT_EQ (view.getRingRisk(), Risk::Unavailable);
 }
+
+//==============================================================================
+// Lane M Task 9 -- the soundcheck overlay.
+
+// RED IF: the overlay is fed from copySnapshot(). The publish sits inside the
+// drain loop (NotchController.cpp:617-650), so with the taps suspended the
+// snapshot is FROZEN for the whole run and the overlay would show the frame
+// from before the run started. Section 4.1.
+TEST (SpectrumView, SoundcheckOverlayCarriesLaneMData)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.resized();
+
+    EXPECT_FALSE (view.hasSoundcheckOverlay());
+
+    std::vector<float> margin (Detector::kNumBins, 12.0f);
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  trusted (Detector::kNumBins, 1);
+    marked[300] = 1;
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (trusted.data()),
+                               Detector::kNumBins, 48000.0);
+    EXPECT_TRUE (view.hasSoundcheckOverlay());
+
+    // The view holds lane M's OWN numbers, not a re-read of the controller:
+    // nothing was ever pumped into this controller, so its snapshot is empty
+    // and an overlay sourced from it would have nothing in it at all.
+    EXPECT_EQ (view.snapshotNotchCountForTest(), 0u);
+    EXPECT_EQ (view.soundcheckMarkedCountForTest(), 1);
+
+    view.clearSoundcheckOverlay();
+    EXPECT_FALSE (view.hasSoundcheckOverlay());
+    EXPECT_EQ (view.soundcheckMarkedCountForTest(), 0);
+}
+
+// RED IF: the overlay is hidden behind the "no signal" empty state. The taps
+// are SUSPENDED for the whole run (section 4.1), so on a console that has not
+// published a frame yet the snapshot sequence is still 0 -- and the operator
+// would be shown an empty grid for 72 s while the measurement they started
+// ran invisibly.
+TEST (SpectrumView, SoundcheckOverlayDrawsEvenWithNoPublishedSpectrum)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.resized();
+
+    ASSERT_EQ (view.getSequenceSeen(), 0u);   // the empty state
+
+    std::vector<float> margin (Detector::kNumBins, 6.0f);
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  trusted (Detector::kNumBins, 1);
+    marked[200] = 1;
+    marked[410] = 1;
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (trusted.data()),
+                               Detector::kNumBins, 48000.0);
+
+    juce::Image img { juce::Image::ARGB, 900, 420, true };
+    { juce::Graphics g { img }; view.paint (g); }
+
+    // Something was actually stroked: the curve reached the path rather than
+    // the paint returning at the empty-state guard.
+    EXPECT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
+}
+
+// RED IF: an untrusted bin is drawn as if it had been measured. LoopGainEstimator
+// only trusts bins inside [kSweepLowHz, kTrustedHighHz] that also cleared the SNR
+// gates; a curve drawn straight through the rest is a line the operator has no
+// reason to believe.
+TEST (SpectrumView, UntrustedBinsBreakTheCurveRatherThanBeingDrawnThrough)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.resized();
+
+    std::vector<float> margin (Detector::kNumBins, 9.0f);
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  allTrusted (Detector::kNumBins, 1);
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (allTrusted.data()),
+                               Detector::kNumBins, 48000.0);
+
+    juce::Image img { juce::Image::ARGB, 900, 420, true };
+    { juce::Graphics g { img }; view.paint (g); }
+    const auto elementsWhenAllTrusted = view.soundcheckOverlayPathElementCountForTest();
+
+    // Half the band never cleared the SNR gate. Those bins must not appear.
+    std::vector<char> halfTrusted (Detector::kNumBins, 1);
+    for (std::size_t k = (std::size_t) Detector::kNumBins / 2; k < halfTrusted.size(); ++k)
+        halfTrusted[k] = 0;
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (halfTrusted.data()),
+                               Detector::kNumBins, 48000.0);
+
+    { juce::Graphics g { img }; view.paint (g); }
+    EXPECT_LT (view.soundcheckOverlayPathElementCountForTest(), elementsWhenAllTrusted);
+    EXPECT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
+}
+
+// RED IF: paint() starts allocating when the overlay is on. The whole view is
+// built on "paint allocates nothing" (SpectrumView.h:10, :119-138) and the
+// overlay must not be the exception.
+TEST (SpectrumView, SoundcheckOverlayPaintsWithoutAllocating)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.resized();
+
+    std::vector<float> margin (Detector::kNumBins, 3.0f);
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  trusted (Detector::kNumBins, 1);
+    for (int k = 100; k < 700; k += 37) marked[(std::size_t) k] = 1;
+
+    // The low-confidence caption is built by the CONSTRUCTOR, and this is
+    // asserted BEFORE anything has painted -- which is the whole proof.
+    // juce::String::fromUTF8 allocates, so building it inside paint() (which
+    // round 1 did) heap-allocated on every frame, straight through the rule
+    // this view is built on and past the Path check below. The Font is cached
+    // beside it for the same reason; juce::Font has no comparable read-back, so
+    // this assertion covers the String and the ctor's initialiser list covers
+    // both.
+    EXPECT_FALSE (view.soundcheckLowConfidenceLabelForTest().isEmpty());
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (trusted.data()),
+                               Detector::kNumBins, 48000.0);
+
+    juce::Image img { juce::Image::ARGB, 900, 420, true };
+    { juce::Graphics g { img }; view.paint (g); }
+
+    const auto elementsAfterFirst = view.soundcheckOverlayPathElementCountForTest();
+    const auto pointCapacity      = view.spectrumPointCapacityForTest();
+
+    // The path must never have GROWN past what the ctor reserved -- the only
+    // proxy juce::Path allows for "did not reallocate" (see the accessor's own
+    // caveat, and dashedStemPathElementCountForTest above it).
+    EXPECT_GT (elementsAfterFirst, (std::size_t) 0);
+    EXPECT_LE (elementsAfterFirst * 3,
+               (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
+
+    for (int i = 0; i < 100; ++i) { juce::Graphics g { img }; view.paint (g); }
+
+    EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsAfterFirst);
+    EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
+
+    //--------------------------------------------------------------------
+    // AND AT A WIDTH NO MONITOR HAS. This is the round-2 defect, and it was a
+    // real one: the dash used to be an absolute PIXEL period, so the number of
+    // dashes -- and with it the path's element count -- grew with the plot's
+    // width. The reservation was derived from an assumed 2560 px maximum that
+    // nothing enforces: src/main.cpp:59-61 calls
+    // setResizeLimits(..., 16384, 16384). On a 5120 px ultrawide the path
+    // would have overrun its reservation and juce::Path would have
+    // REALLOCATED INSIDE paint().
+    //
+    // kMarginDashPeriods removes width from the arithmetic, so the count is a
+    // constant. 8192 px is double the widest display sold and still half the
+    // limit main.cpp actually permits.
+    view.setSize (8192, 420);
+    view.resized();
+
+    juce::Image wide { juce::Image::ARGB, 8192, 420, true };
+    { juce::Graphics g { wide }; view.paint (g); }
+
+    const auto elementsWhenVeryWide = view.soundcheckOverlayPathElementCountForTest();
+    EXPECT_GT (elementsWhenVeryWide, (std::size_t) 0);
+    EXPECT_LE (elementsWhenVeryWide * 3,
+               (std::size_t) gui::SpectrumView::kSoundcheckOverlayReserveFloats);
+
+    // The count must be about the same as at 900 px, not six times it -- that
+    // equivalence IS the fix, and an assertion only on the ceiling would still
+    // pass a version that merely happened to fit.
+    EXPECT_LT (elementsWhenVeryWide, elementsAfterFirst * 2);
+
+    // Painting wide must not have grown anything either.
+    { juce::Graphics g { wide }; view.paint (g); }
+    EXPECT_EQ (view.soundcheckOverlayPathElementCountForTest(), elementsWhenVeryWide);
+    EXPECT_EQ (view.spectrumPointCapacityForTest(), pointCapacity);
+}
+
+// RED IF the dash swallows part of the curve. This is not hypothetical: the
+// first dash implementation skipped whole BINS, and because the axis is
+// logarithmic two adjacent bins at 250 Hz are tens of pixels apart, so one step
+// already exceeded a whole dash period. The state machine then toggled on every
+// bin and emitted startNewSubPath with no lineTo after it -- the entire low
+// half of the curve, 247 Hz hot spot included, drew nothing at all. The path
+// was FULL of elements, so SoundcheckOverlayPaintsWithoutAllocating stayed
+// green; only the render showed it.
+//
+// A bounding box is what tells the two apart, so that is what this pins.
+TEST (SpectrumView, TheDashedMarginCurveSpansTheWholeTrustedBandNotJustItsTopEnd)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    LockFreeRingBuffer<float> tap { 8192 };
+    LockFreeRingBuffer<NotchCommand> cmds { 128 };
+    JuceMonotonicClock clock;
+    NotchController controller { tap, cmds, clock };
+
+    gui::SpectrumView view { controller };
+    view.setSize (900, 420);
+    view.setDisplayRange (gui::SpectrumView::kDefaultLowHz,
+                          gui::SpectrumView::kDefaultHighHz);
+    view.resized();
+
+    constexpr double kRate = 48000.0;
+
+    // A SLOPING margin, not a constant one. A flat curve is a zero-height
+    // rectangle, and juce::Rectangle::isEmpty() is true whenever width OR
+    // height is zero -- so a constant margin would fail the extent assertion
+    // below for a reason that has nothing to do with the dash. (Found by
+    // running it: the first version of this test used a constant 10 dB.)
+    std::vector<float> margin ((std::size_t) Detector::kNumBins, 10.0f);
+    for (int k = 0; k < Detector::kNumBins; ++k)
+        margin[(std::size_t) k] = 6.0f + 12.0f * (float) k / (float) Detector::kNumBins;
+
+    std::vector<char>  marked (Detector::kNumBins, 0);
+    std::vector<char>  trusted (Detector::kNumBins, 0);
+
+    // Trusted across the whole displayed window, so anything missing from the
+    // drawn extent is the DRAWING's fault and not the data's.
+    int firstTrusted = -1, lastTrusted = -1;
+    for (int k = 0; k < Detector::kNumBins; ++k)
+    {
+        const double hz = (double) k * kRate / (double) Detector::kFftSize;
+        if (hz >= gui::SpectrumView::kDefaultLowHz && hz <= gui::SpectrumView::kDefaultHighHz)
+        {
+            trusted[(std::size_t) k] = 1;
+            if (firstTrusted < 0) firstTrusted = k;
+            lastTrusted = k;
+        }
+    }
+    ASSERT_GT (firstTrusted, 0);
+    ASSERT_GT (lastTrusted, firstTrusted);
+
+    view.setSoundcheckOverlay (margin.data(),
+                               reinterpret_cast<const bool*> (marked.data()),
+                               reinterpret_cast<const bool*> (trusted.data()),
+                               Detector::kNumBins, kRate);
+
+    juce::Image img { juce::Image::ARGB, 900, 420, true };
+    { juce::Graphics g { img }; view.paint (g); }
+
+    const auto drawn = view.soundcheckOverlayPathBoundsForTest();
+    ASSERT_GT (view.soundcheckOverlayPathElementCountForTest(), (std::size_t) 0);
+
+    // The plot is everything but the toolbar, the dB gutter and the tick row;
+    // rather than reproduce that arithmetic here, the assertion is on the
+    // PROPORTION of the view the curve reaches across. The broken version
+    // covered only the dense high end -- roughly the right third.
+    EXPECT_GT (drawn.getWidth(), 0.75f * (float) view.getWidth());
+
+    // And it genuinely starts on the left: a curve that begins a third of the
+    // way in is the exact defect, and a width check alone could still be
+    // satisfied by one stray subpath at the far left.
+    EXPECT_LT (drawn.getX(), 0.25f * (float) view.getWidth());
+}

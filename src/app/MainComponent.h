@@ -23,6 +23,7 @@
 #include "app/NotchController.h"
 #include "app/SessionLogger.h"
 #include "app/SlotConfig.h"
+#include "app/SoundcheckController.h"
 #include "dsp/ClockSource.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
@@ -31,6 +32,7 @@
 #include "gui/NotchListPanel.h"
 #include "gui/SlotPanel.h"
 #include "gui/SlotTabs.h"
+#include "gui/SoundcheckPanel.h"
 #include "gui/SpectrumView.h"
 #include "gui/StatusBar.h"
 #include "gui/StatusBadge.h"
@@ -128,6 +130,44 @@ public:
     std::function<void (std::function<void (const juce::File&)> onPicked)> presetLoadChooser;
     std::function<void (std::function<void (const juce::File&)> onPicked)> presetSaveChooser;
 
+    // LANE M. THE CONSOLE HAS THREE LOCK STATES, NOT TWO (spec 4.3, review
+    // I-3). "Locked" as a bool put the operator's emergency control behind a
+    // results strip: BYPASS is how a show is saved when something goes wrong,
+    // and it must come back the moment the sweep stops.
+    enum class SoundcheckLock
+    {
+        // Idle with nothing on the strip. Everything is live.
+        None,
+
+        // A run is in flight. Everything that could move the chain the run is
+        // measuring is dead: the mode switches, CLEAR ALL, DO, the preset row,
+        // the device controls, the routing table, the DETECTION strip and the
+        // notch table's verdict buttons (a FALSE verdict is a one-click
+        // clearNotch -- a partial CLEAR ALL by another name).
+        Measuring,
+
+        // Results, and the Applied report that follows an AP DUNG. The sound
+        // has stopped, so the MODE SWITCHES AND CLEAR ALL COME BACK. What stays
+        // dead is everything that would invalidate or silently consume the
+        // proposals still on screen: DO itself, PRESET LOAD (adoptPreset
+        // overwrites without checking n.active), the routing table (Task 7's
+        // stale-linked ruling), the DETECTION strip (RunParams were frozen at
+        // Arm, so a DEPTH move here would have APPLY writing against a ceiling
+        // the run never saw) and the verdict buttons.
+        Pending
+    };
+
+    // LANE M Task 10. The confirmation the operator answers before ONE SAMPLE
+    // is emitted (spec 4.3). Injectable exactly as presetLoadChooser is, and for
+    // the same reason: JUCE_MODAL_LOOPS_PERMITTED is off, so a headless test
+    // cannot answer a native box. `text` is the honest level statement plus the
+    // total duration; the callback is invoked ONCE, true only on OK.
+    //
+    // A null hook means NO RUN, never a silent run: beginSoundcheck() refuses
+    // rather than arming an unconfirmed sweep.
+    std::function<void (const juce::String& text,
+                        std::function<void (bool)> onAnswer)> soundcheckConfirmHook;
+
     // THE one route a routing-table change takes (the SlotPanel lambda calls
     // this): the same detector stop/apply/start cycle as a device change,
     // then the CURRENT mode's detection gating re-applied to the changed slot,
@@ -143,6 +183,11 @@ public:
     // TEST ACCESSORS -- let headless tests assert rail/spectrum geometry
     // without reaching into private members.
     [[nodiscard]] juce::Rectangle<int> railBoundsForTest() const     { return modeRail_.getBounds(); }
+
+    // Lane M Task 9. The rail itself, not just its bounds: a headless caller
+    // and tools/snapshot.cpp have to put the transport into its LOCKED state
+    // (F10) to render it, and that is three setters on the rail.
+    [[nodiscard]] gui::ModeRail& getModeRailForTest() { return modeRail_; }
     [[nodiscard]] juce::Rectangle<int> spectrumBoundsForTest() const { return spectrumView_.getBounds(); }
     [[nodiscard]] juce::Rectangle<int> notchListBoundsForTest() const { return notchListPanel_.getBounds(); }
     // The routing table's CONTENT rect -- a zero height here means the
@@ -180,12 +225,94 @@ public:
     // so it has to drive refreshFromSnapshot() itself. tools/snapshot.cpp uses
     // these to render the console with real detector output in it.
     [[nodiscard]] gui::SpectrumView&   getSpectrumViewForTest()   { return spectrumView_; }
+
+    // Lane M Task 9. The strip is a plain-data component: it is laid out and
+    // rendered by this console, but nothing in Task 9 CONNECTS it to a
+    // SoundcheckController -- that wiring (the confirm dialog, the poll, APPLY) is
+    // Task 10. Exposed now so a headless caller and tools/snapshot.cpp can put
+    // the console into a Running or a Results state and look at it, which is
+    // the only way a GUI change gets reported (CLAUDE.md, 2026-08-25).
+    [[nodiscard]] gui::SoundcheckPanel& getSoundcheckPanelForTest() { return soundcheckPanel_; }
     [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
     // slot; never null for [0, kMaxSlots).
     NotchController* getNotchControllerForTest (int slot);
+
+    //==========================================================================
+    // LANE M Task 10 -- TEST ACCESSORS ONLY. Modelled on getSlotPanelForTest
+    // above; every one of them is a member the wiring owns and nothing else can
+    // reach. getModeRailForTest() already existed (Task 9) and is NOT
+    // re-declared here.
+
+    // The device panel carries onBeforeRestart / onAfterRestart, and the whole
+    // point of this task is what those two hooks now do FIRST (F15).
+    [[nodiscard]] gui::DevicePanel& getDevicePanelForTest() { return devicePanel_; }
+
+    [[nodiscard]] SoundcheckController& getSoundcheckControllerForTest() { return soundcheck_; }
+
+    // The message the status strip is currently holding -- panelMessage_,
+    // written by showMessage. A refusal has to be VISIBLE, not merely
+    // not-a-crash, so a test can read the sentence the operator would.
+    [[nodiscard]] juce::String lastMessageForTest() const { return panelMessage_; }
+
+    // true == Measuring (the full lock), false == None. Kept as it was so the
+    // tests written against the two-state lock still say what they said.
+    void setSoundcheckControlsLockedForTest (bool locked)
+        { setSoundcheckLock (locked ? SoundcheckLock::Measuring : SoundcheckLock::None); }
+    void setSoundcheckLockForTest (SoundcheckLock lock) { setSoundcheckLock (lock); }
+    [[nodiscard]] SoundcheckLock soundcheckLockForTest() const { return soundcheckLock_; }
+
+    // Drives the confirmation step on its own, which is the only way a headless
+    // test can hold a dialog open: preflight refuses before the dialog whenever
+    // no device is running, and no test may open one (this engine passes input
+    // to output -- a device opened in a test suite is a feedback path).
+    void askSoundcheckConfirmationForTest (const std::vector<SoundcheckController::Target>& targets)
+        { askForSoundcheckConfirmation (targets); }
+    [[nodiscard]] bool soundcheckConfirmPendingForTest() const { return soundcheckConfirmPending_; }
+
+    // ONE tick of the message-thread mirror. The headless suite pumps no
+    // message loop, so timerCallback() never fires on its own and this is the
+    // only way to drive an edge (the precedent is
+    // RingRiskReadsUnavailableWhenTheMonitoredDetectorHasNoHistory, which drives
+    // one poll by hand for the same reason).
+    void syncSoundcheckUiForTest() { syncSoundcheckUi(); }
+
+    // The teardown, so a test can assert which lock each ending leaves behind
+    // (an Applied report still holds the console; a Hidden strip does not).
+    void endSoundcheckSessionForTest (gui::SoundcheckPanel::Mode panelMode)
+        { endSoundcheckSession (panelMode); }
+
+    // The targets a press of DO would measure, and the RunParams it would
+    // freeze. Both are exposed because neither is observable anywhere else:
+    // arm() copies RunParams into a private member and no getter reports it, so
+    // "the running preset's ceiling really is fed" is otherwise unprovable --
+    // and a ceiling left at its 0.0 default is FINITE, so arm() would not
+    // refuse it either (SoundcheckController.h RunParams::ceilingDb).
+    [[nodiscard]] std::vector<SoundcheckController::Target> soundcheckTargetsForTest() const
+        { return buildSoundcheckTargets(); }
+    [[nodiscard]] SoundcheckController::RunParams soundcheckRunParamsForTest() const
+        { return buildSoundcheckRunParams(); }
+
+    // THE COUNTDOWN SOURCE. It FORWARDS to the one private function
+    // syncSoundcheckUi() feeds the panel from -- deliberately not a second copy
+    // of the expression, so a test that asserts on this is asserting on what
+    // the operator actually sees (F12).
+    [[nodiscard]] double soundcheckCountdownMsForTest() const { return soundcheckCountdownMs(); }
+
+    // The exact sentence the operator is asked to agree to. Exposed because
+    // the honest level statement (spec 4.3 / F13) is a REQUIREMENT, and a
+    // requirement nothing asserts is a requirement that quietly goes missing.
+    [[nodiscard]] static juce::String soundcheckConfirmTextForTest (int passCount,
+                                                                    int distinctOutputs)
+        { return soundcheckConfirmText (passCount, distinctOutputs); }
+
+    // One slot's apply ledger. It lives for this component's whole lifetime and
+    // CLEAR ALL does not reset it -- see SoundcheckController.h, which calls
+    // that out as a property of the design rather than a leak.
+    [[nodiscard]] const SoundcheckApplyLedger& soundcheckLedgerForTest (int slot) const
+        { return soundcheckLedgers_[(std::size_t) slot]; }
 
     // TEST ACCESSOR ONLY -- the serialiser is otherwise reachable only through
     // a live detector thread and a real log file. Public here, next to the
@@ -244,6 +371,87 @@ private:
     // changed one.
     void applyModeGating (int slotIndex);
 
+    //==========================================================================
+    // LANE M Task 10 -- the DO flow. Every one of these runs on the MESSAGE
+    // THREAD and nowhere else; the lane M thread reaches this object only
+    // through the three injected std::functions wired in the constructor.
+
+    // The DO press: preflight, then the confirmation, then arm.
+    void beginSoundcheck();
+    // The confirmation step alone. Separate so there is ONE place that puts DO
+    // out of reach for the life of its own dialog and ONE place that gives it
+    // back (review I-2).
+    void askForSoundcheckConfirmation (const std::vector<SoundcheckController::Target>& targets);
+    // The OK half of the confirmation. Separate because it crosses an async
+    // boundary and re-reads everything the dialog could have invalidated.
+    void armSoundcheck (const std::vector<SoundcheckController::Target>& targets);
+
+    // Every enabled slot's every lane, in slot order. NOT deduplicated by
+    // output channel: two slots feeding one channel are two different loops
+    // (different mics), and the spec's worst case -- 8 stereo slots, 16
+    // outputs, ~72 s -- is exactly this count.
+    [[nodiscard]] std::vector<SoundcheckController::Target> buildSoundcheckTargets() const;
+    [[nodiscard]] SoundcheckController::RunParams buildSoundcheckRunParams() const;
+
+    // The ring-risk snapshot BOTH gates read (final review I-2): the highest
+    // ringRiskScore among the slots that have a valid one, over every enabled
+    // slot plus the displayed one. `slotOut` comes back as the slot it was
+    // taken from, or -1 when no slot has scored a frame yet -- which is what
+    // soundcheck_start logs beside the score.
+    [[nodiscard]] NotchController::SnapshotBuffer worstRingRiskSnapshot (int& slotOut) const;
+
+    // The sentence the operator reads before anything is emitted. TWO counts,
+    // because they differ and the difference is the operator's time: a PASS is
+    // one (slot, lane) measurement, and two slots feeding one output produce
+    // two passes on ONE channel. The duration follows the passes; the channel
+    // count is what the operator recognises on their patch (review M-1).
+    [[nodiscard]] static juce::String soundcheckConfirmText (int passCount, int distinctOutputs);
+    // Distinct outputChannel values in `targets`.
+    [[nodiscard]] static int distinctOutputCount (const std::vector<SoundcheckController::Target>& targets);
+    // Each refusal its OWN sentence: "no device" and "the room is ringing" are
+    // different problems with different answers (inv 19, F26).
+    [[nodiscard]] static juce::String soundcheckRefusalMessage (SoundcheckController::Refusal r);
+
+    // F10 / I-3. The ONE place the console's three lock states are applied.
+    void setSoundcheckLock (SoundcheckLock lock);
+    // DO's enabled state, from ONE predicate. It is the lock AND the open
+    // dialog: a device restart in the middle of a confirmation used to unlock
+    // the console and light DO back up with the box still on screen, so the
+    // button and beginSoundcheck's own guard disagreed about whether a press
+    // could do anything (round 2, C-1).
+    void updateMeasureEnabled();
+
+    // One sentence per abort reason, or empty for the two the operator caused
+    // themselves (DUNG and Esc -- they already know).
+    [[nodiscard]] static juce::String soundcheckAbortMessage (SoundcheckController::AbortReason r);
+    // Puts the reason for the run that just ended in front of the operator.
+    void announceSoundcheckAbort();
+
+    // applyModeGating over every slot, as one named thing: it is run at BOTH
+    // edges that can follow lane M's unconditional detection restore.
+    void applyModeGatingToAllSlots();
+
+    // Message-thread mirror of the machine's state, driven by the status timer.
+    void syncSoundcheckUi();
+
+    // THE COUNTDOWN, from lane M's OWN ClockSource. NEVER
+    // NotchController::getSoundcheckRemainingMs(), which reports the PASSIVE
+    // 15 s window measured in liveMs_ -- frozen while lane M has the taps
+    // suspended, so it would show a number that stands still or reads 0 for the
+    // whole run (F12, SoundcheckPanel.h:27-33). ONE definition, fed to the panel
+    // and read by the test, so the two cannot drift apart.
+    [[nodiscard]] double soundcheckCountdownMs() const;
+    // The Results-strip Model built from the run's own results.
+    [[nodiscard]] gui::SoundcheckPanel::Model soundcheckResultsModel() const;
+    // Points the analyser's overlay at the DISPLAYED slot and lane's result.
+    void refreshSoundcheckOverlay();
+    // AP DUNG. The ONE place a preventive notch is written.
+    void applySoundcheckProposals();
+    // Unlock, hand detection back to the MODE, and settle the strip. Shared by
+    // BO, APPLY, the abort path and the device-restart hook so no two of them
+    // can tear a run down differently.
+    void endSoundcheckSession (gui::SoundcheckPanel::Mode panelMode);
+
     // Declared BEFORE every child component: the look and feel must outlive
     // anything that might query it during teardown. The constructor installs
     // it once with setLookAndFeel(); children inherit it through the normal
@@ -297,6 +505,10 @@ private:
     // SpectrumView reads notchControllers_[0], DeviceDrawer re-parents
     // devicePanel_ -- both are declared above, so they outlive these.
     gui::SpectrumView spectrumView_;
+    // Lane M Task 9. An OVERLAY over the analyser, so it is declared AFTER the
+    // view it covers: JUCE paints children in the order they were added, and
+    // a strip that has to be opaque over a live trace must be added second.
+    gui::SoundcheckPanel soundcheckPanel_;
     gui::ModeRail     modeRail_;
     gui::StatusBadge  statusBadge_;      // masthead furniture (see the ctor)
     gui::SlotTabs     slotTabs_;         // masthead furniture likewise
@@ -316,6 +528,45 @@ private:
     // The live notch list (reads notchControllers_[0] above, so it is
     // declared after it). Always visible: a fixed bottom strip.
     gui::NotchListPanel notchListPanel_;
+
+    //==========================================================================
+    // LANE M Task 10 state. All of it is declared BEFORE soundcheck_ below,
+    // which is the last member in this class -- see the comment there.
+
+    // One ledger per slot, alive for this component's whole lifetime: it
+    // records what the PREVIOUS apply placed, so the next one replaces only its
+    // own work and never a notch the operator locked in with the SOUNDCHECK
+    // mode switch (SoundcheckController.h, C-2/Q7). CLEAR ALL does NOT reset
+    // it, deliberately -- the entries simply stop matching anything.
+    std::array<SoundcheckApplyLedger, kMaxSlots> soundcheckLedgers_;
+
+    // Written by onStateChanged, which is invoked from the LANE M THREAD (and
+    // from whatever thread calls stop()/abortAndJoin()/the destructor). A
+    // relaxed store is ALL it may do: every GUI touch happens later, on the
+    // message thread, in syncSoundcheckUi().
+    std::atomic<bool> soundcheckDirty_ { false };
+
+    // What syncSoundcheckUi last saw, so an edge is an edge. Message thread.
+    SoundcheckController::State lastSoundcheckState_ = SoundcheckController::State::Idle;
+    SoundcheckLock soundcheckLock_ = SoundcheckLock::None;
+
+    // True while a confirmation is still unanswered. A second DO must not stack
+    // a second dialog -- two OKs are two arms, and the later one would arm
+    // against targets the first already consumed. ModeRail::handleClearAllClicked
+    // carries the same guard for the same reason (review I-2).
+    bool soundcheckConfirmPending_ = false;
+
+    // BUMPED EVERY TIME THE CONSOLE'S LANE M STATE IS TORN DOWN -- a device
+    // restart, and every end of session. A confirmation captures it when it is
+    // asked and its answer is DROPPED if the number has moved (round 2, C-1).
+    //
+    // The state checks alone were not enough: a device restart while the
+    // machine was Idle with the box open ran endSoundcheckSession(), which put
+    // the lock back to None -- so a later OK saw "Idle, unlocked, fine" and
+    // armed with targets captured against the PREVIOUS device's routing. A
+    // counter cannot be fooled that way, because it records that something
+    // happened rather than what the state looks like afterwards.
+    unsigned soundcheckConsoleGeneration_ = 0;
 
     // A message the GUI itself produced -- a setting the hardware refused.
     // Device errors come from the engine and take precedence over it.
@@ -384,6 +635,24 @@ private:
     // notches, so extra WIDTH there buys nothing. The width goes where the
     // controls are. See docs/spec-ui-mockup.md section 5.
     static constexpr float kNotchColumnFraction = 0.44f;
+
+    //==========================================================================
+    // THE LAST MEMBER IN THIS CLASS, and that is the whole safety argument.
+    //
+    // SoundcheckController::stop(), abortAndJoin() AND ITS DESTRUCTOR invoke all
+    // three injected lambdas on the calling thread as the last thing they do --
+    // they stand a live run down, and standing one down means restoring
+    // detection and logging the abort (SoundcheckController.h, I-10/N-2/C-3).
+    // Those lambdas reach engine_, systemClock_, sessionLogger_,
+    // notchControllers_ and soundcheckDirty_. Members die in REVERSE
+    // declaration order, so declaring this last is what keeps every one of them
+    // alive while it runs.
+    //
+    // The task brief said "after engine_ and before notchControllers_". That is
+    // wrong against this header's own rule -- notchControllers_ would already be
+    // dead when setDetectionActiveOnAllSlots fired from ~SoundcheckController.
+    // The header's declaration-order rule wins; the brief's line does not.
+    SoundcheckController soundcheck_ { engine_, systemClock_ };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

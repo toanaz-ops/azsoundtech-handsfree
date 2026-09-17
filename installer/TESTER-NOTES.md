@@ -1,17 +1,25 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.2.0
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.3.0
 
-Ngày build: 2026-09-07 · suite test 547/547 xanh (`63c1759`) · installer:
-26 848 726 byte (25,6 MB), đóng gói 2026-09-07 21:46, gate 547/547
+Ngày build: 2026-09-16 · suite test 712/712 xanh (`17f5225`, nhánh
+`feat/lane-m-active-soundcheck`) · installer: **chưa đóng gói — release bị chặn
+tới khi owner duyệt** (xem cuối mục "Mới trong 1.3.0")
 
-SHA-256 của Setup 1.2.0:
+SHA-256 của Setup 1.3.0: **chưa đóng gói** · dung lượng: **chưa đóng gói**
+
+Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
+25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
 Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
 nhờ test bản cũ.
 
-> **1.2.0 CÓ đụng đường audio.** Độ sâu của một notch nay thay đổi theo thời
-> gian. **Mở âm lượng nhỏ trước** và đọc mục "Mới trong 1.2.0" bên dưới trước
-> khi cắm vào PA thật.
+> **1.3.0 CÓ đụng đường audio, và đây là thay đổi lớn nhất tới nay.** Lần đầu
+> tiên app **tự phát tín hiệu ra PA** (nút `ĐO`). **HẠ MASTER TRƯỚC**, mở âm
+> lượng nhỏ, và đọc hết mục "Mới trong 1.3.0" bên dưới trước khi cắm vào dàn
+> thật. Trong app **không có limiter** — chỉ có một kẹp cứng ±1.0.
+>
+> **1.2.0 cũng CÓ đụng đường audio**: độ sâu của một notch thay đổi theo thời
+> gian — xem mục "Mới trong 1.2.0".
 
 ## Biết trước để không tưởng app hỏng
 
@@ -34,6 +42,111 @@ nhờ test bản cũ.
    nguyên ở mức đọc cuối** thay vì về N/A: khoảng trống đã biết của bản này,
    đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
    **hú mà chip vẫn LOW**.
+
+## Mới trong 1.3.0 (so với 1.2.0) — **HẠ MASTER TRƯỚC**
+
+Bản này app **tự phát tín hiệu ra PA** lần đầu tiên. Từ trước tới giờ nó chỉ
+trừ gain khỏi tiếng anh em đưa vào; giờ nó tự bắn một tiếng sweep ra loa để đo
+phòng. Đọc hết mục này trước khi cắm vào dàn thật.
+
+1. **HẠ MASTER TRƯỚC.** Sweep phát ở **20 dB dưới toàn thang của hệ, tại vị trí
+   master hiện tại của anh em**. Dàn đang chạy show ở mức bình thường thì sweep
+   nghe nhỏ hơn chương trình một chút. **Master mở hết thì 20 dB dưới toàn thang
+   vẫn là rất to.** Mức đó chỉ chỉnh được **xuống**, không bao giờ lên. Và
+   **trong app không có limiter** — giữa sweep và loa chỉ có một cái kẹp cứng
+   ±1.0, tức clipper, không phải limiter.
+
+2. **Bấm `ĐO`, xác nhận hộp thoại, rồi để yên.** Kênh ngõ ra đang được đo **im
+   hoàn toàn 4,5 giây**, lần lượt từng kênh một. Hệ 4 ngõ ra mất khoảng **18
+   giây**; hệ 8 slot stereo (16 kênh ngõ ra) mất khoảng **72 giây**. Hộp thoại
+   in đúng con số của dàn đang cắm. **Đừng bấm khi MC đang nói.**
+
+3. **`DỪNG` là nút dừng chính thức.** `Esc` thường cũng ăn nhưng **không bảo
+   đảm** — nó chỉ tới được overlay khi overlay đang giữ focus. Từ lúc bấm `DỪNG`
+   tới lúc im là khoảng **31 ms ở buffer 64** và **51 ms ở buffer 1024**, cộng
+   độ trễ của driver và amp. **Phải KHÔNG có tiếng "cạch"** — ramp tắt 30 ms do
+   chính callback audio sinh ra, nên nó chạy xong kể cả khi mọi thứ khác đã
+   chết. Nghe thấy "cạch" là **báo lại ngay**.
+
+4. **App chỉ ĐỀ XUẤT. Không gì được đặt cho tới khi bấm `ÁP DỤNG`.** `BỎ`, hoặc
+   để hết 20 giây, ném đề xuất đi và không đụng vào notch nào.
+
+5. **⚠️ Lần `ÁP DỤNG` THẬT ĐẦU TIÊN xảy ra trên dàn của anh em.** Không một test
+   tự động nào trong dự án đi tới được đường đó — đường `ÁP DỤNG` chỉ chạy được
+   khi có GUI thật và device thật. **Mở âm lượng thấp cho lần `ÁP DỤNG` đầu
+   tiên.** Sau khi bấm, tối đa 6 bin mỗi làn bị cắt ở `−6 / −12 / −18 / −24 dB`
+   (hoặc đúng trần của preset đang chạy, ví dụ `Music` là −10).
+
+6. **Sau `ÁP DỤNG`, bảng báo cáo giữ console tới khi anh em bấm `BỎ`.** Không có
+   đồng hồ đếm ngược ở bước này: định tuyến, tuning (Q/DEPTH), và hai nút
+   GOOD/FALSE vẫn **khoá** cho tới lúc bấm `BỎ`. Chuyển mode (`AUTO` / `BYPASS`
+   / `SOUNDCHECK`) và `CLEAR ALL` thì **dùng được ngay** — cái đó cố ý, để luôn
+   có đường thoát. Đó là thiết kế, không phải app treo: **`BỎ` là một cú bấm.**
+
+7. **Băng tin cậy dừng ở 6 kHz.** Sweep đi tới 10 kHz, nhưng một sweep log biên
+   độ hằng bơm vào mỗi bin ở 10 kHz **ít hơn 20 dB** so với ở 100 Hz, nên phần
+   6–10 kHz app **vẽ mờ** kèm nhãn "độ tin cậy thấp" và **không bao giờ đề
+   xuất** cắt ở đó. **Cho chúng tôi biết có đáng mở rộng lên không.**
+
+8. **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng trong lúc đo.** Loa của chúng vẫn
+   đang phát tiếng mic. Phòng sát ngưỡng ở một kênh khác thì sweep **có thể**
+   kích nó hú — đó chính là lý do app **từ chối bắt đầu** khi chip `RING RISK`
+   đã đọc `RISING` trở lên. App đọc chip của **mọi slot đang bật**, không riêng
+   slot đang hiện trên màn hình: bấm `ĐO` mà bị từ chối trong khi chip trên màn
+   hình đang `LOW` thì **đúng là như vậy** — một slot khác đang ngân. Không phải
+   lỗi.
+
+9. **App tự dừng và nói lý do.** Chín lý do, mỗi lý do một câu riêng dưới đáy
+   màn hình, ví dụ "tín hiệu mic quá lớn", "phòng đã hú sẵn trước khi phát",
+   "không đo được nền nhiễu", "mất dữ liệu mic". Hai lý do đầu được quyết trong
+   **0,5 giây đo nền, trước khi một mẫu sweep nào ra loa** — nên một lần chạy
+   trong phòng đang ngân **phải dừng trước khi nghe thấy sweep**. Nghe thấy
+   sweep rồi mới dừng là **báo lại ngay**.
+
+10. **Ba câu "không phải phòng sạch".** Một kênh trả về **"không đo được"**
+    nghĩa là mic không nghe đủ rõ loa (SNR thấp). **"sai định tuyến"** nghĩa là
+    cặp kênh vào/ra của slot đó không hợp lệ với device đang cắm. **"thiếu trần
+    cắt"** nghĩa là preset đang chạy không có trần để lượng tử độ sâu — app
+    **không** vẽ một đường phẳng 0 dB cho ba trường hợp này, vì đường phẳng
+    trông hệt như "phòng rất tốt".
+
+11. **`CLEAR ALL` KHÔNG xoá sổ ledger của lần `ÁP DỤNG` trước.** App nhớ riêng
+    một sổ (làn, index, tần số) cho mỗi slot để lần `ĐO` sau dọn đúng notch của
+    lần trước. `CLEAR ALL` gỡ notch nhưng không đụng sổ đó. Hệ quả duy nhất nhìn
+    thấy được: một lần `ÁP DỤNG` sau đó có thể báo `cleared_previous` lớn hơn số
+    notch thật sự vừa gỡ. Không nguy hiểm, nhưng biết trước thì đỡ tưởng lỗi.
+
+12. **Chạy lại `ĐO` chỉ dọn notch của chính lần `ÁP DỤNG` trước đó.** Notch do
+    mode `SOUNDCHECK` 15 giây (nút cũ) đặt thì **không bị đụng tới**.
+
+13. **Preset lưu sau soundcheck có mang notch phòng ngừa, nhưng nạp lại thì
+    chúng tự nhả.** Nạp lại đưa chúng vào với `Origin::Preset`, nên chúng
+    **tự nhả sau 30 giây yên tĩnh** như mọi notch preset khác. Muốn bảo vệ
+    phòng ngừa đầy đủ trở lại thì **chạy `ĐO` lại**.
+
+14. **Độ sâu không bao giờ nông hơn slider DEPTH đang để.** Nếu anh em kéo
+    slider sâu hơn trong lúc đang xem kết quả, lúc `ÁP DỤNG` app lấy **cái sâu
+    hơn** giữa đề xuất và slider. Đây là cái kẹp cuối trước PA.
+
+15. **⚠️ Trong lúc `ĐO`, bộ chống hú TẮT trên MỌI slot.** Không phải chỉ kênh
+    đang được quét: suốt cả lần chạy (hệ 16 kênh là ~72 giây) **cả dàn không có
+    bảo vệ chống hú**, rồi mới bật lại theo mode đang chạy khi kết thúc. Hộp
+    thoại xác nhận có in đúng câu này trước khi anh em bấm. **Phòng bắt đầu hú
+    thì bấm `DỪNG` ngay** — trong lúc chạy đó là đường thoát.
+
+**Cần báo lại, theo thứ tự giá trị:**
+
+1. **Mở master lên từng dB cho tới lúc hú, TRƯỚC và SAU `ÁP DỤNG`. Chênh lệch
+   đó là con số DUY NHẤT chứng minh tính năng này hoạt động.**
+2. Đường `margin` trên màn hình so với một phép đo tham chiếu (REW / Smaart +
+   mic đo): **lệch bao nhiêu dB, sai bao nhiêu bin?**
+3. Bấm `DỪNG` giữa sweep: bao lâu thì im, **và có tiếng "cạch" không?**
+4. 4,5 giây im mỗi kênh có vừa quy trình soundcheck của anh em không? ~72 giây
+   có quá dài không?
+5. Phòng ồn thì bao nhiêu kênh trả về **"không đo được"**?
+6. Ứng viên lane M đề xuất có trùng với bin mà detector thật sự cắt trong show
+   sau đó không?
+
 
 ## Mới trong 1.2.0 (so với 1.1.3) — **nghe ở âm lượng thấp trước**
 

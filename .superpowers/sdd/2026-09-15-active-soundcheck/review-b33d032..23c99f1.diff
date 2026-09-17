@@ -1,0 +1,194 @@
+# Review package: b33d032..23c99f1
+
+## Commits
+23c99f1 fix(lane-m): SoundcheckCandidates review round 2 -- depthFor refuses a NaN ceiling
+
+## Files changed
+ src/dsp/SoundcheckCandidates.cpp     | 20 +++++++++++++++++---
+ src/dsp/SoundcheckCandidates.h       |  6 ++++++
+ tests/test_soundcheck_candidates.cpp | 34 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 57 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/dsp/SoundcheckCandidates.cpp b/src/dsp/SoundcheckCandidates.cpp
+index 57601c2..1665f83 100644
+--- a/src/dsp/SoundcheckCandidates.cpp
++++ b/src/dsp/SoundcheckCandidates.cpp
+@@ -16,20 +16,29 @@ SoundcheckCandidates::depthFor (double hDb, double ceilingDb, const Ladder& ladd
+     Depth out;
+ 
+     // An empty or null ladder is a CALLER BUG, and the silent failure it would
+     // otherwise cause is the dangerous kind: the rung loop would run zero
+     // times, `found` would stay false, and every proposal would land on
+     // maxDepthDb -- a full -24 dB cut on every bin, from a struct nobody
+     // filled in. Refuse instead, with the rule's own "no proposal" Depth.
+     if (ladder.rungsDb == nullptr || ladder.count <= 0)
+         return out;
+ 
++    // The same refusal for a ceiling that is not a number, and for the same
++    // reason: std::max is (a < b) ? b : a, so std::max (rung, NaN) compares
++    // `rung < NaN` -- false -- and hands back the RAW RUNG. A direct caller
++    // would get a fully formed -12 dB proposal with saturated == false out of
++    // an Input nobody filled in. pick() raises Output::ceilingMissing for its
++    // own callers; depthFor is public and has no such channel, so it refuses.
++    if (! std::isfinite (ceilingDb))
++        return out;
++
+     // Both sides dB. needed_dB > 0 means "this many dB must come out".
+     const double needed = hDb + kTargetMarginDb;
+     if (needed < kMinUsefulCutDb)
+         return out;                        // MARK only; depthDb stays 0 and means "no proposal"
+ 
+     const double depthRaw = -needed;       // <= -kMinUsefulCutDb, so strictly negative
+ 
+     // The SHALLOWEST rung at least as deep as depthRaw. Deeper == more negative,
+     // so "at least as deep" is r <= depthRaw, and "shallowest" is the largest
+     // such r. Getting this backwards is spec rev 2's N2 defect.
+@@ -84,38 +93,43 @@ void SoundcheckCandidates::smooth (const float* hDb, float* out, int numBins, do
+             sum += (double) hDb[(std::size_t) j];
+ 
+         out[(std::size_t) k] = (float) (sum / (double) (hi - lo + 1));
+     }
+ }
+ 
+ SoundcheckCandidates::Output SoundcheckCandidates::pick (const Input& in)
+ {
+     Output out;
+ 
+-    if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
+-        return out;
+-
++    // Computed BEFORE the null-input return below, so a caller always gets a
++    // truthful ceilingMissing. A controller that forgot the ceiling has most
++    // likely forgotten the buffers too, and reporting "no proposals, ceiling
++    // fine" on the way out of that would point the investigation at the room.
++    //
+     // Neither of these stops the MARKS: the operator is still shown the room,
+     // and a caller bug must not silently look like a quiet stage. Both stop
+     // every PROPOSAL, because the depth of a cut cannot be decided without a
+     // ladder to quantise onto or a ceiling to clamp against.
+     //
+     // DELIBERATELY REDUNDANT with depthFor's own guard: while both stand, no
+     // test can tell them apart (measured 2026-09-16 -- neutering either one
+     // alone leaves the suite green; removing BOTH turns
+     // EmptyLadderMarksButProposesNothing red). Keep both anyway. depthFor is
+     // public and a later lane may call it directly, and this one states the
+     // refusal where the marks/proposals split actually happens.
+     const bool ladderMissing  = (in.ladder.rungsDb == nullptr || in.ladder.count <= 0);
+     const bool ceilingMissing = ! std::isfinite (in.ceilingDb);
+     out.ceilingMissing = ceilingMissing;
+ 
++    if (in.hDb == nullptr || in.trusted == nullptr || ! (in.sampleRate > 0.0))
++        return out;
++
+     // Step 4 up front: the prominence test in step 5 needs the smoothed curve,
+     // and smoothing is over the WHOLE array -- a bin outside the trusted band
+     // still contributes to the average of a bin inside it.
+     std::array<float, kNumBins> hs {};
+     smooth (in.hDb, hs.data(), kNumBins, in.sampleRate);
+ 
+     // Top-kMaxPreventivePerLane by H_dB descending, maintained by insertion so
+     // step 7 keeps the HOTTEST six, not the first six found.
+     std::array<Candidate, kMaxPreventivePerLane> best {};
+     int kept = 0;
+diff --git a/src/dsp/SoundcheckCandidates.h b/src/dsp/SoundcheckCandidates.h
+index f13f779..1f06dac 100644
+--- a/src/dsp/SoundcheckCandidates.h
++++ b/src/dsp/SoundcheckCandidates.h
+@@ -68,20 +68,26 @@ public:
+         int           count   = 0;
+         double        maxDepthDb = -24.0;
+     };
+ 
+     // depthDb == 0.0 means "no proposal" -- the bin is MARK only.
+     struct Depth { double depthDb = 0.0; double residualDb = 0.0; bool saturated = false; };
+ 
+     // The whole depth rule, on one H_dB value. Public so the six worked
+     // examples of spec §4.4 can be asserted directly instead of inferred from
+     // a full pick() run.
++    //
++    // Returns the mark-only Depth {0, 0, false} -- "no proposal" -- for an
++    // empty ladder and for a non-finite ceilingDb, as well as for a bin that
++    // needs less than kMinUsefulCutDb. A direct caller gets no channel for the
++    // distinction (pick() has Output::ceilingMissing); what it does get is a
++    // refusal rather than a plausible-looking cut derived from a NaN.
+     [[nodiscard]] static Depth depthFor (double hDb, double ceilingDb, const Ladder& ladder);
+ 
+     struct Input
+     {
+         const float* hDb        = nullptr;      // kNumBins, from LoopGainEstimator
+         // kNumBins. Pass LoopGainEstimator::Result::trusted VERBATIM: pick()
+         // has no `measured` input and cannot re-derive that gate, and Result
+         // documents that `measured` OVERRIDES `trusted` -- finish() has already
+         // cleared the whole array when the run was unusable. A caller that
+         // rebuilds this array from per-bin SNR instead reintroduces exactly the
+diff --git a/tests/test_soundcheck_candidates.cpp b/tests/test_soundcheck_candidates.cpp
+index 0778905..cf96879 100644
+--- a/tests/test_soundcheck_candidates.cpp
++++ b/tests/test_soundcheck_candidates.cpp
+@@ -342,20 +342,31 @@ TEST (SoundcheckCandidates, UnsetCeilingIsDetectedAndRefused)
+     const auto missing = SoundcheckCandidates::pick (in);
+     EXPECT_TRUE (missing.ceilingMissing);
+     EXPECT_EQ (missing.candidateCount, 0);
+     EXPECT_GT (missing.markedCount, 0);
+ 
+     // 0.0 is the OTHER state: no cut authorised, and not a bug.
+     const auto zero = SoundcheckCandidates::pick (f.input (0.0));
+     EXPECT_FALSE (zero.ceilingMissing);
+     EXPECT_EQ (zero.candidateCount, 0);
+     EXPECT_GT (zero.markedCount, 0);
++
++    // RED IF: the flag is computed after the null-input early return. A
++    // controller that forgot the ceiling has most likely forgotten the buffers
++    // too, and "no proposals, ceiling fine" would send the investigation to the
++    // room instead of to the caller.
++    SoundcheckCandidates::Input blank;
++    ASSERT_EQ (blank.hDb, nullptr);
++    const auto nothing = SoundcheckCandidates::pick (blank);
++    EXPECT_TRUE (nothing.ceilingMissing);
++    EXPECT_EQ (nothing.candidateCount, 0);
++    EXPECT_EQ (nothing.markedCount, 0);
+ }
+ 
+ // RED IF: a non-finite hDb reaches step 5. `NaN < x` is FALSE for every x, so a
+ // NaN bin passes both step 5 gates untouched and then passes
+ // `needed < kMinUsefulCutDb` too -- it would be proposed at -24 dB with
+ // saturated == false, the single most dangerous output this class can produce.
+ // Review M-2.
+ //
+ // The 1050 Hz bin is the second half of the check: it sits INSIDE the NaN bin's
+ // 1/3-octave window, so its smoothed value is NaN as well. The prominence gate
+@@ -380,10 +391,33 @@ TEST (SoundcheckCandidates, NonFiniteLoopGainIsNeverMarked)
+     EXPECT_NEAR (out.candidates[0].hz, 2000.0f, (float) (kSr / Detector::kFftSize));
+     EXPECT_TRUE (out.marked[(std::size_t) LoopGainEstimator::hzToBin (2000.0, kSr)]);
+ 
+     // Infinity takes the same path.
+     Field g;
+     g.poke (1000.0, std::numeric_limits<float>::infinity());
+     const auto inf = SoundcheckCandidates::pick (g.input());
+     EXPECT_EQ (inf.markedCount, 0);
+     EXPECT_EQ (inf.candidateCount, 0);
+ }
++
++// RED IF: depthFor uses a non-finite ceiling instead of refusing it.
++// std::max is `(a < b) ? b : a`, so std::max (rung, NaN) evaluates
++// `rung < NaN` -- false -- and returns the RAW RUNG. A direct caller would get
++// a fully formed -12 dB proposal, saturated == false, out of an Input nobody
++// filled in. pick() raises Output::ceilingMissing for its own callers; depthFor
++// is public, has no such channel, and must refuse. Review I-3 residual.
++TEST (SoundcheckCandidates, DepthForRefusesANonFiniteCeiling)
++{
++    // Control: the same H_dB with a real ceiling IS a -12 dB proposal, so the
++    // zeroes below are the guard and not a dead fixture.
++    ASSERT_DOUBLE_EQ (SoundcheckCandidates::depthFor (2.0, -24.0, shippedLadder()).depthDb, -12.0);
++
++    for (const double bad : { std::numeric_limits<double>::quiet_NaN(),
++                              std::numeric_limits<double>::infinity(),
++                              -std::numeric_limits<double>::infinity() })
++    {
++        const auto d = SoundcheckCandidates::depthFor (2.0, bad, shippedLadder());
++        EXPECT_DOUBLE_EQ (d.depthDb, 0.0)    << "ceilingDb=" << bad;
++        EXPECT_DOUBLE_EQ (d.residualDb, 0.0) << "ceilingDb=" << bad;
++        EXPECT_FALSE (d.saturated)           << "ceilingDb=" << bad;
++    }
++}

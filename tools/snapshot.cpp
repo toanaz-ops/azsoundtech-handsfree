@@ -24,6 +24,17 @@
 //                      column, the dashed R stem and the L/R picker all render
 //                      with something real behind them, plus a RING RISK chip
 //                      STAGED to Critical (see the note where it is set)
+//   console-soundcheck-running.png
+//                      lane M mid-measurement: the DO cell locked, the strip
+//                      showing which output channel is being swept and how
+//                      long is left, and the big DUNG that stops it
+//   console-soundcheck-results.png
+//                      the same run finished -- the margin curve and its
+//                      marked bins over the analyser, the low-confidence band
+//                      above 6 kHz dimmed, and the results strip carrying a
+//                      hot-spot count plus the three sentences that are NOT a
+//                      hot-spot count (saturated / could not measure / bad
+//                      routing)
 //   console-preset-music.png
 //                      console-live's frame with the notch defaults set to
 //                      presets/Music.json's OFF-LIST pair (Q 25, depth -10 dB),
@@ -48,6 +59,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "app/MainComponent.h"
+#include "app/SoundcheckController.h"
 #include "dsp/Detector.h"
 
 #include <cmath>
@@ -356,6 +368,144 @@ int main (int argc, char** argv)
 
     if (! shoot (app, outDir.getChildFile ("console-live.png")))
         return 1;
+
+    //--------------------------------------------------------------------
+    // LANE M (Task 9): the two soundcheck states.
+    //
+    // Both are STAGED, and said so on stdout. Task 9 builds the components and
+    // the overlay API; nothing in it connects them to a live
+    // SoundcheckController (that is Task 10), and a real run would need a
+    // device, an output channel and 72 s of sweep into a PA. What these two
+    // pictures prove is what the console LOOKS like in each state --
+    // legibility, whether the Vietnamese renders, whether AP DUNG fits its
+    // button, whether the markers bury the trace. That the panel is DRIVEN
+    // correctly is proven by tests, not here.
+    //
+    // The numbers are a plausible OutputResult rather than round figures: a
+    // margin curve built from a constant would be a straight line and would
+    // say nothing about how the overlay reads against a real trace.
+    {
+        auto& panel = app.getSoundcheckPanelForTest();
+
+        // RUNNING. Channel 2 of 4, 47.2 s left -- lane M's OWN countdown
+        // (getRemainingMsInRun), never the passive 15 s window, which is
+        // frozen while the taps are suspended.
+        panel.setProgress (1, 4, 47200.0);
+        panel.setMode (gui::SoundcheckPanel::Mode::Running);
+
+        // F10: while a run is in flight every control that could change the
+        // chain underneath it is out of reach, and so is DO itself.
+        app.getModeRailForTest().setModeControlsEnabled (false);
+        app.getModeRailForTest().setMeasureEnabled (false);
+        app.resized();
+
+        std::cout << "console-soundcheck-running: panel STAGED to Running "
+                     "(no device, no sweep -- see the comment in tools/snapshot.cpp)"
+                  << std::endl;
+
+        if (! shoot (app, outDir.getChildFile ("console-soundcheck-running.png")))
+            return 1;
+
+        //----------------------------------------------------------------
+        // RESULTS. A synthetic OutputResult pushed into the overlay and the
+        // strip: two outputs' worth of findings, a handful of marked bins, one
+        // saturated candidate and one channel that could not be measured.
+        SoundcheckController::OutputResult result;
+        result.slot = 0; result.lane = 0; result.outChannel = 0; result.inChannel = 0;
+        result.measured = true;
+
+        // A margin that dips towards zero around the partials the live shot's
+        // programme material actually carries, so the curve peaks where the
+        // trace does and a reviewer can see whether the two are separable.
+        //
+        // SNAPPED TO BIN CENTRES. Round 1 put the dips at the partials' exact
+        // frequencies with a sigma of ~0.028 octaves -- about 5 Hz wide at
+        // 247 Hz, against a 23.4 Hz bin. The dip fell BETWEEN two bins and was
+        // never sampled, so the 247 Hz tick sat on the axis with no peak above
+        // it and the picture showed a marker pointing at nothing.
+        const auto snapToBin = [] (double hz)
+        {
+            const double bin = std::lround (hz * (double) Detector::kFftSize / kSampleRate);
+            return bin * kSampleRate / (double) Detector::kFftSize;
+        };
+
+        const double hotHz[] = { snapToBin (247.0),  snapToBin (660.0),
+                                 snapToBin (1240.0), snapToBin (1920.0),
+                                 snapToBin (3400.0) };
+
+        for (int k = 0; k < (int) result.marginDb.size(); ++k)
+        {
+            const double hz = (double) k * kSampleRate / (double) Detector::kFftSize;
+
+            // Baseline headroom, falling with frequency the way a real room's
+            // does, plus a notch of margin at each hot spot.
+            double margin = 19.0 - 4.0 * std::log10 (juce::jmax (20.0, hz) / 100.0);
+            for (const double f : hotHz)
+            {
+                const double octaves = std::log2 (juce::jmax (1.0, hz) / f);
+                // sigma ~0.1 octaves, not ~0.028: a peak has to be wider than
+                // the bin spacing to be VISIBLE as a peak once it is sampled
+                // at 23.4 Hz, and at 247 Hz the round-1 figure was five times
+                // narrower than one bin.
+                margin -= 17.0 * std::exp (-(octaves * octaves) / 0.02);
+            }
+
+            result.marginDb[(std::size_t) k] = (float) margin;
+
+            // LoopGainEstimator only trusts the swept band; everything else is
+            // drawn as a gap rather than as a line nobody should believe.
+            result.trusted[(std::size_t) k] =
+                hz >= SoundcheckController::kSweepLowHz
+                && hz <= SoundcheckController::kTrustedHighHz;
+        }
+
+        // The marked bins: the peak of each dip, which is what
+        // SoundcheckCandidates would have picked.
+        int marked = 0;
+        for (const double f : hotHz)
+        {
+            const int bin = (int) std::lround (f * (double) Detector::kFftSize / kSampleRate);
+            if (bin > 0 && bin < (int) result.marked.size())
+            {
+                result.marked[(std::size_t) bin] = true;
+                ++marked;
+            }
+        }
+        result.markedCount    = marked;
+        result.candidateCount = marked;
+        result.saturatedBins  = 1;      // one still over after the deepest rung
+
+        app.getSpectrumViewForTest().setSoundcheckOverlay (
+            result.marginDb.data(), result.marked.data(), result.trusted.data(),
+            (int) result.marginDb.size(), kSampleRate);
+
+        panel.setResultsSummary (/*hotSpots*/ result.candidateCount,
+                                 /*saturated*/ result.saturatedBins,
+                                 /*unmeasured*/ 1,
+                                 /*routingInvalid*/ 1);
+        panel.setMode (gui::SoundcheckPanel::Mode::Results);
+
+        // The mode switches come back the moment the run ends; DO does NOT,
+        // because a second measurement on top of an unanswered proposal set
+        // would throw the proposals away.
+        app.getModeRailForTest().setModeControlsEnabled (true);
+        app.resized();
+
+        std::cout << "console-soundcheck-results: " << marked
+                  << " marked bins STAGED into the overlay, strip showing "
+                     "hot spots + saturated + unmeasured + misrouted"
+                  << std::endl;
+
+        if (! shoot (app, outDir.getChildFile ("console-soundcheck-results.png")))
+            return 1;
+
+        // Back to a resting console, so the shot that follows is console-live's
+        // frame and not this one with a strip across it.
+        panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
+        app.getSpectrumViewForTest().clearSoundcheckOverlay();
+        app.getModeRailForTest().setMeasureEnabled (true);
+        app.resized();
+    }
 
     //--------------------------------------------------------------------
     // The off-list-ceiling shot (final review, I-4).

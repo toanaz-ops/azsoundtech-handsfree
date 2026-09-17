@@ -179,6 +179,22 @@ public:
     Coeffs coeffsForTest() const { return { b0_, b1_, b2_, a1_, a2_ }; }
     int    rampRemainingForTest() const { return rampRemaining_; }
     double processSample(double input);
+
+    // Clears the FILTER STATE only: z1_ and z2_ go to zero, the coefficients
+    // and any in-flight depth ramp are left exactly as they are.
+    //
+    // Separate from reset() because the two statements are different (lane M
+    // N-1). reset() says "the past is gone" and therefore also cancels a ramp
+    // toward a target designed against that past. clearState() says only "this
+    // filter is about to be handed a discontinuity in its INPUT" -- which is
+    // what a lane being muted and un-muted is. Calling reset() there cancels
+    // the ramp on EVERY block of a mute that can last 4.5 s, stranding the
+    // filter at an intermediate depth while NotchInfo.depthDB already reads
+    // the target, and turning the rare NaN-heal GAP into the normal case.
+    //
+    // Branch-free, allocation-free, audio-thread safe.
+    void clearState();
+
     void reset();
 
 private:

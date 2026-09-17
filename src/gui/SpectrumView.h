@@ -44,6 +44,7 @@
 
 #include "app/NotchController.h"
 #include "dsp/Detector.h"
+#include "dsp/LoopGainEstimator.h"
 #include "gui/RtaProcessing.h"
 
 #include <array>
@@ -201,6 +202,146 @@ public:
     // reads as instant.
     void setDisplayLane (int lane);
     [[nodiscard]] int getDisplayLane() const { return displayLane_; }
+
+    //==========================================================================
+    // LANE M -- the active-soundcheck overlay (Task 9).
+    //
+    // A DATA overlay only: the margin curve, a marker per marked bin, and the
+    // dimmed band above kLowConfidenceAboveHz. Everything a finger touches is
+    // in gui::SoundcheckPanel.
+    //
+    // IT IS FED LANE M'S OWN ARRAYS, NEVER copySnapshot(). The detector's
+    // publish happens inside NotchController's drain loop
+    // (NotchController.cpp:568-582 builds the list, :617-650 publishes), and
+    // lane M runs with the taps SUSPENDED -- so nothing is drained and
+    // copySnapshot() returns the SAME frozen frame for the whole 72 s run.
+    // An overlay sourced from it would be showing the room as it was before
+    // the measurement started (spec section 4.1).
+    //
+    // The three arrays are COPIED, not borrowed: SoundcheckController's results
+    // vector lives behind its stateMutex_ and is rebuilt per run, so holding
+    // pointers into it would outlive what they point at.
+    //
+    // marginDb is SoundcheckController::OutputResult::marginDb (= -H_dB, so
+    // LOW means close to feeding back); marked and trusted are the per-bin
+    // arrays of the same struct. numBins is clamped to Detector::kNumBins.
+    void setSoundcheckOverlay (const float* marginDb, const bool* marked, const bool* trusted,
+                               int numBins, double sampleRate);
+    void clearSoundcheckOverlay();
+    [[nodiscard]] bool hasSoundcheckOverlay() const { return hasSoundcheckOverlay_; }
+
+    // Above this, LoopGainEstimator does not trust its own numbers, so the band
+    // is drawn dimmed and labelled rather than left looking like a measurement.
+    // ALIASED, not re-stated: a second 6000.0 here would be free to drift away
+    // from the one the estimator actually gates on.
+    static constexpr float kLowConfidenceAboveHz = (float) LoopGainEstimator::kTrustedHighHz;
+
+    // The margin window the curve is drawn against, in dB of headroom before
+    // the loop rings. It is NOT the plot's own -90..0 dB magnitude axis -- that
+    // axis measures a different quantity -- so the curve carries its own scale
+    // and the two are read as two things.
+    //
+    // Oriented the same way round as the trace, which is the whole reason for
+    // these two numbers rather than the obvious ones: LOW margin draws HIGH on
+    // the plot, so the curve rises exactly where the trace does and an operator
+    // reads "up = about to howl" once for both.
+    static constexpr float kMarginAtRiskDb = 0.0f;    // at the plot ceiling
+    static constexpr float kMarginSafeDb   = 24.0f;   // at the plot floor
+
+    // The margin curve is DASHED, and peak-hold is solid. Both are near-white
+    // by the time they are drawn on a sodium plot -- `text` and `peak` differ
+    // by about six values -- so colour alone does not separate them, and with
+    // peak hold ON an operator would be looking at two pale traces with no way
+    // to tell which is the measurement. The dash is what tells them apart.
+    //
+    // Counted as a FIXED NUMBER OF PERIODS ACROSS THE PLOT, not in absolute
+    // pixels, and this is a correctness requirement before it is a visual one.
+    //
+    // An absolute pixel period makes the dash COUNT proportional to the plot's
+    // width, and nothing in this app bounds that width:
+    // src/main.cpp:59-61 calls setResizeLimits(..., 16384, 16384). Round 2 of
+    // this task reserved the path against an assumed 2560 px maximum, which is
+    // not a maximum of anything -- on a 5120 px ultrawide the dash count would
+    // have overrun the reservation and juce::Path would have reallocated
+    // INSIDE paint(), which is the one thing this whole view is built not to
+    // do. Periods-across-the-plot removes the width from the arithmetic
+    // entirely, so the bound below holds at 1440 px and at 16384 px alike.
+    //
+    // It is also the better picture: the dash keeps the same visual density at
+    // every window size instead of turning into a dotted line on a big screen.
+    // 110 periods over the ~1330 px plot of a 1440 px window is a 12.1 px
+    // period, which is what the fixed 7 + 5 was, so nothing about how it reads
+    // at the default size has changed.
+    static constexpr int   kMarginDashPeriods   = 110;
+    static constexpr float kMarginDashDutyCycle = 7.0f / 12.0f;   // on / (on + off)
+
+    // soundcheckOverlayPath_'s ctor reservation. Same units and the same
+    // caveat as kDashedStemReserveFloats above: Path::preallocateSpace()
+    // reserves COORDS, not elements, at roughly three floats per lineTo or
+    // startNewSubPath.
+    //
+    // WIDTH DOES NOT APPEAR IN THIS DERIVATION, and that is the point. Round 2
+    // derived it from an assumed 2560 px plot; nothing enforces such a maximum
+    // (src/main.cpp:59-61 allows 16384), so on a wide enough monitor the path
+    // would have grown past the reservation and reallocated inside paint().
+    // With kMarginDashPeriods the dash count is a constant, so both terms below
+    // are constants:
+    //
+    //   - one element per bin: Detector::kNumBins = 1025, worst case every one
+    //     trusted and inside the displayed range;
+    //   - plus the dash: kMarginDashPeriods = 110 dashes, each costing a
+    //     startNewSubPath plus the lineTo that ends it part-way along a
+    //     segment -- 2 elements each, 220. (Bin points falling INSIDE a dash
+    //     are already counted in the 1025.)
+    //   - a subpath break for an untrusted run costs nothing extra: the next
+    //     dash's startNewSubPath is already in the 220.
+    //
+    // (1025 + 220) * 3 = 3735 coords. Rounded to 4200 for headroom against
+    // juce::Path's own per-element accounting. The test paints at 8192 px --
+    // wider than any monitor sold -- and asserts the realised count against
+    // this constant, so an undersized figure fails rather than quietly
+    // reallocating.
+    static constexpr int kSoundcheckOverlayReserveFloats = 4200;
+
+    // TEST ACCESSORS ONLY -- the no-allocation-in-paint guarantee, proved for
+    // the overlay path exactly as dashedStemPathElementCountForTest proves it
+    // for the dashed stem, and carrying the same honest caveat: juce::Path
+    // exposes no capacity getter, so the element count walked with
+    // Path::Iterator is the closest available proxy for "did not grow".
+    [[nodiscard]] std::size_t soundcheckOverlayPathElementCountForTest() const
+    {
+        std::size_t count = 0;
+        juce::Path::Iterator it (soundcheckOverlayPath_);
+        while (it.next())
+            ++count;
+        return count;
+    }
+    [[nodiscard]] int soundcheckMarkedCountForTest() const { return soundcheckMarkedCount_; }
+
+    // TEST ACCESSOR ONLY -- the EXTENT of what the overlay actually drew,
+    // paired with the element count above for the same reason
+    // dashedStemPathBoundsForTest is paired with its own counter.
+    //
+    // It exists because of a real defect the element count could not see: the
+    // first dash implementation skipped whole bins, and on the log axis that
+    // emitted a startNewSubPath with no lineTo after it for every bin below
+    // about 1 kHz. The path was full of elements and the entire low half of
+    // the curve drew NOTHING. An element count cannot tell those apart; a
+    // bounding box can.
+    [[nodiscard]] juce::Rectangle<float> soundcheckOverlayPathBoundsForTest() const
+    {
+        return soundcheckOverlayPath_.getBounds();
+    }
+
+    // TEST ACCESSOR ONLY -- the low-confidence band's caption. It exists so a
+    // test can assert the string is built by the CONSTRUCTOR and not by
+    // paint(): a juce::String assembled from UTF-8 bytes allocates, and this
+    // one used to be assembled on every frame. Reading it back non-empty
+    // BEFORE anything has painted is the proof.
+    [[nodiscard]] juce::String soundcheckLowConfidenceLabelForTest() const
+    {
+        return lowConfidenceLabel_;
+    }
 
     //==========================================================================
     // RING RISK -- how close the room is to ringing right now.
@@ -401,6 +542,13 @@ private:
     // The axis gutter under the plot, where the range is dragged.
     [[nodiscard]] juce::Rectangle<int> axisGutter() const;
 
+    // LANE M. Drawn from TWO places in paint() -- once in the empty-state
+    // branch and once after the trace -- because the overlay has to survive a
+    // console that has never published a frame: the taps are suspended for the
+    // whole run, so a soundcheck started on a freshly-opened window would
+    // otherwise show 72 s of empty grid.
+    void paintSoundcheckOverlay (juce::Graphics& g, const juce::Rectangle<float>& plot);
+
     // Ticks that actually fall inside the current window, chosen from a fixed
     // 1-2-5 ladder so they stay on round numbers as the range changes.
     void rebuildTicks();
@@ -445,6 +593,31 @@ private:
     // allocating its own -- reusing this member keeps that write inside
     // memory this object already owns, same as markerPath_ above.
     juce::Path dashedStemPath_;
+
+    // LANE M. One reused path for the margin curve, following markerPath_'s
+    // pattern: Path::clear() resets the element count without releasing
+    // storage, so a rebuild writes into memory this object already owns.
+    juce::Path soundcheckOverlayPath_;
+
+    // Lane M's own copy of the run's per-bin arrays. Fixed std::arrays, so
+    // taking a result costs no allocation and paint() reads members rather
+    // than chasing a pointer into somebody else's vector.
+    std::array<float, (std::size_t) Detector::kNumBins> soundcheckMarginDb_ {};
+    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckMarked_ {};
+    std::array<bool,  (std::size_t) Detector::kNumBins> soundcheckTrusted_ {};
+    bool   hasSoundcheckOverlay_ = false;
+
+    // Built ONCE, in the constructor, exactly as noSignalLabel_ and tickFont_
+    // are. Both used to be created inside paintSoundcheckOverlay(): a
+    // juce::String assembled from UTF-8 bytes allocates, and so does building a
+    // juce::Font, so the overlay was heap-allocating on every single frame --
+    // straight through the "paint() allocates nothing" rule this whole view is
+    // built on, and past a test that only watched the Path.
+    juce::String lowConfidenceLabel_;
+    juce::Font   overlayLabelFont_;
+    int    soundcheckBins_       = 0;
+    int    soundcheckMarkedCount_ = 0;
+    double soundcheckSampleRate_ = 0.0;
 
     // Tuning-toolbar state (display-only: changing these never restarts the
     // audio engine, detector or notch chain).

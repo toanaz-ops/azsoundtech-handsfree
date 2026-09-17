@@ -94,6 +94,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.h
     ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.cpp
     ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.h
+    ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
@@ -116,6 +118,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.h
+    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SoundcheckPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/SpectrumView.h
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBar.cpp
@@ -133,6 +137,12 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.h
     ${CMAKE_SOURCE_DIR}/src/dsp/NotchCommand.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/LoopGainEstimator.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/LoopGainEstimator.h
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckCandidates.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckCandidates.h
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
 )

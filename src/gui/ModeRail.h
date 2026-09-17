@@ -47,6 +47,14 @@ public:
     std::function<void()> onBypass;
     std::function<void()> onClearAllConfirmed;
 
+    // Lane M (Q16). A SEPARATE request from onSoundcheck, because the two
+    // things are separate: SOUNDCHECK waits 15 s for the room to howl on its
+    // own, DO plays a swept signal into the PA for ~72 s. One button meaning
+    // both, on live-sound equipment, is a hazard -- so this is its own
+    // callback on its own momentary button, never a fourth mode in the radio
+    // group.
+    std::function<void()> onMeasure;
+
     // Which switch is lit. Named here rather than taken as an AudioEngine::Mode
     // so the rail keeps knowing nothing about the engine -- the same separation
     // every other panel in this GUI holds to.
@@ -73,12 +81,39 @@ public:
     // Label cannot be two sizes.
     void updateCountdown();
 
+    // Lane M F10. While a measurement is in flight every control that could
+    // change what the filter chain is doing under it has to be out of reach:
+    // the run is measuring that chain. DO itself is NOT in here -- it has its
+    // own switch below, because it is also the control that has to stay
+    // unreachable through the Results window while SOUNDCHECK and friends come
+    // back.
+    void setModeControlsEnabled (bool enabled);
+
+    // Lane M. Off while a run or its Results window is open, and off whenever
+    // the rig cannot be measured at all (no device, no enabled slot).
+    void setMeasureEnabled (bool enabled);
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
     // Public: they ARE this component's interface; wiring and headless tests
     // drive them directly.
     juce::TextButton soundcheckButton { "SOUNDCHECK" };
+    // Lane M. "DO" with a crossed D: U+0110 U+004F, written as EXPLICIT UTF-8
+    // BYTES rather than as a source literal. This build passes no /utf-8 to
+    // MSVC, so a literal would be decoded with whatever the machine's active
+    // codepage happens to be -- the mojibake that shipped the middle-dot bug
+    // (src/gui/DeviceViewModel.cpp:13 is the precedent).
+    //
+    // The two-argument juce::TextButton(name, tooltip) is the trap here, and
+    // the mechanism is worth stating exactly, because the one-line version of
+    // it is wrong: param 2 IS the tooltip (juce_TextButton.cpp:46-49). What
+    // ships blank is `{ {}, "LABEL" }` -- an empty NAME with the legend put in
+    // the tooltip slot, which renders a button with no text while the build
+    // stays green. So the defence is not "use one argument", it is "assert the
+    // exact label", which the tests do
+    // (memory/juce9-api-traps-2026-08-25.md; its rule is right).
+    juce::TextButton measureButton    { juce::String::fromUTF8 ("\xc4\x90O") };
     juce::TextButton autoButton       { "AUTO" };
     juce::TextButton bypassButton     { "BYPASS" };
     juce::TextButton clearAllButton   { "CLEAR ALL" };
@@ -96,6 +131,14 @@ private:
     // in the opposite direction is circular and drifted by exactly the
     // caption's height.
     juce::Rectangle<int> countdownCaptionArea_;
+
+    // The DO cell's width, MEASURED in the constructor with the real legend
+    // font and the real hint -- not estimated. A cell narrower than its legend
+    // does not fail a test, it ships a truncated button
+    // (memory/stereo-lane-lessons-2026-09-05.md). Measured once, in the ctor,
+    // because neither string nor font ever changes: measuring in resized()
+    // would buy the same number on every window drag.
+    int measureCellWidth_ = 0;
 
     // True while a confirmation is still unanswered: a second CLEAR ALL
     // click must not stack another dialog (and so fire two confirms).

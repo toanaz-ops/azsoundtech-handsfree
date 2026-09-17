@@ -1,0 +1,574 @@
+# Review package: 724b8f8..3c9563a
+
+## Commits
+3c9563a fix(lane-m): SoundcheckController review round 2 -- the sweep deadline and the tear-down contract
+
+## Files changed
+ src/app/SoundcheckController.cpp    | 81 +++++++++++++++++++++++++++----------
+ src/app/SoundcheckController.h      | 48 ++++++++++++++++++----
+ tests/test_soundcheckcontroller.cpp | 67 ++++++++++++++++++++++++++++++
+ 3 files changed, 166 insertions(+), 30 deletions(-)
+
+## Diff
+diff --git a/src/app/SoundcheckController.cpp b/src/app/SoundcheckController.cpp
+index fa900b2..d878d6f 100644
+--- a/src/app/SoundcheckController.cpp
++++ b/src/app/SoundcheckController.cpp
+@@ -68,25 +68,24 @@ SoundcheckController::SoundcheckController (AudioEngine& engine, ClockSource& cl
+     : juce::Thread ("AZSoundcheck"),
+       engine_ (engine),
+       clock_ (clock)
+ {
+     // MUST be 2 * kFftSize floats: performFrequencyOnlyForwardTransform reads
+     // and writes the whole array even though only kNumBins entries come back
+     // (Detector.h:34-35). Sizing it kFftSize overruns by 8 KB.
+     fftScratch_.assign ((std::size_t) Detector::kFftSize * 2, 0.0f);
+ }
+ 
+-// *** DECLARATION ORDER IN THE OWNER MATTERS. *** This destructor stands a
+-// live run down through engine_ and clock_, so an owner must declare its
+-// AudioEngine and its ClockSource BEFORE its SoundcheckController; members are
+-// destroyed in reverse order, and the other way round this would touch two
+-// dead references on the way out.
++// Declaration order in the owner is load-bearing here -- this destructor stands
++// a live run down through engine_, clock_ AND all three injected lambdas. The
++// contract is stated where a caller will actually read it, on the lambda
++// members in SoundcheckController.h (I-10/N-2/C-3).
+ 
+ SoundcheckController::~SoundcheckController()
+ {
+     // The lambdas are invoked from this thread; they must not be destroyed
+     // (this object's members die right after) while a poll is in flight.
+     stop (2000);
+ }
+ 
+ // ---------------------------------------------------------------- MESSAGE ---
+ 
+@@ -158,49 +157,54 @@ SoundcheckController::refuseOnRingRisk (const NotchController::SnapshotBuffer& r
+     return Refusal::None;
+ }
+ 
+ SoundcheckController::Refusal
+ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
+                            const NotchController::SnapshotBuffer& riskSnapshot)
+ {
+     if (state_.load (std::memory_order_acquire) != State::Idle)
+         return Refusal::AlreadyRunning;
+ 
+-    // A fade from the LAST run is still in the air. Arming calls
+-    // setSoundcheckOutputChannel(), which discards a pending ramp-out (C-2) --
+-    // so a fast re-arm would turn the previous abort into a hard cut, which is
+-    // the click the ramp exists to prevent. Wait for the callback to finish it.
+-    if (engine_.soundcheckIsEmitting() || engine_.isSoundcheckRampOutPending())
+-        return Refusal::RampOutPending;
+-
+     // Everything below is a CALLER BUG, not a room. Refusing here is what
+     // stops a bug from becoming either a wrong cut or a plausible-looking
+     // "room clean" that nobody questions.
+     //
+     // Task 3 I-3: a non-finite ceiling reaches SoundcheckCandidates as "unset"
+     // and produces marks with no proposals -- never distinguishable from a
+     // quiet room downstream. N1: the gate is a PEAKINESS RATIO, and zero is not
+     // a gate, it is a field nobody filled in, which would abort every run in
+     // every room.
+     if (! (params.sampleRate > 0.0)
+         || ! std::isfinite (params.ceilingDb)
+         || ! (params.noiseFloorGate > 0.0f)
+         || params.numInputChannels <= 0 || params.numOutputChannels <= 0)
+         return Refusal::InvalidParams;
+ 
+     // I-4: re-validated HERE, not just in preflight. preflight() ran before the
+     // Confirm dialog; a slot can be disabled, or re-routed, while the operator
+     // is reading it.
++    //
++    // ORDER: this comes BEFORE the fade check. "The device is gone" outranks
++    // "a fade from the last run is still finishing" -- a stopped engine cannot
++    // finish a fade at all, so reporting RampOutPending there would send Task 9
++    // to tell the operator to wait for something that will never happen.
+     const Refusal targetRefusal = validateTargets (targets);
+     if (targetRefusal != Refusal::None)
+         return targetRefusal;
+ 
++    // A fade from the LAST run is still in the air. Arming calls
++    // setSoundcheckOutputChannel(), which discards a pending ramp-out (C-2) --
++    // so a fast re-arm would turn the previous abort into a hard cut, which is
++    // the click the ramp exists to prevent. Wait for the callback to finish it.
++    if (engine_.soundcheckIsEmitting() || engine_.isSoundcheckRampOutPending())
++        return Refusal::RampOutPending;
++
+     // S-1: and so can the room start ringing. This is the LAST read of a live
+     // snapshot before the taps are suspended and ring risk stops updating at
+     // all, so it is the one that matters -- and the one soundcheck_start logs.
+     const Refusal riskRefusal = refuseOnRingRisk (riskSnapshot);
+     if (riskRefusal != Refusal::None)
+         return riskRefusal;
+ 
+     params_      = params;
+     params_.peak = SoundcheckSignal::clampPeak (params.peak);
+ 
+@@ -224,20 +228,21 @@ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
+     noiseWindow_.assign ((std::size_t) std::max<std::int64_t> (windowSamples, 1), 0.0f);
+     capture_.assign (8192, 0.0f);
+ 
+     SoundcheckSignal::Params sig;
+     sig.sampleRate = params_.sampleRate;
+     sig.peak       = params_.peak;
+     const SoundcheckSignal signal { sig };
+     reference_.assign ((std::size_t) std::max<std::int64_t> (signal.totalSamples(), 1), 0.0f);
+     for (std::int64_t n = 0; n < signal.totalSamples(); ++n)
+         reference_[(std::size_t) n] = signal.sampleAt (n);
++    sweepTotalSamples_ = signal.totalSamples();
+ 
+     dropsAtArm_    = engine_.getMicCaptureDropCount();
+     micHotSinceMs_ = -1.0;
+     stopRequested_.store (false, std::memory_order_relaxed);
+     worstPeakiness_.store (0.0f, std::memory_order_relaxed);
+     runStartedAtMs_.store (clock_.nowMs(), std::memory_order_relaxed);
+ 
+     engine_.setSoundcheckPeak (params_.peak);
+     // Held for the WHOLE run, across every Gap (inv 10): keying suspension on
+     // the output channel would un-suspend the taps for 300 ms per channel and
+@@ -457,25 +462,31 @@ void SoundcheckController::runOnce()
+                 return;
+             }
+             if (noiseWindowIsRinging())
+             {
+                 beginAbort (AbortReason::RoomRinging);
+                 return;
+             }
+ 
+             // ONLY NOW does the sweep exist.
+             armSweepForCurrentTarget();
+-            // The lead-in is added HERE: the first sample leaves kSweepLeadInMs
+-            // from now, so the Sweep phase has to end that much later or Tail
+-            // and Analyse would both run a lead-in early and clip the end of
+-            // the measured tail.
+-            phaseEndsAtMs_ += kSweepLeadInMs + kSweepSeconds * 1000.0;
++            // RE-STAMPED FROM NOW, not accumulated from the noise-floor
++            // deadline (N-1). After C-1 the audio is anchored to THIS INSTANT:
++            // the callback starts counting when the channel is published here,
++            // so a deadline carried forward from enterTarget() is short by
++            // however late this poll was. At L < 700 ms that silently
++            // under-measures the tail; past 700 ms the Gap arrives while the
++            // sweep is still at full amplitude.
++            //
++            // Tail and Gap keep accumulating from this value, which is correct
++            // precisely because it is now anchored to the audio.
++            phaseEndsAtMs_ = clock_.nowMs() + kSweepLeadInMs + kSweepSeconds * 1000.0;
+             state_.store (State::Sweep, std::memory_order_release);
+             notifyStateChanged();
+             return;
+         }
+ 
+         case State::Sweep:
+         {
+             if (! serviceEmittingPhase())
+                 return;
+             if (clock_.nowMs() < phaseEndsAtMs_)
+@@ -813,20 +824,26 @@ void SoundcheckController::enterTarget (int index)
+     state_.store (State::NoiseFloor, std::memory_order_release);
+     notifyStateChanged();
+ }
+ 
+ void SoundcheckController::armSweepForCurrentTarget()
+ {
+     Target t {};
+     {
+         const std::lock_guard<std::mutex> lock (stateMutex_);
+         const int index = targetIndex_.load (std::memory_order_relaxed);
++        // Unreachable: the gate is only entered from a target this machine put
++        // itself on. It is asserted rather than silently skipped because the
++        // silent version arms NO sweep, and the run would then sit through a
++        // whole Sweep + Tail measuring a channel it never drove and report the
++        // result as a room that could not be measured.
++        jassert (index >= 0 && index < (int) targets_.size());
+         if (index < 0 || index >= (int) targets_.size())
+             return;
+         t = targets_[(std::size_t) index];
+     }
+ 
+     // Everything captured from here on is Y, the room reply to the sweep.
+     noiseFloorEndSample_ = capturedSamples_;
+ 
+     // ORDER IS THE CONTRACT (N-2). The index is a relaxed store and the channel
+     // is a RELEASE store that the callback loads with ACQUIRE, so a callback
+@@ -834,28 +851,48 @@ void SoundcheckController::armSweepForCurrentTarget()
+     // starts at -sweepLeadInSamples_, i.e. with a short silent run-up, so the
+     // first sample it ever emits is index 0 at the foot of the ramp-in
+     // whatever buffer size the device uses.
+     //
+     // setSoundcheckOutputChannel() also discards any stale ramp-out anchor,
+     // which is why it must not be called mid-ramp anywhere else (C-2).
+     engine_.setSoundcheckSampleIndex (-sweepLeadInSamples_);
+     engine_.setSoundcheckOutputChannel (t.outChannel);
+ }
+ 
++void SoundcheckController::releaseOutputChannelSafely()
++{
++    // BY CONSTRUCTION the signal is already zero here: Sweep + Tail is 3.7 s of
++    // deadline against 3.0 s of sweep, and sampleAt() returns 0 past
++    // totalSamples. Releasing a silent channel is silent.
++    //
++    // DEFENSIVE ANYWAY (N-1). "By construction" is exactly the kind of claim a
++    // late poll breaks, and the failure mode is not a wrong number on a screen:
++    // a bare store to scOutChannel_ while the callback still has a non-zero
++    // sample to produce is a HARD CUT on a live PA, taken at whatever amplitude
++    // the sweep happened to be at. If that is where we are, the fade is handed
++    // to the callback exactly as an abort would hand it over (inv 9) and the
++    // callback releases the channel itself when the envelope reaches zero.
++    const std::int64_t idx = engine_.getSoundcheckSampleIndex();
++    if (engine_.soundcheckIsEmitting() && idx >= 0 && idx < sweepTotalSamples_)
++    {
++        engine_.requestSoundcheckRampOut();
++        return;
++    }
++
++    engine_.setSoundcheckOutputChannel (-1);
++}
++
+ void SoundcheckController::enterGap()
+ {
+-    // The sweep and its tail are over, so the signal is already zero
+-    // (sampleAt returns 0 past totalSamples): releasing the channel here is
+-    // silent, and it un-mutes every lane routed to it for the gap.
+     engine_.setSoundcheckCaptureActive (false);
+     engine_.setSoundcheckCaptureChannel (-1);
+-    engine_.setSoundcheckOutputChannel (-1);
++    releaseOutputChannelSafely();
+     // scSuspendTaps_ STAYS true (inv 10).
+ 
+     phaseEndsAtMs_ += kGapMs;
+     state_.store (State::Gap, std::memory_order_release);
+     notifyStateChanged();
+ }
+ 
+ void SoundcheckController::analyseCurrentTarget()
+ {
+     drainCapture();
+@@ -965,21 +1002,21 @@ void SoundcheckController::analyseCurrentTarget()
+ 
+ void SoundcheckController::finishRun()
+ {
+     // THE ORDER IS THE INVARIANT (inv 12). Detection must be back on BEFORE the
+     // state changes, or a GUI polling getState() sees Results while the
+     // detector is still disarmed -- and lane G's release ladder would walk a
+     // -24 notch up two rungs during the 20 s results window while spec §3
+     // declares 0 dB.
+     engine_.setSoundcheckCaptureActive (false);
+     engine_.setSoundcheckCaptureChannel (-1);
+-    engine_.setSoundcheckOutputChannel (-1);
++    releaseOutputChannelSafely();
+     engine_.setSoundcheckTapsSuspended (false);
+     if (setDetectionActiveOnAllSlots)
+         setDetectionActiveOnAllSlots (true);
+ 
+     if (logEvent)
+     {
+         int ok = 0, failed = 0, marked = 0, candidates = 0;
+         {
+             const std::lock_guard<std::mutex> lock (stateMutex_);
+             for (const auto& r : results_)
+diff --git a/src/app/SoundcheckController.h b/src/app/SoundcheckController.h
+index a5cf9d3..1dc8117 100644
+--- a/src/app/SoundcheckController.h
++++ b/src/app/SoundcheckController.h
+@@ -4,20 +4,25 @@
+ // emits, for how long, on which output channel, and when it stops. Everything
+ // audible in lane M is downstream of this class: AudioEngine only obeys eight
+ // atomics, and this is the only thing that writes them.
+ //
+ // THREAD MAP -- every public method is labelled below, and the labels are the
+ // contract, not documentation of an accident:
+ //
+ //   MESSAGE THREAD   preflight(), arm(), applyRequested(), dismissRequested(),
+ //                    requestStop(), abortAndJoin(), start(), stop(), and the
+ //                    assignment of the three std::function members.
++//                    *** stop(), abortAndJoin() AND THE DESTRUCTOR ALSO INVOKE
++//                    ALL THREE LAMBDAS ON THE CALLING THREAD *** as the last
++//                    thing they do -- they stand a live run down, and standing
++//                    it down means restoring detection and logging the abort
++//                    (N-2). See the lifetime contract on the members below.
+ //   LANE M THREAD    run() -> runOnce() in a wait(kPollMs) loop. It drains the
+ //                    engine's mic-capture ring, runs LoopGainEstimator and
+ //                    SoundcheckCandidates, writes the eight engine atomics and
+ //                    calls the injected lambdas. It NEVER calls NotchController
+ //                    (inv 17) -- this class holds no pointer to one.
+ //   AUDIO CALLBACK   not entered here at all. The callback reads the atomics
+ //                    this class writes, owns scSampleIndex_ once a run is in
+ //                    flight, latches the ramp-out anchor and releases the
+ //                    channel when the envelope reaches zero (inv 9).
+ //   ANY THREAD       getState(), getCurrentTargetIndex(), getTargetCount(),
+@@ -206,44 +211,64 @@ public:
+     // catches up at its next runOnce(), which is what restores detection.
+     void  requestStop (AbortReason reason);
+     // The device-restart path (Task 10). IT JOINS THE POLL THREAD FIRST, then
+     // runs the abort on the CALLER thread: the other order leaves two threads
+     // inside the machine, and a poll thread sitting in Gap can enterTarget()
+     // after the abort and emit a whole sweep with the taps live (C-2). Returns
+     // true when the machine reached Idle.
+     //
+     // *** AFTER THIS RETURNS THE POLL THREAD IS STOPPED. *** Task 10 must call
+     // start() again once the device is back; nothing restarts it here.
+-    bool  abortAndJoin();
++    [[nodiscard]] bool abortAndJoin();
+ 
+     // --- ANY THREAD (reads) ---
+     [[nodiscard]] State  getState() const;
+     [[nodiscard]] int    getCurrentTargetIndex() const;
+     [[nodiscard]] int    getTargetCount() const;
+     [[nodiscard]] double getElapsedMsInRun() const;
+     [[nodiscard]] double getRemainingMsInRun() const;
+     [[nodiscard]] std::vector<OutputResult> copyResults() const;
+     // I-4: consumed by MainComponent's APPLY lambda (Task 10), which walks the
+     // slots and calls applySoundcheckResults once per slot's NotchController.
+     [[nodiscard]] std::vector<OutputResult> copyResultsForSlot (int slot) const;
+ 
+     // Injected so this class holds NO NotchController pointer (inv 17). The
+     // owner's lambda does nothing but relaxed atomic stores
+     // (NotchController::setDetectionActive).
+     //
+-    // *** LIFETIME CONTRACT (I-10) ***
+-    // All three are ASSIGNED ONCE, BEFORE start(), AND NEVER AFTER. They are
+-    // invoked from the lane M thread; a std::function assigned while it is
+-    // being invoked is a data race, and these are bare public members with no
+-    // lock. Before any reassignment or destruction, abortAndJoin() or
+-    // stop() must have RETURNED. MainComponent assigns them in its
+-    // constructor (Task 10 Step 2), before the controller is ever started.
++    // *** LIFETIME CONTRACT (I-10, amended by N-2) ***
++    //
++    // ASSIGNED ONCE, BEFORE start(), AND NEVER AFTER. A std::function assigned
++    // while it is being invoked is a data race, and these are bare public
++    // members with no lock. Before any reassignment, abortAndJoin() or stop()
++    // must have RETURNED. MainComponent assigns them in its constructor
++    // (Task 10 Step 2), before the controller is ever started.
++    //
++    // THEY ARE INVOKED FROM THE LANE M THREAD *AND* FROM WHATEVER THREAD CALLS
++    // stop(), abortAndJoin() OR THE DESTRUCTOR. Those three stand a live run
++    // down after joining the poll thread, and standing a run down means
++    // setDetectionActiveOnAllSlots(true), a soundcheck_abort through logEvent
++    // and one onStateChanged -- there is no other thread left to do it on.
++    //
++    // NOT enforced with jassert(isThisTheMessageThread()). The last of those
++    // three calls is a DESTRUCTOR, which runs on whatever thread owns the
++    // object, and an assertion that holds only in Debug builds fires long after
++    // the dangling reference it is supposed to prevent has already been formed.
++    // The property that actually prevents it is DECLARATION ORDER, which is
++    // checkable by reading the owner:
++    //
++    // *** THE OWNER MUST DECLARE SoundcheckController AFTER *** its AudioEngine,
++    // its ClockSource, its SessionLogger and every GUI member these lambdas
++    // reach. Members are destroyed in reverse declaration order, so declaring
++    // it last means all of them are still alive while it stands the run down.
++    // The other way round, the destructor touches dead objects on its way out
++    // (C-3).
+     std::function<void (bool)>             setDetectionActiveOnAllSlots;
+     std::function<void (const juce::var&)> logEvent;      // message- or lane-M thread
+     std::function<void()>                  onStateChanged;   // GUI repaint request
+ 
+     // One poll step. run() is this in a loop with wait(kPollMs); every test
+     // drives it directly, so no test starts a thread.
+     void runOnce();
+ 
+     void start();
+     // Stands the RUN down, not just the thread (C-3): stopping the poll thread
+@@ -262,20 +287,23 @@ public:
+     // the same rounding the writer uses, qualified.
+     [[nodiscard]] static double roundToThreeSignificantFiguresForTest (double v);
+ 
+ private:
+     void run() override;
+ 
+     // --- phase helpers, all on the lane M thread (enterTarget(0) is also
+     // reached from arm() on the message thread, before the thread exists) ---
+     void enterTarget (int index);
+     void enterGap();
++    // Releases scOutChannel_ -- but through the RAMP if the callback still has
++    // a non-zero sample to produce (N-1). A bare store there is a hard cut.
++    void releaseOutputChannelSafely();
+     void finishRun();
+     void beginAbort (AbortReason reason);
+     void stopEmissionSafely();            // ramp-out while emitting, backstop while silent
+     bool checkDeviceUnchanged() const;     // sample rate + channel counts vs RunParams
+     bool micIsHot();                       // advances the hold timer, so NOT const
+     void armSweepForCurrentTarget();       // gate passed: publish the index, THEN the channel
+     [[nodiscard]] Refusal validateTargets (const std::vector<Target>& targets) const;
+     [[nodiscard]] Refusal refuseOnRingRisk (const NotchController::SnapshotBuffer& r) const;
+     bool noiseWindowIsRinging() const;     // peakinessAt vs params_.noiseFloorGate
+     void drainCapture();
+@@ -309,20 +337,24 @@ private:
+     // Sample bookkeeping for the CURRENT target, lane M thread only.
+     //
+     // The noise floor is no longer delimited by the sweep index (C-1): the
+     // sweep does not exist until the gate has passed. noiseFloorEndSample_ is
+     // INT64_MAX until then -- everything captured is noise -- and is stamped
+     // with capturedSamples_ at the moment the gate says quiet.
+     std::int64_t noiseFloorEndSample_ = 0;
+     std::int64_t capturedSamples_     = 0;
+     std::size_t  noiseWindowFill_     = 0;
+     std::int64_t sweepLeadInSamples_  = 0;
++    // Length of the sweep itself, so releaseOutputChannelSafely() can ask
++    // "could the callback still be producing a non-zero sample?" without
++    // re-deriving SoundcheckSignal's arithmetic.
++    std::int64_t sweepTotalSamples_   = 0;
+ 
+     LoopGainEstimator estimator_ { 48000.0 };
+     std::vector<float> capture_;          // drain scratch, sized once at Arm
+     std::vector<float> noiseWindow_;      // the whole noise-floor phase
+     std::vector<float> reference_;        // the regenerated sweep, built once at Arm
+ 
+     // The magnitude spectrum of the noise window, so noiseWindowIsRinging()
+     // can run PeakinessAnalyzer::peakinessAt over it without allocating.
+     std::array<float, LoopGainEstimator::kNumBins> noiseMagnitudes_ {};
+     // The worst peakiness the last noise window produced. Published through
+diff --git a/tests/test_soundcheckcontroller.cpp b/tests/test_soundcheckcontroller.cpp
+index 6676d90..8632471 100644
+--- a/tests/test_soundcheckcontroller.cpp
++++ b/tests/test_soundcheckcontroller.cpp
+@@ -628,20 +628,82 @@ TEST (SoundcheckController, SweepIsNotArmedUntilTheGateSaysQuiet)
+     EXPECT_EQ (r.peakOn (0), 0.0f);
+     EXPECT_EQ (r.peakOn (1), 0.0f);
+     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::NoiseFloor);
+ 
+     // ...and one poll later, with the room scored quiet, it arms.
+     r.pump (20.0);
+     EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
+     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Sweep);
+ }
+ 
++// RED IF: the sweep deadlines are carried forward from the noise-floor deadline
++// instead of re-stamped when the sweep is actually armed (N-1).
++//
++// After C-1 the audio starts when the GATE POLL arms it, not when the noise
++// floor was entered. A poll that is L late therefore leaves a deadline L short:
++// under 700 ms that silently under-measures the tail (a resonance whose decay
++// fell outside the window reads lower than it is -- the estimator cannot tell,
++// and the log says nothing); past 700 ms the Gap arrives while the sweep is
++// still at FULL AMPLITUDE and the bare release is a hard cut on a live PA.
++TEST (SoundcheckController, LateGatePollDoesNotShortenTheTailOrCutTheSweep)
++{
++    Rig r;                          // silent room: any non-zero output IS the sweep
++    ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
++
++    // 800 ms late -- past kTailSeconds, which is what turns the bug audible.
++    r.driveUnpolled (SoundcheckController::kNoiseFloorMs + 800.0);
++    ASSERT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
++
++    const double armedAtMs = r.clock.nowMs();
++    r.sc.runOnce();                                    // the late gate poll
++    ASSERT_EQ (r.sc.getState(), SoundcheckController::State::Sweep);
++    ASSERT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
++
++    const double perBlock = r.frames / kSr * 1000.0;
++
++    // (a) 3.0 s after ARMING -- i.e. just before the sweep audio itself ends --
++    //     the machine must still be sweeping. The old arithmetic entered Gap at
++    //     armedAt + 2.92 s, 100 ms before the audio finished.
++    while (r.clock.nowMs() < armedAtMs + 3000.0)
++    {
++        r.block(); r.clock.advance (perBlock); r.sc.runOnce();
++    }
++    EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Sweep)
++        << "the Sweep phase ended before the sweep audio did";
++    EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), 0);
++    EXPECT_FALSE (r.engine.isSoundcheckRampOutPending())
++        << "the sweep was cut short -- something asked for an emergency fade";
++    EXPECT_GT (r.peakOn (0), 0.0f) << "nothing is being emitted at all";
++
++    // (b) and no release by the CONTROLLER ever lands on a channel that is
++    //     still making sound, for either target.
++    float peakAtRelease = -1.0f;
++    int   releases = 0;
++    for (double t = 0.0; t < 12000.0; t += perBlock)
++    {
++        r.block();
++        const float peakThisBlock  = r.peakOn (0) + r.peakOn (1);
++        const bool  armedAfterBlock = r.engine.getSoundcheckOutputChannel() >= 0;
++        r.clock.advance (perBlock);
++        r.sc.runOnce();
++        if (armedAfterBlock && r.engine.getSoundcheckOutputChannel() < 0)
++        {
++            ++releases;
++            peakAtRelease = std::max (peakAtRelease, peakThisBlock);
++        }
++    }
++    EXPECT_GT (releases, 0) << "the run never released a channel -- a fixture problem";
++    EXPECT_FLOAT_EQ (std::max (peakAtRelease, 0.0f), 0.0f)
++        << "a channel was released while it was still playing: that is a hard "
++           "cut at whatever amplitude the sweep had reached";
++}
++
+ // RED IF: the gate answers a question about the whole spectrum instead of the
+ // band the sweep measures (I-2). An LED driver at 17 kHz, a switch-mode supply
+ // or mains hum are narrow, permanent and outside [kSweepLowHz, kTrustedHighHz]:
+ // scoring them refuses every run in the venue and says nothing about whether the
+ // room rings where the measurement is going.
+ TEST (SoundcheckController, GateIgnoresBinsOutsideTheSweepBand)
+ {
+     {
+         Rig out;
+         out.micSource = noisePlusTone (16384, 1.0e-3f, 17000.0, 0.05f);
+@@ -651,20 +713,22 @@ TEST (SoundcheckController, GateIgnoresBinsOutsideTheSweepBand)
+             << "a 17 kHz whine, outside the swept band, refused the run";
+         EXPECT_NE (out.sc.getState(), SoundcheckController::State::Idle);
+     }
+     {
+         Rig in;                                     // the control, in-band
+         in.micSource = noisePlusTone (16384, 1.0e-3f, 1000.0, 0.05f);
+         ASSERT_EQ (in.armWith (in.params (10.0f)), SoundcheckController::Refusal::None);
+         in.pump (2000.0);
+         EXPECT_TRUE (sawEvent (in.log, "soundcheck_abort"));
+         EXPECT_EQ (abortReasonInLog (in.log), "room_ringing");
++        in.micSource.assign (4096, 0.0f);
++        expectEngineStoodDown (in);
+     }
+ }
+ 
+ // RED IF: an unmeasured noise floor is read as a quiet one. No frames means the
+ // device delivered nothing at all -- and "we heard nothing" is not "the room is
+ // silent", it is "we were not listening". The gate FAILS CLOSED.
+ TEST (SoundcheckController, AnUnmeasurableNoiseFloorFailsClosed)
+ {
+     Rig r;
+     ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+@@ -865,38 +929,41 @@ TEST (SoundcheckController, EngineStoppedAbortReleasesTheChannelWithNoCallback)
+     r.setRunning (false);
+     r.sc.runOnce();
+ 
+     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+     EXPECT_EQ (abortReasonInLog (r.log), "engine_stopped");
+     // NOT ONE further callback has run, and the channel is already released.
+     EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1)
+         << "the abort waited for a fade that nothing will ever generate";
+     EXPECT_FALSE (r.engine.isSoundcheckRampOutPending());
+     EXPECT_TRUE (r.detectionOn);
++    r.setRunning (true);        // the helper drives blocks; put the rig back first
++    expectEngineStoodDown (r);
+ }
+ 
+ // RED IF: a device error is not an abort. getLastDeviceError() is the only
+ // channel through which a driver failure reaches this thread at all.
+ TEST (SoundcheckController, DeviceErrorAborts)
+ {
+     Rig r;
+     ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);
+     r.pump (200.0);
+     ASSERT_FALSE (sawEvent (r.log, "soundcheck_abort"));
+ 
+     r.engine.audioDeviceError ("the interface fell over");
+     r.sc.runOnce();
+ 
+     EXPECT_TRUE (sawEvent (r.log, "soundcheck_abort"));
+     EXPECT_EQ (r.sc.getState(), SoundcheckController::State::Idle);
+     EXPECT_TRUE (r.detectionOn);
+     EXPECT_EQ (r.engine.getSoundcheckOutputChannel(), -1);
++    expectEngineStoodDown (r);
+ }
+ 
+ // RED IF: micCaptureDrops_ is ignored. A drop splices sample N onto N+k, which
+ // through the Hann window is broadband energy in every bin -- the measurement is
+ // worthless and must not be reported as a measurement. F20.
+ TEST (SoundcheckController, CaptureDropAborts)
+ {
+     Rig r;
+     r.micSource = whiteNoise (4096, 1.0e-4f);
+     ASSERT_EQ (r.armWith (r.params()), SoundcheckController::Refusal::None);

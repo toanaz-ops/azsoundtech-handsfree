@@ -1368,6 +1368,36 @@ TEST (GuiWiring, SetAndClearKeepTheirOwnEventNames)
     EXPECT_FALSE (cv.getDynamicObject()->hasProperty ("from_db"));
 }
 
+// RED IF: reasonName gains no case for SoundcheckReplace. It falls through to
+// "unknown" and the tester's log says nothing useful -- the same class of defect
+// as lane G's retuneReasonName fallthrough (Task 9 review I2).
+//
+// B-3: this lives HERE because MainComponent::notchEventToVarForTest
+// (MainComponent.h:194) is used from nowhere else in the suite
+// (test_gui_wiring.cpp:1337, 1360, 1365, 1383), and the event is built INLINE --
+// the makeClearEvent helper plan rev 1 assumed does not exist anywhere in the
+// repo.
+TEST (GuiWiring, SoundcheckReplaceReachesTheLogAsItsOwnReason)
+{
+    NotchController::NotchEvent clear;
+    clear.kind   = NotchController::NotchEvent::Kind::Clear;
+    clear.slot   = 0;
+    clear.lane   = 0;
+    clear.index  = 2;
+    clear.hz     = 1000.0f;
+    clear.q      = 30.0f;
+    clear.depthDb = -12.0f;
+    clear.origin = NotchController::Origin::Soundcheck;
+    clear.reason = NotchController::ClearReason::SoundcheckReplace;
+
+    const juce::var v = MainComponent::notchEventToVarForTest (clear);
+
+    EXPECT_EQ (v["ev"].toString(), "notch_clear");
+    EXPECT_EQ (v["reason"].toString(), "soundcheck_replace");
+    EXPECT_NE (v["reason"].toString(), "manual");
+    EXPECT_NE (v["reason"].toString(), "unknown");
+}
+
 // RED IF a reason name is dropped or renamed -- logstats.py and the tester
 // notes both read these four strings.
 TEST (GuiWiring, EveryRetuneReasonHasItsOwnName)
@@ -1765,4 +1795,1365 @@ TEST (GuiWiring, PresetLoadWithoutACeilingSaysSoInTheLog)
     EXPECT_TRUE (load->getDynamicObject()->hasProperty ("ceiling_applied"));
     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("q"));
     EXPECT_FALSE (load->getDynamicObject()->hasProperty ("depth_db"));
+}
+
+//==============================================================================
+// Lane M Task 9 -- gui::SoundcheckPanel.
+//
+// Vietnamese labels are compared against EXPLICIT UTF-8 BYTES written out here
+// independently of the ones in src/gui/SoundcheckPanel.cpp. Sharing a constant
+// between the assertion and the thing asserted would make these tests
+// incapable of failing; and a raw source literal would depend on MSVC's
+// source-charset guess, which is what produced the mojibake middle dot
+// (src/gui/DeviceViewModel.cpp:13 is the byte-escape precedent).
+
+TEST (SoundcheckPanel, StopIsTheOfficialPathAndEscIsTheSecondOne)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.resized();
+
+    int stops = 0;
+    panel.onStop = [&stops] { ++stops; };
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    EXPECT_TRUE (panel.getWantsKeyboardFocus());
+
+    panel.stopButton.onClick();
+    EXPECT_EQ (stops, 1);
+
+    // Esc is BEST EFFORT and second, not first: a key press only reaches the
+    // component that currently has focus and the preset name field also takes
+    // keys (MainComponent.cpp:255-290). F14.
+    EXPECT_TRUE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+    EXPECT_EQ (stops, 2);
+
+    // Anything the panel does not own must be REFUSED so it still reaches
+    // whatever else wants it.
+    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::returnKey)));
+    EXPECT_EQ (stops, 2);
+
+    // And Esc must not be a stop button in disguise once the run is over: in
+    // Results the only two answers are AP DUNG and BO.
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    EXPECT_FALSE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+    EXPECT_EQ (stops, 2);
+}
+
+TEST (SoundcheckPanel, ModesShowTheRightControlsWithRealLabels)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+
+    // RED IF the three buttons carry no text (the JUCE 9 two-argument
+    // TextButton(name, tooltip) trap), or if AP DUNG is shown mid-run.
+    EXPECT_EQ (panel.stopButton.getButtonText(),
+               juce::String::fromUTF8 ("D\xe1\xbb\xaaNG"));                 // DUNG
+    EXPECT_EQ (panel.applyButton.getButtonText(),
+               juce::String::fromUTF8 ("\xc3\x81P D\xe1\xbb\xa4NG"));       // AP DUNG
+    EXPECT_EQ (panel.dismissButton.getButtonText(),
+               juce::String::fromUTF8 ("B\xe1\xbb\x8e"));                   // BO
+
+    EXPECT_FALSE (panel.stopButton.getButtonText().isEmpty());
+    EXPECT_FALSE (panel.applyButton.getButtonText().isEmpty());
+    EXPECT_FALSE (panel.dismissButton.getButtonText().isEmpty());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.resized();
+    EXPECT_TRUE  (panel.isVisible());
+    EXPECT_TRUE  (panel.stopButton.isVisible());
+    EXPECT_FALSE (panel.applyButton.isVisible());
+    EXPECT_FALSE (panel.dismissButton.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.resized();
+    EXPECT_FALSE (panel.stopButton.isVisible());
+    EXPECT_TRUE  (panel.applyButton.isVisible());
+    EXPECT_TRUE  (panel.dismissButton.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
+    EXPECT_FALSE (panel.isVisible());
+    EXPECT_FALSE (panel.getWantsKeyboardFocus());
+}
+
+TEST (SoundcheckPanel, EveryVisibleControlIsInsideThePanelAndNoneOverlap)
+{
+    // RED IF a button is laid off the panel's own bounds -- invisible in every
+    // test and obvious in a render (memory/gui-console-lessons-2026-08-24.md:
+    // headless setSize() has no peer, so resized() is driven by hand).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, gui::SoundcheckPanel::kPanelHeight);
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.resized();
+    EXPECT_TRUE (panel.getLocalBounds().contains (panel.stopButton.getBounds()));
+    EXPECT_GT   (panel.stopButton.getWidth(), 0);
+    EXPECT_GE   (panel.stopButton.getHeight(), az::theme::touchTarget);
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.resized();
+    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.applyButton.getBounds()));
+    EXPECT_TRUE  (panel.getLocalBounds().contains (panel.dismissButton.getBounds()));
+    EXPECT_FALSE (panel.applyButton.getBounds().intersects (panel.dismissButton.getBounds()));
+
+    // The summary must not run under the two buttons: a results line that is
+    // half-covered by AP DUNG is a line nobody reads before pressing it.
+    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.applyButton.getBounds()));
+    EXPECT_FALSE (panel.summaryBoundsForTest().intersects (panel.dismissButton.getBounds()));
+
+    // Both legends must FIT, measured with the real font rather than guessed
+    // (memory/stereo-lane-lessons-2026-09-05.md).
+    const auto font = az::theme::legendFont (az::theme::switchFontSize, true,
+                                             az::theme::trackingSwitch);
+    EXPECT_GE ((float) panel.applyButton.getWidth(),
+               az::theme::stringWidth (font, panel.applyButton.getButtonText().toUpperCase())
+                   + 2.0f * (float) az::theme::gap);
+}
+
+TEST (SoundcheckPanel, UnmeasuredAndMisroutedAreSeparateSentences)
+{
+    // RED IF an unmeasured channel or a mis-routed one is folded into the
+    // headline count. They are DIFFERENT sentences for the operator: "could
+    // not measure" and "the routing is wrong" ask for different actions (F26).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.setResultsSummary (/*hotSpots*/ 3, /*saturated*/ 1,
+                             /*unmeasured*/ 2, /*routingInvalid*/ 1);
+    panel.resized();
+
+    const juce::String text = panel.summaryTextForTest();
+    EXPECT_TRUE (text.contains ("3"));
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("kh\xc3\xb4ng \xc4\x91o \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c")));  // khong do duoc
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("\xc4\x91\xe1\xbb\x8bnh tuy\xe1\xba\xbfn")));                  // dinh tuyen
+
+    // The two faults are separate LINES, not one run-on sentence.
+    EXPECT_GE (juce::StringArray::fromLines (text).size(), 4);
+
+    // And the saturated warning names the action to take, not just the fact.
+    EXPECT_TRUE (text.containsIgnoreCase (juce::String ("gain")));
+}
+
+TEST (SoundcheckPanel, AMissingCeilingIsAnErrorAndNeverReadsAsACleanRoom)
+{
+    // SoundcheckController::OutputResult::ceilingMissing / ladderMissing mean
+    // "pick() had nothing to propose FROM" -- a fault in the setup, not a
+    // verdict about the room. Reporting that as zero hot spots would tell an
+    // operator their PA is clean when nothing was actually judged.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+
+    gui::SoundcheckPanel::Model model;
+    model.hotSpots      = 0;
+    model.cannotPropose = 2;
+    panel.setResults (model);
+
+    const juce::String text = panel.summaryTextForTest();
+    EXPECT_TRUE (panel.hasErrorForTest());
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("thi\xe1\xba\xbfu tr\xe1\xba\xa7n c\xe1\xba\xaft")));   // thieu tran cat
+
+    // A genuinely clean room says so, and is NOT an error.
+    const gui::SoundcheckPanel::Model clean;
+    panel.setResults (clean);
+    EXPECT_FALSE (panel.hasErrorForTest());
+}
+
+TEST (SoundcheckPanel, ProgressShowsLaneMsOwnCountdownAndTheChannelItIsOn)
+{
+    // F12: the number is lane M's OWN remaining-ms, never
+    // getSoundcheckRemainingMs() -- that one measures the PASSIVE 15 s window
+    // in liveMs_, which is frozen while the taps are suspended and would show
+    // a number that stands still. The panel is fed a double and formats it;
+    // nothing here reaches for the controller.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 120);
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    panel.setProgress (/*channelIndex*/ 1, /*channelCount*/ 4, /*remainingMs*/ 47200.0);
+    panel.resized();
+
+    // Caption and number are two different sizes, so they are two different
+    // things -- one Label cannot be two sizes (ModeRail.h:66-72).
+    const auto caption = panel.progressTextForTest();
+    EXPECT_TRUE (caption.contains ("2/4"));                     // 1-based for a human
+    EXPECT_TRUE (caption.containsIgnoreCase (
+        juce::String::fromUTF8 ("k\xc3\xaanh")));               // kenh
+    EXPECT_FALSE (caption.contains ("48"));                     // the number is NOT in here
+
+    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("48 s"));   // ceil(47.2)
+
+    panel.setProgress (3, 4, 0.0);
+    EXPECT_EQ (panel.countdownTextForTest(), juce::String ("0 s"));
+}
+
+//==============================================================================
+// Lane M Task 9, review round 1.
+
+// RED IF a fault sentence is dropped or half-drawn to make the strip fit. Both
+// of the last two sentences ask the operator to go and FIX something -- a bad
+// patch, a channel that could not be measured -- so a strip that silently
+// swallows the tail is a strip that reports a run as clean when it was not.
+// The rule is: the panel asks for the height its lines need, and the owner
+// gives it.
+TEST (SoundcheckPanel, ThePanelAsksForEnoughHeightToDrawEveryFaultSentence)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    EXPECT_EQ (panel.preferredHeight(), gui::SoundcheckPanel::kPanelHeight);
+
+    // One line: the minimum is enough and the strip must not grow for nothing.
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+    panel.setResultsSummary (0, 0, 0, 0);
+    const int oneLine = panel.preferredHeight();
+    EXPECT_EQ (oneLine, gui::SoundcheckPanel::kPanelHeight);
+
+    // Every fault at once. The strip has to get taller, and every line has to
+    // fit inside the area paint() draws into.
+    gui::SoundcheckPanel::Model worst;
+    worst.hotSpots        = 4;
+    worst.saturatedBins   = 2;
+    worst.unmeasured      = 3;
+    worst.routingInvalid  = 1;
+    worst.cannotPropose   = 2;
+    worst.clearedPrevious = 5;      // with placed == 0 this is the worse-off line too
+    panel.setResults (worst);
+
+    const int many = panel.preferredHeight();
+    EXPECT_GT (many, oneLine);
+
+    panel.setSize (900, many);
+    panel.resized();
+
+    const auto lines = juce::StringArray::fromLines (panel.summaryTextForTest());
+    EXPECT_GE (lines.size(), 6);
+    EXPECT_GE (panel.summaryBoundsForTest().getHeight(),
+               lines.size() * gui::SoundcheckPanel::kSummaryLineHeightForTest);
+}
+
+// RED IF the post-apply outcome has nowhere to go. clearedPrevious > 0 with
+// placed == 0 means the apply took working notches OUT and put nothing back:
+// the room is measurably worse than before the operator pressed AP DUNG. It is
+// the one outcome that must never be reported as success, and Task 10 needs a
+// landing place for SoundcheckApplyStats that already refuses to do that.
+TEST (SoundcheckPanel, AnApplyThatClearedAndPlacedNothingIsReportedAsWorseOff)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 140);
+    panel.setMode (gui::SoundcheckPanel::Mode::Applied);
+
+    gui::SoundcheckPanel::Model stats;
+    stats.clearedPrevious = 3;
+    stats.placed          = 0;
+    EXPECT_TRUE (stats.worseOff());
+
+    panel.setResults (stats);
+    panel.resized();
+
+    EXPECT_TRUE (panel.hasErrorForTest());
+
+    const auto text = panel.summaryTextForTest();
+    // "KEM an toan hon truoc" -- the sentence says the room got WORSE, in the
+    // operator's own language, not a count they have to interpret.
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")));
+    EXPECT_TRUE (text.contains ("3"));
+
+    // And it is NOT dressed up as a clean room.
+    EXPECT_FALSE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("kh\xc3\xb4ng t\xc3\xacm th\xe1\xba\xa5y")));
+
+    // An apply that actually placed something is not an error, and says so.
+    gui::SoundcheckPanel::Model good;
+    good.clearedPrevious = 3;
+    good.placed          = 4;      // LANE-writes: 2 per linked pair
+    EXPECT_FALSE (good.worseOff());
+    panel.setResults (good);
+    EXPECT_FALSE (panel.hasErrorForTest());
+    EXPECT_TRUE  (panel.summaryTextForTest().contains ("4"));
+
+    // BO is still reachable: an outcome the operator cannot clear is an
+    // outcome that covers the analyser until the app restarts.
+    panel.resized();
+    EXPECT_TRUE  (panel.dismissButton.isVisible());
+    EXPECT_FALSE (panel.applyButton.isVisible());
+}
+
+// RED IF the worse-off verdict is taken from the TOTALS (final review I-3).
+// The counts the strip is given are sums over every slot, and a sum hides the
+// one outcome this report exists to refuse to hide: slot 0 loses three notches
+// and gets none back while slot 1 places six, and `3 cleared / 6 placed` reads
+// as an unqualified success. Slot 0's chain is the one that howls.
+//
+// The APPLY path itself cannot be driven headless (it needs State::Results,
+// which needs a real device and >= 4.5 s per output -- see
+// AnAppliedReportHoldsTheConsoleAndADismissedOneDoesNot), so what is pinned
+// here is the contract between the per-slot stats and the strip: the sum, the
+// flag the owner sets beside it, and what the panel then says.
+TEST (SoundcheckPanel, AWorseOffSlotIsNotMaskedByAnotherSlotsSuccess)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 200);
+    panel.setMode (gui::SoundcheckPanel::Mode::Applied);
+
+    // TWO SLOTS' real stats, summed exactly as applySoundcheckProposals sums
+    // them -- and the per-slot verdict taken with the same identity, before the
+    // sum destroys it.
+    SoundcheckApplyStats slot0;      // cleared three, put nothing back
+    slot0.clearedPrevious = 3;
+    slot0.placed          = 0;
+
+    SoundcheckApplyStats slot1;      // a clean six
+    slot1.clearedPrevious = 0;
+    slot1.placed          = 6;
+
+    gui::SoundcheckPanel::Model model;
+    model.placed          = slot0.placed          + slot1.placed;
+    model.clearedPrevious = slot0.clearedPrevious + slot1.clearedPrevious;
+    model.anySlotWorseOff = (slot0.clearedPrevious > 0 && slot0.placed == 0)
+                         || (slot1.clearedPrevious > 0 && slot1.placed == 0);
+
+    // THE MASK ITSELF, asserted rather than assumed: on the totals alone this
+    // run looks fine, which is exactly why the flag has to exist.
+    ASSERT_FALSE (model.worseOff());
+    ASSERT_TRUE  (model.anySlotWorseOff);
+    EXPECT_TRUE  (model.showWorseOff());
+
+    panel.setResults (model);
+    panel.resized();
+
+    EXPECT_TRUE (panel.hasErrorForTest())
+        << "a slot that came out worse is an ERROR, whatever the totals say";
+
+    const auto text = panel.summaryTextForTest();
+    // "KEM an toan hon truoc" -- the danger sentence, in the operator's own
+    // words, on a run the totals called a success.
+    EXPECT_TRUE (text.containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")))
+        << text.toStdString();
+    // And the six that WERE placed are still reported: the operator needs both
+    // halves, not the warning instead of the count.
+    EXPECT_TRUE (text.contains ("6")) << text.toStdString();
+    EXPECT_TRUE (text.contains ("3")) << text.toStdString();
+
+    // The control: with neither slot worse off, nothing changes about the
+    // existing success report.
+    gui::SoundcheckPanel::Model clean;
+    clean.placed          = 6;
+    clean.clearedPrevious = 3;
+    EXPECT_FALSE (clean.showWorseOff());
+    panel.setResults (clean);
+    EXPECT_FALSE (panel.hasErrorForTest());
+    EXPECT_FALSE (panel.summaryTextForTest().containsIgnoreCase (
+        juce::String::fromUTF8 ("K\xc3\x89M an to\xc3\xa0n h\xc6\xa1n")));
+}
+
+// RED IF "no hot spots" is printed beside a finding that contradicts it. A
+// saturated bin is one the DEEPEST rung on the ladder could not fix -- the
+// opposite of a clean room -- and round 1 printed both lines together.
+TEST (SoundcheckPanel, ASaturatedBinIsNeverAccompaniedByTheCleanRoomLine)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::SoundcheckPanel panel;
+    panel.setSize (900, 140);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+
+    const auto cleanRoom = juce::String::fromUTF8 (
+        "kh\xc3\xb4ng t\xc3\xacm th\xe1\xba\xa5y \xc4\x91i\xe1\xbb\x83m");   // "khong tim thay diem"
+
+    panel.setResultsSummary (/*hotSpots*/ 0, /*saturated*/ 2,
+                             /*unmeasured*/ 0, /*routingInvalid*/ 0);
+    EXPECT_FALSE (panel.summaryTextForTest().containsIgnoreCase (cleanRoom));
+    EXPECT_TRUE  (panel.summaryTextForTest().containsIgnoreCase (juce::String ("gain")));
+
+    // A run that really did find nothing still says so.
+    panel.setResultsSummary (0, 0, 0, 0);
+    EXPECT_TRUE (panel.summaryTextForTest().containsIgnoreCase (cleanRoom));
+}
+
+// Gap B / I-4. RED IF the strip goes back on top of the analyser. It did in
+// round 1, and the render -- not a test -- showed it burying the whole
+// frequency axis and the overlay's own marked-bin rake.
+TEST (GuiWiring, TheSoundcheckStripTakesABandOffTheAnalyserAndNeverCoversIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    auto& view  = app.getSpectrumViewForTest();
+
+    app.setSize (1440, 920);
+    app.resized();      // headless: no peer, so setSize() never runs it
+                        // (memory/gui-console-lessons-2026-08-24.md)
+
+    const int analyserWhenHidden = view.getHeight();
+    EXPECT_FALSE (panel.isVisible());
+
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    app.resized();
+
+    const auto strip = panel.getBounds();
+    const auto plot  = view.getBounds();
+
+    EXPECT_TRUE  (panel.isVisible());
+    EXPECT_FALSE (strip.intersects (plot));               // never an overlay
+    EXPECT_GE    (strip.getY(), plot.getBottom());        // and always BELOW
+    EXPECT_EQ    (strip.getHeight(), panel.preferredHeight());
+    EXPECT_LT    (plot.getHeight(), analyserWhenHidden);  // the plot paid for it
+
+    // Hidden again: the analyser gets its height back.
+    panel.setMode (gui::SoundcheckPanel::Mode::Hidden);
+    app.resized();
+    EXPECT_EQ (view.getHeight(), analyserWhenHidden);
+}
+
+// I-4. RED IF the strip is the thing that shrinks on a short window. The
+// analyser going under its floor is a nuisance; a fault sentence nobody sees
+// is a room that stays wrong.
+TEST (GuiWiring, AShortWindowShrinksTheAnalyserRatherThanTheSoundcheckStrip)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    auto& view  = app.getSpectrumViewForTest();
+
+    // Every fault at once, so the strip is asking for more than its minimum.
+    gui::SoundcheckPanel::Model worst;
+    worst.hotSpots        = 4;
+    worst.saturatedBins   = 2;
+    worst.unmeasured      = 3;
+    worst.routingInvalid  = 1;
+    worst.cannotPropose   = 2;
+    worst.clearedPrevious = 5;
+    panel.setResults (worst);
+    panel.setMode (gui::SoundcheckPanel::Mode::Results);
+
+    app.setSize (1440, 920);
+    app.resized();
+    const int tallPlot = view.getHeight();
+    ASSERT_EQ (panel.getHeight(), panel.preferredHeight());
+
+    // A genuinely short window. There is no kMinHeight constant to reach for;
+    // 560 px is well under what the masthead, transport, strip and floor want
+    // together, which is exactly the case the rule is about.
+    app.setSize (1440, 560);
+    app.resized();
+
+    // The strip kept EVERY pixel it asked for...
+    EXPECT_EQ (panel.getHeight(), panel.preferredHeight());
+    // ...the analyser is what gave way...
+    EXPECT_LT (view.getHeight(), tallPlot);
+    // ...and the two still do not overlap, so nothing is drawn over anything.
+    EXPECT_FALSE (panel.getBounds().intersects (view.getBounds()));
+    EXPECT_GE    (panel.getBounds().getY(), view.getBounds().getBottom());
+}
+
+
+//==============================================================================
+// LANE M Task 10 -- the wiring that connects a button to a loudspeaker.
+//
+// NOTHING IN THIS FILE CAN EMIT. Every test here builds a MainComponent with no
+// audio device: SoundcheckController::arm() refuses outright while the engine
+// is not running (Refusal::EngineNotRunning), so the machine never leaves Idle
+// and scOutChannel_ is never armed. That is asserted rather than assumed --
+// soundcheckIsEmitting() is checked on the DO path below.
+
+// RED IF: onBeforeRestart forgets lane M, or onAfterRestart forgets to start the
+// poll thread again. audioDeviceAboutToStart clears every ring under "no
+// producer and no consumer running" (LockFreeRingBuffer.h), and micCapture_ is
+// in that block now with the lane M thread as its consumer. abortAndJoin()
+// leaves the thread STOPPED and nothing inside the controller restarts it
+// (SoundcheckController.h:219-220). F15.
+TEST (MainComponentSoundcheck, DeviceRestartAbortsAndJoinsTheSoundcheckFirst)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_NE (app.getDevicePanelForTest().onBeforeRestart, nullptr);
+    ASSERT_NE (app.getDevicePanelForTest().onAfterRestart,  nullptr);
+
+    // A poll thread, as a live device would have left behind.
+    sc.start();
+    ASSERT_TRUE (sc.isPollThreadRunningForTest());
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    // JOINED -- not merely asked to stop. This is the assertion that goes red
+    // if the hook restarts the device with the lane M thread still draining.
+    EXPECT_FALSE (sc.isPollThreadRunningForTest());
+    EXPECT_EQ    (sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+
+    app.getDevicePanelForTest().onAfterRestart();
+
+    // ...and running again, or the next DO would arm a run nothing ever polls.
+    EXPECT_TRUE (sc.isPollThreadRunningForTest());
+
+    sc.stop (2000);
+}
+
+// RED IF: a device restart leaves the console locked. The restart can happen
+// without the operator asking for it, so the abort path has to hand the
+// controls back -- a rig with its mode rail dead mid-show is unusable.
+TEST (MainComponentSoundcheck, DeviceRestartUnlocksTheConsoleAndSaysWhatHappened)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckControlsLockedForTest (true);
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Running);
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_TRUE (app.getModeRailForTest().autoButton.isEnabled());
+    EXPECT_EQ   (app.getSoundcheckPanelForTest().getMode(),
+                 gui::SoundcheckPanel::Mode::Hidden);
+    // A measurement that vanished has to SAY it vanished.
+    EXPECT_TRUE (app.lastMessageForTest().isNotEmpty());
+}
+
+// RED IF a restart claims a measurement was stopped when there was none. M-2:
+// Mode::Applied is a record of work that FINISHED -- its proposals are placed --
+// so "your measurement was stopped" there is a lie about a success.
+TEST (MainComponentSoundcheck, ARestartWithNothingMeasuringSaysNothing)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Applied);
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+    app.showMessage ({});
+
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    EXPECT_TRUE (app.lastMessageForTest().isEmpty())
+        << "an applied report is not a measurement in flight";
+
+    // And a plain idle console says nothing either.
+    MainComponent idle;
+    idle.showMessage ({});
+    idle.getDevicePanelForTest().onBeforeRestart();
+    EXPECT_TRUE (idle.lastMessageForTest().isEmpty());
+}
+
+// RED IF: PRESET LOAD stays live while proposals are pending. adoptPreset uses
+// the FILE's indices and overwrites without checking n.active
+// (NotchController.cpp -> setNotchImpl), so it would silently erase every
+// pending proposal. F10.
+TEST (MainComponentSoundcheck, PresetLoadIsRefusedWhileASoundcheckIsPending)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckControlsLockedForTest (true);
+
+    juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("lane-m-lock-test.json");
+    tmp.replaceWithText ("{\"version\":\"1.0\",\"notches\":[]}");
+
+    EXPECT_FALSE (app.loadPreset (tmp)) << "a pending soundcheck must refuse a preset load";
+    // And it must be a REFUSAL the operator can read, not a silent false that
+    // looks exactly like a corrupt file.
+    const auto refusal = app.lastMessageForTest();
+    EXPECT_TRUE (refusal.isNotEmpty());
+
+    // THE LOCK is what refused, not the file. With the lock off the same file
+    // goes back to PresetManager and comes back with ITS verdict -- whatever
+    // that is for this fixture -- without lane M's sentence on screen. (The
+    // fixture is deliberately minimal: whether PresetManager accepts it is
+    // tested elsewhere, and asserting its verdict here would make this test
+    // about the preset format instead of about the lock.)
+    app.setSoundcheckControlsLockedForTest (false);
+    app.showMessage ({});
+    app.loadPreset (tmp);
+    EXPECT_NE (app.lastMessageForTest(), refusal)
+        << "with the lock off the refusal sentence must not be shown again";
+
+    tmp.deleteFile();
+}
+
+// RED IF: the mode buttons, CLEAR ALL, the preset row or any slot control stays
+// live during a run. A mode change mid-run re-arms detection under a suspended
+// tap; CLEAR ALL mid-run removes notches nobody asked about; a width or routing
+// change moves the very chain the run is measuring.
+TEST (MainComponentSoundcheck, ModeAndClearAllAreLockedWhileRunning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // A REAL notch, so the verdict buttons below exist to be asserted on. Same
+    // recipe as FalseVerdictLogsVerdictThenClearsWithVerdictFalse above: place
+    // it, feed one hop to both taps, pump runOnce() to publish the snapshot.
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    ASSERT_TRUE (c0->setNotch (0, 0, 1234.0, 30.0, -12.0, NotchController::Origin::Manual));
+    std::vector<float> hop (512, 0.1f);
+    app.getAudioEngine().getTapBuffer (0, 0).write (hop.data(), hop.size());
+    app.getAudioEngine().getTapBuffer (0, 1).write (hop.data(), hop.size());
+    c0->runOnce();
+
+    auto& list = app.getNotchListPanelForTest();
+    list.refreshFromSnapshot();
+    ASSERT_EQ (list.rowCountForTest(), 1);
+
+    app.setSoundcheckControlsLockedForTest (true);
+    auto& rail = app.getModeRailForTest();
+
+    EXPECT_FALSE (rail.soundcheckButton.isEnabled());
+    EXPECT_FALSE (rail.autoButton.isEnabled());
+    EXPECT_FALSE (rail.bypassButton.isEnabled());
+    EXPECT_FALSE (rail.clearAllButton.isEnabled());
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+
+    // PRESET LOAD / SAVE, and the device controls that would restart the engine.
+    EXPECT_FALSE (app.getDeviceDrawer().loadButton.isEnabled());
+    EXPECT_FALSE (app.getDeviceDrawer().saveButton.isEnabled());
+
+    // enable / width / routing / LINK-INDEP on a slot row. Component::isEnabled
+    // walks the parent chain, which is what one setEnabled on the panel buys.
+    auto& row = app.getSlotPanelForTest().getRowForTest (0);
+    EXPECT_FALSE (row.enable.isEnabled());
+    EXPECT_FALSE (row.width.isEnabled());
+    EXPECT_FALSE (row.outLanes[0].isEnabled());
+    EXPECT_FALSE (row.link.isEnabled());
+
+    // I-1: the DETECTION strip. RunParams are frozen at Arm, but the ceiling
+    // APPLY clamps against is read live, so a DEPTH move here would hand the
+    // operator cuts the results strip never described.
+    EXPECT_FALSE (app.getTuningPanel().isEnabled());
+
+    // C-1, CRITICAL: the notch table's FALSE verdict is one click from
+    // clearNotch(VerdictFalse) -- a partial CLEAR ALL mid-sweep, on the very
+    // chain being measured. Asserted on the REAL button, not on the panel.
+    EXPECT_FALSE (list.isEnabled());
+    ASSERT_NE   (list.falseButtonForTest (0), nullptr);
+    ASSERT_NE   (list.goodButtonForTest (0), nullptr);
+    EXPECT_FALSE (list.falseButtonForTest (0)->isEnabled());
+    EXPECT_FALSE (list.goodButtonForTest (0)->isEnabled());
+
+    app.setSoundcheckControlsLockedForTest (false);
+    EXPECT_TRUE (rail.measureButton.isEnabled());
+    EXPECT_TRUE (rail.clearAllButton.isEnabled());
+    EXPECT_TRUE (app.getDeviceDrawer().loadButton.isEnabled());
+    // The row controls come back -- but NOT width / in / out, which SlotPanel
+    // itself keeps disabled while no device has reported any channels
+    // (SlotPanel.cpp:282-295, `haveChannels`). enable and LINK are ungated, so
+    // they are what proves the unlock reached the rows.
+    EXPECT_TRUE (row.enable.isEnabled());
+    EXPECT_TRUE (row.link.isEnabled());
+    EXPECT_TRUE (app.getTuningPanel().isEnabled());
+    EXPECT_TRUE (list.falseButtonForTest (0)->isEnabled());
+}
+
+// RED IF: the restore-detection lambda grows past a relaxed atomic store per
+// slot. It runs on the LANE M THREAD, and that is only defensible because
+// NotchController::setDetectionActive is exactly one relaxed store. inv 17.
+TEST (MainComponentSoundcheck, RestoreDetectionCallbackOnlyTouchesAtomics)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_NE (sc.setDetectionActiveOnAllSlots, nullptr);
+    ASSERT_NE (sc.logEvent, nullptr);
+    ASSERT_NE (sc.onStateChanged, nullptr);
+
+    sc.setDetectionActiveOnAllSlots (false);
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_FALSE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+
+    sc.setDetectionActiveOnAllSlots (true);
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_TRUE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+}
+
+// RED IF: pressing DO with no device open emits anything, or shows nothing at
+// all. A refusal must SAY which refusal it was. inv 19, F26.
+TEST (MainComponentSoundcheck, MeasureWithNoDeviceRefusesAndSaysSo)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    bool confirmAsked = false;
+    app.soundcheckConfirmHook = [&confirmAsked] (const juce::String&,
+                                                 std::function<void (bool)>)
+    {
+        confirmAsked = true;
+    };
+
+    ASSERT_NE (app.getModeRailForTest().onMeasure, nullptr);
+    app.getModeRailForTest().onMeasure();
+
+    EXPECT_EQ (app.getSoundcheckControllerForTest().getState(),
+               SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    EXPECT_TRUE  (app.lastMessageForTest().isNotEmpty());
+    // The dialog is NEVER reached: the refusal happens in preflight, before the
+    // operator is asked to drop their master for a run that cannot happen.
+    EXPECT_FALSE (confirmAsked);
+    // ...and the console is not left locked by a refusal.
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+}
+
+// RED IF: a null confirm hook means a SILENT run instead of no run. The
+// confirmation is the only thing standing between a button and 72 seconds of
+// sweep through a PA.
+TEST (MainComponentSoundcheck, NoConfirmHookMeansNoRun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.soundcheckConfirmHook = nullptr;
+    app.getModeRailForTest().onMeasure();
+
+    EXPECT_EQ (app.getSoundcheckControllerForTest().getState(),
+               SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    EXPECT_TRUE  (app.lastMessageForTest().isNotEmpty());
+}
+
+// RED IF: the countdown is fed NotchController::getSoundcheckRemainingMs -- the
+// PASSIVE 15 s window, measured in liveMs_, which is FROZEN while lane M has the
+// taps suspended. It would show a number that stands still or reads 0 for the
+// whole run. F12.
+TEST (MainComponentSoundcheck, TheCountdownComesFromLaneMsOwnClockNotThePassiveWindow)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // A passive 15 s soundcheck window, in flight and reporting a big number.
+    app.getNotchControllerForTest (0)->startSoundcheck();
+    ASSERT_GT (app.getNotchControllerForTest (0)->getSoundcheckRemainingMs(), 1000.0);
+
+    // Lane M is Idle, so ITS countdown is zero. Swap the source and this reads
+    // ~15000 instead.
+    EXPECT_DOUBLE_EQ (app.soundcheckCountdownMsForTest(), 0.0);
+}
+
+// RED IF: the run is armed without the running preset's ceiling, or without the
+// detector's live peakiness threshold. Neither omission is caught by arm(): a
+// defaulted ceilingDb of 0.0 is FINITE and passes its isfinite() check, and the
+// run would then propose nothing at all while looking like a clean room
+// (Task 3 I-3, N1).
+TEST (MainComponentSoundcheck, RunParamsCarryTheRunningPresetsCeilingAndTheLiveGate)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto* controller = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller, nullptr);
+    controller->setNotchDefaults (24.0, -18.0);
+    controller->setPeakinessThreshold (7.5f);
+
+    const auto params = app.soundcheckRunParamsForTest();
+
+    EXPECT_DOUBLE_EQ (params.ceilingDb, controller->getNotchDepthDb());
+    EXPECT_DOUBLE_EQ (params.notchQ,    controller->getNotchQ());
+    EXPECT_FLOAT_EQ  (params.noiseFloorGate, controller->getPeakinessThreshold());
+    EXPECT_GT (params.noiseFloorGate, 0.0f);
+    EXPECT_FLOAT_EQ (params.peak, SoundcheckController::kSoundcheckMaxPeak);
+
+    // And the ceiling really is the tuning value, not the 0.0 default.
+    EXPECT_LT (params.ceilingDb, 0.0);
+}
+
+// RED IF: the targets stop being "every lane of every enabled slot". The
+// spec's worst case -- 8 stereo slots, 16 outputs, ~72 s -- IS this count, and
+// the confirmation quotes it.
+TEST (MainComponentSoundcheck, TargetsAreEveryLaneOfEveryEnabledSlot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // Slot 0 ships enabled and stereo (AudioEngine's constructor).
+    const auto targets = app.soundcheckTargetsForTest();
+    ASSERT_EQ (targets.size(), 2u);
+    EXPECT_EQ (targets[0].slot, 0);
+    EXPECT_EQ (targets[0].lane, 0);
+    EXPECT_EQ (targets[1].lane, 1);
+    EXPECT_EQ (targets[0].outChannel, app.getAudioEngine().getSlotConfig (0).outputChannels[0]);
+    EXPECT_EQ (targets[1].inChannel,  app.getAudioEngine().getSlotConfig (0).inputChannels[1]);
+
+    // A mono slot contributes ONE target, not two.
+    SlotConfig mono = app.getAudioEngine().getSlotConfig (0);
+    mono.width = 1;
+    app.getAudioEngine().setSlotConfig (0, mono);
+    EXPECT_EQ (app.soundcheckTargetsForTest().size(), 1u);
+
+    // A disabled rig has nothing to measure at all, which is what preflight
+    // turns into Refusal::NoChannels rather than a zero-length run.
+    mono.enabled = false;
+    app.getAudioEngine().setSlotConfig (0, mono);
+    EXPECT_TRUE (app.soundcheckTargetsForTest().empty());
+}
+
+// RED IF: the confirmation stops making the honest level statement, or stops
+// quoting the real cost in seconds. Spec 4.3 / F13: no SPL figure (the app
+// cannot know one), but "20 dB below full scale at YOUR master" and the total
+// duration both have to be there before the operator agrees to it.
+TEST (MainComponentSoundcheck, TheConfirmationSaysHaMasterTruocAndTheRealDuration)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    // 16 PASSES over 10 distinct output channels -- the shape a rig gets when
+    // some slots are summed onto shared outputs. The two counts differ, and
+    // both have to be in the sentence (review M-1).
+    const auto text = MainComponent::soundcheckConfirmTextForTest (16, 10);
+
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "H\xe1\xba\xa0 MASTER TR\xc6\xaf\xe1\xbb\x9a" "C")))   // "HA MASTER TRUOC"
+        << "the confirmation must tell the operator to drop the master";
+    EXPECT_TRUE (text.contains ("20 dB")) << "the level statement is the point";
+
+    // "16 luot do tren 10 kenh ngo ra" -- the passes and the channels, in that
+    // order and as different numbers.
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "16 l\xc6\xb0\xe1\xbb\xa3t \xc4\x91o tr\xc3\xaan 10 k\xc3\xaanh")))
+        << text.toStdString();
+
+    // 16 PASSES x kPerTargetMs -- the machine spends the time per pass, not per
+    // channel. DERIVED from the constant, so this asserts the arithmetic rather
+    // than a second copy of "72".
+    const double totalSec = SoundcheckController::kPerTargetMs * 16.0 / 1000.0;
+    EXPECT_TRUE (text.contains (juce::String (totalSec, 1)))
+        << "expected " << totalSec << " s in: " << text.toStdString();
+    EXPECT_TRUE (text.contains (juce::String (SoundcheckController::kPerTargetMs / 1000.0, 1)))
+        << "the per-pass silence has to be stated too";
+
+    // DETECTION OFF ON EVERY SLOT, FOR THE WHOLE RUN (final review I-1). arm()
+    // calls setDetectionActiveOnAllSlots(false), so the operator is agreeing to
+    // ~72 seconds with no feedback protection anywhere in the rig -- and the
+    // dialog said nothing about it. Mutation-checked: deleting the
+    // kScConfirmDetectionOff term from soundcheckConfirmText fails here.
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 (
+        "b\xe1\xbb\x99 ch\xe1\xbb\x91ng h\xc3\xba T\xe1\xba\xaeT tr\xc3\xaan m\xe1\xbb\x8di slot")))   // "bo chong hu TAT tren moi slot"
+        << "the dialog must say the protection goes off on EVERY slot: "
+        << text.toStdString();
+    EXPECT_TRUE (text.contains (juce::String::fromUTF8 ("D\xe1\xbb\xaaNG")))   // "DUNG"
+        << "...and name the way out";
+}
+
+// RED IF: DUNG / Esc is not wired. SoundcheckPanel routes BOTH through onStop
+// (SoundcheckPanel::keyPressed), so this one callback is the whole stop path a
+// finger can reach.
+TEST (MainComponentSoundcheck, StopAndDismissAreWiredAndNeitherEmits)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& panel = app.getSoundcheckPanelForTest();
+    ASSERT_NE (panel.onStop,    nullptr);
+    ASSERT_NE (panel.onApply,   nullptr);
+    ASSERT_NE (panel.onDismiss, nullptr);
+
+    // Esc reaches onStop through the panel itself.
+    panel.setMode (gui::SoundcheckPanel::Mode::Running);
+    app.setSoundcheckControlsLockedForTest (true);
+    EXPECT_TRUE (panel.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey)));
+
+    // Nothing was emitting, and the stop leaves nothing armed behind it.
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+
+    // BO puts the strip away and hands the console back.
+    panel.onDismiss();
+    EXPECT_EQ   (panel.getMode(), gui::SoundcheckPanel::Mode::Hidden);
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_FALSE (app.getSpectrumViewForTest().hasSoundcheckOverlay());
+}
+
+// RED IF: a ledger is shared between slots, or reset by anything. It is one per
+// slot, alive for the component's lifetime, and CLEAR ALL deliberately does NOT
+// reset it (SoundcheckController.h: a property of the design, not a leak).
+TEST (MainComponentSoundcheck, EverySlotHasItsOwnApplyLedgerAndClearAllDoesNotResetIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        EXPECT_TRUE (app.soundcheckLedgerForTest (slot).entries.empty()) << "slot " << slot;
+
+    ASSERT_NE (app.getModeRailForTest().onClearAllConfirmed, nullptr);
+    app.getModeRailForTest().onClearAllConfirmed();
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        EXPECT_TRUE (app.soundcheckLedgerForTest (slot).entries.empty()) << "slot " << slot;
+}
+
+// RED IF the console stays fully locked once the sweep has stopped. I-3 /
+// spec 4.3: BYPASS is how a soundman saves a show, and a results strip is not a
+// reason to take it away. What must STAY dead is everything that would
+// invalidate or silently consume the proposals on screen.
+TEST (MainComponentSoundcheck, BypassIsReachableDuringResultsButMeasureIsNot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+    auto& rail = app.getModeRailForTest();
+
+    // BACK: the emergency controls.
+    EXPECT_TRUE (rail.bypassButton.isEnabled());
+    EXPECT_TRUE (rail.autoButton.isEnabled());
+    EXPECT_TRUE (rail.soundcheckButton.isEnabled());
+    EXPECT_TRUE (rail.clearAllButton.isEnabled());
+
+    // STILL DEAD: a second run would throw the proposals away...
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+    // ...adoptPreset would erase them...
+    EXPECT_FALSE (app.getDeviceDrawer().loadButton.isEnabled());
+    // ...and these three would change what they were computed against.
+    EXPECT_FALSE (app.getSlotPanelForTest().getRowForTest (0).link.isEnabled());
+    EXPECT_FALSE (app.getTuningPanel().isEnabled());
+    EXPECT_FALSE (app.getNotchListPanelForTest().isEnabled());
+
+    juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("lane-m-results-lock.json");
+    tmp.replaceWithText ("{\"version\":\"1.0\",\"notches\":[]}");
+    EXPECT_FALSE (app.loadPreset (tmp)) << "PRESET LOAD is refused through Results too";
+    tmp.deleteFile();
+
+    // Applied is the SAME state: its proposals are placed, but the ledger, the
+    // routing and the ceiling they were computed against must not move until
+    // the operator dismisses the report.
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Results);
+    app.getSoundcheckPanelForTest().onDismiss();
+    EXPECT_EQ   (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+    EXPECT_TRUE (rail.measureButton.isEnabled());
+    EXPECT_TRUE (app.getTuningPanel().isEnabled());
+}
+
+// RED IF DO stays live while its own confirmation is open. I-2: two stacked
+// dialogs are two arms, and a stale OK arriving after the console moved on
+// would start a sweep against a rig that is no longer the one on screen.
+TEST (MainComponentSoundcheck, MeasureIsDeadWhileItsOwnConfirmationIsOpen)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    int asked = 0;
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&asked, &answer] (const juce::String&,
+                                                   std::function<void (bool)> cb)
+    {
+        ++asked;
+        answer = std::move (cb);
+    };
+
+    auto& rail = app.getModeRailForTest();
+    const auto targets = app.soundcheckTargetsForTest();
+    ASSERT_FALSE (targets.empty());
+
+    // The confirmation step on its own: preflight refuses before the dialog
+    // with no device, and no test may open one (this engine passes input to
+    // output -- a device opened in a test suite is a feedback path).
+    app.askSoundcheckConfirmationForTest (targets);
+
+    EXPECT_EQ    (asked, 1);
+    EXPECT_TRUE  (app.soundcheckConfirmPendingForTest());
+    EXPECT_FALSE (rail.measureButton.isEnabled()) << "DO must be dead while its box is up";
+
+    // A second press stacks NOTHING.
+    app.askSoundcheckConfirmationForTest (targets);
+    app.getModeRailForTest().onMeasure();
+    EXPECT_EQ (asked, 1);
+
+    // HUY hands the button back and arms nothing.
+    ASSERT_NE (answer, nullptr);
+    answer (false);
+    EXPECT_FALSE (app.soundcheckConfirmPendingForTest());
+    EXPECT_TRUE  (rail.measureButton.isEnabled());
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+}
+
+// RED IF a STALE OK arms. The box was open while the console moved on -- here,
+// into a Results window -- and the targets in that callback describe a rig the
+// operator is no longer looking at.
+TEST (MainComponentSoundcheck, AStaleConfirmationDoesNotArm)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&answer] (const juce::String&,
+                                           std::function<void (bool)> cb)
+    {
+        answer = std::move (cb);
+    };
+
+    app.askSoundcheckConfirmationForTest (app.soundcheckTargetsForTest());
+    ASSERT_NE (answer, nullptr);
+
+    // The console moved on while the box was up.
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+
+    answer (true);
+
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // DO stays dead, because the lock -- not the dialog -- owns it now.
+    EXPECT_FALSE (app.getModeRailForTest().measureButton.isEnabled());
+}
+
+// RED IF an armed run can be left with no poll thread. arm() enters the first
+// target itself and every phase after that is a poll, so a run whose thread was
+// never started sits in NoiseFloor for ever with the taps suspended and
+// detection off. armSoundcheck starts it idempotently before arming.
+//
+// (The same line in startAudio() is deliberately NOT covered by a test: the only
+// way to reach it opens the machine's default audio device, and this engine
+// passes input to output -- a feedback path in a test suite. See the fix report.)
+TEST (MainComponentSoundcheck, ArmingAlwaysLeavesAPollThreadRunning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    ASSERT_FALSE (sc.isPollThreadRunningForTest());
+
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&answer] (const juce::String&,
+                                           std::function<void (bool)> cb)
+    {
+        answer = std::move (cb);
+    };
+
+    app.askSoundcheckConfirmationForTest (app.soundcheckTargetsForTest());
+    ASSERT_NE (answer, nullptr);
+    answer (true);   // arm() itself refuses -- no device -- but the thread is up
+
+    EXPECT_TRUE (sc.isPollThreadRunningForTest());
+    EXPECT_EQ   (sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // A refused arm hands DO back rather than leaving it dead.
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+
+    sc.stop (2000);
+}
+
+namespace
+{
+// Brings MainComponent's engine to the state SoundcheckController::preflight
+// accepts WITHOUT OPENING A DEVICE -- B-4's seam (AudioEngine::setRunningForTest)
+// plus one driven block, because numInputChannels_/numOutputChannels_ are
+// written only from the callback. This is the same recipe
+// tests/test_soundcheckcontroller.cpp uses.
+//
+// NOTHING CAN REACH HARDWARE HERE. There is no device: the block's output
+// buffers are the test's own floats and are thrown away, and no test below
+// drives a block after arming, so not one sample of sweep is ever generated.
+void makeEngineLookRunning (MainComponent& app)
+{
+    constexpr int channels = 2;
+    constexpr int frames   = 256;
+
+    SlotConfig cfg;
+    cfg.enabled = true;
+    cfg.width   = 2;
+    cfg.inputChannels[0]  = 0; cfg.inputChannels[1]  = 1;
+    cfg.outputChannels[0] = 0; cfg.outputChannels[1] = 1;
+    app.getAudioEngine().setSlotConfig (0, cfg);
+    app.getAudioEngine().setRunningForTest (true);
+
+    std::vector<std::vector<float>> in  ((std::size_t) channels, std::vector<float> (frames, 0.0f));
+    std::vector<std::vector<float>> out ((std::size_t) channels, std::vector<float> (frames, 0.0f));
+    std::vector<const float*> inPtr;
+    std::vector<float*>       outPtr;
+    for (auto& v : in)  inPtr.push_back (v.data());
+    for (auto& v : out) outPtr.push_back (v.data());
+
+    const juce::AudioIODeviceCallbackContext ctx {};
+    app.getAudioEngine().audioDeviceIOCallbackWithContext (inPtr.data(), channels,
+                                                           outPtr.data(), channels,
+                                                           frames, ctx);
+}
+
+// RunParams good enough to arm. MainComponent's own builder is tested by
+// RunParamsCarryTheRunningPresetsCeilingAndTheLiveGate; it cannot be used here
+// because it reads getCurrentSampleRateHz(), which only a real device sets.
+SoundcheckController::RunParams armableParams()
+{
+    SoundcheckController::RunParams p;
+    p.noiseFloorGate    = 10.0f;
+    p.peak              = SoundcheckController::kSoundcheckMaxPeak;
+    p.sampleRate        = 48000.0;
+    p.numInputChannels  = 2;
+    p.numOutputChannels = 2;
+    p.ceilingDb         = -18.0;
+    p.notchQ            = 30.0;
+    return p;
+}
+} // namespace
+
+// RED IF a device restart during an open confirmation leaves a live OK behind.
+// C-1 (round 2), and the state checks alone could not see it: onBeforeRestart
+// tears the console down and puts the lock back to None with the box still on
+// screen, so a later OK found "Idle, unlocked, fine" and armed with targets
+// captured against the PREVIOUS device's routing.
+TEST (MainComponentSoundcheck, ADeviceRestartInvalidatesAnOpenConfirmation)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    std::function<void (bool)> answer;
+    app.soundcheckConfirmHook = [&answer] (const juce::String&,
+                                           std::function<void (bool)> cb)
+    {
+        answer = std::move (cb);
+    };
+
+    auto& rail = app.getModeRailForTest();
+    auto& sc   = app.getSoundcheckControllerForTest();
+
+    app.askSoundcheckConfirmationForTest (app.soundcheckTargetsForTest());
+    ASSERT_NE    (answer, nullptr);
+    ASSERT_FALSE (rail.measureButton.isEnabled());
+
+    // The device restarts underneath the open box.
+    app.getDevicePanelForTest().onBeforeRestart();
+
+    // THE BUTTON AND THE GUARD AGREE. The restart unlocked the console, but a
+    // confirmation is still outstanding, so DO stays out of reach.
+    EXPECT_TRUE  (app.soundcheckConfirmPendingForTest());
+    EXPECT_FALSE (rail.measureButton.isEnabled());
+
+    app.showMessage ({});
+    answer (true);   // the stale OK
+
+    // NOTHING ARMED. armSoundcheck() would have started the poll thread on its
+    // way in, and abortAndJoin() left it stopped -- so this is the assertion
+    // that goes red if the generation check is dropped.
+    EXPECT_FALSE (sc.isPollThreadRunningForTest());
+    EXPECT_EQ    (sc.getState(), SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+
+    // ...and it SAID so, rather than swallowing the answer.
+    EXPECT_TRUE  (app.lastMessageForTest().isNotEmpty());
+    // The box is answered and nothing is held, so DO is reachable again.
+    EXPECT_FALSE (app.soundcheckConfirmPendingForTest());
+    EXPECT_TRUE  (rail.measureButton.isEnabled());
+}
+
+// RED IF the mode stops deciding detection after a run. I-2 (round 2): the
+// controller restores detection with one UNCONDITIONAL store per slot -- inv 17
+// allows its thread nothing else -- so without a message-thread correction
+// BYPASS detects and a slot the engine has disabled is armed.
+TEST (MainComponentSoundcheck, TheModeDecidesDetectionAgainWhenARunEnds)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.requestMode (AudioEngine::Mode::Bypass);
+
+    auto& sc = app.getSoundcheckControllerForTest();
+
+    // Exactly what finishRun()/beginAbort() do on the lane M thread.
+    sc.setDetectionActiveOnAllSlots (true);
+    for (int i = 0; i < kMaxSlots; ++i)
+        ASSERT_TRUE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+
+    // A session that has just ended: the strip is up, the console is locked,
+    // and the machine is back at Idle.
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Running);
+    app.setSoundcheckControlsLockedForTest (true);
+    sc.onStateChanged();               // the flag the lane M thread would set
+    app.syncSoundcheckUiForTest();     // one tick
+
+    // BYPASS MEANS NO DETECTION, on every slot.
+    for (int i = 0; i < kMaxSlots; ++i)
+        EXPECT_FALSE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+
+    EXPECT_EQ (app.getSoundcheckPanelForTest().getMode(), gui::SoundcheckPanel::Mode::Hidden);
+}
+
+// RED IF a DISABLED slot is left detecting. applyModeGating used to return
+// early for one, which was harmless until lane M's blanket restore armed them
+// all. A disabled slot has no live chain, and a detector scoring one is a notch
+// waiting to be placed in a chain nobody is listening to.
+TEST (MainComponentSoundcheck, ADisabledSlotIsGatedOffNotSkipped)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.requestMode (AudioEngine::Mode::Auto);
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    sc.setDetectionActiveOnAllSlots (true);
+
+    app.getSoundcheckPanelForTest().setMode (gui::SoundcheckPanel::Mode::Running);
+    app.setSoundcheckControlsLockedForTest (true);
+    sc.onStateChanged();
+    app.syncSoundcheckUiForTest();
+
+    // Slot 0 ships enabled, so AUTO keeps it armed...
+    EXPECT_TRUE (app.getNotchControllerForTest (0)->detectionActiveForTest());
+    // ...and every other slot is disabled, so every other slot goes quiet.
+    for (int i = 1; i < kMaxSlots; ++i)
+    {
+        ASSERT_FALSE (app.getAudioEngine().getSlotConfig (i).enabled) << "slot " << i;
+        EXPECT_FALSE (app.getNotchControllerForTest (i)->detectionActiveForTest()) << "slot " << i;
+    }
+}
+
+// RED IF an Applied report releases the console, or a Hidden one holds it.
+// I-3: the two endings leave DIFFERENT locks, and the ternary that decides it
+// is one character from being wrong in either direction.
+TEST (MainComponentSoundcheck, AnAppliedReportHoldsTheConsoleAndADismissedOneDoesNot)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.endSoundcheckSessionForTest (gui::SoundcheckPanel::Mode::Applied);
+    EXPECT_EQ    (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::Pending);
+    EXPECT_FALSE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_TRUE  (app.getModeRailForTest().bypassButton.isEnabled());
+    EXPECT_FALSE (app.getTuningPanel().isEnabled());
+
+    app.endSoundcheckSessionForTest (gui::SoundcheckPanel::Mode::Hidden);
+    EXPECT_EQ   (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+    EXPECT_TRUE (app.getModeRailForTest().measureButton.isEnabled());
+    EXPECT_TRUE (app.getTuningPanel().isEnabled());
+
+    // NOT ASSERTED HERE: that the Results EDGE sets Pending. Reaching
+    // State::Results means arming a real run and letting it finish, and
+    // MainComponent owns a JuceMonotonicClock with no injection seam -- so that
+    // costs >= 4.5 s of wall time per output with blocks driven continuously
+    // throughout, and is timing-flaky. The edge calls setSoundcheckLock(Pending)
+    // and applyModeGatingToAllSlots(), both of which are asserted directly here
+    // and in TheModeDecidesDetectionAgainWhenARunEnds.
+}
+
+// RED IF the ring-risk gate only ever looks at the slot on screen. arm()
+// disarms detection on EVERY slot and buildSoundcheckTargets() sweeps EVERY
+// enabled slot, so "is this room safe to sweep" is a question about the whole
+// rig -- but both gates read notchControllers_[displayedSlot_] and nothing
+// else (final review I-2). Here slot 1 is ringing and the console is showing
+// slot 0: before the fix the run was armed, with the one detector that could
+// have caught the howl switched off by arm() a moment later.
+TEST (MainComponentSoundcheck, RingRiskOnAnUndisplayedSlotRefusesTheRun)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    MainComponent app;
+    app.setSize (1280, 880);
+    app.resized();
+
+    makeEngineLookRunning (app);         // slot 0 enabled, 2 in / 2 out, running
+
+    // A SECOND enabled slot, on the same patch: two mics round the same
+    // speakers is the ordinary case, and the run would sweep both.
+    SlotConfig second;
+    second.enabled = true;
+    second.width   = 2;
+    second.inputChannels[0]  = 0; second.inputChannels[1]  = 1;
+    second.outputChannels[0] = 0; second.outputChannels[1] = 1;
+    app.getAudioEngine().setSlotConfig (1, second);
+
+    ASSERT_EQ (app.getDisplayedSlot(), 0) << "precondition: the console shows slot 0";
+
+    const float best = ringRiskDriveSlotToCritical (app, 1);
+
+    NotchController::SnapshotBuffer onScreen {};
+    app.getNotchControllerForTest (0)->copySnapshot (onScreen);
+    ASSERT_FALSE (onScreen.ringRiskValid)
+        << "precondition: the DISPLAYED slot has scored nothing, so the old "
+           "gate saw no risk at all";
+
+    NotchController::SnapshotBuffer ringing {};
+    app.getNotchControllerForTest (1)->copySnapshot (ringing);
+    ASSERT_TRUE (ringing.ringRiskValid) << "slot 1's detector never scored a frame";
+    ASSERT_GE (ringing.ringRiskScore,
+               NotchController::kRiskFreezeFraction * ringing.ringRiskThreshold)
+        << "highest score seen on slot 1 was " << best;
+
+    bool confirmAsked = false;
+    app.soundcheckConfirmHook = [&confirmAsked] (const juce::String&,
+                                                 std::function<void (bool)>)
+    {
+        confirmAsked = true;
+    };
+
+    app.getModeRailForTest().onMeasure();
+
+    // The dialog is NEVER reached: this is a preflight refusal, so the operator
+    // is not asked to drop their master for a run that must not happen.
+    EXPECT_FALSE (confirmAsked);
+    EXPECT_EQ    (app.getSoundcheckControllerForTest().getState(),
+                  SoundcheckController::State::Idle);
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    // "nguy co hu" -- the ring-risk sentence, not some other refusal.
+    EXPECT_TRUE  (app.lastMessageForTest().contains (
+        juce::String::fromUTF8 ("nguy c\xc6\xa1 h\xc3\xba")))
+        << app.lastMessageForTest().toStdString();
+    // A refusal does not leave the console locked.
+    EXPECT_TRUE  (app.getModeRailForTest().measureButton.isEnabled());
+}
+
+// RED IF an abort ends a run in silence. Every abort but the two a finger
+// causes is decided on the LANE M THREAD, which may not touch a component -- so
+// if this tick does not say why, nothing ever does, and "the strip vanished"
+// is what the operator gets for a mic that was too hot.
+TEST (MainComponentSoundcheck, AnAbortTellsTheOperatorWhy)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    makeEngineLookRunning (app);
+
+    auto& sc = app.getSoundcheckControllerForTest();
+    const auto targets = app.soundcheckTargetsForTest();
+    ASSERT_FALSE (targets.empty());
+
+    const auto runAndAbortWith = [&] (SoundcheckController::AbortReason reason)
+    {
+        NotchController::SnapshotBuffer risk {};
+        EXPECT_EQ (sc.arm (targets, armableParams(), risk),
+                   SoundcheckController::Refusal::None);
+        app.syncSoundcheckUiForTest();
+
+        app.showMessage ({});
+        sc.requestStop (reason);
+        sc.runOnce();          // serviceEmittingPhase -> beginAbort(reason)
+
+        EXPECT_EQ  (sc.getState(), SoundcheckController::State::Idle);
+        EXPECT_TRUE (sc.hasLastAbortReason());
+        EXPECT_EQ  (sc.getLastAbortReason(), reason);
+
+        app.syncSoundcheckUiForTest();   // the tick that tells the operator
+        return app.lastMessageForTest();
+    };
+
+    const auto micHot      = runAndAbortWith (SoundcheckController::AbortReason::MicHot);
+    const auto roomRinging = runAndAbortWith (SoundcheckController::AbortReason::RoomRinging);
+
+    EXPECT_TRUE (micHot.isNotEmpty())      << "a hot mic must be reported";
+    EXPECT_TRUE (roomRinging.isNotEmpty()) << "a ringing room must be reported";
+    // TWO DIFFERENT PROBLEMS, two different answers from the soundman -- so not
+    // one shared "could not measure".
+    EXPECT_NE (micHot, roomRinging);
+
+    // DUNG and Esc get NOTHING: the operator pressed the button, and a status
+    // strip that repeats what they just did is a strip they stop reading.
+    const auto userStop = runAndAbortWith (SoundcheckController::AbortReason::UserStop);
+    EXPECT_TRUE (userStop.isEmpty());
+
+    // And not one sample was ever generated: no block is driven after an arm,
+    // and the output channel is not armed during the noise floor at all.
+    EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
+    EXPECT_EQ    (app.getSoundcheckPanelForTest().getMode(), gui::SoundcheckPanel::Mode::Hidden);
 }

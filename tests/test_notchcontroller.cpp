@@ -3749,3 +3749,166 @@ TEST (NotchControllerLadder, TheMemoryRingReclaimsAConsumedSlotBeforeEvictingALi
     EXPECT_DOUBLE_EQ (probeMemoryAt (h, quiet, 61.0 * binHz), -18.0)
         << "the 18th write did not land anywhere findable";
 }
+
+// ===========================================================================
+// Lane M (active soundcheck): the two ADDITIVE NotchController changes.
+// Appended at file scope -- the anonymous namespaces above have all closed, so
+// Harness (:20) and Recorder (:1471) are both visible here, and nothing lands
+// inside a namespace that already ended (lane G m-E).
+// ===========================================================================
+
+// RED IF: SnapshotNotch loses `origin`, or the aggregate initialiser at
+// NotchController.cpp:578-580 is not updated alongside the struct -- brace
+// elision would then silently shift channel/index by one field. Without this
+// field lane M cannot find the previous run's preventive notches to clear, and
+// they never auto-release (NotchController.cpp:729), so the 16-slot chain
+// drains after a few soundchecks. F7.
+TEST (NotchControllerSoundcheck, SnapshotCarriesOrigin)
+{
+    Harness h;
+    ASSERT_TRUE (h.controller.setNotch (0, 3, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Soundcheck));
+    ASSERT_TRUE (h.controller.setNotch (0, 4, 2000.0, 30.0, -12.0,
+                                        NotchController::Origin::Manual));
+
+    // B-1(c): latest_ is written ONLY inside runOnce()'s drain loop, and the
+    // loop body runs only when a block was actually drained off the tap.
+    // Without this the snapshot stays empty forever and the whole test passes
+    // vacuously. Precedent: tests/test_gui_wiring.cpp:1033-1035, and
+    // memory/preset-save-roundtrip-2026-09-05.md.
+    const std::vector<float> block (512, 0.0f);
+    h.tap.write (block.data(), block.size());
+
+    NotchController::SnapshotBuffer snap {};
+    h.controller.runOnce();
+    h.controller.copySnapshot (snap);
+    ASSERT_GT (snap.notchCount, 0u) << "the snapshot never refreshed -- pump the tap";
+
+    bool sawSoundcheck = false, sawManual = false;
+    for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+    {
+        const auto& n = snap.notches[i];
+        if (n.index == 3)
+        {
+            EXPECT_EQ (n.origin, NotchController::Origin::Soundcheck);
+            EXPECT_NEAR (n.frequency, 1000.0f, 0.5f);   // the fields after `origin` still line up
+            EXPECT_EQ ((int) n.channel, 0);
+            sawSoundcheck = true;
+        }
+        if (n.index == 4)
+        {
+            EXPECT_EQ (n.origin, NotchController::Origin::Manual);
+            EXPECT_NEAR (n.frequency, 2000.0f, 0.5f);
+            sawManual = true;
+        }
+    }
+    EXPECT_TRUE (sawSoundcheck);
+    EXPECT_TRUE (sawManual);
+}
+
+// RED IF: SoundcheckReplace is folded into Manual. The log could then not tell
+// "the soundcheck replaced its own previous proposal" from "a human removed a
+// notch" -- the exact mislabelling lane D exists to prevent. F21.
+TEST (NotchControllerSoundcheck, SoundcheckReplaceIsItsOwnClearReason)
+{
+    // B-2, from Recorder's own comment at tests/test_notchcontroller.cpp:1466:
+    //   1. Recorder has NO operator(). The sink comes from rec.sink().
+    //   2. The Recorder must be declared BEFORE the Harness it is wired to. The
+    //      controller's destructor calls stop(), which flushes the remaining
+    //      events through the sink -- into this object. Declaration order is the
+    //      reverse of destruction order.
+    Recorder rec;
+    Harness  h;
+    h.controller.setEventSink (rec.sink());
+
+    ASSERT_TRUE (h.controller.setNotch (0, 2, 1000.0, 30.0, -12.0,
+                                        NotchController::Origin::Soundcheck));
+    h.controller.clearNotch (0, 2, NotchController::ClearReason::SoundcheckReplace);
+
+    const std::vector<float> block (512, 0.0f);   // B-1(c)
+    h.tap.write (block.data(), block.size());
+    h.controller.runOnce();
+
+    ASSERT_FALSE (rec.events.empty());
+    const auto& last = rec.events.back();
+    EXPECT_EQ (last.kind, NotchController::NotchEvent::Kind::Clear);
+    EXPECT_EQ (last.reason, NotchController::ClearReason::SoundcheckReplace);
+    EXPECT_NE (last.reason, NotchController::ClearReason::Manual);
+    EXPECT_FALSE (h.controller.activeForTest (0, 2));   // B-3: `active`, never depth < 0
+}
+
+// RED IF: lane G's room memory is touched by a preventive notch.
+//
+// I-6, and this is why the test lives HERE and not in
+// tests/test_soundcheckcontroller.cpp: it needs Harness, NoiseSource and
+// probeMemoryAt, all of which are in this TU's anonymous namespace. BOTH
+// Soundcheck room-memory lines live inside placeConfirmed:
+//
+//   NotchController.cpp:1116 -- if (index >= 0 && origin != Origin::Soundcheck)
+//                               remembered = takeRememberedDepthLocked(...)
+//                               i.e. a Soundcheck placement never CONSUMES an entry
+//   NotchController.cpp:1169 -- if (origin == Origin::Soundcheck) depthDb = ceiling;
+//                               i.e. a remembered depth never DECIDES a Soundcheck depth
+//
+// Neither is reachable from setNotch/clearNotch, and roomMemory_ is written
+// only on the auto-release path (:843). Plan rev 1's version called setNotch
+// and clearNotch only, so it exercised nothing and could not go red no matter
+// what lane M did; and its step 1 read a probe's own steep-rise depth as proof
+// that an ENTRY existed, which it is not -- probeMemoryAt clears MANUALLY
+// precisely so it leaves no entry behind. This version builds the entry the
+// only way the app ever builds one, then checks BOTH halves. inv 18, F20.
+TEST (NotchControllerSoundcheck, APreventiveNotchNeitherWritesNorConsumesRoomMemory)
+{
+    Harness h;
+    NoiseSource quiet;
+    const double binHz   = kTestSr / Detector::kFftSize;   // 23.4375
+    const double memoHz  = 43.0 * binHz;                   // 1007.8125 = probeMemoryAt(1000)'s bin
+    // Bin 60, and deliberately NOT a harmonic of bin 43 (2x43 = 86, 3x43 = 129):
+    // a locked fundamental would hold the probe back through the harmonic
+    // penalty and the test would read that as a memory effect (KD-3).
+    const double freshHz = 60.0 * binHz;                   // 1406.25
+    h.controller.setNotchDefaults (30.0, -24.0);
+
+    // 1. A real -24 DETECTOR notch, auto-released all the way to Clear. That is
+    //    the only path in the app that writes a room-memory entry
+    //    (rememberReleaseLocked, NotchController.cpp:843) -- a manual clear, a
+    //    CLEAR ALL or a FALSE verdict deliberately write nothing.
+    ASSERT_TRUE (h.controller.setNotch (0, 0, memoHz, 30.0, -24.0,
+                                        NotchController::Origin::Detector));
+    pumpQuietFor (h, quiet, 62000.0);   // from -24: 60 s to Clear, +2 s margin
+    ASSERT_FALSE (h.controller.activeForTest (0, 0));
+
+    // 2. A PREVENTIVE notch at the SAME bin, then cleared the way a re-run
+    //    clears its own previous proposal.
+    ASSERT_TRUE (h.controller.setNotch (0, 15, memoHz, 30.0, -24.0,
+                                        NotchController::Origin::Soundcheck));
+    h.controller.clearNotch (0, 15, NotchController::ClearReason::SoundcheckReplace);
+    const std::vector<float> block (512, 0.0f);
+    h.tap.write (block.data(), block.size());
+    h.controller.runOnce();
+
+    h.controller.setDetectionActive (true);
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+
+    // 3. NOT CONSUMED. The entry is still there, so a fresh DETECTOR howl at
+    //    that bin is still placed at the remembered depth instead of crawling
+    //    up from the steep-rise rung.
+    EXPECT_DOUBLE_EQ (probeMemoryAt (h, quiet, 1000.0), -24.0)
+        << "the preventive notch spent the room's history";
+
+    // 4. NOT WRITTEN. A preventive notch at a bin with no history must leave
+    //    none behind, or the next detector howl there starts deep on evidence
+    //    the room never gave.
+    ASSERT_TRUE (h.controller.setNotch (0, 15, freshHz, 30.0, -24.0,
+                                        NotchController::Origin::Soundcheck));
+    h.controller.clearNotch (0, 15, NotchController::ClearReason::SoundcheckReplace);
+    h.tap.write (block.data(), block.size());
+    h.controller.runOnce();
+
+    const double fresh = probeMemoryAt (h, quiet, freshHz);
+    ASSERT_NE (fresh, 0.0) << "nothing was ever placed at the fresh bin";
+    EXPECT_DOUBLE_EQ (fresh, -12.0)
+        << "the preventive notch left a memory entry behind at a bin the room "
+           "never howled at";
+}

@@ -1,0 +1,802 @@
+# Review package: 335b855..164092e
+
+## Commits
+164092e feat(lane-m): SoundcheckSignal -- clamped log sweep and ramp-out as pure functions
+9069245 docs(lane-m): plan rev 3 — 6 residuals from scoped re-check (N-1 recorder lifetime in Task 7)
+
+## Files changed
+ CMakeLists.txt                                     |   2 +
+ .../plans/2026-09-15-active-soundcheck.md          |  73 +++++--
+ src/dsp/SoundcheckSignal.cpp                       |  97 ++++++++++
+ src/dsp/SoundcheckSignal.h                         |  95 +++++++++
+ tests/CMakeLists.txt                               |   1 +
+ tests/test_soundchecksignal.cpp                    | 212 +++++++++++++++++++++
+ 6 files changed, 464 insertions(+), 16 deletions(-)
+
+## Diff
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ca2d294..af9e5b9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -126,20 +126,22 @@ set(HANDSFREE_CORE_SOURCES
+     ${CMAKE_SOURCE_DIR}/src/dsp/Biquad.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/Detector.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/Detector.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/PeakinessAnalyzer.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/PeakinessAnalyzer.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/CandidateScorer.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/CandidateScorer.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.cpp
+     ${CMAKE_SOURCE_DIR}/src/dsp/NotchChain.h
+     ${CMAKE_SOURCE_DIR}/src/dsp/NotchCommand.h
++    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.cpp
++    ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckSignal.h
+     ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
+     ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
+ )
+ 
+ target_sources(HandsFree PRIVATE
+     src/main.cpp
+     ${HANDSFREE_CORE_SOURCES}
+ )
+ 
+ # Generates JuceLibraryCode/JuceHeader.h for this target. Without it the
+diff --git a/docs/superpowers/plans/2026-09-15-active-soundcheck.md b/docs/superpowers/plans/2026-09-15-active-soundcheck.md
+index 3622562..5848439 100644
+--- a/docs/superpowers/plans/2026-09-15-active-soundcheck.md
++++ b/docs/superpowers/plans/2026-09-15-active-soundcheck.md
+@@ -67,20 +67,35 @@ Line anchors corrected: `reasonName` `PartialApplyUnwind` **`:75`** (m-2); `kTap
+ 
+ Content: `tools/snapshot.cpp` has no scene registry — `main()` (`:156`) is a linear sequence of `shoot()` calls, so lane M adds another one (m-11, and see the correction note); the fixture's `session_end` is the **last** line (`tests/fixtures/session-sample.jsonl:15`, `t = 60000`), so new lines are inserted **before** it (m-12); test counts corrected to **10** for Task 5 (m-13), **21** for Task 6 (m-14) and **8** for Task 9 (m-15); `RefusesWithZeroChannels`'s dead `RunParams` removed (m-16); `UntrustedBinIsNeverACandidate` now pokes a bin **below** `kTrustedHighHz` with `trusted = false`, since an 8 kHz bin was already excluded by the band and proved nothing (m-17); `kSweepSeconds * 0.0 + 0.7` → `0.7` (m-18); `SoundcheckCandidates::smooth` no longer claims a test it does not have (m-19); `dsp/SoundcheckSignal.h` is included from `AudioEngine.cpp` only, never the header (m-20); missing test includes named per task (m-21); the two identical `Candidate` types get an explicit field-by-field copy in Task 6 Step 4 (m-22).
+ 
+ **Running test-count estimates, corrected:** 554 / 562 / 574 / 577 / **587** / 608 / 619 / 625 / **633** / **638**.
+ 
+ ### Two test hardenings the cross-check asked for on top of the findings
+ 
+ - **`NoiseFloorOfAQuietRoomDoesNotAbort` was a flake.** The 7.35 figure is a 60-seed **one-shot** maximum; dense sampling crossed 10.0 once at **13.99** (`memory/peakiness-sweep-2048-2026-09-04.md`). Taking a max over ~1023 bins of a looped 16384-sample buffer will eventually exceed a gate of 10. The test now pins `ASSERT_LT (worstPeakinessForTest(), 10.0f)` **first**, so a fixture that drifts fails as a fixture problem instead of as a false gate failure.
+ - **`HotMicAbortsOnlyAfterTheHold` never proved the hold.** It now drives one 5.33 ms block at 0.9 followed by quiet and asserts **no** abort, before the long burst that must abort.
+ 
++### Revision 3, 2026-09-15 — six residuals from the scoped re-check
++
++The cross-check's own re-check of rev 2 scored **17 ADDRESSED / 5 PARTIAL / 0 NOT**, accepted both of the deviations recorded below, and accepted the m-4 rebuttal (cite **both** `:1116` and `:1169`). Six residuals remained; all six are applied.
++
++| ID | Defect | Fix |
++|---|---|---|
++| **N-1** | **BLOCKING.** `LinkedPairUnwindsWhenTheSecondLaneFails` and `ARerunReplacesItsOwnPreviousProposals` declared `NotchRig rig;` **before** `EventRecorder rec;`. Locals are destroyed in reverse declaration order, so `~NotchController` runs `stop()` and flushes its remaining events through the sink into a vector that is already gone. Rev 2 fixed the *type* definition order and missed the *object* order in two test bodies — which is the same defect `tests/test_notchcontroller.cpp:1466-1470` was written to warn about | Both bodies are `EventRecorder rec; NotchRig rig {…};`. The `EventRecorder` struct comment now says outright that the rule is about the **object** order in every test body, not only where the two types are defined |
++| **N-2** | Two stale `r.engine.audioDeviceAboutToStart (nullptr)` lines survived in Task 8's tests. B-4 established that this call does not set `isRunning_`, so both runs would have aborted `engine_stopped` | Deleted. `Rig`'s constructor already calls `setRunningForTest(true)` and drives one block. The one remaining call, in Task 5's `DeviceRestartDrainsTheCaptureRing`, is the **subject** of that test and stays |
++| **N-3** | Task 2's Step 5 prose still carried the old derivation — `T60 = 2.0 s`, `1 − 10^(−3 × 0.7/2.0 × 2)` — while the test's block comment had been corrected to `T60 = 8.0 s` and 2.62 dB. An implementer reading the step rather than the comment would have "corrected" the test back | The prose now carries the same chain as the comment, and states the 2.0 s number explicitly as the defect (0.0035 dB, unmeasurable) so nobody re-derives their way back into it |
++| **N-4** | Task 6's Files list and `git add` named only `tests/test_soundcheckcontroller.cpp`, but `APreventiveNotchNeitherWritesNorConsumesRoomMemory` lives in `tests/test_notchcontroller.cpp` — it needs `Harness`, `NoiseSource` and `probeMemoryAt` from that TU's anonymous namespace. The commit would have left the test uncommitted | Both the Files list and the `git add` line name `tests/test_notchcontroller.cpp`, with the reason |
++| **N-5** | `takenThisCall[n.index] = false;` in the replace pass is a **no-op** — the array starts all-false — and the comment beside it claimed the cleared slot was reusable by this call, which it is not: the re-read snapshot still lists the cleared notch for ~10.7 ms | The line is deleted and the comment says what actually happens: an index cleared by this call stays skipped by this call, the result is conservative, and conservative is the right side when the alternative is two writers on one index |
++| **N-6** | Task 5's snapshot block comment still said "the **SEVEN** soundcheck atomics… nothing below this point reads the atomics again" while nine values are snapshotted — contradicting invariant 7's own amended wording two hundred lines above it | "NINE values… the seven soundcheck atomics, the sample rate (I-9) and the test-only gain seam (B-5)", and "nothing below reads **any of the nine** again", naming `currentSampleRate_` as the one rev 1 got wrong |
++
++---
++
+ ### Where this plan departs from the cross-check, and why
+ 
+ - **B-2, the recorder's home.** `tests/test_gui_helpers.h` **does** exist, so the coordinator's ruling was to promote `Recorder` into it. Opening it changes the answer: it is a **GUI-only** header — `namespace gui_test`, and its only include is `<juce_gui_basics/juce_gui_basics.h>`. Promoting a `NotchController::NotchEvent` recorder into it would pull `app/NotchController.h` into every GUI test TU that includes it and would require editing `tests/test_notchcontroller.cpp` to consume the promoted copy — a refactor with no benefit to lane M and a real chance of disturbing 122 existing tests. **This plan takes B-2's own stated alternative** ("define a local recorder there, before `NotchRig`"). Flagged here so the coordinator can overrule cheaply.
+ - **m-11's ordinal.** `tools/snapshot.cpp` has **three** `shoot()` calls today — `:212` (`console-idle.png`), `:357` (`console-live.png`), `:395` (`console-preset-music.png`) — so lane M's is the **fourth**, not the third. The substance of m-11 (no scene registry; `main()` is linear) is correct and is what the task follows.
+ - **m-4 / I-6's line number.** The cross-check says the Soundcheck room-memory gate is at `:1169-1170` and "NOT `:1116`". Both lines exist and they do different jobs: **`:1116`** is `if (index >= 0 && origin != Origin::Soundcheck) remembered = takeRememberedDepthLocked (...)` — the gate that stops a Soundcheck placement from **consuming** an entry, which is what §4.6(f) and invariant 18 are about; **`:1169`** is `if (origin == Origin::Soundcheck) depthDb = ceiling;` — the override that stops a remembered depth from **deciding** a Soundcheck depth. This plan cites **both**, each with its job. I-6's substantive finding — that the rev-1 test could not go red because neither line is reachable from `setNotch`/`clearNotch` — is correct and is fixed.
+ 
+ ---
+ 
+ ## The nine owner confirmations — the release gate
+ 
+@@ -1265,21 +1280,21 @@ private:
+ cmake -B build -G "Visual Studio 18 2026" -A x64
+ ```
+ ```bash
+ cmake --build build --config Release
+ ```
+ ```bash
+ cd build && ctest -C Release -R LoopGainEstimator --output-on-failure
+ ```
+ Expected: `100% tests passed` (8 tests).
+ 
+-**If `DecayLongerThanTheTailIsUnderRead`'s 3.0 dB is not what the synthetic room produces, do NOT edit the number to match.** Derive it: with a per-sample decay `r` and a T60 of 2.0 s, the fraction of the resonator's energy captured inside a 0.7 s tail is `1 - 10^(-3 * 0.7/2.0 * 2)`, and the shortfall is `-10*log10` of it. Put the derivation in the comment beside the number, as lane G's B-4 lesson requires ("write the arithmetic in the comment or it drifts").
++**If `DecayLongerThanTheTailIsUnderRead`'s 2.62 dB is not what the synthetic room produces, do NOT edit the number to match** — re-derive it from the block comment in that test, which is the authority. The chain is: the sweep reaches 1 kHz at `t_1k = kSweepSeconds · ln(1000/100) / ln(10000/100) = 3.0 × 0.5 = 1.5 s`, so the short window keeps `(3.0 − 1.5) + 0.7 = 2.2 s` of the ring-out; with `T60 = 8.0 s` the captured energy fraction is `1 − 10^(−6 × 2.2 / 8.0) = 0.5477`, and the shortfall is `−10·log10(0.5477) = 2.62 dB`. **Do not use the earlier 2.0 s figure**: at `T60 = 2.0` the same arithmetic gives `1 − 10^(−6 × 2.2 / 2.0) = 0.99921`, a shortfall of 0.0035 dB, which no test can measure — that was plan rev 1's defect (I-2). Keep the derivation in the comment beside the number, as lane G's B-4 lesson requires ("write the arithmetic in the comment or it drifts").
+ 
+ - [ ] **Step 6: Full gate and commit**
+ 
+ ```bash
+ cd build && ctest -C Release
+ ```
+ Expected: `100% tests passed (562)` — 554 + 8. ESTIMATE.
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+@@ -2547,25 +2562,31 @@ void AudioEngine::setRunningForTest (bool running)
+ }
+ ```
+ 
+ `requestSoundcheckRampOut()` stores the CURRENT `scSampleIndex_` into `scRampOutAtSample_` — the anchor is a sample index, not a time, so the callback can evaluate the envelope with no clock.
+ 
+ - [ ] **Step 4: The snapshot, beside `bypass`**
+ 
+ At `src/app/AudioEngine.cpp:514`, directly under the existing `const bool bypass = ...` line and under its existing comment:
+ 
+ ```cpp
+-    // Lane M (spec §4.1, invariant 7): the SEVEN soundcheck atomics are read
+-    // HERE, once, for the same reason the mode and the mapping are -- a flip
++    // Lane M (spec §4.1, invariant 7): NINE values are read HERE, once -- the
++    // seven soundcheck atomics, the sample rate (I-9) and the test-only gain
++    // seam (B-5) -- for the same reason the mode and the mapping are: a flip
+     // mid-callback between the mute decision (point 2) and the tap decision
+     // (point 4) would produce a block that BOTH injects the sweep and taps it
+-    // back into the detector. Nothing below this point reads the atomics again.
++    // back into the detector.
++    //
++    // Nothing below this point reads ANY of the nine again. That includes
++    // currentSampleRate_, which plan rev 1 re-read down at point 3 (I-9): a rate
++    // change landing between the two reads would build the sweep with one T and
++    // index it with another.
+     const int          scOutChannel      = scOutChannel_.load       (std::memory_order_relaxed);
+     const bool         scSuspendTaps     = scSuspendTaps_.load      (std::memory_order_relaxed);
+     const int          scCaptureIn       = scCaptureInChannel_.load (std::memory_order_relaxed);
+     const bool         scCaptureActive   = scCaptureActive_.load    (std::memory_order_relaxed);
+     const std::int64_t scSampleIndex     = scSampleIndex_.load      (std::memory_order_relaxed);
+     const float        scPeak            = scPeak_.load             (std::memory_order_relaxed);
+     const std::int64_t scRampOutAt       = scRampOutAtSample_.load  (std::memory_order_relaxed);
+     // I-9: the sample rate belongs in the SAME snapshot. Reading it down at
+     // point 3 would mean a rate change landing between the two reads builds the
+     // sweep with one T and indexes it with another.
+@@ -2791,20 +2812,21 @@ Abort  ← from any emitting phase: set scRampOutAtSample_ (the callback does th
+ 1. **`Results` runs WITH detection back on** (F9). Rev 1 held detection off for 60 s to avoid racing for an `index`. But the taps resume the moment suspension lifts, so `liveMs_` advances (`src/app/NotchController.cpp:662-664`), `riskValid` is false so `frozen` is false, and the release ladder walks 60 s: a −24 notch loses its first rung at 30 s and its second at 40 s — while spec §3 declares 0 dB. Detection comes back **the instant the last channel's tail ends**, and `kResultsTimeoutMs` is 20 s regardless.
+ 2. **The `index` race is handled by re-reading, not by disarming the detector** (F10) — Task 7.
+ 3. **Ring risk is read only where it is still alive.** Making `ringRiskScore >= ringRiskThreshold` a *mid-run* abort condition **can never fire**: detection is off, so `processSpectrumForDetection` returns immediately (`src/app/NotchController.cpp:1281-1282`) and `frameScoreValid_` is never true; and the taps are suspended, so no block is drained and the snapshot never refreshes (`:617-650`). Ring risk is therefore read at **`Preflight` and again at `Arm`**, while the taps still run. The "is the room ringing?" question *during* a run is answered by lane M's own measurement instead: the 0.5 s noise window goes through `PeakinessAnalyzer::peakinessAt` and the **peakiest bin** is compared against `RunParams::noiseFloorGate`.
+ 4. **The mic level for self-abort is computed on the lane M thread** from `micCapture_` (20 ms sliding RMS), never taken from anything of the detector's.
+ 
+ **`RunParams` — read ONCE at `Arm` on the message thread, then immutable.** Every field being frozen is the point: a threshold that moved mid-run would score channel 1 and channel 9 of the *same measurement* on two different rulers, and nobody reading the log could tell.
+ 
+ **Files:**
+ - Create: `src/app/SoundcheckController.h`, `src/app/SoundcheckController.cpp`
+ - Create: `tests/test_soundcheckcontroller.cpp`
++- Modify: **`tests/test_notchcontroller.cpp`** — N-4. `APreventiveNotchNeitherWritesNorConsumesRoomMemory` lands **here**, not in the new file, because it needs `Harness`, `NoiseSource` and `probeMemoryAt` (`tests/test_notchcontroller.cpp:20`, `:335`, `:400`), all of which live in that TU's anonymous namespace. Append it after the last anonymous namespace closes (lane G m-E)
+ - Modify: `CMakeLists.txt` (`HANDSFREE_CORE_SOURCES`), `tests/CMakeLists.txt`
+ 
+ **Interfaces:**
+ - Consumes: `AudioEngine` setters and `getMicCaptureBuffer` / `getMicCaptureDropCount` (Task 5); `SoundcheckSignal` (1), `LoopGainEstimator` (2), `SoundcheckCandidates` (3); `ClockSource` (`src/dsp/ClockSource.h:8-13`); `PeakinessAnalyzer::peakinessAt` (`src/dsp/PeakinessAnalyzer.h:166`); `NotchController::SnapshotBuffer` and the three constants `kRiskFreezeFraction` / `kDepthLadderDb` / `kMaxDepthDb` **as values, never through a stored pointer** (inv 17).
+ - Produces:
+   ```cpp
+   class SoundcheckController : private juce::Thread
+   {
+   public:
+       static constexpr double kTailSeconds      = 0.7;
+@@ -3797,21 +3819,21 @@ Expected: `100% tests passed` (**21** tests — m-14 recounted this; rev 1 said
+ 
+ ```bash
+ cd build && ctest -C Release
+ ```
+ Expected: `100% tests passed (608)` — 587 + 21. ESTIMATE.
+ 
+ ```bash
+ rm -f .superpowers/sdd/.gitignore
+ ```
+ ```bash
+-git add src/app/SoundcheckController.h src/app/SoundcheckController.cpp tests/test_soundcheckcontroller.cpp CMakeLists.txt tests/CMakeLists.txt
++git add src/app/SoundcheckController.h src/app/SoundcheckController.cpp tests/test_soundcheckcontroller.cpp tests/test_notchcontroller.cpp CMakeLists.txt tests/CMakeLists.txt
+ ```
+ ```bash
+ git commit -m "feat(lane-m): SoundcheckController -- state machine, refusals, self-aborts on a fake clock"
+ ```
+ 
+ ---
+ 
+ ### Task 7: `ÁP DỤNG` and `BỎ` — placing on the message thread, through the existing API
+ 
+ **Mức level dự kiến (spec §3):** after `ÁP DỤNG`, each candidate bin is cut by **−6 / −12 / −18 / −24 dB** (or by the preset ceiling, whichever is shallower), at most **6 bins per lane**. After `BỎ` or the 20 s timeout: **0 dB — nothing is placed.**
+@@ -3879,20 +3901,28 @@ Rev 1's comment said "this lane's" while the code walked the whole snapshot, whi
+ Append to `tests/test_soundcheckcontroller.cpp`. Helper first, next to the other helpers in the anonymous namespace:
+ 
+ ```cpp
+ // B-2: tests/test_notchcontroller.cpp's Recorder lives in THAT translation
+ // unit's anonymous namespace and is invisible here, it has no operator() (the
+ // sink comes from sink()), and it must outlive the controller it is wired to,
+ // because the controller's destructor flushes through the sink
+ // (tests/test_notchcontroller.cpp:1466-1486).
+ //
+ // So this TU defines its own, DECLARED BEFORE NotchRig for that lifetime reason.
++//
++// N-1: and that is not only about where the two TYPES are defined. In EVERY TEST
++// BODY that wires a recorder to a rig, the `EventRecorder` OBJECT must be
++// declared before the `NotchRig` OBJECT. Locals are destroyed in reverse
++// declaration order, so `NotchRig rig; EventRecorder rec;` puts the flush from
++// ~NotchController into a vector that has already gone. The bug is silent in a
++// passing run and shows up as a heap corruption somewhere else.
++//
+ // It is not promoted into tests/test_gui_helpers.h: that header is GUI-only
+ // (namespace gui_test, and its only include is juce_gui_basics), so putting a
+ // NotchController::NotchEvent recorder in it would drag app/NotchController.h
+ // into every GUI test TU and force an edit to test_notchcontroller.cpp to
+ // consume the promoted copy.
+ struct EventRecorder
+ {
+     std::vector<NotchController::NotchEvent> events;
+ 
+     NotchController::EventSink sink()
+@@ -4111,46 +4141,51 @@ TEST (SoundcheckApply, LinkedIsDerivedFromLaneCountNotJustTheSwitch)
+     EXPECT_EQ (stats.placed, 1);
+     EXPECT_TRUE  (rig.controller->activeForTest (0, 15));
+     EXPECT_FALSE (rig.controller->activeForTest (1, 15));
+ }
+ 
+ // RED IF: a linked pair is left half-placed. One lane protected while the GUI
+ // claims both is worse than placing nothing -- the same reasoning
+ // placeConfirmed (:1262-1264) and adoptPreset (:528-530) already follow. N4.
+ TEST (SoundcheckApply, LinkedPairUnwindsWhenTheSecondLaneFails)
+ {
+-    NotchRig rig { 2 };
+-    rig.controller->setLinked (true);
+-
++    // N-1: the RECORDER FIRST. Destruction runs in reverse declaration order, so
++    // a recorder declared after the rig is already gone when ~NotchController
++    // runs stop() and flushes its remaining events through the sink -- a write
++    // into a destroyed vector. Same rule, same reason, as
++    // tests/test_notchcontroller.cpp:1466-1470.
+     EventRecorder rec;
++    NotchRig      rig { 2 };
++    rig.controller->setLinked (true);
+     rig.controller->setEventSink (rec.sink());
+ 
+     rig.controller->failNextSetNotchOnLaneForTest (1);
+     const auto stats = applySoundcheckResults (*rig.controller,
+                                                { oneCandidate (0, 0, 1000.0, -12.0) });
+ 
+     EXPECT_EQ (stats.placed, 0);
+     EXPECT_GE (stats.refused, 1);
+     EXPECT_FALSE (rig.controller->activeForTest (0, 15)) << "lane 0 must be unwound";
+ 
+     rig.pump();
+     EXPECT_TRUE (rec.sawClearWithReason (NotchController::ClearReason::PartialApplyUnwind))
+         << "and with THAT reason, not Manual";
+ }
+ 
+ // RED IF: the previous run's preventive notches are left in place. They never
+ // auto-release (NotchController.cpp:729), so the 16-slot chain drains after a
+ // few soundchecks. §4.6b.
+ TEST (SoundcheckApply, ARerunReplacesItsOwnPreviousProposals)
+ {
+-    NotchRig rig { 1 };
++    // N-1: the RECORDER FIRST -- see LinkedPairUnwindsWhenTheSecondLaneFails.
+     EventRecorder rec;
++    NotchRig      rig { 1 };
+     rig.controller->setEventSink (rec.sink());
+ 
+     auto first = applySoundcheckResults (*rig.controller, { oneCandidate (0, 0, 1000.0, -12.0) });
+     ASSERT_EQ (first.placed, 1);
+     rig.pump();                                   // B-1(c)
+ 
+     const auto second = applySoundcheckResults (*rig.controller,
+                                                 { oneCandidate (0, 0, 1200.0, -12.0) });
+     rig.pump();
+ 
+@@ -4292,23 +4327,31 @@ SoundcheckApplyStats applySoundcheckResults (
+         NotchController::SnapshotBuffer snap {};
+         controller.copySnapshot (snap);
+         for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+         {
+             const auto& n = snap.notches[i];
+             if (n.origin != NotchController::Origin::Soundcheck)
+                 continue;
+             controller.clearNotch ((int) n.channel, (int) n.index,
+                                    NotchController::ClearReason::SoundcheckReplace);
+             ++stats.clearedPrevious;
+-            // The cleared slot is free for THIS call to reuse, and the snapshot
+-            // will not say so for another ~10.7 ms.
+-            takenThisCall[(std::size_t) n.index] = false;
++            // N-5: nothing is marked free here, and that is deliberate.
++            //
++            // takenThisCall starts all-false, so clearing an index to false
++            // would be a no-op anyway. More importantly, an index freed HERE is
++            // NOT reusable by THIS call: the snapshot each placement re-reads
++            // still lists the cleared notch for up to ~10.7 ms (latest_ is
++            // republished only inside runOnce()'s drain loop on the detector
++            // thread), so firstFreeIndexTopDown skips it regardless. The result
++            // is conservative -- a re-run may place lower down the chain than it
++            // strictly had to -- and conservative is the right side to be on
++            // when the alternative is two writers on one index.
+         }
+     }
+ 
+     for (const auto& result : results)
+     {
+         if (! result.measured || result.routingInvalid)
+             continue;                                        // a valid result that places nothing
+ 
+         for (int c = 0; c < result.candidateCount; ++c)
+         {
+@@ -4547,22 +4590,21 @@ TEST (SessionLoggerSoundcheck, EveryAbortReasonHasItsOwnName)
+ Includes for this file: `<set>` and `<algorithm>` (I-7), plus `app/SoundcheckController.h` (I-8).
+ 
+ Append to `tests/test_soundcheckcontroller.cpp`:
+ 
+ ```cpp
+ // RED IF: a run stops emitting one of the five events, or emits them out of
+ // order. The order is what makes the log readable: start, one output per
+ // channel, one result.
+ TEST (SoundcheckController, AFullRunEmitsTheFiveEventsInOrder)
+ {
+-    Rig r;
+-    r.engine.audioDeviceAboutToStart (nullptr);
++    Rig r;                                 // B-4: the ctor already runs the engine
+     r.micSource = whiteNoise (16384, 1.0e-4f);
+     ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+     r.pump (12000.0);
+     ASSERT_EQ (r.sc.getState(), SoundcheckController::State::Results);
+ 
+     std::vector<juce::String> names;
+     for (const auto& v : r.log) names.push_back (evOf (v));
+ 
+     ASSERT_GE (names.size(), 4u);
+     EXPECT_EQ (names.front(), "soundcheck_start");
+@@ -4592,22 +4634,21 @@ TEST (SoundcheckController, AbortEventCarriesAtOutputAndElapsed)
+             EXPECT_EQ ((int) o->getProperty ("at_output"), 1) << "second channel is index 1";
+             EXPECT_GT ((double) o->getProperty ("elapsed_ms"), 5000.0);
+             EXPECT_EQ (o->getProperty ("reason").toString(), "user_stop");
+         }
+ }
+ 
+ // RED IF: soundcheck_start stops carrying the numbers that let a later reader
+ // reconstruct what the room was told to do.
+ TEST (SoundcheckController, StartCarriesTheLevelAndTheDuration)
+ {
+-    Rig r;
+-    r.engine.audioDeviceAboutToStart (nullptr);
++    Rig r;                                 // B-4: the ctor already runs the engine
+     r.micSource = whiteNoise (4096, 1.0e-4f);
+     ASSERT_TRUE (r.sc.arm (r.stereoTargets(), r.params()));
+     r.pump (20.0);
+ 
+     ASSERT_FALSE (r.log.empty());
+     auto* o = r.log.front().getDynamicObject();
+     ASSERT_NE (o, nullptr);
+     EXPECT_EQ ((int) o->getProperty ("outputs"), 2);
+     EXPECT_NEAR ((double) o->getProperty ("peak_dbfs"), -20.0, 0.1);
+     EXPECT_NEAR ((double) o->getProperty ("sweep_ms"), 3000.0, 1.0);
+diff --git a/src/dsp/SoundcheckSignal.cpp b/src/dsp/SoundcheckSignal.cpp
+new file mode 100644
+index 0000000..8c4a094
+--- /dev/null
++++ b/src/dsp/SoundcheckSignal.cpp
+@@ -0,0 +1,97 @@
++// src/dsp/SoundcheckSignal.cpp
++#include "dsp/SoundcheckSignal.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace
++{
++constexpr double kPi = 3.14159265358979323846;
++}
++
++float SoundcheckSignal::clampPeak (float requested) noexcept
++{
++    // Decided explicitly rather than by jlimit/std::clamp: both are undefined
++    // for NaN inputs, and this value drives a loudspeaker.
++    if (! std::isfinite (requested))
++        return 0.0f;
++    return std::min (std::max (requested, 0.0f), kSoundcheckMaxPeak);
++}
++
++SoundcheckSignal::SoundcheckSignal (const Params& p) noexcept
++{
++    sampleRate_ = (p.sampleRate > 0.0) ? p.sampleRate : 48000.0;
++    lowHz_      = (p.lowHz > 0.0)      ? p.lowHz      : kSweepLowHz;
++
++    const double highHz = (p.highHz > lowHz_) ? p.highHz : (lowHz_ * 2.0);
++    const double tS     = (p.sweepSeconds > 0.0) ? p.sweepSeconds : kSweepSeconds;
++
++    k_            = std::log (highHz / lowHz_);
++    phaseScale_   = 2.0 * kPi * lowHz_ * tS / k_;
++    totalSamples_ = (std::int64_t) (tS * sampleRate_);
++    rampSamples_  = (std::int64_t) (std::max (0.0, p.rampMs) * sampleRate_ / 1000.0);
++
++    // Never more than half the sweep at each end, or the two windows overlap
++    // and the "last sample is exactly zero" property stops holding.
++    rampSamples_ = std::min (rampSamples_, totalSamples_ / 2);
++
++    peak_ = clampPeak (p.peak);
++}
++
++float SoundcheckSignal::sampleAt (std::int64_t n) const noexcept
++{
++    if (n < 0 || n >= totalSamples_)
++        return 0.0f;
++
++    const double t   = (double) n / (double) totalSamples_;
++    const double phi = phaseScale_ * (std::exp (k_ * t) - 1.0);
++
++    // Raised cosine at BOTH ends. w(0) == 0 and w(totalSamples_-1) == 0 by
++    // construction: the denominator is rampSamples_, and the index that reaches
++    // it is exactly the first sample of the flat middle.
++    double w = 1.0;
++    if (rampSamples_ > 0)
++    {
++        const std::int64_t fromStart = n;
++        const std::int64_t fromEnd   = totalSamples_ - 1 - n;
++        const std::int64_t edge      = std::min (fromStart, fromEnd);
++
++        if (edge < rampSamples_)
++            w = 0.5 * (1.0 - std::cos (kPi * (double) edge / (double) rampSamples_));
++    }
++
++    const double v = (double) peak_ * w * std::sin (phi);
++
++    // The peak is already clamped, w is in [0,1] and |sin| <= 1, so this cannot
++    // exceed kSoundcheckMaxPeak. The clamp is here anyway because it costs one
++    // instruction and this is the sample that leaves for a loudspeaker.
++    return (float) std::min (std::max (v, -(double) kSoundcheckMaxPeak),
++                             (double) kSoundcheckMaxPeak);
++}
++
++double SoundcheckSignal::instantaneousHz (std::int64_t n) const noexcept
++{
++    if (totalSamples_ <= 0)
++        return lowHz_;
++    const double t = (double) n / (double) totalSamples_;
++    return lowHz_ * std::exp (k_ * t);
++}
++
++std::int64_t SoundcheckSignal::rampOutSamples (double sampleRate) noexcept
++{
++    if (! (sampleRate > 0.0))
++        return 0;
++    return (std::int64_t) (kRampOutMs * sampleRate / 1000.0);
++}
++
++float SoundcheckSignal::rampOut (std::int64_t n, std::int64_t anchor,
++                                 std::int64_t rampLengthSamples) noexcept
++{
++    if (n < anchor)
++        return 1.0f;
++    if (rampLengthSamples <= 0 || n >= anchor + rampLengthSamples)
++        return 0.0f;   // EXACTLY zero -- the callback uses this to end the run
++
++    const double x = (double) (n - anchor) / (double) rampLengthSamples;
++    return (float) (0.5 * (1.0 + std::cos (kPi * x)));
++}
+diff --git a/src/dsp/SoundcheckSignal.h b/src/dsp/SoundcheckSignal.h
+new file mode 100644
+index 0000000..c045720
+--- /dev/null
++++ b/src/dsp/SoundcheckSignal.h
+@@ -0,0 +1,95 @@
++// src/dsp/SoundcheckSignal.h
++//
++// Lane M. The log sine sweep the active soundcheck plays, as a PURE function of
++// a sample index -- no state advanced by anyone, no allocation, no JUCE. That
++// shape is load-bearing three ways:
++//
++//   1. The audio callback can evaluate it directly, so the emergency ramp-out
++//      needs no other thread to still be alive (spec §4.2, invariant 9).
++//   2. The lane M thread can regenerate the EXACT sequence that was emitted, to
++//      use as the reference spectrum X of the loop-gain estimate (spec §4.4).
++//   3. A headless test can assert any individual sample.
++//
++// The noise-floor phase is expressed as a NEGATIVE sample index rather than as
++// a separate "emitting" flag: sampleAt(n) returns 0 for n < 0, so one gate
++// cannot disagree with the other (spec §4.2).
++//
++// SAFETY. This class is the last thing before a loudspeaker. The peak is
++// clamped in clampPeak() and the clamped value is the ONLY one stored, so there
++// is no route by which an unclamped number reaches sampleAt() -- a value with
++// two routes to becoming wrong needs both clamped, and one clamp is half a
++// clamp (lane G M-B). The +-1.0f output clamp in AudioEngine still sits AFTER
++// the injection point and must never be removed (invariant 4).
++//
++// Deliberately in src/dsp/ with no juce_audio_devices and no src/app/ include:
++// AudioEngine.cpp includes this header from inside the realtime callback, and
++// app/SoundcheckController.h aliases its constants (see that header).
++#pragma once
++
++#include <cstdint>
++
++class SoundcheckSignal
++{
++public:
++    // Spec §4.10. These are the DEFINITIONS; SoundcheckController.h aliases
++    // them so there is one place to look up a lane M constant and still only
++    // one literal per value (lane G m-D).
++    static constexpr double kSweepLowHz        = 100.0;
++    static constexpr double kSweepHighHz       = 10000.0;
++    static constexpr double kSweepSeconds      = 3.0;
++    static constexpr double kRampMs            = 30.0;
++    // A SEPARATE constant from kRampMs even though the value matches: the
++    // ramp-out is a different function, anchored at an arbitrary sample the
++    // callback is handed, and the two must be able to move apart (F8).
++    static constexpr double kRampOutMs         = 30.0;
++    static constexpr float  kSoundcheckMaxPeak = 0.1f;    // -20 dBFS (Q2)
++    static constexpr float  kSoundcheckMinPeak = 0.01f;   // -40 dBFS (Q2)
++
++    // [0, kSoundcheckMaxPeak]. NaN and infinity map to 0 (silence), not to the
++    // maximum: any comparison with NaN picks an arbitrary branch, so the
++    // non-finite case is decided explicitly, exactly as AudioEngine.cpp:642
++    // decides it for the output clamp.
++    static float clampPeak (float requested) noexcept;
++
++    struct Params
++    {
++        double sampleRate   = 48000.0;
++        double lowHz        = kSweepLowHz;
++        double highHz       = kSweepHighHz;
++        double sweepSeconds = kSweepSeconds;
++        double rampMs       = kRampMs;
++        float  peak         = kSoundcheckMaxPeak;
++    };
++
++    explicit SoundcheckSignal (const Params& p) noexcept;
++
++    // 0 for n < 0 and for n >= totalSamples().
++    [[nodiscard]] float sampleAt (std::int64_t n) const noexcept;
++
++    // f0 * exp(K * n / T). Reported for the marker maths and the tests; the
++    // sample generator does not call it.
++    [[nodiscard]] double instantaneousHz (std::int64_t n) const noexcept;
++
++    [[nodiscard]] std::int64_t totalSamples() const noexcept { return totalSamples_; }
++    [[nodiscard]] std::int64_t rampSamples()  const noexcept { return rampSamples_; }
++    [[nodiscard]] float        clampedPeak()  const noexcept { return peak_; }
++
++    // Half a raised cosine, falling from 1 at `anchor` to EXACTLY 0 at
++    // `anchor + rampLengthSamples` and staying there. 1 before the anchor.
++    // Static because the callback applies it to a signal it may have built from
++    // a different Params instance, and because reaching exactly 0 is what tells
++    // the callback the ramp is finished (invariant 9).
++    static float rampOut (std::int64_t n, std::int64_t anchor,
++                          std::int64_t rampLengthSamples) noexcept;
++
++    static std::int64_t rampOutSamples (double sampleRate) noexcept;
++
++private:
++    double       sampleRate_   = 48000.0;
++    double       lowHz_        = kSweepLowHz;
++    double       k_            = 0.0;   // ln(f1/f0)
++    double       phaseScale_   = 0.0;   // 2*pi*f0*T_s/K
++    std::int64_t totalSamples_ = 0;
++    std::int64_t rampSamples_  = 0;
++    float        peak_         = 0.0f;
++};
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 7b3b447..0d74f30 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -33,20 +33,21 @@ add_executable(HandsFreeTests
+     test_notchlistpanel.cpp
+     test_aztheme.cpp
+     test_presetmanager.cpp
+     test_licensemanager.cpp
+     test_clocksource.cpp
+     test_candidatescorer.cpp
+     test_notchcontroller.cpp
+     test_licenseviewmodel.cpp
+     test_presetsfirstrun.cpp
+     test_sessionlogger.cpp
++    test_soundchecksignal.cpp
+     ${HANDSFREE_CORE_SOURCES}
+ )
+ 
+ # Detector uses juce::dsp::FFT / WindowingFunction, so the test target needs
+ # the juce_dsp module. AudioEngine needs juce_audio_devices for
+ # juce::AudioDeviceManager / AudioIODeviceCallback (it pulls in juce_events and
+ # juce_audio_basics transitively, which is where ScopedJuceInitialiser_GUI and
+ # ScopedNoDenormals live). JUCE modules are INTERFACE libraries and must be
+ # linked PRIVATE (see JUCE "CMake API.md": PUBLIC would compile the module
+ # twice).
+diff --git a/tests/test_soundchecksignal.cpp b/tests/test_soundchecksignal.cpp
+new file mode 100644
+index 0000000..f652161
+--- /dev/null
++++ b/tests/test_soundchecksignal.cpp
+@@ -0,0 +1,212 @@
++// tests/test_soundchecksignal.cpp
++//
++// SoundcheckSignal is the ONLY thing between "the app decided to measure" and a
++// loudspeaker. Every test here is a safety test; none of them needs a device,
++// a thread or a clock.
++#include <gtest/gtest.h>
++
++#include "dsp/SoundcheckSignal.h"
++
++#include <algorithm>
++#include <cmath>
++#include <limits>
++#include <vector>
++
++namespace
++{
++constexpr double kSr = 48000.0;
++
++SoundcheckSignal::Params defaultParams (float peak = SoundcheckSignal::kSoundcheckMaxPeak)
++{
++    SoundcheckSignal::Params p;
++    p.sampleRate = kSr;
++    p.peak       = peak;
++    return p;
++}
++
++// Zero crossings of the sweep over a short span, converted back to a frequency.
++// Counting crossings is deliberately independent of instantaneousHz(): a test
++// that asked the class for the answer it is checking proves nothing.
++double measuredHzAround (const SoundcheckSignal& s, std::int64_t centre, std::int64_t span)
++{
++    int crossings = 0;
++    float prev = s.sampleAt (centre - span / 2);
++    for (std::int64_t n = centre - span / 2 + 1; n < centre + span / 2; ++n)
++    {
++        const float cur = s.sampleAt (n);
++        if ((prev < 0.0f && cur >= 0.0f) || (prev >= 0.0f && cur < 0.0f))
++            ++crossings;
++        prev = cur;
++    }
++    return (crossings / 2.0) * kSr / (double) span;
++}
++} // namespace
++
++// RED IF: clampPeak() stops clamping, or the clamp is applied only at the
++// setter and not at the point of use (spec §3 safety table: "a value with two
++// routes to becoming wrong needs BOTH clamped -- one clamp is half a clamp",
++// lane G lesson M-B). inv 1.
++TEST (SoundcheckSignal, PeakIsClampedWhateverIsAsked)
++{
++    for (float asked : { 1.0f, 10.0f, -5.0f, std::numeric_limits<float>::quiet_NaN(),
++                         std::numeric_limits<float>::infinity() })
++    {
++        const SoundcheckSignal s { defaultParams (asked) };
++
++        EXPECT_LE (s.clampedPeak(), SoundcheckSignal::kSoundcheckMaxPeak) << "asked " << asked;
++        EXPECT_GE (s.clampedPeak(), 0.0f) << "asked " << asked;
++
++        for (std::int64_t n = 0; n < s.totalSamples(); n += 97)
++            ASSERT_LE (std::abs (s.sampleAt (n)), SoundcheckSignal::kSoundcheckMaxPeak)
++                << "asked " << asked << " at n=" << n;
++    }
++}
++
++// RED IF: the raised-cosine window is dropped, or it is applied as w(n)+something
++// that does not vanish at the ends. A non-zero first sample IS a click into a PA.
++// inv 2.
++TEST (SoundcheckSignal, FirstAndLastSampleAreExactlyZero)
++{
++    const SoundcheckSignal s { defaultParams() };
++
++    EXPECT_FLOAT_EQ (s.sampleAt (0), 0.0f);
++    EXPECT_FLOAT_EQ (s.sampleAt (s.totalSamples() - 1), 0.0f);
++}
++
++// RED IF: the noise-floor phase is reintroduced as a separate "emitting" flag
++// instead of a negative sample index. inv 2 / inv 6.
++TEST (SoundcheckSignal, NegativeIndexReturnsZero)
++{
++    const SoundcheckSignal s { defaultParams() };
++
++    for (std::int64_t n : { -1LL, -100LL, -24000LL, -(std::int64_t) (0.5 * kSr) })
++        EXPECT_FLOAT_EQ (s.sampleAt (n), 0.0f) << "n=" << n;
++
++    EXPECT_FLOAT_EQ (s.sampleAt (s.totalSamples()), 0.0f);
++    EXPECT_FLOAT_EQ (s.sampleAt (s.totalSamples() + 4096), 0.0f);
++}
++
++// RED IF: the exponential phase term is written with the wrong sign or the wrong
++// K, which produces a sweep that runs backwards or stops short of 10 kHz.
++//
++// B-8: an earlier draft asserted 100 Hz +- 5 and 10000 Hz +- 500 at the probe
++// CENTRES, and the sweep cannot meet that. f(n) = 100 * 100^(n/T) with
++// T = 3.0 * 48000 = 144000, so a probe centred at 2400 samples is already at
++// 100 * 100^(2400/144000) = 107.98 Hz, and one centred near the end reads about
++// 9263 Hz. Both are CORRECT for a log sweep; the tolerances were wrong.
++//
++// So the test compares each measurement against the closed form evaluated at
++// THAT SAME centre, which pins the shape without pretending the endpoints are
++// reachable by a finite probe. The endpoints themselves are pinned by
++// instantaneousHz(0) and instantaneousHz(total), where no window is needed.
++TEST (SoundcheckSignal, InstantaneousFrequencyIsMonotoneAndHitsBothEnds)
++{
++    const SoundcheckSignal s { defaultParams() };
++    const std::int64_t total = s.totalSamples();
++
++    // The closed form, written out here rather than asked of the class, so the
++    // two are independent.
++    auto closedForm = [total] (std::int64_t n)
++    {
++        return 100.0 * std::pow (100.0, (double) n / (double) total);
++    };
++
++    // 20 ms holds ~2 cycles at 100 Hz; 4 ms holds ~37 at 9 kHz.
++    const std::int64_t spanA = (std::int64_t) (0.020 * kSr);
++    const std::int64_t spanB = (std::int64_t) (0.004 * kSr);
++    const std::int64_t cA    = spanA / 2 + 1;
++    const std::int64_t cB    = total - spanB / 2 - 1;
++
++    const double atStart = measuredHzAround (s, cA, spanA);
++    const double atEnd   = measuredHzAround (s, cB, spanB);
++
++    EXPECT_NEAR (atStart, closedForm (cA), closedForm (cA) * 0.05);
++    EXPECT_NEAR (atEnd,   closedForm (cB), closedForm (cB) * 0.05);
++
++    // The ends themselves, where no probe window is involved.
++    EXPECT_NEAR (s.instantaneousHz (0),     100.0,   0.01);
++    EXPECT_NEAR (s.instantaneousHz (total), 10000.0, 1.0);
++
++    double previous = 0.0;
++    for (std::int64_t n = 0; n < total; n += total / 64)
++    {
++        const double hz = s.instantaneousHz (n);
++        ASSERT_GT (hz, previous) << "not monotone at n=" << n;
++        previous = hz;
++    }
++}
++
++// RED IF: the fade-in is made linear or shortened. The ramp must rise from 0 to
++// the full peak envelope over exactly kRampMs and never overshoot.
++TEST (SoundcheckSignal, RampIsMonotoneOverThirtyMilliseconds)
++{
++    const SoundcheckSignal s { defaultParams() };
++    const std::int64_t ramp = s.rampSamples();
++
++    EXPECT_EQ (ramp, (std::int64_t) (SoundcheckSignal::kRampMs * kSr / 1000.0));
++
++    // The envelope is not directly observable, so probe it by the running peak
++    // over one period of the (100 Hz, 480-sample) tone at each point.
++    auto envelopeNear = [&s] (std::int64_t centre)
++    {
++        float m = 0.0f;
++        for (std::int64_t n = centre; n < centre + 480; ++n)
++            m = std::max (m, std::abs (s.sampleAt (n)));
++        return m;
++    };
++
++    float previous = -1.0f;
++    for (std::int64_t n = 0; n + 480 < ramp; n += 480)
++    {
++        const float e = envelopeNear (n);
++        ASSERT_GE (e, previous) << "envelope fell during the fade-in at n=" << n;
++        previous = e;
++    }
++}
++
++// RED IF: the ramp-out reuses the fade-in window instead of being its own
++// function (F8), or its last sample is "very small" rather than EXACTLY zero.
++// The callback relies on reaching exactly 0 to know the ramp is over and to
++// clear scOutChannel_ itself. inv 9.
++TEST (SoundcheckSignal, RampOutIsMonotoneAndReachesExactlyZero)
++{
++    const std::int64_t r = SoundcheckSignal::rampOutSamples (kSr);
++    EXPECT_EQ (r, (std::int64_t) (SoundcheckSignal::kRampOutMs * kSr / 1000.0));
++
++    const std::int64_t anchor = 12345;
++
++    EXPECT_FLOAT_EQ (SoundcheckSignal::rampOut (anchor - 1, anchor, r), 1.0f);
++    EXPECT_FLOAT_EQ (SoundcheckSignal::rampOut (anchor,     anchor, r), 1.0f);
++
++    float previous = 1.0f;
++    for (std::int64_t n = anchor; n < anchor + r; ++n)
++    {
++        const float v = SoundcheckSignal::rampOut (n, anchor, r);
++        ASSERT_LE (v, previous + 1.0e-6f) << "ramp-out rose at n=" << n;
++        ASSERT_GE (v, 0.0f);
++        previous = v;
++    }
++
++    EXPECT_FLOAT_EQ (SoundcheckSignal::rampOut (anchor + r,       anchor, r), 0.0f);
++    EXPECT_FLOAT_EQ (SoundcheckSignal::rampOut (anchor + r + 999, anchor, r), 0.0f);
++}
++
++// RED IF: the two envelopes are multiplied in the wrong order or the ramp-out is
++// applied to the raw sine instead of the already-windowed sample. This is the
++// composition the callback performs, asserted here once so Task 5 only has to
++// wire it.
++TEST (SoundcheckSignal, RampOutMultipliesTheWindowedSampleAndNeverExceedsThePeak)
++{
++    const SoundcheckSignal s { defaultParams() };
++    const std::int64_t r      = SoundcheckSignal::rampOutSamples (kSr);
++    const std::int64_t anchor = s.totalSamples() / 2;
++
++    for (std::int64_t n = anchor; n < anchor + r + 64; ++n)
++    {
++        const float v = s.sampleAt (n) * SoundcheckSignal::rampOut (n, anchor, r);
++        ASSERT_LE (std::abs (v), SoundcheckSignal::kSoundcheckMaxPeak);
++    }
++
++    EXPECT_FLOAT_EQ (s.sampleAt (anchor + r + 10)
++                         * SoundcheckSignal::rampOut (anchor + r + 10, anchor, r), 0.0f);
++}

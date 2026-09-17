@@ -1,0 +1,1003 @@
+# Review package: 40818df..47d324c
+
+## Commits
+47d324c feat(lane-m): AudioEngine emits the soundcheck sweep -- mute by output channel, capture ring, callback-owned ramp-out
+
+## Files changed
+ src/app/AudioEngine.cpp    | 226 ++++++++++++++++++++++++++
+ src/app/AudioEngine.h      | 120 ++++++++++++++
+ tests/test_audioengine.cpp | 395 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 741 insertions(+)
+
+## Diff
+diff --git a/src/app/AudioEngine.cpp b/src/app/AudioEngine.cpp
+index b4b6548..a2ce267 100644
+--- a/src/app/AudioEngine.cpp
++++ b/src/app/AudioEngine.cpp
+@@ -1,12 +1,17 @@
+ #include "app/AudioEngine.h"
+ 
++// Lane M. Included from the .cpp ONLY, never from AudioEngine.h (m-20):
++// the header needs nothing from it, and keeping it out stops a DSP header
++// from riding into every TU that already pulls juce_audio_devices.
++#include "dsp/SoundcheckSignal.h"
++
+ #include <cmath>
+ 
+ namespace
+ {
+ constexpr int kNumChannels = 2;  // stereo in/out
+ 
+ // Hard ceiling on every sample handed to the driver. Values beyond full scale
+ // would be clipped by the DAC conversion anyway; the clamp only makes that
+ // bound explicit and bounds what multi-slot summing can stack onto one output
+ // channel. Non-finite values must never reach the driver at all -- their
+@@ -317,20 +322,118 @@ std::uint64_t AudioEngine::getTapDropCount (int slot) const
+ {
+     return getTapDropCount (slot, 0);
+ }
+ 
+ std::uint64_t AudioEngine::getTapDropCount (int slot, int lane) const
+ {
+     return tapDropCounts_[(std::size_t) clampSlot (slot)][(std::size_t) clampLane (lane)]
+         .load (std::memory_order_relaxed);
+ }
+ 
++
++// ---- Lane M: active soundcheck (spec 2026-09-15 §4.1) ------------------
++//
++// Every setter here is a single relaxed atomic store on the message thread.
++// None of them restarts the device, allocates, or takes a lock; the audio
++// callback reads all of them exactly once per block.
++
++void AudioEngine::setSoundcheckOutputChannel (int channel)
++{
++    // Not range-checked here on purpose: the channel count can change between
++    // this store and the callback that reads it, so the ONLY check that means
++    // anything is the one the callback makes against its OWN channel count
++    // (invariant 3).
++    scOutChannel_.store (channel, std::memory_order_relaxed);
++}
++
++void AudioEngine::setSoundcheckCaptureChannel (int channel)
++{
++    scCaptureInChannel_.store (channel, std::memory_order_relaxed);
++}
++
++void AudioEngine::setSoundcheckCaptureActive (bool active)
++{
++    scCaptureActive_.store (active, std::memory_order_relaxed);
++}
++
++void AudioEngine::setSoundcheckTapsSuspended (bool suspended)
++{
++    scSuspendTaps_.store (suspended, std::memory_order_relaxed);
++}
++
++void AudioEngine::setSoundcheckSampleIndex (std::int64_t n)
++{
++    scSampleIndex_.store (n, std::memory_order_relaxed);
++}
++
++void AudioEngine::setSoundcheckPeak (float peak)
++{
++    // Clamped HERE and again inside SoundcheckSignal::sampleAt. Two clamps for
++    // one value is deliberate: this number has two routes in (this setter and
++    // the test seam below), and a value with two routes to becoming wrong
++    // needs both clamped -- one clamp is half a clamp (lane G M-B).
++    scPeak_.store (SoundcheckSignal::clampPeak (peak), std::memory_order_relaxed);
++}
++
++void AudioEngine::requestSoundcheckRampOut()
++{
++    // The anchor is a SAMPLE INDEX, not a time, so the callback can evaluate
++    // the envelope with no clock and no other thread alive.
++    scRampOutAtSample_.store (scSampleIndex_.load (std::memory_order_relaxed),
++                              std::memory_order_relaxed);
++}
++
++int AudioEngine::getSoundcheckOutputChannel() const
++{
++    return scOutChannel_.load (std::memory_order_relaxed);
++}
++
++std::int64_t AudioEngine::getSoundcheckSampleIndex() const
++{
++    return scSampleIndex_.load (std::memory_order_relaxed);
++}
++
++bool AudioEngine::soundcheckIsEmitting() const
++{
++    return scOutChannel_.load (std::memory_order_relaxed) >= 0;
++}
++
++LockFreeRingBuffer<float>& AudioEngine::getMicCaptureBuffer()
++{
++    return micCapture_;
++}
++
++std::uint64_t AudioEngine::getMicCaptureDropCount() const
++{
++    return micCaptureDrops_.load (std::memory_order_relaxed);
++}
++
++void AudioEngine::setRunningForTest (bool running)
++{
++    // TEST SEAM ONLY (B-4). isRunning_ is otherwise written only by start()
++    // and audioDeviceError(); audioDeviceAboutToStart() does not touch it, so
++    // a headless test can never reach a state SoundcheckController::preflight
++    // accepts. It stores the same atomic start() stores.
++    isRunning_.store (running, std::memory_order_release);
++}
++
++void AudioEngine::setSoundcheckGainUnclampedForTest (float gain)
++{
++    // TEST SEAM ONLY (B-5, F17). Applied at insertion point 3 to the sample
++    // AFTER SoundcheckSignal has clamped it, because a seam on the PEAK
++    // achieves nothing -- the signal constructor and sampleAt both clamp, so
++    // the amplitude is already bounded twice before the +-1.0f output clamp
++    // and invariant 4 could not be turned red by any test. Default 1.0f in
++    // every shipping path.
++    scGainUnclampedForTest_.store (gain, std::memory_order_relaxed);
++}
++
+ LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue()
+ {
+     return getCommandQueue (0);
+ }
+ 
+ LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue (int slot)
+ {
+     return commandQueues_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))];
+ }
+ 
+@@ -506,20 +609,62 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+     numInputChannels_.store (numInputChannels, std::memory_order_relaxed);
+     numOutputChannels_.store (numOutputChannels, std::memory_order_relaxed);
+ 
+     // Real-time thread: no allocation, no locking. The only shared state read
+     // here is the mode and the slot mapping, via lock-free atomics. The mode
+     // AND the mapping are snapshotted ONCE at the top of the block: a config
+     // change mid-block would otherwise mix lanes from two mappings inside one
+     // output buffer.
+     const bool bypass = (currentMode_.load (std::memory_order_acquire) == Mode::Bypass);
+ 
++    // Lane M (spec §4.1, invariant 7): NINE values are read HERE, once -- the
++    // seven soundcheck atomics, the sample rate (I-9) and the test-only gain
++    // seam (B-5) -- for the same reason the mode and the mapping are: a flip
++    // mid-callback between the mute decision (point 2) and the tap decision
++    // (point 4) would produce a block that BOTH injects the sweep and taps it
++    // back into the detector.
++    //
++    // Nothing below this point reads ANY of the nine again. That includes
++    // currentSampleRate_: a rate change landing between two reads would build
++    // the sweep with one T and index it with another.
++    const int          scOutChannel    = scOutChannel_.load       (std::memory_order_relaxed);
++    const bool         scSuspendTaps   = scSuspendTaps_.load      (std::memory_order_relaxed);
++    const int          scCaptureIn     = scCaptureInChannel_.load (std::memory_order_relaxed);
++    const bool         scCaptureActive = scCaptureActive_.load    (std::memory_order_relaxed);
++    const std::int64_t scSampleIndex   = scSampleIndex_.load      (std::memory_order_relaxed);
++    const float        scPeak          = scPeak_.load             (std::memory_order_relaxed);
++    const std::int64_t scRampOutAt     = scRampOutAtSample_.load  (std::memory_order_relaxed);
++    const double       scSampleRate    = currentSampleRate_.load  (std::memory_order_relaxed);
++    // B-5, TEST SEAM. 1.0f in every shipping path.
++    const float        scGainUnclamped = scGainUnclampedForTest_.load (std::memory_order_relaxed);
++
++    // Invariant 3: re-checked against THIS callback's counts, exactly as the
++    // lane loop re-checks every channel index below. A device restart onto
++    // fewer channels without this is an out-of-bounds write on the audio
++    // thread.
++    const int scOut  = (scOutChannel >= 0 && scOutChannel < numOutputChannels
++                        && outputChannelData != nullptr) ? scOutChannel : -1;
++    const int scInCh = (scCaptureIn  >= 0 && scCaptureIn  < numInputChannels
++                        && inputChannelData  != nullptr) ? scCaptureIn  : -1;
++
++    // Lane M point 1 (Q13, B-6): the RAW mic, before any DSP, taken straight
++    // off the callback's input pointers.
++    //
++    // This must NOT live inside the lane loop. A measurement mic is normally
++    // not in the routing table at all -- that is what "raw mic" means -- so a
++    // capture that only fired when an ENABLED, correctly-routed lane happened
++    // to read from scCaptureInChannel_ would capture NOTHING in the common
++    // case, and the lane M thread would report every channel as "could not
++    // measure" with no clue why. scInCh is already bounds-checked against THIS
++    // callback's numInputChannels (invariant 3).
++    const float* capSource = (scInCh >= 0) ? inputChannelData[scInCh] : nullptr;
++
+     struct LaneRef { const float* in; float* out; NotchChain* chain; };
+ 
+     // Stack-resident lane table -- no heap, no lock. Upper bound: every slot
+     // stereo = 8 x 2 lanes.
+     LaneRef lanes[kMaxSlots * kMaxSlotLanes];
+     int numLanes = 0;
+ 
+     // Per-slot, per-lane tap source: slot s, lane l taps its output post-DSP
+     // when that lane exists and is valid. Null means "do not tap this lane" --
+     // disabled slot, invalid width, or no valid channel pair for that lane.
+@@ -540,20 +685,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+ 
+         for (int lane = 0; lane < width; ++lane)
+         {
+             const int inIdx  = slotInCh_[slot][(std::size_t) lane].load (std::memory_order_relaxed);
+             const int outIdx = slotOutCh_[slot][(std::size_t) lane].load (std::memory_order_relaxed);
+ 
+             if (inIdx < 0 || inIdx >= numInputChannels
+                 || outIdx < 0 || outIdx >= numOutputChannels)
+                 continue;
+ 
++            // Lane M point 2 (Q15 relitigated, F2): mute EVERY lane routed to
++            // the channel being measured -- not one (slot, lane) pair. Several
++            // slots sum onto one output channel (the clear below, then the DSP
++            // accumulating), so muting a pair would leave that channel's
++            // feedback loop CLOSED. A muted lane enters neither lanes[] nor
++            // tapSource, so it is also not fed back to the detector.
++            if (scOut >= 0 && outIdx == scOut)
++                continue;
++
+             const float* in = (inputChannelData != nullptr)
+                                   ? inputChannelData[inIdx] : nullptr;
+             float* out      = (outputChannelData != nullptr)
+                                   ? outputChannelData[outIdx] : nullptr;
+ 
+             if (in == nullptr || out == nullptr)
+                 continue;
+ 
+             lanes[numLanes++] = { in, out,
+                                   &notchChains_[(std::size_t) slot][(std::size_t) lane] };
+@@ -616,20 +770,63 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+                 {
+                     chain.reset();
+                     v = 0.0;
+                 }
+ 
+                 out[n] += static_cast<float> (v);
+             }
+         }
+     }
+ 
++
++    // Lane M point 3 (spec §4.1). MUST stay ABOVE the +-kMaxOutputLevel clamp
++    // below: past it, the sweep would reach the driver unclamped
++    // (invariant 4). Writes exactly ONE channel (invariant 5), accumulating
++    // like the DSP above. No lock, no allocation, no logging (invariant 16):
++    // SoundcheckSignal holds nothing but doubles and lives on the stack.
++    if (scOut >= 0)
++    {
++        SoundcheckSignal::Params params;
++        params.sampleRate = scSampleRate;           // I-9: from the snapshot, not re-read
++        params.peak       = scPeak;
++        const SoundcheckSignal signal { params };
++
++        const std::int64_t rampLen = SoundcheckSignal::rampOutSamples (scSampleRate);
++        float* out = outputChannelData[scOut];
++
++        if (out != nullptr)
++        {
++            for (int n = 0; n < numSamples; ++n)
++            {
++                const std::int64_t idx = scSampleIndex + n;
++                float v = signal.sampleAt (idx);            // 0 while idx < 0 (NoiseFloor)
++                if (scRampOutAt >= 0)
++                    v *= SoundcheckSignal::rampOut (idx, scRampOutAt, rampLen);
++                // B-5: 1.0f in every shipping path. The ONLY route past the
++                // signal own clamps, and it exists so the +-1.0f output clamp
++                // below can be SHOWN to still cover this path.
++                out[n] += v * scGainUnclamped;
++            }
++        }
++
++        scSampleIndex_.store (scSampleIndex + numSamples, std::memory_order_relaxed);
++
++        // The callback ENDS the run itself once the ramp-out has reached zero
++        // (F8, invariant 9): no other thread needs to still be alive for the
++        // sound to stop.
++        if (scRampOutAt >= 0 && scSampleIndex + numSamples >= scRampOutAt + rampLen)
++        {
++            scOutChannel_.store      (-1, std::memory_order_relaxed);
++            scRampOutAtSample_.store (-1, std::memory_order_relaxed);
++        }
++    }
++
+     // Final output guard: every sample actually handed to the driver is forced
+     // finite and clamped to +-kMaxOutputLevel (rationale at the constant).
+     // This is the one pass that also covers Bypass copies and multi-slot sums,
+     // and it runs BEFORE the tap writes below so the detector sees exactly
+     // what left the app.
+     if (outputChannelData != nullptr)
+     {
+         for (int ch = 0; ch < numOutputChannels; ++ch)
+         {
+             float* out = outputChannelData[ch];
+@@ -647,20 +844,42 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
+     }
+ 
+     // Tap EVERY enabled slot's post-DSP output on EVERY lane -- the signal
+     // actually leaving that lane -- in every mode, including Bypass (the
+     // detector must still see the signal when bypassed). Written straight
+     // from the already-processed output buffer in ONE bulk write() per ring
+     // per callback: no heap buffer, no per-sample writes. The detector may be
+     // slow or absent: a short write (or 0) is expected and silently tolerated
+     // -- never block, never spin, never log. A lane with no valid
+     // input/output pair is not tapped at all.
++    //
++    // Lane M point 4 (spec §4.1, invariant 10). Keyed on scSuspendTaps_ and
++    // NOT on scOutChannel_: that index returns to -1 at every Gap, so keying
++    // on it would un-suspend the taps for 300 ms between channels and restart
++    // lane G's ~420 ms tapAlive window PER CHANNEL -- ~11.5 s over 16
++    // channels, past kReleaseStepMs = 10 s (N3). Held for the whole run, the
++    // true figure is ~0.42 s, once.
++    //
++    // This is a SKIP, not a drop: tapDropCounts_ must not move, or every
++    // reader of the session log sees a burst of false positives that never
++    // happened. The raw mic goes to its own ring instead.
++    if (scSuspendTaps)
++    {
++        if (scCaptureActive && capSource != nullptr)
++        {
++            const std::size_t requested = (std::size_t) numSamples;
++            const std::size_t written   = micCapture_.write (capSource, requested);
++            if (written < requested)
++                micCaptureDrops_.fetch_add (requested - written, std::memory_order_relaxed);
++        }
++    }
++    else
+     for (int slot = 0; slot < kMaxSlots; ++slot)
+         for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+         {
+             const float* src = tapSource[slot][lane];
+             if (src == nullptr)
+                 continue;
+ 
+             const size_t requested = static_cast<size_t> (numSamples);
+             const size_t written   =
+                 tapBuffers_[(std::size_t) slot][(std::size_t) lane].write (src, requested);
+@@ -723,20 +942,27 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
+     // callback into its dispatch list only after audioDeviceAboutToStart()
+     // returns, so the audio thread cannot be inside the callback yet.
+     //
+     // Detector::reset() is the consumer-side counterpart. Calling it belongs
+     // to Task 14, which owns the detector instance; the method exists and is
+     // tested here so that wiring is a one-liner.
+     for (auto& slotTaps : tapBuffers_)
+         for (auto& tap : slotTaps)
+             tap.clear();
+ 
++    // Lane M: the same precondition and the same reason. Capture taken at the
++    // PREVIOUS device's rate would be spliced onto the front of the next run's
++    // first analysis windows, and every bin-to-Hz conversion would be wrong.
++    // MainComponent aborts and joins the SoundcheckController before a restart
++    // reaches here (spec §4.3), so neither producer nor consumer is running.
++    micCapture_.clear();
++
+     // All 16 rings (8 taps + 8 command queues) are cleared under the same
+     // precondition (no producer/consumer running); the detector side is
+     // stopped by MainComponent BEFORE any device restart reaches this point
+     // (bridge design §6.5).
+     for (auto& queue : commandQueues_)
+         queue.clear();
+ }
+ 
+ void AudioEngine::audioDeviceStopped()
+ {
+diff --git a/src/app/AudioEngine.h b/src/app/AudioEngine.h
+index 49b1ddc..e433703 100644
+--- a/src/app/AudioEngine.h
++++ b/src/app/AudioEngine.h
+@@ -188,20 +188,99 @@ public:
+     // behaviour on the audio thread -- blocking or spinning is not -- but a
+     // drop splices sample N onto sample N+k, and through the detector's Hann
+     // window that step is broadband energy in every bin. Without this count
+     // nothing downstream can distinguish a drop-induced false peak from a real
+     // howl. Incremented with memory_order_relaxed: one lock-free RMW per short
+     // write, no allocation, no ordering dependency on anything else.
+     std::uint64_t getTapDropCount() const;
+     std::uint64_t getTapDropCount (int slot) const;
+     std::uint64_t getTapDropCount (int slot, int lane) const;
+ 
++    // ---- Lane M: active soundcheck (spec 2026-09-15 §4.1) --------------
++    //
++    // The engine's whole share of the soundcheck is these plain atomic stores
++    // plus one lock-free capture ring. NONE of them restarts the device, and
++    // the audio callback reads every one of them EXACTLY ONCE, at the top of
++    // the block beside the mode snapshot (invariant 7): a flip landing between
++    // the mute decision and the tap decision would give a callback that both
++    // injects the sweep AND taps it back into the detector.
++    //
++    // Thread: message thread (SoundcheckController) for every setter below.
++
++    // The output channel being measured, or -1 when no run is in flight. This
++    // IS the mute key: EVERY lane routed to this channel is silenced, not one
++    // (slot, lane) pair -- several slots sum onto one output channel, so
++    // muting a pair would leave that channel's feedback loop closed. Returns
++    // to -1 at every Gap, so it is NOT usable as the tap-suspension key: see
++    // setSoundcheckTapsSuspended.
++    void setSoundcheckOutputChannel (int channel);
++
++    // Input channel the raw measurement mic arrives on, or -1. Independent of
++    // the routing table: a measurement mic is normally not routed at all.
++    void setSoundcheckCaptureChannel (int channel);
++
++    // Capture gate, held across NoiseFloor + Sweep + Tail. A SEPARATE flag
++    // from the channel index so a safety property is never inferred from the
++    // sign of an index.
++    void setSoundcheckCaptureActive (bool active);
++
++    // Held for the WHOLE run (Arm to the end of the last channel's tail, or
++    // Abort), across every Gap. Keying suspension on the output channel
++    // instead would un-suspend the taps for 300 ms per channel and walk lane
++    // G's release clock down a rung.
++    void setSoundcheckTapsSuspended (bool suspended);
++
++    // Sweep sample index. NEGATIVE during the noise-floor phase, which is how
++    // "not emitting yet" is expressed without a second flag that could
++    // disagree. The audio callback OWNS this value once a run is in flight --
++    // it advances it by numSamples per block.
++    void setSoundcheckSampleIndex (std::int64_t n);
++
++    // Peak amplitude, CLAMPED to kSoundcheckMaxPeak here and again inside
++    // SoundcheckSignal.
++    void setSoundcheckPeak (float peak);
++
++    // Anchor the emergency ramp-out at the CURRENT sample index. The callback
++    // generates the envelope itself and releases the channel when it reaches
++    // zero, so no other thread has to still be alive for the sound to stop.
++    void requestSoundcheckRampOut();
++
++    [[nodiscard]] int          getSoundcheckOutputChannel() const;
++    [[nodiscard]] std::int64_t getSoundcheckSampleIndex()   const;
++    [[nodiscard]] bool         soundcheckIsEmitting()       const;   // scOutChannel_ >= 0
++
++    // Raw mic capture, before ANY DSP, written once per callback while
++    // scCaptureActive_. *** CALLER CONTRACT: read() only, one consumer
++    // thread. *** Same reasoning as getTapBuffer(): the audio callback is and
++    // must remain the sole producer.
++    LockFreeRingBuffer<float>& getMicCaptureBuffer();
++
++    // Samples the capture ring could not accept because the lane M thread fell
++    // behind. Non-zero is a self-abort condition for the run (spec §4.3): a
++    // splice in the captured signal makes the loop-gain estimate wrong in
++    // every bin, exactly as a tap drop does for the detector.
++    [[nodiscard]] std::uint64_t getMicCaptureDropCount() const;
++
++    // TEST SEAM ONLY (B-4). isRunning_ is otherwise written only by start()
++    // and audioDeviceError(); audioDeviceAboutToStart() does not touch it, so
++    // no headless test can reach a state SoundcheckController::preflight
++    // accepts. Stores the same atomic start() stores.
++    void setRunningForTest (bool running);
++
++    // TEST SEAM ONLY (B-5, F17). Multiplied into the injected sample AFTER
++    // SoundcheckSignal has clamped it. 1.0f in every shipping path. It exists
++    // because a seam on the PEAK achieves nothing -- the signal's constructor
++    // and sampleAt both clamp -- so this is the only route by which the
++    // +-1.0f output clamp can be SHOWN to still cover the sweep path
++    // (invariant 4). Same shape as lane G's setRingRiskOverrideForTest.
++    void setSoundcheckGainUnclampedForTest (float gain);
++
+     // Command channel FROM the detector threads INTO the audio thread (bridge
+     // design §2), one queue PER SLOT: the audio callback drains the queues
+     // under ONE SHARED budget of kMaxCommandsPerCallback commands per callback
+     // ACROSS ALL eight queues and applies each command to its slot's notch
+     // chains. The no-argument overload is the legacy surface (slot 0).
+     //
+     // *** CALLER CONTRACT: write() only, and from exactly one thread per queue.
+     // ***
+     // Same reasoning as getTapBuffer(): the type system cannot stop a caller
+     // from breaking the single-producer invariant -- the detector side is and
+@@ -333,20 +412,61 @@ private:
+     std::atomic<double> currentSampleRate_ { 48000.0 };
+     std::atomic<int>    currentBufferSize_ { 64 };
+     std::atomic<bool>   isRunning_        { false };
+ 
+     // Channel counts observed by the last callback. Relaxed atomics: two
+     // stores per callback, no ordering relationship with anything else, and
+     // they are only ever read for display.
+     std::atomic<int> numInputChannels_  { 0 };
+     std::atomic<int> numOutputChannels_ { 0 };
+ 
++    // ---- Lane M: active soundcheck state (spec §4.1) -------------------
++    //
++    // Seven atomics, one counter, one ring. Every one is read by the audio
++    // callback EXACTLY ONCE per block, into stack locals, beside the mode
++    // snapshot; nothing below that point reads any of them again
++    // (invariant 7).
++
++    // Output channel under measurement, -1 = no run. The MUTE key: every lane
++    // whose outputChannels[lane] equals this is silenced (Q15 relitigated).
++    // Back to -1 at every Gap -- not usable as the tap-suspension key, see
++    // scSuspendTaps_ below.
++    std::atomic<int>          scOutChannel_       { -1 };
++    // Tap suspension, held for the WHOLE run including every Gap (N3).
++    std::atomic<bool>         scSuspendTaps_      { false };
++    std::atomic<int>          scCaptureInChannel_ { -1 };
++    // Capture gate, on across NoiseFloor + Sweep + Tail (F5). Separate from
++    // scOutChannel_ so a safety property is not inferred from a sign.
++    std::atomic<bool>         scCaptureActive_    { false };
++    // Sweep sample index, NEGATIVE during NoiseFloor. Audio thread OWNS it.
++    std::atomic<std::int64_t> scSampleIndex_      { 0 };
++    // Peak amplitude, already clamped to kSoundcheckMaxPeak before storing.
++    std::atomic<float>        scPeak_             { 0.0f };
++    // Ramp-out anchor, -1 = none. Set by the message thread, CONSUMED by the
++    // callback, which clears it and scOutChannel_ when the ramp reaches zero.
++    std::atomic<std::int64_t> scRampOutAtSample_  { -1 };
++
++    // TEST SEAM (B-5): 1.0f in every shipping path. See the setter.
++    std::atomic<float>        scGainUnclampedForTest_ { 1.0f };
++
++    // Raw mic capture. NOT "how much audio the run needs" -- micCapture_ is a
++    // stream the lane M thread drains every 5 ms, exactly like the detector's
++    // taps. It is the maximum tolerable drain latency: 65536 samples = 1.37 s
++    // @ 48 kHz, 0.68 s @ 96 kHz, 0.34 s @ 192 kHz -- still 68x the drain
++    // period at the highest rate.
++    static constexpr std::size_t kCaptureCapacity = 65536;
++    LockFreeRingBuffer<float>   micCapture_      { kCaptureCapacity };
++    // Same meaning, and the same reason for existing, as tapDropCounts_: a
++    // short write leaves a SPLICE, not a gap, and a splice poisons every bin
++    // of the loop-gain estimate. Non-zero aborts the run.
++    std::atomic<std::uint64_t>  micCaptureDrops_ { 0 };
++
+     // Last device error. A juce::String is reference-counted and NOT safe to
+     // write on one thread while another reads it, so it takes a mutex rather
+     // than an atomic. That is affordable here precisely because neither side
+     // is the audio thread: audioDeviceError() is called from the device thread
+     // and already logs, and the reader is the message thread. The audio
+     // callback never touches this.
+     mutable std::mutex lastDeviceErrorLock_;
+     juce::String       lastDeviceError_;
+ 
+     // Preferences applied on the next start(). Default type is the platform's
+diff --git a/tests/test_audioengine.cpp b/tests/test_audioengine.cpp
+index 9d5ca1f..bb915a0 100644
+--- a/tests/test_audioengine.cpp
++++ b/tests/test_audioengine.cpp
+@@ -12,24 +12,27 @@
+ // (they are overrides of juce::AudioIODeviceCallback), so the tests can drive
+ // the callback directly with fabricated buffers. That is what lets the tap
+ // drop counter and the restart drain be tested for real rather than by
+ // inspection.
+ 
+ #include <gtest/gtest.h>
+ 
+ #include "app/AudioEngine.h"
+ #include "app/SlotConfig.h"
+ #include "dsp/LockFreeRingBuffer.h"
++#include "dsp/SoundcheckSignal.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ #include <limits>
++#include <thread>
+ #include <vector>
+ 
+ namespace
+ {
+ // Matches AudioEngine::kTapCapacity, which is private.
+ constexpr std::size_t kTapCapacity = 8192;
+ 
+ // Drives one callback of `numSamples` frames of stereo input at a constant
+ // level. Bypass (the default mode) copies input to output, and the tap is
+ // written from the output, so every callback pushes `numSamples` into the ring.
+@@ -52,20 +55,67 @@ struct CallbackDriver
+     {
+         const juce::AudioIODeviceCallbackContext context {};
+         engine.audioDeviceIOCallbackWithContext (ins, 2, outs, 2, frames, context);
+     }
+ 
+     std::vector<float> inL, inR, outL, outR;
+     const float* ins[2] {};
+     float*       outs[2] {};
+     int          frames;
+ };
++
++// Like CallbackDriver but with a configurable channel count and per-channel
++// input, so a test can prove that only ONE output channel changed.
++struct MultiDriver
++{
++    MultiDriver (int channels, int numSamples, float inputLevel = 0.25f)
++        : frames (numSamples)
++    {
++        in.assign  ((std::size_t) channels, std::vector<float> ((std::size_t) numSamples, inputLevel));
++        out.assign ((std::size_t) channels, std::vector<float> ((std::size_t) numSamples, 0.0f));
++        for (auto& v : in)  inPtr.push_back (v.data());
++        for (auto& v : out) outPtr.push_back (v.data());
++    }
++
++    void operator() (AudioEngine& engine)
++    {
++        for (auto& v : out) std::fill (v.begin(), v.end(), 0.0f);
++        const juce::AudioIODeviceCallbackContext context {};
++        engine.audioDeviceIOCallbackWithContext (inPtr.data(), (int) inPtr.size(),
++                                                 outPtr.data(), (int) outPtr.size(),
++                                                 frames, context);
++    }
++
++    float peakOn (int channel) const
++    {
++        float m = 0.0f;
++        for (float v : out[(std::size_t) channel]) m = std::max (m, std::abs (v));
++        return m;
++    }
++
++    std::vector<std::vector<float>> in, out;
++    std::vector<const float*> inPtr;
++    std::vector<float*>       outPtr;
++    int frames;
++};
++
++// Slot `s` enabled, mono, inCh -> outCh. SlotConfig's field names come from
++// src/app/SlotConfig.h.
++void routeMono (AudioEngine& engine, int s, int inCh, int outCh)
++{
++    SlotConfig c;
++    c.enabled = true;
++    c.width   = 1;
++    c.inputChannels[0]  = inCh;
++    c.outputChannels[0] = outCh;
++    engine.setSlotConfig (s, c);
++}
+ } // namespace
+ 
+ // B1. getTapBuffer() was DECLARED in AudioEngine.h and never DEFINED in
+ // AudioEngine.cpp. It linked only because nothing called it; the first line of
+ // Task 13 to call it would have failed with LNK2019. This test is that first
+ // caller, so the defect can never come back silently.
+ TEST (AudioEngine, TapBufferAccessorIsDefinedAndUsable)
+ {
+     const juce::ScopedJuceInitialiser_GUI juceInit;
+     AudioEngine engine;
+@@ -1285,10 +1335,355 @@ TEST (AudioEngine, OutputIsClampedToFullScaleAndNonFiniteBecomesSilence)
+ 
+         RoutingDriver d (128, 2, 2);
+         for (auto& channel : d.in)
+             std::fill (channel.begin(), channel.end(), 0.8f);
+         d (engine);
+ 
+         for (int i = 0; i < d.frames; ++i)
+             ASSERT_FLOAT_EQ (d.out[0][(std::size_t) i], 1.0f) << "sample " << i;
+     }
+ }
++
++// ===================================================================
++// Lane M -- active soundcheck (Task 5). The engine's side of the sweep:
++// injection before the output clamp, mute by OUTPUT CHANNEL, a raw-mic capture
++// ring, a callback-generated ramp-out, tap suspension, and a single snapshot of
++// every soundcheck atomic per callback.
++// ===================================================================
++
++// RED IF: the mute condition is written as "(slot, lane) matches" instead of
++// "outIdx == scOutChannel_". Several slots SUM onto one output channel
++// (AudioEngine.cpp clears every channel, then the DSP accumulates), so muting
++// one pair leaves the feedback loop through that channel CLOSED -- spec rev 1's
++// blocker F2. inv 8.
++TEST (AudioEngineSoundcheck, SweptChannelCarriesOnlyTheSweep)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);              // B-4
++    engine.setMode (AudioEngine::Mode::Bypass);   // Bypass copies in->out: loudest case
++
++    routeMono (engine, 0, 0, 1);
++    routeMono (engine, 1, 2, 1);   // a SECOND slot onto the same output channel
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckSampleIndex (0);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (1);
++
++    MultiDriver d { 4, 256, 0.5f };
++    d (engine);
++
++    SoundcheckSignal::Params p;
++    p.sampleRate = engine.getCurrentSampleRateHz();
++    p.peak       = SoundcheckSignal::kSoundcheckMaxPeak;
++    const SoundcheckSignal expected { p };
++
++    for (int n = 0; n < 256; ++n)
++        ASSERT_NEAR (d.out[1][(std::size_t) n], expected.sampleAt (n), 1.0e-6f)
++            << "sample " << n << " carries something other than the sweep";
++}
++
++// RED IF: the injection point is moved BELOW the output clamp.
++//
++// B-5: the seam must sit PAST SoundcheckSignal, not before it. A seam on the
++// PEAK would skip only the setter's clamp -- but the SoundcheckSignal
++// constructor clamps the peak and sampleAt clamps the sample, so |v| <= 0.1
++// whatever the setter was handed, sawSomething would never be set, and the test
++// would assert nothing at all. The gain seam multiplies the ALREADY-CLAMPED
++// sample at point 3, which is the only way to put something over full scale in
++// front of the output clamp. inv 4, F17.
++TEST (AudioEngineSoundcheck, OutputClampStillCoversTheSweepPath)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckGainUnclampedForTest (50.0f);   // 0.1 * 50 = 5x full scale
++    // PAST the 30 ms ramp-in, deliberately. Measured 2026-09-16: starting at
++    // sample 0 the raised-cosine ramp-in holds the sweep to 0.01557 over the
++    // first 512 samples, so 50x is only 0.778 -- over this test's 0.5 bar but
++    // NEVER over full scale, and the test then passed with the +-1.0f clamp
++    // DELETED. That is plan rev 1's "the test asserts nothing" defect one level
++    // up. rampSamples = 30 ms * 48 kHz / 1000 = 1440, and from there w == 1, so
++    // the sweep reaches 0.0999999 and 50x is 5.0 -- five times full scale, which
++    // the clamp cannot silently survive.
++    engine.setSoundcheckSampleIndex (1440);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (1);
++
++    MultiDriver d { 2, 512 };
++    d (engine);
++
++    bool sawSomething = false;
++    bool sawTheClampEngage = false;
++    for (float v : d.out[1])
++    {
++        ASSERT_LE (std::abs (v), 1.0f) << "a sample escaped the +-1.0f clamp";
++        ASSERT_TRUE (std::isfinite (v));
++        if (std::abs (v) > 0.5f) sawSomething = true;
++        // The clamp did not merely permit this block -- it ACTED on it. Without
++        // this the test cannot tell "the signal stayed under full scale" from
++        // "the clamp caught it", and only the second proves invariant 4.
++        if (std::abs (v) >= 1.0f - 1.0e-6f) sawTheClampEngage = true;
++    }
++    EXPECT_TRUE (sawSomething)
++        << "the seam produced nothing over 0.5 -- the test proves nothing, and "
++           "that is exactly what plan rev 1's peak seam did";
++    EXPECT_TRUE (sawTheClampEngage)
++        << "nothing reached the +-1.0f bound, so this block never exercised the "
++           "clamp at all";
++}
++
++// RED IF: any other output channel receives a sample from the soundcheck path.
++// It is the ONLY test for invariant 5. N6.
++TEST (AudioEngineSoundcheck, SweepTouchesOnlyTheMeasuredChannel)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    engine.setMode (AudioEngine::Mode::Bypass);
++
++    for (int ch = 0; ch < 4; ++ch)
++        routeMono (engine, ch, ch, ch);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckSampleIndex (0);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (2);
++
++    MultiDriver d { 4, 256, 0.25f };
++    d (engine);
++
++    // Channels 0, 1, 3 still pass their own input through, untouched.
++    for (int ch : { 0, 1, 3 })
++        for (int n = 0; n < 256; ++n)
++            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) n], 0.25f)
++                << "channel " << ch << " sample " << n;
++}
++
++// RED IF: the ramp-out is driven from the controller thread instead of being
++// generated inside the callback. Nothing but the callback runs here -- no
++// controller, no poll -- and the sweep must still reach exactly zero and release
++// the channel on its own. inv 9, F8.
++TEST (AudioEngineSoundcheck, AbortRampsDownInTheCallbackAlone)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckSampleIndex (4800);         // mid-sweep
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (1);
++
++    MultiDriver d { 2, 64 };
++    d (engine);
++    ASSERT_GT (d.peakOn (1), 0.0f);
++
++    engine.requestSoundcheckRampOut();
++
++    // kRampOutMs = 30 ms; at 48 kHz that is 1440 samples = 23 callbacks of 64.
++    for (int i = 0; i < 40; ++i)
++        d (engine);
++
++    EXPECT_FLOAT_EQ (d.peakOn (1), 0.0f);
++    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1)
++        << "the callback must release the channel itself";
++    EXPECT_FALSE (engine.soundcheckIsEmitting());
++}
++
++// RED IF: tap suspension is keyed on scOutChannel_ rather than on
++// scSuspendTaps_. scOutChannel_ goes to -1 at every Gap, so the taps would come
++// back for 300 ms between channels, restarting lane G's ~420 ms tapAlive window
++// per channel: ~0.72 s each, ~11.5 s over 16 channels, past kReleaseStepMs =
++// 10 s. inv 10, N3.
++TEST (AudioEngineSoundcheck, TapsStaySuspendedAcrossTheGap)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (0);
++    engine.setSoundcheckSampleIndex (0);
++
++    MultiDriver d { 2, 256 };
++    for (int i = 0; i < 8; ++i) d (engine);
++
++    // The Gap: the channel is released, the suspend flag is NOT.
++    engine.setSoundcheckOutputChannel (-1);
++    const auto before = engine.getTapBuffer (0, 0).getAvailableRead();
++    for (int i = 0; i < 64; ++i) d (engine);    // 64 x 256 = 16384 samples ~ 341 ms > kGapMs
++    EXPECT_EQ (engine.getTapBuffer (0, 0).getAvailableRead(), before)
++        << "a tap was written during the Gap";
++
++    EXPECT_EQ (engine.getTapDropCount (0, 0), 0u)
++        << "a SKIP is not a DROP -- tapDropCounts_ must not move";
++}
++
++// RED IF: capture is gated on scOutChannel_ instead of on its own flag, or the
++// noise-floor phase emits. The NoiseFloor phase has a live channel, capture on,
++// and a NEGATIVE sample index. inv 6, F5.
++TEST (AudioEngineSoundcheck, NoiseFloorCapturesWithoutEmitting)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckCaptureChannel (1);
++    engine.setSoundcheckCaptureActive (true);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (0);
++    engine.setSoundcheckSampleIndex (-24000);          // 0.5 s before the sweep
++
++    MultiDriver d { 2, 256, 0.3f };
++    d (engine);
++
++    EXPECT_EQ (d.peakOn (0), 0.0f) << "the noise-floor phase emitted";
++    EXPECT_GE (engine.getMicCaptureBuffer().getAvailableRead(), 256u);
++
++    // And with capture off, nothing arrives even though the channel is live.
++    engine.setSoundcheckCaptureActive (false);
++    const auto have = engine.getMicCaptureBuffer().getAvailableRead();
++    d (engine);
++    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), have);
++}
++
++// RED IF: the per-callback bounds check is dropped. A device restart onto fewer
++// channels would then be an out-of-bounds write on the realtime thread. inv 3,
++// F3.
++TEST (AudioEngineSoundcheck, OutOfRangeChannelIsIgnored)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckSampleIndex (0);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckCaptureActive (true);
++
++    MultiDriver d { 2, 128 };
++
++    engine.setSoundcheckOutputChannel (2);       // == numOutputChannels
++    engine.setSoundcheckCaptureChannel (9);
++    d (engine);                                  // must not crash, must not write
++    EXPECT_EQ (d.peakOn (0), 0.25f);             // slot 0 still passes through
++    EXPECT_EQ (d.peakOn (1), 0.0f);
++
++    engine.setSoundcheckOutputChannel (-5);
++    d (engine);
++    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
++}
++
++// RED IF: the atomics are read at more than one point in the callback. A flip
++// between the mute decision and the tap decision produces a callback that BOTH
++// injects the sweep AND taps it into the detector -- the poisoning case this
++// lane exists to prevent. inv 7, F4.
++TEST (AudioEngineSoundcheck, AtomicsAreSnapshottedOnce)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
++    engine.setSoundcheckSampleIndex (0);
++
++    MultiDriver d { 2, 64 };
++
++    // Callbacks driven while another thread flips the channel and the suspend
++    // flag as fast as it can. Each callback must be internally consistent: if
++    // it emitted, it must NOT have tapped, and vice versa.
++    //
++    // 20000, not the 200 this test was first written with. Measured 2026-09-16
++    // against two deliberate mutants -- a re-read of scOutChannel_ at the mute
++    // decision, and one at the injection point -- 200 callbacks caught them in
++    // roughly 1 run out of 60: a guard that fires 2% of the time is not a
++    // guard. The first disagreement typically lands near callback 200, i.e.
++    // once the flipper thread has actually been scheduled, so the old bound sat
++    // exactly on the edge. At 20000 the two mutants are caught 10/10 and 9/10
++    // over separate processes, the real code passed 15/15, and the whole test
++    // still runs in 0.10 s.
++    std::atomic<bool> stop { false };
++    std::thread flipper ([&engine, &stop]
++    {
++        while (! stop.load())
++        {
++            engine.setSoundcheckOutputChannel (0);
++            engine.setSoundcheckTapsSuspended (true);
++            engine.setSoundcheckOutputChannel (-1);
++            engine.setSoundcheckTapsSuspended (false);
++        }
++    });
++
++    for (int i = 0; i < 20000; ++i)
++    {
++        const auto tapBefore = engine.getTapBuffer (0, 0).getAvailableRead();
++        d (engine);
++        const auto tapAfter  = engine.getTapBuffer (0, 0).getAvailableRead();
++        const bool tapped    = tapAfter != tapBefore;
++        const bool emitted   = d.peakOn (0) > 0.0f && d.peakOn (0) != 0.25f;
++
++        ASSERT_FALSE (tapped && emitted)
++            << "callback " << i << " both injected and tapped -- the atomics were re-read";
++        engine.getTapBuffer (0, 0).clear();
++    }
++
++    stop.store (true);
++    flipper.join();
++}
++
++// RED IF: an idle engine emits anything, OR mutes a lane. inv 6.
++TEST (AudioEngineSoundcheck, IdleEngineEmitsNoSweepAndMutesNoLane)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    engine.setMode (AudioEngine::Mode::Bypass);
++    routeMono (engine, 0, 0, 0);
++    routeMono (engine, 1, 1, 1);
++
++    MultiDriver d { 2, 256, 0.4f };
++    d (engine);
++
++    // Both lanes contributed normally; nothing was muted and nothing injected.
++    for (int ch : { 0, 1 })
++        for (int n = 0; n < 256; ++n)
++            ASSERT_FLOAT_EQ (d.out[(std::size_t) ch][(std::size_t) n], 0.4f) << "ch " << ch;
++
++    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1);
++    EXPECT_FALSE (engine.soundcheckIsEmitting());
++}
++
++// RED IF: micCapture_.clear() is left out of audioDeviceAboutToStart's drain
++// block. Audio captured at the PREVIOUS device's sample rate would be spliced
++// onto the front of the next run's first analysis windows -- the same defect the
++// tap rings are already cleared to avoid. F15.
++TEST (AudioEngineSoundcheck, DeviceRestartDrainsTheCaptureRing)
++{
++    const juce::ScopedJuceInitialiser_GUI juceInit;
++    AudioEngine engine;
++    engine.setRunningForTest (true);
++    routeMono (engine, 0, 0, 0);
++
++    engine.setSoundcheckCaptureChannel (1);
++    engine.setSoundcheckCaptureActive (true);
++    engine.setSoundcheckTapsSuspended (true);
++    engine.setSoundcheckOutputChannel (0);
++    engine.setSoundcheckSampleIndex (-1000);
++
++    MultiDriver d { 2, 256, 0.3f };
++    d (engine);
++    ASSERT_GT (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
++
++    engine.audioDeviceAboutToStart (nullptr);
++    EXPECT_EQ (engine.getMicCaptureBuffer().getAvailableRead(), 0u);
++}
