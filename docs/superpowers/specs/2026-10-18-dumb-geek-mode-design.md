@@ -1,215 +1,275 @@
 # Lane U — Hai chế độ giao diện: Dumb mode (≤ 3 nút) ⇄ Geek mode (console đầy đủ)
 
 **Ngày:** 2026-10-18. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane U, cần G — G đã hạ cánh 1.2.0; main `f36ce29`, 1.3.0 alpha, suite 714/714).
-**Sổ quyết định:** [`../decisions/2026-10-18-lane-u-dumb-geek-mode.md`](../decisions/2026-10-18-lane-u-dumb-geek-mode.md) (Q1–Q4 owner chọn; Q5–Q9 điều phối tự chọn, owner CHƯA duyệt).
-**Trạng thái:** rev 1, chưa phản biện, chưa plan.
-**Đụng audio path:** **không** về DSP — không đổi hệ số, gain, buffer, detector. Wizard ghi `SlotConfig` qua đúng API mà `SlotPanel` dùng hôm nay (`AudioEngine::setSlotConfig`), và nhớ thiết bị qua đúng đường `DevicePanel::restartWith`. **Mức thay đổi dự kiến: 0 dB** trên mọi đường tín hiệu đã cấu hình giống nhau. Thay đổi hành vi duy nhất ngoài GUI: app **nhớ thiết bị + routing** giữa hai lần mở (Q5).
+**Sổ quyết định:** [`../decisions/2026-10-18-lane-u-dumb-geek-mode.md`](../decisions/2026-10-18-lane-u-dumb-geek-mode.md) (Q1–Q4 owner chọn; Q5–Q12 điều phối tự chọn, owner CHƯA duyệt).
+**Trạng thái:** **rev 2** — sau phản biện read-only độc lập vòng 1 (6 BLOCKER / 7 IMPORTANT / 6 MINOR, bảng đối chiếu ở §8). Rev 1 không dùng làm cơ sở cho code.
+**Đụng audio path:** không về DSP — không đổi hệ số, gain, buffer, detector. Nhưng **có đổi cái gì được mở lúc khởi động** (§3.2): app nay nhớ thiết bị + routing. Mức thay đổi dự kiến: **0 dB** trên mọi đường tín hiệu có cấu hình giống lần chạy trước; khác biệt duy nhất người nghe gặp được là sau khi mở lại app, các đường đã cấu hình **vẫn còn** thay vì về mặc định slot 0 `{0,1}→{0,1}`. Peak meter của wizard chỉ đọc mẫu vào (§3.6).
 **Release:** 1.4.0 (`-Part minor`), không gộp lane khác.
 
 ## 1. Vấn đề
 
-- Console hôm nay có ~40 điều khiển (ModeRail 5 nút, TuningPanel 3 nút + 5 combo,
-  SlotPanel 8 hàng routing, DevicePanel 4 combo, SpectrumView 4 nhóm nút,
-  NotchListPanel nút verdict mỗi hàng). Người dùng mục tiêu ở mic vox của một
-  sự kiện nhỏ không cần và không nên chạm hầu hết chúng.
-- Owner 06/09/2026: hai chế độ, chuyển qua lại; Dumb ≤ 3 nút; giữ console hiện
-  tại làm Geek.
-- **Cấu hình thiết bị và routing không được lưu** giữa hai lần mở app
-  (`AudioEngine::start()`, `src/app/AudioEngine.cpp:50`): mỗi lần mở là ASIO +
-  thiết bị mặc định + `SlotConfig` mặc định. Với Geek thì người vận hành tự chỉnh
-  lại; với Dumb thì không có chỗ để chỉnh — nên phải nhớ.
+- Console hôm nay có ~40 điều khiển. Người dùng mục tiêu ở mic vox của một sự kiện
+  nhỏ không cần và không nên chạm hầu hết chúng.
+- Owner 06/09/2026: hai chế độ, chuyển qua lại; Dumb ≤ 3 nút; giữ console hiện tại
+  làm Geek.
+- **Cấu hình thiết bị và routing không được lưu** giữa hai lần mở app:
+  `startAudio()` (`src/app/MainComponent.cpp:1010`) luôn chọn
+  `chooseDefaultDeviceType` + thiết bị mặc định; `SlotConfig` chỉ sống trong RAM
+  hoặc preset. Dumb không có chỗ để chỉnh lại mỗi lần mở — nên phải nhớ.
+- **Engine chỉ mở 2 kênh vào / 2 kênh ra** (`kNumChannels = 2`,
+  `src/app/AudioEngine.cpp:12`). Lane U **không** đổi điều đó (đổi = thay đổi
+  audio path có mức riêng, lane khác). Wizard vì vậy chỉ cho chọn trong các kênh
+  callback thật sự nhận được.
 
 ## 2. Quyết định đã chốt
 
 | Mục | Quyết định | Sổ |
 |---|---|---|
 | Ba nút | `ĐO PHÒNG` (lane M) · `BẬT CHỐNG HÚ` (= `Mode::Auto`) · `TẮT` (= `Mode::Bypass`) | Q1 |
-| Chuyển chế độ | nút nhỏ cố định ở góc (`GEEK` trong Dumb, `ĐƠN GIẢN` trong Geek); nhớ qua lần mở; cài mới mặc định Dumb | Q2 |
-| Hiển thị | một đèn trạng thái lớn bằng câu người, không phổ, không số dB/Hz | Q3 |
+| Chuyển chế độ | nút nhỏ cố định ở góc (`GEEK` trong Dumb, `ĐƠN GIẢN` trong Geek); nhớ qua lần mở | Q2 |
+| Hiển thị | một đèn trạng thái lớn bằng câu người + một dòng thông báo; không phổ, không dB/Hz | Q3 |
 | Thiết bị/routing | wizard riêng trong Dumb | Q4 |
 | Lưu ở đâu | `settings.json` cạnh `presets/`, dùng cho cả hai chế độ | Q5 (tạm) |
 | Wizard | 3 bước, tạo slot 0, tắt slot 1–7, xác nhận nếu sẽ ghi đè > 1 slot | Q6 (tạm) |
-| Khi nào wizard hiện | tự hiện khi vào Dumb mà cấu hình không hợp lệ; đèn "Cần cài đặt" bấm được | Q7 (tạm) |
-| Kết quả `ĐO PHÒNG` | tái dùng nguyên luồng lane M; `ÁP DỤNG`/`BỎ` thay tạm hai nút | Q8 (tạm) |
-| Thư viện | `az_host_settings` (target riêng, chỉ `juce_core`) | Q9 (tạm) |
+| Khi nào wizard hiện | khi vào Dumb mà chưa cấu hình được; đèn "Cần cài đặt" bấm được | Q7 (tạm) |
+| Kết quả `ĐO PHÒNG` | tái dùng nguyên luồng lane M | Q8 (tạm) |
+| Thư viện | `az_host_settings`, target INTERFACE (§3.1) | Q9 (tạm) |
+| `TẮT` lúc đang đo | khoá, giống `BYPASS` của Geek; `DỪNG` ở ngay cạnh | Q10 (tạm) |
+| Lần đầu của tester 1.3.x | không có `settings.json` mà có `presets/` → mở **Geek** | Q11 (tạm) |
+| Thiết bị đã lưu không còn | **không** áp routing đã lưu lên thiết bị khác; "Cần cài đặt" | Q12 (tạm) |
 
 ## 3. Thiết kế
 
 ### 3.1 Thư viện `az_host_settings` (Q9)
 
-Đây là **target CMake thư viện đầu tiên** của repo (hôm nay mọi `.cpp` được liệt
-kê thẳng vào `HandsFree`, `HandsFreeTests`, `HandsFreeSnapshot`). Lý do tách,
-theo CLAUDE.md "Phần dùng chung phải là thư viện": nhớ thiết bị âm thanh là phần
-"JUCE host shell", và voice isolator (`docs/research/2026-09-06-cedar-realtime-plugins.md`
-§7) là sản phẩm thứ hai đã được nêu tên, cùng điểm insert, cần đúng phần này.
+Target thư viện đầu tiên của repo. Lý do tách (CLAUDE.md "Phần dùng chung phải là
+thư viện"): nhớ thiết bị âm thanh là phần "JUCE host shell", và voice isolator
+(`docs/research/2026-09-06-cedar-realtime-plugins.md` §7) là sản phẩm thứ hai đã
+được nêu tên, cùng điểm insert, cần đúng phần này.
 
-- `libs/host_settings/` → `add_library(az_host_settings STATIC ...)`, link
-  `juce::juce_core` duy nhất. Không include gì từ `src/`.
+- `libs/host_settings/`, `add_library(az_host_settings INTERFACE)` với
+  `target_sources(INTERFACE …)`: **người dùng biên dịch nguồn**, giống một module
+  JUCE. Một thư viện STATIC link `juce::juce_core` sẽ biên dịch `juce_core.cpp` vào
+  thư viện VÀ vào app (module JUCE là INTERFACE thêm nguồn cho ai link nó) — hai bản
+  của mọi symbol JUCE. Chỉ dùng `juce_core`; không include gì từ `src/`.
 - API (namespace `az::host`):
 
   ```cpp
   struct DeviceSetup { juce::String type, name; double sampleRate = 0; int bufferSize = 0; };
+  struct HostSettings { DeviceSetup device; juce::var product; };
 
-  struct HostSettings
+  struct LoadResult
   {
-      int         schema = 1;
-      DeviceSetup device;          // rỗng = chưa từng lưu
-      juce::var   product;         // phần riêng của sản phẩm, thư viện không đọc
+      HostSettings settings;     // mặc định khi không đọc được
+      juce::String error;        // rỗng = ổn (kể cả "chưa có file")
+      bool mayOverwrite = true;  // false = file của build MỚI hơn: không được ghi đè
   };
 
-  // Không bao giờ throw. File thiếu / hỏng / schema lạ -> trả về HostSettings{}
-  // và đặt `error` (để log), KHÔNG xóa file hỏng (đổi tên thành .bad để chẩn đoán).
-  HostSettings loadHostSettings (const juce::File& file, juce::String& error);
-
-  // Ghi atomic: file tạm cùng thư mục rồi replaceFileIn. false = không ghi được.
-  bool saveHostSettings (const juce::File& file, const HostSettings& s);
+  LoadResult loadHostSettings (const juce::File&);
+  bool       saveHostSettings (const juce::File&, const HostSettings&);  // atomic
   ```
 
-- `product` là `juce::var` để thư viện không phụ thuộc ngược `SlotConfig`. App
-  serialize vào đó: `{ "uiMode": "dumb"|"geek", "slots": [ ... 8 SlotConfig ... ] }`.
-- Đường dẫn: `%APPDATA%/AZSoundtech/HandsFree/settings.json` — app quyết định,
-  thư viện chỉ nhận `juce::File`.
+- JSON hỏng → `error`, file đổi tên `.bad` (để chẩn đoán), `mayOverwrite = true`.
+- `schema` lớn hơn bản này hiểu → `error`, file **giữ nguyên**, `mayOverwrite = false`:
+  hạ cấp một bản alpha không được phá cấu hình của bản mới.
+- Rate ngoài [8 k, 768 k] / buffer ngoài [16, 8192] → đọc như "chưa lưu" (0).
 
 ### 3.2 Nạp/lưu trong app
 
-- `src/app/AppSettings.{h,cpp}`: chuyển đổi `HostSettings.product` ⇄
-  `{ UiMode, std::array<SlotConfig, kMaxSlots> }`. Giá trị lạ (width ∉ {1,2},
-  kênh âm) bị bỏ, slot đó về mặc định — giống quy tắc của `PresetManager`.
-- **Không đọc/ghi trong ctor `MainComponent`** (bài học data-loop: 26 test + snapshot
-  tool dựng `MainComponent`). `main.cpp` gọi `mainComponent.applySettings(file)`
-  TRƯỚC `startAudio()` và `saveSettings(file)` ở `shutdown()` + sau mỗi lần wizard
-  hoàn tất + sau mỗi lần đổi chế độ.
-- Áp dụng lúc khởi động: `engine_.setAudioDeviceType(type)` + `engine_.setAudioDevice(name)` (hai setter có
-  sẵn mà `DevicePanel::restartWith` dùng, `src/gui/DevicePanel.cpp:105`), rồi `startAudio()`, rồi sample rate/buffer qua
-  `setSampleRate/setBufferSize` (trả false nếu thiết bị từ chối → giữ mặc định,
-  `showMessage`), rồi `setSlotConfig` cho từng slot **sau khi** đã có số kênh thật,
-  kẹp bằng `slotConfigIsValid` — slot không hợp lệ bị **tắt**, không kẹp kênh
-  (kẹp sẽ âm thầm đưa mic vào kênh khác: trên PA đó là một đường tín hiệu lạ).
-- Geek cũng được lợi: mở app lại về đúng thiết bị/routing lần trước. Đây là
-  thay đổi hành vi có chủ đích, phải ghi vào tester notes.
+`src/app/AppSettings.{h,cpp}` chuyển `HostSettings.product` ⇄
+`{ UiMode, hasRouting, std::array<SlotConfig, 8> }`. Một entry slot không parse được
+→ slot đó **tắt** (không kẹp — khác `PresetManager`, vốn kẹp width và kênh,
+`PresetManager.cpp:885-890`: kẹp ở đây là đưa mic vào một kênh không ai chọn).
+
+**Không I/O trong ctor `MainComponent`** (bài học data-loop). `main.cpp` gọi
+`content->enableSettings (defaultAppSettingsFile())` **trước** `startAudio()`. Không có
+lời gọi đó (26 test, snapshot tool) thì `MainComponent` không bao giờ đọc/ghi file.
+
+**Thứ tự khởi động (sửa B-1, B-2, B-3, B-4, B-6):**
+
+1. `enableSettings` đọc file. Không có file: `uiMode` = Geek nếu thư mục `presets/`
+   đã tồn tại (tester 1.3.x, Q11), ngược lại Dumb.
+2. Nếu `hasRouting`: ghi 8 `SlotConfig` vào engine bằng `engine_.setSlotConfig`
+   **khi engine còn dừng** (chưa thread nào chạy, nên không cần chu trình restart;
+   `startAudio()` đã `setWidth` từ `getSlotConfig`, `MainComponent.cpp:1026-1031`;
+   callback tự kiểm biên từng làn).
+3. `startAudio()` đổi một chỗ: loại driver = `savedDevice.type` nếu loại đó có trong
+   `getAvailableDeviceTypeNames()`, ngược lại `chooseDefaultDeviceType` như hôm nay;
+   tên thiết bị = `savedDevice.name`.
+4. Sau `engine_.start()`: nếu có thiết bị đã lưu mà `getCurrentDeviceType/Name()`
+   **khác** (JUCE `initialise(…, selectDefaultDeviceOnFailure = true, …)` đã mở thiết
+   bị mặc định thay) → **tắt mọi slot đã khôi phục** qua `changeSlotConfig`, đặt cờ
+   `deviceMismatch_`, `showMessage("Không thấy <tên>. Cần cài đặt lại.")` (Q12).
+5. Rate/buffer đã lưu: áp **trong** `onBeforeRestart/onAfterRestart`, đúng như
+   `DevicePanel::applySampleRate` (`DevicePanel.cpp:136-145`). Từ chối → giữ của
+   thiết bị, một dòng thông báo.
+6. **Kiểm kênh ở tick timer đầu tiên mà `getNumInput/OutputChannels() > 0`**
+   (số kênh = 0 cho tới khi audio chạy, `AudioEngine.h:145`): slot bật mà
+   `!slotConfigIsValid` → tắt qua `changeSlotConfig` + một dòng thông báo. Chạy
+   một lần mỗi lần mở thiết bị.
+
+**Khi nào ghi** (chỉ khi đã `enableSettings` và `mayOverwrite`):
+đổi chế độ UI; wizard `XONG`; `changeSlotConfig` do người dùng (SlotPanel); đổi
+thiết bị/rate/buffer từ DevicePanel **thành công**; `MainComponent::~MainComponent`
+**không** ghi (dtor không I/O) — `main.cpp::shutdown()` gọi `saveSettings()` trước
+`mainWindow.reset()`.
+
+**Không xoá trí nhớ (I-9):** phần `device` chỉ được cập nhật từ một thiết bị **đã mở
+thành công** do người dùng chọn. Khi `deviceMismatch_` hoặc mở thất bại, lần ghi giữ
+nguyên `device` + routing đã đọc, cho tới khi người dùng chủ động cài lại.
 
 ### 3.3 `DumbView` (Q1, Q3)
 
-`src/gui/DumbView.{h,cpp}`, một `juce::Component` dùng theme Sodium Rack. Không
-giữ tham chiếu tới engine/controller: MainComponent đẩy trạng thái vào bằng
-`setStatus (DumbStatus)` mỗi tick của timer có sẵn, và nhận hành động qua
-`std::function` (`onMeasure`, `onStop`, `onEnable`, `onDisable`, `onApply`,
-`onDismiss`, `onOpenWizard`, `onSwitchToGeek`).
-
-Bố cục (1440×920 tham chiếu, co theo kích thước):
+`src/gui/DumbView.{h,cpp}`, theme Sodium Rack. Không giữ tham chiếu engine/controller:
+MainComponent đẩy `DumbInputs` mỗi tick của timer có sẵn, view gọi `dumbStatusFor`
+(hàm thuần, `src/gui/DumbStatus.{h,cpp}`) và vẽ. Hành động qua `std::function`.
 
 ```
 ┌──────────────────────────────────────────────── [GEEK] ┐
-│                                                         │
-│                ●  ĐANG CHẶN 3 ĐIỂM                       │   đèn: màu + câu
-│                   Hệ thống đang chống hú.                │   dòng phụ
-│                                                         │
-│   [ ĐO PHÒNG ]     [ BẬT CHỐNG HÚ ]     [ TẮT ]          │   3 nút to
+│                ●  ĐANG CHẶN 3 ĐIỂM                       │  đèn + câu
+│                   Hệ thống đang chống hú.                │  dòng phụ
+│                   <dòng thông báo, nếu có>               │  showMessage
+│   [ ĐO PHÒNG ]     [ BẬT CHỐNG HÚ ]     [ TẮT ]          │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Trạng thái → câu (hàm thuần `dumbStatusFor`, test được):**
+**Đầu vào** — mọi thứ đọc từ đúng nguồn Geek đang đọc:
 
-| Ưu tiên | Điều kiện | Đèn | Câu chính | Nút |
+| Trường | Nguồn |
+|---|---|
+| `configured` | thiết bị đang chạy, không `deviceMismatch_`, không `getLastDeviceError()`, slot 0 bật và hợp lệ |
+| `phase` | `soundcheckPanel_.getMode()`: Hidden → Idle, Running → Measuring, Results, Applied |
+| `measureAllowed` | **đúng** vị từ của `updateMeasureEnabled` (`MainComponent.cpp:1523`): lock None và không có hộp xác nhận đang mở |
+| `risk` | `worstRingRiskSnapshot` → `riskForScore` → **một `RingRiskHysteresis` riêng của Dumb** (750 ms, `SpectrumView.h:438`) |
+| `notchCount` | tổng notch hoạt động mọi slot bật |
+| `message` | dòng cuối của `showMessage`, mờ sau 8 s |
+
+**Bảng trạng thái** (ưu tiên từ trên xuống):
+
+| # | Điều kiện | Đèn | Câu chính | Nút trái · giữa · TẮT |
 |---|---|---|---|---|
-| 1 | cấu hình không hợp lệ / thiết bị không mở | xám | Cần cài đặt | ĐO PHÒNG, BẬT tắt (disabled); đèn bấm được → wizard |
-| 2 | soundcheck đang chạy (`Preflight`…`Gap`) | cyan nhấp nháy | Đang đo phòng… | `DỪNG` thay `ĐO PHÒNG`; BẬT disabled; **TẮT luôn sống** |
-| 3 | soundcheck `Results` | cyan | Tìm thấy N điểm dễ hú | `ÁP DỤNG` · `BỎ` thay ĐO PHÒNG, BẬT; TẮT sống |
-| 4 | `Mode::Bypass` | xám | Đang TẮT — không chống hú | TẮT ở trạng thái chọn |
-| 5 | Auto, risk `Critical` | đỏ | Đang hú — đang xử lý | |
-| 6 | Auto, risk `Rising` | amber | Sắp hú | |
-| 7 | Auto, N > 0 notch | xanh | Đang chặn N điểm | |
-| 8 | Auto, còn lại | xanh | An toàn | |
+| 1 | `!configured` | xám | Cần cài đặt (đèn bấm được → wizard) | ĐO ✗ · BẬT ✗ · TẮT ✓ |
+| 2 | Measuring | cyan, thở | Đang đo phòng… | **DỪNG** ✓ · BẬT ✗ · TẮT ✗ (Q10, giống Geek) |
+| 3 | Results | cyan | Tìm thấy N điểm dễ hú / Không thấy điểm dễ hú | **ÁP DỤNG** (✗ nếu N=0) · **BỎ** · TẮT ✓ |
+| 4 | Applied | cyan | Đã chặn trước N điểm | ĐO ✗ · **BỎ** · TẮT ✓ |
+| 5 | Bypass | xám | Đang TẮT | ĐO (theo `measureAllowed`) · BẬT ✓ · TẮT (chọn) |
+| 6 | Critical | đỏ | Đang hú — đang xử lý | |
+| 7 | Rising | amber | Sắp hú | |
+| 8 | N > 0 | xanh | Đang chặn N điểm | |
+| 9 | Low | xanh | An toàn | |
+| 10 | Unavailable | xanh mờ | Đang chống hú (không khẳng định "an toàn" khi detector chưa có số) | |
 
-- Risk lấy **slot xấu nhất** qua `worstRingRiskSnapshot` (có sẵn,
-  `MainComponent.h:401`), không phải slot đang hiển thị: Dumb không có khái niệm
-  slot đang chọn. N = tổng notch đang hoạt động trên mọi slot bật.
-- `Mode::Soundcheck` (thụ động 15 s) không có nút trong Dumb. Nếu đang ở mode đó
-  khi chuyển sang Dumb thì hiện như Auto (đèn ưu tiên 5–8).
-- `TẮT` không bao giờ bị khoá — giống quy tắc lane M "BYPASS is how a show is
-  saved" (`SoundcheckLock`).
-- Mọi hành động gọi **đúng** hàm Geek đang gọi: `requestMode(Auto/Bypass)`,
-  `beginSoundcheck()`, và các lambda của `soundcheckPanel_` cho DỪNG/ÁP DỤNG/BỎ.
-  Không có đường điều khiển thứ hai.
+Hàng 5–10: ĐO theo `measureAllowed`; BẬT, TẮT ✓.
+
+- `DỪNG` / `ÁP DỤNG` / `BỎ` gọi **chính** các lambda của `soundcheckPanel_`
+  (`onStop`, `onApply`, `onDismiss`); `ĐO PHÒNG` gọi `beginSoundcheck()` (cùng hộp
+  thoại xác nhận, cùng lời từ chối — lời từ chối giờ hiện ở dòng thông báo);
+  `BẬT`/`TẮT` gọi `requestMode`. **Không có đường điều khiển thứ hai.**
+- `Mode::Soundcheck` (thụ động) không có nút trong Dumb; nếu đang ở mode đó thì đèn
+  đọc như Auto, `BẬT` không ở trạng thái chọn.
 
 ### 3.4 Chuyển chế độ (Q2)
 
-- `MainComponent::setUiMode (UiMode)`: Dumb → ẩn mọi con trừ `dumbView_` và nút
-  góc; Geek → ngược lại. `resized()` rẽ nhánh ở đầu. Engine, controller,
-  detector **không biết** đang ở chế độ nào.
-- Đổi chế độ trong lúc soundcheck đang chạy: được phép, trạng thái giữ nguyên
-  (cả hai view đọc cùng `SoundcheckController`).
-- Hộp thoại đang mở (xác nhận đo, xác nhận CLEAR ALL) khi đổi chế độ: hộp thoại
-  async vẫn sống; callback đi qua `SafePointer` + bộ đếm thế hệ như lane M.
+- `MainComponent::setUiMode (UiMode)`: Dumb → ẩn mọi con trừ `dumbView_` và nút góc;
+  Geek → ngược lại. `resized()` rẽ nhánh ở đầu. Engine, controller, detector không
+  biết đang ở chế độ nào.
+- Đổi chế độ lúc đang đo: được. Cả hai view đọc cùng `soundcheckPanel_`/controller.
+- Hộp thoại async đang mở khi đổi chế độ: vẫn sống, callback đi qua `SafePointer`
+  + bộ đếm thế hệ có sẵn.
 
 ### 3.5 Wizard (Q4, Q6, Q7)
 
-`src/gui/SetupWizard.{h,cpp}` + máy trạng thái thuần `src/app/SetupWizardModel.{h,cpp}`
-(không JUCE GUI, test được).
+`src/gui/SetupWizard.{h,cpp}` + máy trạng thái thuần `src/app/SetupWizardModel.{h,cpp}`.
 
-1. **Thiết bị**: combo driver (ASIO đứng đầu nếu có — `chooseDefaultDeviceType`
-   có sẵn) + combo thiết bị. Chọn = restart qua `onBeforeRestart/onAfterRestart`
-   (§6.5 bridge lifecycle — bắt buộc, xem `memory/bridge-lifecycle-devicepanel-2026-08-23.md`).
-2. **Mic**: `MỘT MIC` / `CẶP STEREO`, rồi kênh vào; mỗi kênh có một thanh mức
-   vào sống (đọc từ ring thu thô của lane M? — **không**: ring đó chỉ ghi khi đang
-   đo. Dùng một peak meter atomic mới mỗi kênh vào trong callback, xem §4).
-3. **Ngõ ra**: kênh ra (một hoặc cặp, cùng width với bước 2).
-   `XONG` → nếu Geek đang bật > 1 slot: hộp xác nhận "Thay cấu hình hiện tại
-   (N đường) bằng 1 đường?" → ghi slot 0, tắt 1–7, `saveSettings`.
+1. **Thiết bị**: combo driver + combo thiết bị. Đổi = `devicePanel_`'s
+   `restartWith` path (cùng hook `onBeforeRestart/onAfterRestart`).
+2. **Mic**: các lựa chọn dựng từ `engine_.getNumInputChannels()` — số kênh callback
+   **thật sự nhận**, không phải `getInputChannelNames()` của thiết bị (I-7). Với
+   engine 2 kênh: `Mic 1`, `Mic 2`, `Stereo 1+2`. Mỗi kênh có thanh mức vào sống (§3.6).
+3. **Ngõ ra**: tương tự từ `getNumOutputChannels()`, cùng width với bước 2.
+   `XONG` → nếu đang bật > 1 slot: hộp xác nhận "Thay N đường hiện có bằng 1
+   đường?" → slot 0 = cấu hình mới, slot 1–7 tắt, **qua `changeSlotConfig`** (B-6:
+   restart cycle + `setWidth` + `applyModeGating`), rồi `saveSettings()`.
 
-`HUỶ` ở bất kỳ bước nào: không ghi gì; thiết bị đã đổi ở bước 1 **được giữ** (đã
-restart rồi, lùi lại là một restart nữa trên PA).
+`HUỶ`: không ghi routing. Nếu bước 1 đã đổi thiết bị, chạy luôn kiểm kênh của §3.2
+bước 6 (slot không còn hợp lệ trên thiết bị mới → tắt) và **không** lưu thiết bị mới
+(I-8). Wizard không mở được khi đang đo (đèn không bấm được ở hàng 2–4).
 
 ### 3.6 Peak meter đầu vào cho wizard
 
-Thứ duy nhất chạm audio callback: `std::array<std::atomic<float>, kMaxInputs>`
-peak tuyệt đối mỗi kênh vào, ghi `max(old, |x|)` bằng `memory_order_relaxed`,
-GUI đọc và `exchange(0)` mỗi frame. Chỉ ghi khi cờ `inputMeterEnabled_` bật
-(wizard đang mở bước 2). Không cấp phát, không lock, không đụng mẫu ra.
-**Mức thay đổi trên đường tín hiệu: 0** (chỉ đọc mẫu vào).
+`std::array<std::atomic<float>, 2>` (= `kNumChannels`), ghi `max(old, |x|)` bằng
+load + store `relaxed` cho kênh `ch < min(numInputChannels, 2)` có con trỏ khác null;
+GUI đọc bằng `exchange(0)` mỗi frame. Cờ `inputMeterEnabled_` đọc **một lần** đầu
+callback như các atomic khác; chỉ bật khi wizard ở bước 2. Một đỉnh có thể mất khi
+load/store của callback xen giữa `exchange` của GUI — chấp nhận được cho một thanh
+mức hiển thị, nói thẳng ở đây. Không cấp phát, không lock, không ghi mẫu ra.
+**Mức thay đổi: 0.**
 
 ## 4. Bất biến
 
-1. DumbView không có đường điều khiển nào mà Geek không có.
-2. `TẮT` sống trong mọi trạng thái, kể cả lúc đo và lúc có kết quả.
-3. Không có số dB/Hz trong chữ chính của Dumb (lane M Q10).
-4. `settings.json` hỏng không bao giờ chặn app mở; app mở với mặc định và báo một dòng.
-5. Không đọc/ghi `settings.json` trong ctor `MainComponent`.
-6. Slot nạp từ settings mà không hợp lệ với số kênh thật → **tắt**, không kẹp.
-7. Mọi restart thiết bị của wizard đi qua hook `onBeforeRestart/onAfterRestart`.
-8. Peak meter không ghi gì khi cờ tắt; không đụng buffer ra.
+1. DumbView không có đường điều khiển nào mà Geek không có; mọi nút gọi đúng hàm Geek gọi.
+2. `TẮT` sống trong mọi trạng thái trừ lúc đang đo — y như `BYPASS` của Geek
+   (`setModeControlsEnabled(!measuring)`, `MainComponent.cpp:1477`), và lúc đó `DỪNG`
+   ở cùng màn hình.
+3. Không có số dB/Hz trong chữ của Dumb.
+4. `settings.json` hỏng không chặn app mở; file của build mới hơn không bị ghi đè.
+5. Không I/O settings khi chưa `enableSettings` (mọi test, snapshot tool).
+6. Routing đã lưu không bao giờ chạy trên một thiết bị khác thiết bị đã lưu.
+7. Slot không hợp lệ với số kênh **thật** → tắt, không kẹp. Kiểm chỉ khi số kênh > 0.
+8. Mọi thay đổi slot sau khi engine chạy đi qua `changeSlotConfig`; mọi restart thiết
+   bị/rate/buffer đi qua hook `onBeforeRestart/onAfterRestart`.
+9. Trí nhớ thiết bị chỉ bị ghi đè bởi một thiết bị đã mở thành công do người dùng chọn.
+10. Peak meter không ghi gì khi cờ tắt; không đụng buffer ra.
 
 ## 5. Test
 
 Headless (`ctest`):
-- `az_host_settings`: round-trip; file thiếu; JSON hỏng → mặc định + `.bad`;
-  schema lạ; ghi atomic không để lại file tạm.
-- `AppSettings`: product ⇄ struct; slot lạ bị bỏ; uiMode lạ → Dumb.
-- `dumbStatusFor`: một test mỗi hàng của bảng §3.3, cộng thứ tự ưu tiên (Results
-  + Critical → Results; Bypass + Critical → Bypass).
-- `SetupWizardModel`: chuyển bước, width bước 3 theo bước 2, xác nhận ghi đè khi
-  > 1 slot bật, HUỶ không ghi.
-- `MainComponent`: `setUiMode` ẩn/hiện đúng con; nút Dumb gọi đúng `requestMode`
-  (`onClick()`, không `triggerClick()` — bài học data-loop); `applySettings` tắt
-  slot không hợp lệ.
-- Peak meter: cờ tắt → 0; cờ bật → peak đúng của block giả.
+- `az_host_settings`: round-trip; thiếu file; JSON hỏng → `.bad`; schema mới hơn →
+  file giữ nguyên + `mayOverwrite=false`; rate/buffer ngoài khoảng; ghi atomic.
+- `AppSettings`: round-trip; slot lạ → tắt; vắng routing ≠ 8 slot tắt; uiMode lạ.
+- `dumbStatusFor`: một test mỗi hàng §3.3 + thứ tự ưu tiên (Results+Critical → Results;
+  Bypass+Critical → Bypass; Measuring → TẮT ✗, DỪNG ✓; Unavailable ≠ "An toàn").
+- `SetupWizardModel`: bước, width bước 3 theo bước 2, lựa chọn chỉ trong số kênh
+  callback nhận, xác nhận khi > 1 slot bật, HUỶ không ghi routing.
+- `MainComponent` (headless, 0 kênh): `setUiMode` ẩn/hiện đúng; nút Dumb gọi đúng
+  hàm (`onClick()`); khôi phục khi 0 kênh **không** tắt slot nào (B-1); kiểm kênh
+  tắt slot không hợp lệ khi số kênh được giả lập > 0 (cần một seam test cho số kênh);
+  không `enableSettings` → không file nào được tạo.
+- Peak meter: cờ tắt → 0; cờ bật → peak đúng của block giả; con trỏ null bỏ qua.
 
-Ảnh (`HandsFreeSnapshot`): thêm `dumb-safe.png`, `dumb-blocking.png`,
-`dumb-measuring.png`, `dumb-results.png`, `dumb-setup.png`, `wizard-step{1,2,3}.png`.
-Đọc lại từng ảnh trước khi gửi.
+Ảnh (`HandsFreeSnapshot`): `dumb-setup.png`, `dumb-safe.png`, `dumb-blocking.png`,
+`dumb-measuring.png`, `dumb-results.png`, `wizard-step{1,2,3}.png`. Đọc lại từng ảnh.
 
-Rig (không headless được): wizard với ASIO thật; peak meter đúng kênh; nhớ thiết bị
-sau khi khởi động lại máy; chuyển chế độ giữa lúc đang hú.
+Rig: wizard với ASIO thật; đổi/rút sound card giữa hai lần mở (Q12); peak meter đúng
+kênh; chuyển chế độ lúc đang hú.
 
-## 6. Docs phải cập nhật cùng thay đổi
+## 6. Docs và tester notes
 
-`docs/GIOI-THIEU.md` (hai chế độ, wizard), `docs/KY-THUAT-CHONG-HU.md` (§ settings,
-không đổi DSP), roadmap (dòng U), tester notes 1.4.0 (nêu: app nay nhớ thiết bị
-và routing; cài mới mở ở Dumb).
+`docs/GIOI-THIEU.md` (hai chế độ, wizard, nhớ cấu hình), `docs/KY-THUAT-CHONG-HU.md`
+(§ settings; DSP không đổi), roadmap (dòng U), tester notes 1.4.0: **app nay nhớ
+thiết bị + routing giữa hai lần mở**; cài mới mở Dumb, máy đã có preset mở Geek; rút
+sound card → "Cần cài đặt", không chạy routing cũ lên card khác.
 
 ## 7. Ngoài phạm vi
 
-- Khoá Geek bằng mật khẩu (Q2-2 không chọn).
-- Wizard nhiều slot.
-- Đổi preset trong Dumb.
-- Phổ trong Dumb (Q3-2 không chọn).
+Khoá Geek bằng mật khẩu; wizard nhiều slot; mở hơn 2 kênh (lane riêng, có mức riêng);
+preset trong Dumb; phổ trong Dumb.
+
+## 8. Phản biện vòng 1 (2026-10-18) → rev 2
+
+| # | Mức | Finding | Xử lý |
+|---|---|---|---|
+| 1 | BLOCKER | Số kênh = 0 tới khi audio chạy → kiểm sau `startAudio` tắt hết slot rồi ghi xuống đĩa | §3.2 bước 2 + 6: ghi slot trước start, kiểm ở tick đầu có kênh |
+| 2 | BLOCKER | `startAudio` tự đè loại driver | §3.2 bước 3 |
+| 3 | BLOCKER | JUCE mở thiết bị mặc định khi thiết bị đã lưu mất → routing cũ chạy trên card khác | §3.2 bước 4, Q12, inv 6 |
+| 4 | BLOCKER | rate/buffer không qua hook §6.5 | §3.2 bước 5, inv 8 |
+| 5 | BLOCKER | "TẮT luôn sống" mâu thuẫn inv 1 và lane M | Q10, inv 2 |
+| 6 | BLOCKER | `setSlotConfig` trần ≠ đường của SlotPanel | wizard + kiểm kênh dùng `changeSlotConfig` |
+| 7 | IMPORTANT | Engine chỉ mở 2 kênh | §1, §3.5 bước 2, §7 |
+| 8 | IMPORTANT | "0 dB" chưa đủ; HUỶ để slot cũ trên card mới | header, §3.5 HUỶ, §6 |
+| 9 | IMPORTANT | Ghi lúc thất bại xoá trí nhớ; `shutdown` không có handle | §3.2 "Không xoá trí nhớ", `saveSettings` trước `mainWindow.reset()` |
+| 10 | IMPORTANT | Thiếu trạng thái (confirm đang mở, Applied, Unavailable, lỗi thiết bị) | §3.3 bảng hàng 1, 4, 10 + `measureAllowed` |
+| 11 | IMPORTANT | Không hysteresis → đèn nháy | `RingRiskHysteresis` riêng của Dumb |
+| 12 | IMPORTANT | `showMessage` vô hình trong Dumb | dòng thông báo |
+| 13 | IMPORTANT | Tester 1.3.x bị coi như cài mới | Q11 |
+| m | MINOR | STATIC vs INTERFACE; "giống PresetManager" sai; schema mới bị phá; peak meter biên; displayedSlot cũ; test 0-kênh pass sai lý do | §3.1, §3.2, §3.6, §5 |

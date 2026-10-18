@@ -4,9 +4,9 @@ Mỗi mục là một ngả rẽ thiết kế đã hỏi owner trong brainstorm.
 các phương án đã đề xuất (kèm phương án khuyên dùng), và lựa chọn của owner.
 Lật lại khi cần đổi hướng; đừng hỏi lại câu đã có đáp án ở đây.
 
-**Trạng thái:** Q1–Q4 owner đã chọn 2026-10-18; Q5+ điều phối tự chọn tạm, owner chưa duyệt.
+**Trạng thái:** Q1–Q4 owner đã chọn 2026-10-18; Q5–Q12 điều phối tự chọn tạm, owner chưa duyệt.
 
-Spec đích: `docs/superpowers/specs/2026-10-18-dumb-geek-mode-design.md` (chưa viết).
+Spec đích: `docs/superpowers/specs/2026-10-18-dumb-geek-mode-design.md` (rev 2).
 Người hỏi: Claude (điều phối). Người quyết: owner (ToanAZ).
 
 ## Bối cảnh nêu trước khi hỏi
@@ -117,5 +117,33 @@ Người hỏi: Claude (điều phối). Người quyết: owner (ToanAZ).
 |---|---|---|
 | 1 | **Thư viện `az_host_settings`** (CMake target riêng, chỉ `juce_core`), vì "JUCE host shell" là ứng viên thư viện trong CLAUDE.md và voice isolator (`cedar-realtime-plugins.md` §7) cần đúng phần nhớ thiết bị này. Wizard + DumbView ở lại app | khuyên dùng |
 | 2 | Để trong `src/app/`, tách khi sản phẩm hai có code | |
+
+**Chọn: 1.** — điều phối tự chọn 2026-10-18, owner CHƯA duyệt.
+
+## Q10 — `TẮT` trong lúc đang đo? (sinh ra từ phản biện vòng 1, B-5; điều phối tự chọn)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Khoá, y như `BYPASS` của Geek** (`setModeControlsEnabled(!measuring)`, `MainComponent.cpp:1477`); `DỪNG` ở ngay nút trái | khuyên dùng |
+| 2 | `TẮT` = `DỪNG` rồi Bypass khi controller về Idle — một đường Geek không có | |
+| 3 | `TẮT` gọi `requestMode(Bypass)` ngay giữa sweep — `requestMode` không dừng lần đo | |
+
+**Chọn: 1.** — điều phối tự chọn 2026-10-18, owner CHƯA duyệt.
+
+## Q11 — Tester 1.3.x mở 1.4.0 lần đầu (chưa có `settings.json`)? (vòng 1, I-13; điều phối tự chọn)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Có thư mục `presets/` → Geek; không có → Dumb** | khuyên dùng |
+| 2 | Luôn Dumb + wizard | |
+
+**Chọn: 1.** — điều phối tự chọn 2026-10-18, owner CHƯA duyệt.
+
+## Q12 — Thiết bị đã lưu không còn lúc mở app? (vòng 1, B-3; điều phối tự chọn)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Không áp routing đã lưu lên thiết bị JUCE mở thay; tắt slot; "Cần cài đặt"; không ghi đè trí nhớ** | khuyên dùng |
+| 2 | Áp routing đã lưu nếu chỉ số kênh còn trong biên | |
 
 **Chọn: 1.** — điều phối tự chọn 2026-10-18, owner CHƯA duyệt.
