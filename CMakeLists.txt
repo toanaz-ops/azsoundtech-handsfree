@@ -45,6 +45,10 @@ else()
     message(WARNING "ASIO SDK not found. Download from Steinberg and place in external/asiosdk/")
 endif()
 
+# Shared platform libraries (CLAUDE.md "Phần dùng chung phải là thư viện").
+# Each is its own target with its own include root and no path back into src/.
+add_subdirectory(libs/host_settings)
+
 # Create JUCE standalone GUI application
 juce_add_gui_app(HandsFree
     PRODUCT_NAME "AZ Soundtech Hands-free"
@@ -82,6 +86,8 @@ endif()
 # src/main.cpp is NOT here -- it is the app's entry point, and the other two
 # targets bring their own.
 set(HANDSFREE_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
     ${CMAKE_SOURCE_DIR}/src/app/LicenseManager.cpp
     ${CMAKE_SOURCE_DIR}/src/app/LicenseViewModel.cpp
@@ -97,6 +103,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DumbStatus.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DumbStatus.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.h
@@ -166,6 +174,7 @@ target_link_libraries(HandsFree
     PRIVATE
         HandsFreeFonts
         melatonin_blur
+        az_host_settings
         juce::juce_audio_devices
         juce::juce_audio_utils
         juce::juce_cryptography
