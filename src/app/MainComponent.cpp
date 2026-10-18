@@ -962,6 +962,11 @@ MainComponent::MainComponent()
             {
                 const auto remembered = settings_.slots;
                 deviceMismatch_ = true;
+                // onAfterRestart clears the flag whenever the open card differs
+                // from mismatchDeviceName_ -- and the remembered card always
+                // does. Point it at the open card so the flag really holds
+                // (round 4): no partial routing reaches the disk mid-loop.
+                mismatchDeviceName_ = engine_.getCurrentDeviceName();
                 for (int i = 0; i < kMaxSlots; ++i)
                     changeSlotConfig (i, remembered[(std::size_t) i]);
             }
