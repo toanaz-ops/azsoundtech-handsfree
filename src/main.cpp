@@ -29,6 +29,13 @@ public:
 
     void shutdown() override
     {
+        // Lane U: the last save happens while the content still exists. The
+        // component's destructor does no file I/O (26 tests and the snapshot
+        // tool construct it), so this is the one place quitting is remembered.
+        if (mainWindow != nullptr)
+            if (auto* content = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+                content->saveSettings();
+
         mainWindow.reset();
     }
 
@@ -68,6 +75,9 @@ private:
             // constructible in a test on a machine with no audio hardware.
             // Done AFTER setVisible so a device that refuses to open leaves a
             // visible window showing why, rather than nothing at all.
+            // Lane U: settings first -- they name the device startAudio()
+            // opens and carry the routing it sizes the detectors from.
+            content->enableSettings(defaultAppSettingsFile());
             content->startAudio();
             // Lane D: the session log opens AFTER the device, so its header
             // names the device actually in use. A failed start (no %APPDATA%)

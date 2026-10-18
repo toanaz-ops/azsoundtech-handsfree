@@ -105,6 +105,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DumbStatus.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DumbStatus.h
+    ${CMAKE_SOURCE_DIR}/src/gui/DumbView.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/DumbView.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.h

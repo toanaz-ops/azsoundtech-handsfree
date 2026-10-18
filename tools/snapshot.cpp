@@ -508,6 +508,60 @@ int main (int argc, char** argv)
     }
 
     //--------------------------------------------------------------------
+    // LANE U: Dumb mode. dumb-setup is REAL -- no device is open, so the
+    // console honestly reads "Cần cài đặt". The rest are STAGED through
+    // DumbView::setInputs, said so on stdout: what they prove is legibility
+    // (does a Vietnamese headline fit, does ÁP DỤNG fit its switch), not that
+    // the inputs are computed correctly -- the status table has its own tests.
+    {
+        app.setUiMode (UiMode::Dumb);
+        app.resized();
+        if (! shoot (app, outDir.getChildFile ("dumb-setup.png")))
+            return 1;
+
+        auto& dumb = app.getDumbViewForTest();
+        gui::DumbInputs in;
+        in.configured = true; in.autoMode = true; in.measureAllowed = true;
+
+        const auto stage = [&] (const char* name, const gui::DumbInputs& inputs,
+                                const juce::String& message = {})
+        {
+            dumb.setInputs (inputs, message);
+            std::cout << name << ": Dumb inputs STAGED (see tools/snapshot.cpp)" << std::endl;
+            return shoot (app, outDir.getChildFile (name));
+        };
+
+        in.risk = gui::DumbInputs::Risk::Low;
+        if (! stage ("dumb-safe.png", in)) return 1;
+
+        in.notchCount = 3;
+        if (! stage ("dumb-blocking.png", in)) return 1;
+
+        in.risk = gui::DumbInputs::Risk::Critical;
+        if (! stage ("dumb-howling.png", in)) return 1;
+
+        auto measuring = in;
+        measuring.phase = gui::DumbInputs::Phase::Measuring;
+        measuring.measureAllowed = false;
+        if (! stage ("dumb-measuring.png", measuring)) return 1;
+
+        auto results = in;
+        results.risk = gui::DumbInputs::Risk::Low;
+        results.phase = gui::DumbInputs::Phase::Results;
+        results.resultCount = 4;
+        if (! stage ("dumb-results.png", results)) return 1;
+
+        auto off = in;
+        off.autoMode = false; off.bypassed = true; off.notchCount = 0;
+        if (! stage ("dumb-off.png", off,
+                     juce::String::fromUTF8 ("Sound card t\xe1\xbb\xab ch\xe1\xbb\x91i buffer \xc4\x91\xc3\xa3 l\xc6\xb0u (64).")))
+            return 1;
+
+        app.setUiMode (UiMode::Geek);
+        app.resized();
+    }
+
+    //--------------------------------------------------------------------
     // The off-list-ceiling shot (final review, I-4).
     //
     // fba2626 changed what the tuning strip DISPLAYS when the values handed

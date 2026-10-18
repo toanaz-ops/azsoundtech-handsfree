@@ -142,7 +142,7 @@ MainComponent đẩy `DumbInputs` mỗi tick của timer có sẵn, view gọi `
 | `measureAllowed` | **đúng** vị từ của `updateMeasureEnabled` (`MainComponent.cpp:1523`): lock None và không có hộp xác nhận đang mở |
 | `risk` | `worstRingRiskSnapshot` → `riskForScore` → **một `RingRiskHysteresis` riêng của Dumb** (750 ms, `SpectrumView.h:438`) |
 | `notchCount` | tổng notch hoạt động mọi slot bật |
-| `message` | dòng cuối của `showMessage`, mờ sau 8 s |
+| `message` | đúng dòng thanh trạng thái Geek đang giữ (`refreshStatus`: lỗi thiết bị, rồi `showMessage`) — giữ, không mờ, như Geek |
 
 **Bảng trạng thái** (ưu tiên từ trên xuống):
 

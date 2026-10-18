@@ -47,6 +47,7 @@ add_executable(HandsFreeTests
     test_hostsettings.cpp
     test_appsettings.cpp
     test_dumbstatus.cpp
+    test_lane_u_wiring.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
