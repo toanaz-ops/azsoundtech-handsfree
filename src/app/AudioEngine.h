@@ -154,6 +154,21 @@ public:
     // UI. Cleared by a successful start().
     juce::String getLastDeviceError() const;
 
+    // ---- Lane U: input peak meter for the setup wizard (spec 3.6) -------
+    //
+    // READ-ONLY on the signal: the callback looks at the input samples and
+    // never writes a sample anywhere. Off unless the wizard's mic step is on
+    // screen; with the flag off the callback does nothing here at all.
+    //
+    // takeInputPeak() returns the largest |x| seen on that input channel since
+    // the previous take and resets it. The callback's max is a relaxed load +
+    // store, so a peak landing between it and the GUI's exchange(0) can be
+    // lost -- acceptable for a meter a person glances at, and the price of not
+    // putting a CAS loop on the audio thread.
+    static constexpr int kInputMeterChannels = 8;
+    void  setInputMeterEnabled (bool enabled);
+    float takeInputPeak (int channel);
+
     // Mode control
     void setMode(Mode mode);
     Mode getMode() const;
@@ -446,6 +461,8 @@ private:
     // Channel counts observed by the last callback. Relaxed atomics: two
     // stores per callback, no ordering relationship with anything else, and
     // they are only ever read for display.
+    std::atomic<bool> inputMeterEnabled_ { false };
+    std::array<std::atomic<float>, kInputMeterChannels> inputPeak_ {};
     std::atomic<int> numInputChannels_  { 0 };
     std::atomic<int> numOutputChannels_ { 0 };
 

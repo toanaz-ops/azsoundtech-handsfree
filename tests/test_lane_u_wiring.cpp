@@ -254,3 +254,223 @@ TEST (LaneU, ANewerBuildsFileIsNeverOverwritten)
     mc.setUiMode (UiMode::Geek);
     EXPECT_EQ (t.file().loadFileAsString(), newer);
 }
+
+//==============================================================================
+// Spec 3.6: the wizard's input peak meter.
+
+namespace
+{
+struct Block
+{
+    std::vector<float> l, r, outL, outR;
+    const float* ins[2] {};
+    float* outs[2] {};
+
+    Block (float peakL, float peakR, int n = 256)
+        : l ((std::size_t) n, 0.0f), r ((std::size_t) n, 0.0f),
+          outL ((std::size_t) n, 0.0f), outR ((std::size_t) n, 0.0f)
+    {
+        l[10] = -peakL;   // negative on purpose: the meter reads |x|
+        r[20] =  peakR;
+        ins[0] = l.data(); ins[1] = r.data();
+        outs[0] = outL.data(); outs[1] = outR.data();
+    }
+
+    void run (AudioEngine& e, int numIns = 2)
+    {
+        const juce::AudioIODeviceCallbackContext ctx {};
+        e.audioDeviceIOCallbackWithContext (ins, numIns, outs, 2, (int) l.size(), ctx);
+    }
+};
+}
+
+TEST (LaneUInputMeter, OffMeansNothingIsMeasured)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    Block b (0.5f, 0.25f);
+    b.run (engine);
+    EXPECT_EQ (engine.takeInputPeak (0), 0.0f);
+    EXPECT_EQ (engine.takeInputPeak (1), 0.0f);
+}
+
+TEST (LaneUInputMeter, OnReportsTheAbsolutePeakAndTakeResetsIt)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setInputMeterEnabled (true);
+
+    Block b (0.5f, 0.25f);
+    b.run (engine);
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (0), 0.5f);
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (1), 0.25f);
+    EXPECT_EQ (engine.takeInputPeak (0), 0.0f);
+
+    // Out of range and channels the callback was not handed read 0.
+    EXPECT_EQ (engine.takeInputPeak (-1), 0.0f);
+    EXPECT_EQ (engine.takeInputPeak (AudioEngine::kInputMeterChannels), 0.0f);
+
+    Block one (0.1f, 0.9f);
+    one.run (engine, 1);
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (0), 0.1f);
+    EXPECT_EQ (engine.takeInputPeak (1), 0.0f);
+}
+
+TEST (LaneUInputMeter, NullChannelPointerIsSkipped)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setInputMeterEnabled (true);
+
+    Block b (0.5f, 0.25f);
+    b.ins[0] = nullptr;
+    b.run (engine);
+    EXPECT_EQ (engine.takeInputPeak (0), 0.0f);
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (1), 0.25f);
+}
+
+TEST (LaneUInputMeter, TheMeterNeverChangesAnOutputSample)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine off, on;
+    on.setInputMeterEnabled (true);
+
+    Block a (0.5f, 0.25f), b (0.5f, 0.25f);
+    a.run (off);
+    b.run (on);
+    EXPECT_EQ (a.outL, b.outL);
+    EXPECT_EQ (a.outR, b.outR);
+}
+
+//==============================================================================
+// Spec 3.5: the wizard as MainComponent wires it.
+
+namespace
+{
+SlotConfig monoRoute (int in, int out)
+{
+    SlotConfig c;
+    c.enabled = true; c.width = 1;
+    c.inputChannels[0] = in; c.outputChannels[0] = out;
+    return c;
+}
+}
+
+TEST (LaneUWizard, OpensOverEverythingAndCannotLeaveStepOneWithoutChannels)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.setSize (MainComponent::kDefaultWidth, MainComponent::kDefaultHeight);
+    mc.setUiMode (UiMode::Dumb);
+    mc.getDumbViewForTest().onOpenWizard();
+
+    auto& w = mc.getSetupWizardForTest();
+    EXPECT_TRUE (w.isOpen());
+    EXPECT_EQ (mc.getIndexOfChildComponent (&w), mc.getNumChildComponents() - 1);
+    EXPECT_EQ (w.getModelForTest().getStep(), SetupWizardModel::Step::Device);
+    EXPECT_FALSE (w.getNextButtonForTest().isEnabled());   // headless: 0 channels
+}
+
+TEST (LaneUWizard, RefusedWhileAMeasurementHoldsTheConsole)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Measuring);
+    mc.openSetupWizard();
+    EXPECT_FALSE (mc.getSetupWizardForTest().isOpen());
+    EXPECT_FALSE (mc.lastMessageForTest().isEmpty());
+}
+
+TEST (LaneUWizard, FinishWithOneSlotOnWritesSlotZeroWithoutAsking)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    bool asked = false;
+    mc.wizardConfirmHook = [&] (const juce::String&, std::function<void (bool)>) { asked = true; };
+
+    mc.openSetupWizard();
+    mc.getSetupWizardForTest().onFinish (monoRoute (1, 0));
+
+    EXPECT_FALSE (asked);
+    const auto s0 = mc.getAudioEngine().getSlotConfig (0);
+    EXPECT_TRUE (s0.enabled);
+    EXPECT_EQ (s0.width, 1);
+    EXPECT_EQ (s0.inputChannels[0], 1);
+    EXPECT_FALSE (mc.getSetupWizardForTest().isOpen());
+}
+
+TEST (LaneUWizard, FinishOverSeveralSlotsAsksAndOnlyYesOverwrites)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.changeSlotConfig (2, monoRoute (0, 1));
+    ASSERT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);   // default slot 0
+    ASSERT_TRUE (mc.getAudioEngine().getSlotConfig (2).enabled);
+
+    std::function<void (bool)> answer;
+    juce::String question;
+    mc.wizardConfirmHook = [&] (const juce::String& text, std::function<void (bool)> a)
+    {
+        question = text;
+        answer   = std::move (a);
+    };
+
+    mc.openSetupWizard();
+    mc.getSetupWizardForTest().onFinish (monoRoute (1, 1));
+    ASSERT_TRUE (answer != nullptr);
+    EXPECT_TRUE (question.contains ("2"));
+
+    answer (false);
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (2).enabled);
+    EXPECT_TRUE (mc.getSetupWizardForTest().isOpen());
+
+    mc.getSetupWizardForTest().onFinish (monoRoute (1, 1));
+    answer (true);
+    EXPECT_FALSE (mc.getAudioEngine().getSlotConfig (2).enabled);
+    EXPECT_EQ (mc.getAudioEngine().getSlotConfig (0).inputChannels[0], 1);
+    EXPECT_FALSE (mc.getSetupWizardForTest().isOpen());
+}
+
+TEST (LaneUWizard, CancelWritesNoRouting)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    const auto before = mc.getAudioEngine().getSlotConfig (0);
+
+    mc.openSetupWizard();
+    mc.getSetupWizardForTest().getCancelButtonForTest().onClick();
+
+    EXPECT_FALSE (mc.getSetupWizardForTest().isOpen());
+    const auto after = mc.getAudioEngine().getSlotConfig (0);
+    EXPECT_EQ (after.enabled, before.enabled);
+    EXPECT_EQ (after.inputChannels[0], before.inputChannels[0]);
+}
+
+TEST (LaneUWizard, LeavingForGeekCancelsTheWizard)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.setUiMode (UiMode::Dumb);
+    mc.openSetupWizard();
+    mc.setUiMode (UiMode::Geek);
+    EXPECT_FALSE (mc.getSetupWizardForTest().isOpen());
+}
+
+TEST (LaneUWizard, FinishedWizardIsRememberedAndClearsAMismatch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Fallback");
+    ASSERT_TRUE (mc.deviceMismatchForTest());
+
+    mc.openSetupWizard();
+    mc.wizardConfirmHook = [] (const juce::String&, std::function<void (bool)> a) { a (true); };
+    mc.getSetupWizardForTest().onFinish (monoRoute (0, 1));
+
+    EXPECT_FALSE (mc.deviceMismatchForTest());
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
+}

@@ -99,6 +99,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.cpp
     ${CMAKE_SOURCE_DIR}/src/app/MainComponent.h
     ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SetupWizardModel.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SetupWizardModel.h
     ${CMAKE_SOURCE_DIR}/src/app/SessionLogger.h
     ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/SoundcheckController.h
@@ -107,6 +109,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/DumbStatus.h
     ${CMAKE_SOURCE_DIR}/src/gui/DumbView.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DumbView.h
+    ${CMAKE_SOURCE_DIR}/src/gui/SetupWizard.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/SetupWizard.h
     ${CMAKE_SOURCE_DIR}/src/gui/DeviceDrawer.h
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/DevicePanel.h

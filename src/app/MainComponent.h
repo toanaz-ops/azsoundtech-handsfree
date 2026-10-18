@@ -29,6 +29,7 @@
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
 #include "gui/DumbView.h"
+#include "gui/SetupWizard.h"
 #include "gui/ModeBar.h"
 #include "gui/ModeRail.h"
 #include "gui/NotchListPanel.h"
@@ -137,6 +138,16 @@ public:
 
     void setUiMode (UiMode mode);
     [[nodiscard]] UiMode getUiMode() const { return uiMode_; }
+
+    // The Dumb-mode wizard (spec 3.5). Refused, with a message, while a lane M
+    // run holds the console. Finishing writes slot 0 and turns 1-7 off through
+    // changeSlotConfig; with more than one slot on, it asks first through
+    // wizardConfirmHook (injectable for the same reason soundcheckConfirmHook
+    // is: no modal loops, and headless tests must answer it).
+    void openSetupWizard();
+    std::function<void (const juce::String& text,
+                        std::function<void (bool)> onAnswer)> wizardConfirmHook;
+    [[nodiscard]] gui::SetupWizard& getSetupWizardForTest() { return setupWizard_; }
 
     // TEST ACCESSORS (lane U).
     [[nodiscard]] gui::DumbView& getDumbViewForTest() { return dumbView_; }
@@ -406,7 +417,7 @@ private:
     // Right after the restoring start(): JUCE opens the DEFAULT device when the
     // saved one is gone, and the saved routing must not run on it (Q12).
     void checkRestoredDevice (const juce::String& openType, const juce::String& openName);
-    void layoutGeek();
+    void applyWizardResult (const SlotConfig& slot0);
 
     // Polls the engine for display. The engine publishes its state through
     // atomics precisely so a reader like this never blocks the audio thread.
@@ -578,6 +589,10 @@ private:
     UiMode uiMode_ = UiMode::Geek;
     gui::DumbView    dumbView_;
     juce::TextButton simpleModeButton_;   // Geek's way back to Dumb (Q2)
+    gui::SetupWizard setupWizard_;        // over everything, Dumb only
+    bool wizardChangedDevice_ = false;
+    bool wizardAutoOpenDone_  = false;    // Q7: once per session, by itself
+    bool audioStarted_        = false;
 
     juce::File  settingsFile_;            // empty = settings disabled
     bool        settingsMayOverwrite_ = false;

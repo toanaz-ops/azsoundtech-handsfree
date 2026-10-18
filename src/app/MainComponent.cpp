@@ -823,6 +823,78 @@ MainComponent::MainComponent()
     dumbView_.setOpaque (true);
     addChildComponent (dumbView_);
 
+    //--------------------------------------------------------------------
+    // The wizard. Every read is the engine's own; every write goes through a
+    // path Geek already uses: DevicePanel::restartWith (with its 6.5 hooks)
+    // for the device, changeSlotConfig for the routing.
+    setupWizard_.typeNamesProvider     = [this] { return engine_.getAvailableDeviceTypeNames(); };
+    setupWizard_.deviceNamesProvider   = [this] { return engine_.getAvailableDeviceNames(); };
+    setupWizard_.currentTypeProvider   = [this] { return engine_.getCurrentDeviceType(); };
+    setupWizard_.currentDeviceProvider = [this] { return engine_.getCurrentDeviceName(); };
+    setupWizard_.channelCountsProvider = [this]
+    {
+        return std::pair<int, int> { engine_.getNumInputChannels(), engine_.getNumOutputChannels() };
+    };
+    setupWizard_.inputPeakProvider = [this] (int ch) { return engine_.takeInputPeak (ch); };
+    setupWizard_.onMeterEnabled    = [this] (bool on) { engine_.setInputMeterEnabled (on); };
+    setupWizard_.onDeviceChosen    = [this] (const juce::String& type, const juce::String& name)
+    {
+        wizardChangedDevice_ = true;
+        devicePanel_.restartWith (type, name);
+        devicePanel_.refresh();
+        slotPanel_.refresh();
+        setupWizard_.refreshDevice();
+    };
+    setupWizard_.onFinish = [this] (const SlotConfig& slot0)
+    {
+        std::array<SlotConfig, kMaxSlots> current;
+        for (int i = 0; i < kMaxSlots; ++i)
+            current[(std::size_t) i] = engine_.getSlotConfig (i);
+
+        if (! SetupWizardModel::needsOverwriteConfirm (current))
+        {
+            applyWizardResult (slot0);
+            return;
+        }
+
+        int on = 0;
+        for (const auto& c : current)
+            on += c.enabled ? 1 : 0;
+
+        if (wizardConfirmHook == nullptr)
+            return;   // no way to ask = no overwrite
+
+        juce::Component::SafePointer<MainComponent> safe (this);
+        wizardConfirmHook (juce::String::fromUTF8 ("Thay ") + juce::String (on)
+                               + juce::String::fromUTF8 (" \xc4\x91\xc6\xb0\xe1\xbb\x9dng hi\xe1\xbb\x87n c\xc3\xb3 b\xe1\xba\xb1ng 1 \xc4\x91\xc6\xb0\xe1\xbb\x9dng?"),
+                           [safe, slot0] (bool ok)
+                           {
+                               if (ok && safe != nullptr && safe->setupWizard_.isOpen())
+                                   safe->applyWizardResult (slot0);
+                           });
+    };
+    setupWizard_.onCancel = [this]
+    {
+        // Spec 3.5 HUỶ: no routing is written. A device changed in step 1 is a
+        // device the operator picked (DevicePanel's own path remembered it), so
+        // whatever no longer fits it comes off -- disabled, never clamped.
+        if (wizardChangedDevice_ && engine_.getNumInputChannels() > 0
+            && engine_.getNumOutputChannels() > 0)
+            validateRestoredSlots (engine_.getNumInputChannels(), engine_.getNumOutputChannels());
+        refreshDumbView();
+    };
+    wizardConfirmHook = [] (const juce::String& text, std::function<void (bool)> onAnswer)
+    {
+        auto options = juce::MessageBoxOptions::makeOptionsOkCancel (
+            juce::MessageBoxIconType::QuestionIcon,
+            juce::String::fromUTF8 ("C\xc3\xa0i \xc4\x91\xe1\xba\xb7t"), text,
+            "OK", juce::String::fromUTF8 ("HU\xe1\xbb\xb6"), nullptr);
+        juce::NativeMessageBox::showAsync (options,
+            [onAnswer = std::move (onAnswer)] (int result) { onAnswer (result == 1); });
+    };
+    addChildComponent (setupWizard_);
+    dumbView_.onOpenWizard = [this] { openSetupWizard(); };
+
     simpleModeButton_.setButtonText (juce::String::fromUTF8 ("\xc4\x90\xc6\xa0N GI\xe1\xba\xa2N"));
     simpleModeButton_.getProperties().set ("azStyle", "ghost");
     simpleModeButton_.onClick = [this] { setUiMode (UiMode::Dumb); };
@@ -1068,6 +1140,7 @@ void MainComponent::startAudio()
         engine_.setAudioDevice (saved.name);
 
     engine_.start();
+    audioStarted_ = true;
 
     // Before any detector thread starts: if JUCE fell back to another device,
     // the restored routing comes off here, while nothing consumes the taps.
@@ -1267,9 +1340,49 @@ bool MainComponent::saveSettings()
     return true;
 }
 
+void MainComponent::openSetupWizard()
+{
+    if (soundcheckLock_ != SoundcheckLock::None || soundcheckConfirmPending_)
+    {
+        showMessage (juce::String::fromUTF8 ("\xc4\x90" "ang \xc4\x91o ph\xc3\xb2ng \xe2\x80\x94 c\xc3\xa0i \xc4\x91\xe1\xba\xb7t sau khi xong."));
+        return;
+    }
+
+    wizardChangedDevice_ = false;
+    setupWizard_.setBounds (getLocalBounds());
+    setupWizard_.open();
+}
+
+void MainComponent::applyWizardResult (const SlotConfig& slot0)
+{
+    // THE routing path (B-6): restart cycle, setWidth, mode gating.
+    changeSlotConfig (0, slot0);
+    for (int i = 1; i < kMaxSlots; ++i)
+    {
+        auto c = engine_.getSlotConfig (i);
+        if (! c.enabled)
+            continue;
+        c.enabled = false;
+        changeSlotConfig (i, c);
+    }
+
+    // Set up by hand on this device: it is now the device and the routing to
+    // remember.
+    deviceMismatch_ = false;
+    restorePending_ = false;
+    slotPanel_.refresh();
+    setupWizard_.close();
+    saveSettings();
+    refreshDumbView();
+}
+
 void MainComponent::setUiMode (const UiMode mode)
 {
     uiMode_ = mode;
+
+    // The wizard belongs to Dumb; leaving for Geek is a cancel.
+    if (mode == UiMode::Geek && setupWizard_.isOpen())
+        setupWizard_.getCancelButtonForTest().onClick();
 
     const bool dumb = mode == UiMode::Dumb;
     dumbView_.setVisible (dumb);
@@ -2539,7 +2652,22 @@ void MainComponent::timerCallback()
         validateRestoredSlots (engine_.getNumInputChannels(), engine_.getNumOutputChannels());
 
     if (uiMode_ == UiMode::Dumb)
+    {
         refreshDumbView();
+
+        // Q7: Dumb with nothing set up opens the wizard by itself, once. Not
+        // before the routing check has run, and not while the device is open
+        // but has not yet delivered a callback (counts 0) -- both would read
+        // "not configured" for a rig that is.
+        const bool countsKnown = ! engine_.isRunning()
+                              || (engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0);
+        if (audioStarted_ && ! wizardAutoOpenDone_ && ! restorePending_ && countsKnown)
+        {
+            wizardAutoOpenDone_ = true;
+            if (! buildDumbInputs().configured)
+                openSetupWizard();
+        }
+    }
 
     // LANE M's only route onto the message thread. The controller's
     // onStateChanged sets a flag from its own thread; everything that touches a
@@ -2822,6 +2950,7 @@ void MainComponent::resized()
     // LANE U: in Dumb the opaque view covers everything; the Geek layout
     // below still runs so switching back needs nothing re-laid out.
     dumbView_.setBounds (getLocalBounds());
+    setupWizard_.setBounds (getLocalBounds());
 
     auto masthead = area.removeFromTop (mastheadHeight).reduced (kEdgePad, 0);
 
