@@ -21,6 +21,7 @@ target_include_directories(HandsFreeSnapshot PRIVATE
 target_link_libraries(HandsFreeSnapshot PRIVATE
     HandsFreeFonts
     melatonin_blur
+    az_host_settings
     juce::juce_audio_devices
     juce::juce_gui_basics
     juce::juce_cryptography

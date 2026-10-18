@@ -154,6 +154,10 @@ public:
 
     void setResults (const Model& model);
 
+    // Lane U: Dumb mode speaks the SAME counts this strip shows, read from
+    // here rather than recomputed, so the two consoles cannot disagree.
+    [[nodiscard]] const Model& getModel() const { return model_; }
+
     // What this strip needs to show every line it is holding WITHOUT cutting
     // one off. The owner asks rather than assuming kPanelHeight, because the
     // summary's line count is data-dependent and a fault sentence that is

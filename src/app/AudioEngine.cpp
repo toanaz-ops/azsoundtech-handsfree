@@ -271,6 +271,23 @@ int AudioEngine::getNumOutputChannels() const
     return numOutputChannels_.load (std::memory_order_relaxed);
 }
 
+void AudioEngine::setInputMeterEnabled (const bool enabled)
+{
+    if (! enabled)
+        for (auto& p : inputPeak_)
+            p.store (0.0f, std::memory_order_relaxed);
+
+    inputMeterEnabled_.store (enabled, std::memory_order_relaxed);
+}
+
+float AudioEngine::takeInputPeak (const int channel)
+{
+    if (channel < 0 || channel >= kInputMeterChannels)
+        return 0.0f;
+
+    return inputPeak_[(std::size_t) channel].exchange (0.0f, std::memory_order_relaxed);
+}
+
 juce::String AudioEngine::getLastDeviceError() const
 {
     const std::lock_guard<std::mutex> lock (lastDeviceErrorLock_);
@@ -649,6 +666,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // can advertise channels the callback is not given.
     numInputChannels_.store (numInputChannels, std::memory_order_relaxed);
     numOutputChannels_.store (numOutputChannels, std::memory_order_relaxed);
+    deliveredSinceStart_.store (true, std::memory_order_release);
+
+    // Lane U (spec 3.6): the wizard's input meter. Reads input samples only;
+    // bounded by what this callback was handed AND by the meter's own size;
+    // a null channel pointer (JUCE hands those for inactive channels) is
+    // skipped. Nothing else in this callback depends on it.
+    if (inputMeterEnabled_.load (std::memory_order_relaxed) && inputChannelData != nullptr)
+    {
+        const int metered = juce::jmin (numInputChannels, kInputMeterChannels);
+        for (int ch = 0; ch < metered; ++ch)
+        {
+            const float* in = inputChannelData[ch];
+            if (in == nullptr)
+                continue;
+
+            float peak = 0.0f;
+            for (int i = 0; i < numSamples; ++i)
+                peak = juce::jmax (peak, std::abs (in[i]));
+
+            auto& slot = inputPeak_[(std::size_t) ch];
+            if (peak > slot.load (std::memory_order_relaxed))
+                slot.store (peak, std::memory_order_relaxed);
+        }
+    }
 
     // Real-time thread: no allocation, no locking. The only shared state read
     // here is the mode and the slot mapping, via lock-free atomics. The mode
@@ -1002,6 +1043,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
+    // Lane U: the counts the getters report still belong to the PREVIOUS
+    // device until this one's first callback.
+    deliveredSinceStart_.store (false, std::memory_order_release);
+
     if (device != nullptr)
     {
         const double sampleRate = device->getCurrentSampleRate();
@@ -1093,6 +1138,11 @@ void AudioEngine::audioDeviceStopped()
     // Nothing to release here yet: the notch chains are reset in
     // audioDeviceAboutToStart() on the next start. The override is kept so
     // the device lifecycle is explicit.
+    //
+    // The channel counts are deliberately NOT zeroed here (lane U round 2):
+    // a preset load while the card is gone falls back to 2x2 on a zero count
+    // and clamps every slot onto it. Freshness is asked separately, through
+    // hasDeliveredSinceStart().
 }
 
 void AudioEngine::audioDeviceError (const juce::String& errorMessage)

@@ -19,6 +19,7 @@
 // component in this app is therefore reachable from the test target.
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "app/AppSettings.h"
 #include "app/AudioEngine.h"
 #include "app/NotchController.h"
 #include "app/SessionLogger.h"
@@ -27,6 +28,8 @@
 #include "dsp/ClockSource.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
+#include "gui/DumbView.h"
+#include "gui/SetupWizard.h"
 #include "gui/ModeBar.h"
 #include "gui/ModeRail.h"
 #include "gui/NotchListPanel.h"
@@ -112,6 +115,50 @@ public:
     // header names the device actually in use.
     void setAppVersion (const juce::String& version);
     bool startSessionLog (const juce::File& directory);
+
+    //==========================================================================
+    // LANE U (spec 2026-10-18). Settings memory and the two UI modes.
+    //
+    // enableSettings() is the ONLY way this component ever touches
+    // settings.json: main.cpp calls it before startAudio(). Without it -- every
+    // test, the snapshot tool -- nothing is read or written and the console
+    // stays in Geek, exactly as before lane U (spec invariant 5).
+    //
+    // It reads the file, writes any saved routing into the STOPPED engine
+    // (startAudio() then sizes the detectors from it), and remembers the saved
+    // device for startAudio() to open.
+    void enableSettings (const juce::File& file);
+
+    // Writes the current mode, device and routing. A no-op returning false
+    // before enableSettings(), or when the file belongs to a newer build. While
+    // the saved device is missing (deviceMismatch) the saved device AND routing
+    // are written back unchanged: a failed open must not erase the memory of
+    // the rig (spec 3.2, I-9).
+    bool saveSettings();
+
+    void setUiMode (UiMode mode);
+    [[nodiscard]] UiMode getUiMode() const { return uiMode_; }
+
+    // The Dumb-mode wizard (spec 3.5). Refused, with a message, while a lane M
+    // run holds the console. Finishing writes slot 0 and turns 1-7 off through
+    // changeSlotConfig; with more than one slot on, it asks first through
+    // wizardConfirmHook (injectable for the same reason soundcheckConfirmHook
+    // is: no modal loops, and headless tests must answer it).
+    void openSetupWizard();
+    std::function<void (const juce::String& text,
+                        std::function<void (bool)> onAnswer)> wizardConfirmHook;
+    [[nodiscard]] gui::SetupWizard& getSetupWizardForTest() { return setupWizard_; }
+
+    // TEST ACCESSORS (lane U).
+    [[nodiscard]] gui::DumbView& getDumbViewForTest() { return dumbView_; }
+    [[nodiscard]] juce::TextButton& getSimpleModeButtonForTest() { return simpleModeButton_; }
+    [[nodiscard]] gui::DumbInputs dumbInputsForTest() const { return buildDumbInputs(); }
+    [[nodiscard]] bool deviceMismatchForTest() const { return deviceMismatch_; }
+    // Headless runs have 0 channels (no device), so the restored-slot check is
+    // driven here with counts a real device would report.
+    void validateRestoredSlotsForTest (int numIn, int numOut) { validateRestoredSlots (numIn, numOut); }
+    void checkRestoredDeviceForTest (const juce::String& type, const juce::String& name)
+        { checkRestoredDevice (type, name); }
 
     // Puts one line in the status bar and the masthead readout -- the SAME
     // route devicePanel_.onMessage takes. Public because main.cpp is the one
@@ -360,6 +407,18 @@ private:
     // carves the same rect out of its own running area rectangle.
     [[nodiscard]] juce::Rectangle<int> floorBoundsForPaint() const;
 
+    // LANE U helpers.
+    [[nodiscard]] gui::DumbInputs buildDumbInputs() const;
+    void refreshDumbView();
+    // Once per restore, at the first tick with a real channel count: a slot
+    // that does not fit the device is DISABLED through changeSlotConfig, never
+    // clamped (spec invariant 7).
+    void validateRestoredSlots (int numIn, int numOut);
+    // Right after the restoring start(): JUCE opens the DEFAULT device when the
+    // saved one is gone, and the saved routing must not run on it (Q12).
+    void checkRestoredDevice (const juce::String& openType, const juce::String& openName);
+    void applyWizardResult (const SlotConfig& slot0);
+
     // Polls the engine for display. The engine publishes its state through
     // atomics precisely so a reader like this never blocks the audio thread.
     void timerCallback() override;
@@ -525,6 +584,37 @@ private:
     // routing table in both layouts; changes loop over every controller.
     gui::TuningPanel tuningPanel_;
 
+    // LANE U. Default GEEK: a component built without enableSettings() (every
+    // test, the snapshot tool) must look exactly as it did before this lane.
+    UiMode uiMode_ = UiMode::Geek;
+    gui::DumbView    dumbView_;
+    juce::TextButton simpleModeButton_;   // Geek's way back to Dumb (Q2)
+    gui::SetupWizard setupWizard_;        // over everything, Dumb only
+    bool wizardChangedDevice_ = false;
+    // Verification I-1: what the memory said when the wizard opened. A
+    // cancelled wizard leaves it exactly so, whatever step 1 restarted.
+    AppSettings wizardSnapshot_;
+    bool        wizardSnapshotMismatch_ = false;
+    // Verification I-3: bumped at every open, close and device restart; an
+    // overwrite confirmation answered under another generation is dropped.
+    int  wizardGeneration_    = 0;
+    bool wizardConfirmPending_ = false;
+    bool wizardAutoOpenDone_  = false;    // Q7: once per session, by itself
+    bool audioStarted_        = false;
+
+    juce::File  settingsFile_;            // empty = settings disabled
+    bool        settingsMayOverwrite_ = false;
+    AppSettings settings_;                // what was read; device kept on mismatch
+    bool        restorePending_ = false;  // restored routing awaits a channel count
+    bool        deviceMismatch_ = false;
+    juce::String mismatchDeviceName_;     // what JUCE opened instead
+
+    // Dumb's OWN hold: it watches the worst slot, the analyser's watches the
+    // displayed one, and one hold fed two streams would be neither (spec 3.3).
+    gui::SpectrumView::RingRiskHysteresis dumbRiskHold_;
+    gui::SpectrumView::RingRisk           dumbRisk_ = gui::SpectrumView::RingRisk::Unavailable;
+    juce::String                          statusMessage_;   // what refreshStatus showed
+
     // The live notch list (reads notchControllers_[0] above, so it is
     // declared after it). Always visible: a fixed bottom strip.
     gui::NotchListPanel notchListPanel_;
@@ -611,6 +701,7 @@ private:
     // Same figure paint() and resized() both need: the cell the status badge
     // occupies at the masthead's right end.
     static constexpr int kBadgeWidth     = 132;
+    static constexpr int kSimpleModeButtonWidth = 112;   // lane U, fits "ĐƠN GIẢN"
     static constexpr int kBadgeHeight    = 26;
     // The brand block at the masthead's left end: the sodium bar, the product
     // name, then the company. kMarkWidth is what the rig readout starts after,

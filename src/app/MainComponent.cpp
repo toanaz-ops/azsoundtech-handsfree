@@ -644,6 +644,21 @@ MainComponent::MainComponent()
         // the next DO would arm a run that never polls: the first target would
         // sit in NoiseFloor for ever with the taps suspended and detection off.
         soundcheck_.start();
+
+        // LANE U. The operator picked a device other than the one JUCE fell
+        // back to: that is a deliberate choice, and the memory may follow it.
+        if (deviceMismatch_ && engine_.isRunning()
+            && engine_.getCurrentDeviceName() != mismatchDeviceName_)
+            deviceMismatch_ = false;
+
+        // While the wizard is open, a device change is not yet a decision:
+        // only XONG commits it (verification I-1). Saving here would let a
+        // HUỶ leave the step-1 card -- and, after a mismatch, an all-off
+        // routing -- in the memory.
+        if (setupWizard_.isOpen())
+            ++wizardGeneration_;
+        else
+            saveSettings();
     };
 
     // A setting the hardware refused. Held rather than flashed: the user needs
@@ -683,6 +698,11 @@ MainComponent::MainComponent()
     {
         changeSlotConfig (slotIndex, config);
         slotPanel_.refresh();
+
+        // Lane U: the operator is routing THIS device by hand, so what they
+        // build here is the routing to remember, mismatch or not.
+        deviceMismatch_ = false;
+        saveSettings();
     };
 
     // Per-slot LINK/INDEP (Task 7): the panel only ever asks for/reports the
@@ -791,6 +811,189 @@ MainComponent::MainComponent()
                                           (int) c.getNotchQ(),
                                           c.getPeakinessThreshold() };
     };
+
+    //==========================================================================
+    // LANE U. Every Dumb switch calls the SAME function the Geek console calls
+    // for that job (spec invariant 1): the soundcheck strip's own lambdas,
+    // beginSoundcheck(), requestMode(). There is no second control path.
+    dumbView_.onMeasure = [this] { beginSoundcheck();                         refreshDumbView(); };
+    dumbView_.onStop    = [this] { if (soundcheckPanel_.onStop)    soundcheckPanel_.onStop();    refreshDumbView(); };
+    dumbView_.onApply   = [this] { if (soundcheckPanel_.onApply)   soundcheckPanel_.onApply();   refreshDumbView(); };
+    dumbView_.onDismiss = [this] { if (soundcheckPanel_.onDismiss) soundcheckPanel_.onDismiss(); refreshDumbView(); };
+    dumbView_.onEnable  = [this] { requestMode (AudioEngine::Mode::Auto);   refreshDumbView(); };
+    dumbView_.onDisable = [this] { requestMode (AudioEngine::Mode::Bypass); refreshDumbView(); };
+    dumbView_.onSwitchToGeek = [this] { setUiMode (UiMode::Geek); };
+
+    // Added LAST and opaque, so in Dumb it covers the whole console and JUCE
+    // clips every Geek child out of the paint. The Geek layout keeps running
+    // underneath: switching back is instant and nothing has to be re-laid out.
+    dumbView_.setOpaque (true);
+    addChildComponent (dumbView_);
+
+    //--------------------------------------------------------------------
+    // The wizard. Every read is the engine's own; every write goes through a
+    // path Geek already uses: DevicePanel::restartWith (with its 6.5 hooks)
+    // for the device, changeSlotConfig for the routing.
+    setupWizard_.typeNamesProvider     = [this] { return engine_.getAvailableDeviceTypeNames(); };
+    setupWizard_.deviceNamesProvider   = [this] { return engine_.getAvailableDeviceNames(); };
+    setupWizard_.currentTypeProvider   = [this] { return engine_.getCurrentDeviceType(); };
+    setupWizard_.currentDeviceProvider = [this] { return engine_.getCurrentDeviceName(); };
+    setupWizard_.channelCountsProvider = [this]
+    {
+        // Only counts the CURRENT device has delivered: after a card swap the
+        // getters still describe the old card until the first callback.
+        if (! engine_.isRunning() || ! engine_.hasDeliveredSinceStart())
+            return std::pair<int, int> {};
+        return std::pair<int, int> { engine_.getNumInputChannels(), engine_.getNumOutputChannels() };
+    };
+    setupWizard_.inputPeakProvider = [this] (int ch) { return engine_.takeInputPeak (ch); };
+    setupWizard_.onMeterEnabled    = [this] (bool on) { engine_.setInputMeterEnabled (on); };
+    setupWizard_.onDeviceChosen    = [this] (const juce::String& type, const juce::String& name)
+    {
+        wizardChangedDevice_ = true;
+        devicePanel_.restartWith (type, name);
+        devicePanel_.refresh();
+        slotPanel_.refresh();
+        setupWizard_.refreshDevice();
+    };
+    setupWizard_.onFinish = [this] (const SlotConfig& slot0)
+    {
+        if (wizardConfirmPending_)
+            return;   // one box at a time (I-3)
+
+        std::array<SlotConfig, kMaxSlots> current;
+        for (int i = 0; i < kMaxSlots; ++i)
+            current[(std::size_t) i] = engine_.getSlotConfig (i);
+
+        if (! SetupWizardModel::needsOverwriteConfirm (current))
+        {
+            applyWizardResult (slot0);
+            return;
+        }
+
+        int on = 0;
+        for (const auto& c : current)
+            on += c.enabled ? 1 : 0;
+
+        if (wizardConfirmHook == nullptr)
+            return;   // no way to ask = no overwrite
+
+        juce::Component::SafePointer<MainComponent> safe (this);
+        const int generation  = wizardGeneration_;
+        wizardConfirmPending_ = true;
+        wizardConfirmHook (juce::String::fromUTF8 ("Thay ") + juce::String (on)
+                               + juce::String::fromUTF8 (" \xc4\x91\xc6\xb0\xe1\xbb\x9dng hi\xe1\xbb\x87n c\xc3\xb3 b\xe1\xba\xb1ng 1 \xc4\x91\xc6\xb0\xe1\xbb\x9dng?"),
+                           [safe, slot0, generation] (bool ok)
+                           {
+                               if (safe == nullptr)
+                                   return;
+                               safe->wizardConfirmPending_ = false;
+
+                               // Answered about THIS wizard, on THIS device?
+                               if (! ok)
+                                   return;
+
+                               if (safe->setupWizard_.isOpen()
+                                   && generation == safe->wizardGeneration_)
+                               {
+                                   safe->applyWizardResult (slot0);
+                                   return;
+                               }
+
+                               // Round 2 MINOR: an OK that no longer applies
+                               // says so, rather than vanishing.
+                               safe->showMessage (juce::String::fromUTF8 (
+                                   "Sound card \xc4\x91\xc3\xa3 \xc4\x91\xe1\xbb\x95i \xe2\x80\x94 b\xe1\xba\xa5m XONG l\xe1\xba\xa1i."));
+                           });
+    };
+    setupWizard_.onCancel = [this]
+    {
+        ++wizardGeneration_;
+
+        // Spec 3.5 HUỶ: nothing is committed. The memory goes back to what it
+        // was when the wizard opened (I-1). If step 1 changed the card, the
+        // card now open is NOT the remembered one -- which is exactly a
+        // mismatch: every slot comes off (the old routing must not run on a
+        // card nobody confirmed) and the memory is kept for the next start.
+        settings_ = wizardSnapshot_;
+
+        if (! wizardChangedDevice_)
+        {
+            deviceMismatch_ = wizardSnapshotMismatch_;
+            refreshDumbView();
+            return;
+        }
+
+        // Step 1 restarted the device. What matters is WHICH card is open now,
+        // not that a pick happened (round 2, I-1): Y then back to X is X.
+        const auto& remembered = wizardSnapshot_.device;
+        const bool  onRemembered = remembered.type.isEmpty()
+            || (engine_.getCurrentDeviceType() == remembered.type
+                && (remembered.name.isEmpty() || engine_.getCurrentDeviceName() == remembered.name));
+
+        if (! onRemembered)
+        {
+            // A card nobody confirmed: the old routing must not run on it.
+            deviceMismatch_     = true;
+            mismatchDeviceName_ = engine_.getCurrentDeviceName();
+            restorePending_     = false;
+            for (int i = 0; i < kMaxSlots; ++i)
+            {
+                auto c = engine_.getSlotConfig (i);
+                if (! c.enabled)
+                    continue;
+                c.enabled = false;
+                changeSlotConfig (i, c);
+            }
+        }
+        else
+        {
+            // Back on the remembered card -- possibly the one a start-up
+            // fallback had lost. Its own routing comes back with it, and is
+            // checked against its channels at the first real count.
+            //
+            // Round 3: every changeSlotConfig runs onAfterRestart, which SAVES
+            // (the wizard is already closed). With the mismatch still set those
+            // saves write the memory back unchanged; clearing it first made the
+            // first save store slots 1-7 as off -- to disk AND into settings_,
+            // which the loop then read back. So: a local copy, the flag held
+            // until the loop is done, one save after.
+            if (wizardSnapshotMismatch_ && settings_.hasRouting)
+            {
+                const auto remembered = settings_.slots;
+                deviceMismatch_ = true;
+                // onAfterRestart clears the flag whenever the open card differs
+                // from mismatchDeviceName_ -- and the remembered card always
+                // does. Point it at the open card so the flag really holds
+                // (round 4): no partial routing reaches the disk mid-loop.
+                mismatchDeviceName_ = engine_.getCurrentDeviceName();
+                for (int i = 0; i < kMaxSlots; ++i)
+                    changeSlotConfig (i, remembered[(std::size_t) i]);
+            }
+            deviceMismatch_ = false;
+            restorePending_ = true;
+            saveSettings();
+        }
+
+        slotPanel_.refresh();
+        refreshDumbView();
+    };
+    wizardConfirmHook = [] (const juce::String& text, std::function<void (bool)> onAnswer)
+    {
+        auto options = juce::MessageBoxOptions::makeOptionsOkCancel (
+            juce::MessageBoxIconType::QuestionIcon,
+            juce::String::fromUTF8 ("C\xc3\xa0i \xc4\x91\xe1\xba\xb7t"), text,
+            "OK", juce::String::fromUTF8 ("HU\xe1\xbb\xb6"), nullptr);
+        juce::NativeMessageBox::showAsync (options,
+            [onAnswer = std::move (onAnswer)] (int result) { onAnswer (result == 1); });
+    };
+    addChildComponent (setupWizard_);
+    dumbView_.onOpenWizard = [this] { openSetupWizard(); };
+
+    simpleModeButton_.setButtonText (juce::String::fromUTF8 ("\xc4\x90\xc6\xa0N GI\xe1\xba\xa2N"));
+    simpleModeButton_.getProperties().set ("azStyle", "ghost");
+    simpleModeButton_.onClick = [this] { setUiMode (UiMode::Dumb); };
+    addAndMakeVisible (simpleModeButton_);
 
     // Enumeration is safe with no device open -- every AudioEngine query used
     // here guards getCurrentAudioDevice() being null. The rate and buffer
@@ -1017,8 +1220,30 @@ void MainComponent::startAudio()
     // type that IS registered also matters: AudioEngine's own default is the
     // literal string "ASIO", and JUCE silently keeps whatever type is current
     // when the requested one does not exist.
-    engine_.setAudioDeviceType (gui::chooseDefaultDeviceType (engine_.getAvailableDeviceTypeNames()));
+    //
+    // LANE U (spec 3.2 step 3): a SAVED driver type wins when it is registered
+    // here; otherwise the same default as before. The saved device name rides
+    // with it -- under the wrong type it would name nothing.
+    const auto types = engine_.getAvailableDeviceTypeNames();
+    const auto& saved = settings_.device;
+    const bool restoringDevice = settingsFile_ != juce::File() && saved.type.isNotEmpty()
+                              && types.contains (saved.type);
+
+    engine_.setAudioDeviceType (restoringDevice ? saved.type
+                                                : gui::chooseDefaultDeviceType (types));
+    if (restoringDevice)
+        engine_.setAudioDevice (saved.name);
+
     engine_.start();
+    audioStarted_ = true;
+
+    // If JUCE fell back to another device, the restored routing comes off
+    // here. Each changeSlotConfig runs the paired 6.5 hooks, so the detectors
+    // and the lane M thread are started by them a moment before the loop below
+    // would start them -- harmless: start() is idempotent and the save inside
+    // the hook writes back the routing read from disk (deviceMismatch_).
+    if (settingsFile_ != juce::File() && saved.type.isNotEmpty())
+        checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
     // The device is open: the detectors can start pumping. start() is a no-op
     // if the thread already runs. Width first, for the same reason as the
@@ -1035,6 +1260,31 @@ void MainComponent::startAudio()
     // nothing for it to poll before this point. start() is idempotent.
     soundcheck_.start();
 
+    // LANE U (spec 3.2 step 5): the saved rate and buffer, each a device
+    // restart, so each goes through the SAME 6.5 hooks DevicePanel's own
+    // setters use. Not on a mismatched device: those numbers belong to the
+    // interface that is not here.
+    if (restoringDevice && ! deviceMismatch_ && engine_.isRunning())
+    {
+        const auto restart = [this] (auto&& change)
+        {
+            devicePanel_.onBeforeRestart();
+            const bool ok = change();
+            devicePanel_.onAfterRestart();
+            return ok;
+        };
+
+        if (saved.sampleRate > 0.0 && saved.sampleRate != engine_.getCurrentSampleRateHz())
+            if (! restart ([&] { return engine_.setSampleRate (saved.sampleRate); }))
+                showMessage (gui::refusedSampleRateMessage (saved.sampleRate,
+                                                            engine_.getCurrentSampleRateHz()));
+
+        if (saved.bufferSize > 0)
+            if (! restart ([&] { return engine_.setBufferSize (saved.bufferSize); }))
+                showMessage (juce::String::fromUTF8 ("Sound card t\xe1\xbb\xab ch\xe1\xbb\x91i buffer \xc4\x91\xc3\xa3 l\xc6\xb0u (")
+                             + juce::String (saved.bufferSize) + ").");
+    }
+
     // Only now do getAvailableSampleRates() and getAvailableBufferSizes()
     // return anything.
     devicePanel_.refresh();
@@ -1042,6 +1292,278 @@ void MainComponent::startAudio()
     // open, which is why refresh() has to run again here.
     slotPanel_.refresh();
     refreshStatus();
+}
+
+//==============================================================================
+// LANE U (spec 2026-10-18 section 3.2) -- settings memory and the UI modes.
+
+void MainComponent::enableSettings (const juce::File& file)
+{
+    settingsFile_ = file;
+
+    const auto loaded = az::host::loadHostSettings (file);
+    settingsMayOverwrite_ = loaded.mayOverwrite;
+
+    if (loaded.error.isNotEmpty())
+    {
+        juce::Logger::writeToLog ("MainComponent: " + loaded.error);
+        showMessage (juce::String::fromUTF8 ("Kh\xc3\xb4ng \xc4\x91\xe1\xbb\x8d\x63 \xc4\x91\xc6\xb0\xe1\xbb\xa3\x63 c\xe1\xba\xa5u h\xc3\xacnh \xc4\x91\xc3\xa3 l\xc6\xb0u; d\xc3\xb9ng m\xe1\xba\xb7\x63 \xc4\x91\xe1\xbb\x8bnh."));
+    }
+
+    settings_ = appSettingsFromHost (loaded.settings);
+
+    // Q11: no file yet, but presets exist -- a 1.3.x tester, who knows the
+    // console. Only a genuinely fresh machine opens in Dumb.
+    if (! file.existsAsFile() && loaded.error.isEmpty())
+        settings_.uiMode = PresetManager::getPresetDirectory().isDirectory() ? UiMode::Geek
+                                                                            : UiMode::Dumb;
+
+    // Spec 3.2 step 2: into the STOPPED engine, so no restart cycle is needed;
+    // startAudio() sizes every detector from getSlotConfig(). The channel check
+    // waits for a real channel count (restorePending_).
+    if (settings_.hasRouting && ! engine_.isRunning())
+    {
+        for (int i = 0; i < kMaxSlots; ++i)
+            engine_.setSlotConfig (i, settings_.slots[(std::size_t) i]);
+
+        restorePending_ = true;
+        slotPanel_.refresh();
+    }
+
+    setUiMode (settings_.uiMode);
+}
+
+void MainComponent::checkRestoredDevice (const juce::String& openType, const juce::String& openName)
+{
+    const auto& saved = settings_.device;
+
+    // An empty saved name means "the driver's default" and any device of the
+    // saved type satisfies it.
+    const bool same = openType == saved.type
+                   && (saved.name.isEmpty() || openName == saved.name);
+
+    if (same)
+        return;
+
+    // Q12: the saved routing does not run on an interface nobody chose. Every
+    // slot comes off; the memory itself is kept for when the card comes back.
+    deviceMismatch_     = true;
+    mismatchDeviceName_ = openName;
+    restorePending_     = false;
+
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto c = engine_.getSlotConfig (i);
+        if (! c.enabled)
+            continue;
+        c.enabled = false;
+        changeSlotConfig (i, c);   // THE path; deviceMismatch_ is already set,
+                                   // so the save inside it keeps the memory
+    }
+    slotPanel_.refresh();
+
+    showMessage (juce::String::fromUTF8 ("Kh\xc3\xb4ng th\xe1\xba\xa5y ")
+                 + (saved.name.isNotEmpty() ? saved.name : saved.type)
+                 + juce::String::fromUTF8 (". C\xe1\xba\xa7n c\xc3\xa0i \xc4\x91\xe1\xba\xb7t l\xe1\xba\xa1i."));
+}
+
+void MainComponent::validateRestoredSlots (const int numIn, const int numOut)
+{
+    restorePending_ = false;
+
+    // Spec invariant 7: against a count of 0 every slot is "invalid", so this
+    // must never run without one.
+    if (numIn <= 0 || numOut <= 0)
+    {
+        jassertfalse;
+        return;
+    }
+
+    int disabled = 0;
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto c = engine_.getSlotConfig (i);
+        if (! c.enabled || slotConfigIsValid (c, numIn, numOut))
+            continue;
+
+        // DISABLED, never clamped: a clamped channel is a mic routed to an
+        // output nobody picked.
+        c.enabled = false;
+        changeSlotConfig (i, c);
+        ++disabled;
+    }
+
+    if (disabled > 0)
+    {
+        slotPanel_.refresh();
+        showMessage (juce::String (disabled)
+                     + juce::String::fromUTF8 (" \xc4\x91\xc6\xb0\xe1\xbb\x9dng \xc4\x91\xc3\xa3 l\xc6\xb0u kh\xc3\xb4ng kh\xe1\xbb\x9b\x70 sound card, \xc4\x91\xc3\xa3 t\xe1\xba\xaft."));
+    }
+}
+
+bool MainComponent::saveSettings()
+{
+    if (settingsFile_ == juce::File() || ! settingsMayOverwrite_)
+        return false;
+
+    AppSettings out = settings_;
+    out.uiMode = uiMode_;
+
+    // Spec 3.2 "never erase the memory": while the saved device is missing,
+    // or nothing opened at all, the device and routing read from disk are
+    // written back untouched. Only a device that is actually running and is
+    // the one the operator chose replaces them.
+    const bool deviceIsTheChosenOne = engine_.isRunning() && ! deviceMismatch_
+                                   && engine_.getLastDeviceError().isEmpty();
+
+    if (deviceIsTheChosenOne)
+    {
+        out.device.type       = engine_.getCurrentDeviceType();
+        out.device.name       = engine_.getCurrentDeviceName();
+        out.device.sampleRate = engine_.getCurrentSampleRateHz();
+        out.device.bufferSize = engine_.getCurrentBufferSize();
+
+        // Still waiting to check the restored routing against the channels?
+        // Then the engine holds exactly what was read; writing it is a no-op,
+        // and writing "after the check" would be a guess.
+        out.hasRouting = true;
+        for (int i = 0; i < kMaxSlots; ++i)
+            out.slots[(std::size_t) i] = engine_.getSlotConfig (i);
+    }
+
+    if (! az::host::saveHostSettings (settingsFile_, appSettingsToHost (out)))
+        return false;
+
+    settings_ = out;
+    return true;
+}
+
+void MainComponent::openSetupWizard()
+{
+    if (soundcheckLock_ != SoundcheckLock::None || soundcheckConfirmPending_)
+    {
+        showMessage (juce::String::fromUTF8 ("\xc4\x90" "ang \xc4\x91o ph\xc3\xb2ng \xe2\x80\x94 c\xc3\xa0i \xc4\x91\xe1\xba\xb7t sau khi xong."));
+        return;
+    }
+
+    wizardChangedDevice_    = false;
+    wizardSnapshot_         = settings_;
+    wizardSnapshotMismatch_ = deviceMismatch_;
+    ++wizardGeneration_;
+    setupWizard_.setBounds (getLocalBounds());
+    setupWizard_.open();
+}
+
+void MainComponent::applyWizardResult (const SlotConfig& slot0)
+{
+    // THE routing path (B-6): restart cycle, setWidth, mode gating.
+    changeSlotConfig (0, slot0);
+    for (int i = 1; i < kMaxSlots; ++i)
+    {
+        auto c = engine_.getSlotConfig (i);
+        if (! c.enabled)
+            continue;
+        c.enabled = false;
+        changeSlotConfig (i, c);
+    }
+
+    // Set up by hand on this device: it is now the device and the routing to
+    // remember.
+    deviceMismatch_ = false;
+    restorePending_ = false;
+    slotPanel_.refresh();
+    setupWizard_.close();
+    ++wizardGeneration_;
+    saveSettings();
+    refreshDumbView();
+}
+
+void MainComponent::setUiMode (const UiMode mode)
+{
+    uiMode_ = mode;
+
+    // The wizard belongs to Dumb; leaving for Geek is a cancel.
+    if (mode == UiMode::Geek && setupWizard_.isOpen())
+        setupWizard_.getCancelButtonForTest().onClick();
+
+    const bool dumb = mode == UiMode::Dumb;
+    dumbView_.setVisible (dumb);
+    simpleModeButton_.setVisible (! dumb);
+
+    if (dumb)
+    {
+        dumbView_.toFront (false);
+        refreshDumbView();
+    }
+
+    saveSettings();
+}
+
+gui::DumbInputs MainComponent::buildDumbInputs() const
+{
+    gui::DumbInputs in;
+
+    const int numIn  = engine_.getNumInputChannels();
+    const int numOut = engine_.getNumOutputChannels();
+    const auto slot0 = engine_.getSlotConfig (0);
+
+    in.configured = engine_.isRunning() && ! deviceMismatch_
+                 && engine_.getLastDeviceError().isEmpty()
+                 && slot0.enabled && slotConfigIsValid (slot0, numIn, numOut);
+
+    const auto mode = engine_.getMode();
+    in.bypassed = mode == AudioEngine::Mode::Bypass;
+    in.autoMode = mode == AudioEngine::Mode::Auto;
+
+    // updateMeasureEnabled's predicate, verbatim -- one condition, two consoles.
+    in.measureAllowed = soundcheckLock_ == SoundcheckLock::None && ! soundcheckConfirmPending_;
+
+    using PanelMode = gui::SoundcheckPanel::Mode;
+    switch (soundcheckPanel_.getMode())
+    {
+        case PanelMode::Hidden:  in.phase = gui::DumbInputs::Phase::Idle;      break;
+        case PanelMode::Running: in.phase = gui::DumbInputs::Phase::Measuring; break;
+        case PanelMode::Results:
+            in.phase       = gui::DumbInputs::Phase::Results;
+            in.resultCount = soundcheckPanel_.getModel().hotSpots;
+            break;
+        case PanelMode::Applied:
+            in.phase       = gui::DumbInputs::Phase::Applied;
+            in.resultCount = soundcheckPanel_.getModel().placed;
+            break;
+    }
+
+    using Risk = gui::SpectrumView::RingRisk;
+    switch (dumbRisk_)
+    {
+        case Risk::Unavailable: in.risk = gui::DumbInputs::Risk::Unavailable; break;
+        case Risk::Low:         in.risk = gui::DumbInputs::Risk::Low;         break;
+        case Risk::Rising:      in.risk = gui::DumbInputs::Risk::Rising;      break;
+        case Risk::Critical:    in.risk = gui::DumbInputs::Risk::Critical;    break;
+    }
+
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        if (! engine_.getSlotConfig (i).enabled)
+            continue;
+        NotchController::SnapshotBuffer snap {};
+        notchControllers_[(std::size_t) i]->copySnapshot (snap);
+        in.notchCount += (int) snap.notchCount;
+    }
+
+    return in;
+}
+
+void MainComponent::refreshDumbView()
+{
+    // The worst slot, through the same band function and a hold of its own.
+    int slot = -1;
+    const auto worst = worstRingRiskSnapshot (slot);
+    dumbRisk_ = dumbRiskHold_.apply (slot < 0 ? gui::SpectrumView::RingRisk::Unavailable
+                                              : gui::SpectrumView::riskForScore (worst),
+                                     juce::Time::getMillisecondCounterHiRes());
+
+    dumbView_.setInputs (buildDumbInputs(), statusMessage_);
 }
 
 void MainComponent::requestMode (AudioEngine::Mode mode)
@@ -2191,6 +2713,7 @@ void MainComponent::refreshStatus()
         message = panelMessage_;
 
     statusBar_.setStatus (status, message);
+    statusMessage_ = message;   // lane U: Dumb shows the same line
 
     // The masthead readout. A device error replaces the rig line entirely --
     // when the interface is gone, its sample rate is not the news.
@@ -2221,6 +2744,35 @@ void MainComponent::refreshStatus()
 void MainComponent::timerCallback()
 {
     refreshStatus();
+
+    // LANE U (spec 3.2 step 6): the restored routing is checked against the
+    // device's channels at the FIRST tick that has any -- the counts read 0
+    // until audio has flowed (AudioEngine.h), and every slot is "invalid"
+    // against 0.
+    // hasDeliveredSinceStart: after a restart the counts still describe the
+    // previous card until this one's first callback.
+    if (restorePending_ && engine_.isRunning() && engine_.hasDeliveredSinceStart()
+        && engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0)
+        validateRestoredSlots (engine_.getNumInputChannels(), engine_.getNumOutputChannels());
+
+    if (uiMode_ == UiMode::Dumb)
+    {
+        refreshDumbView();
+
+        // Q7: Dumb with nothing set up opens the wizard by itself, once. Not
+        // before the routing check has run, and not while the device is open
+        // but has not yet delivered a callback (counts 0) -- both would read
+        // "not configured" for a rig that is.
+        const bool countsKnown = ! engine_.isRunning()
+                              || (engine_.hasDeliveredSinceStart()
+                                  && engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0);
+        if (audioStarted_ && ! wizardAutoOpenDone_ && ! restorePending_ && countsKnown)
+        {
+            wizardAutoOpenDone_ = true;
+            if (! buildDumbInputs().configured)
+                openSetupWizard();
+        }
+    }
 
     // LANE M's only route onto the message thread. The controller's
     // onStateChanged sets a flag from its own thread; everything that touches a
@@ -2307,6 +2859,7 @@ void MainComponent::paint (juce::Graphics& g)
     // The badge itself is a child and was positioned in resized(); everything
     // else here is painted, because none of it is interactive.
     auto right = masthead.reduced (kEdgePad, 0);
+    right.removeFromRight (kSimpleModeButtonWidth + gap);   // lane U, see resized()
     right.removeFromRight (kBadgeWidth + gap);
 
     const auto deviceChip = right.removeFromRight (kDeviceChipWidth)
@@ -2499,7 +3052,20 @@ void MainComponent::resized()
 
     //--------------------------------------------------------------------
     // 1. Masthead -- painted; the badge is its only child.
+    // LANE U: in Dumb the opaque view covers everything; the Geek layout
+    // below still runs so switching back needs nothing re-laid out.
+    dumbView_.setBounds (getLocalBounds());
+    setupWizard_.setBounds (getLocalBounds());
+
     auto masthead = area.removeFromTop (mastheadHeight).reduced (kEdgePad, 0);
+
+    // Lane U: the way back to Dumb sits OUTSIDE the readout group, at the far
+    // right, so the device chip and the badge keep reading as one pair.
+    // paint() reserves the same band.
+    simpleModeButton_.setBounds (masthead.removeFromRight (kSimpleModeButtonWidth)
+                                         .withSizeKeepingCentre (kSimpleModeButtonWidth, kBadgeHeight));
+    masthead.removeFromRight (gap);
+
     statusBadge_.setBounds (masthead.removeFromRight (kBadgeWidth)
                                     .withSizeKeepingCentre (kBadgeWidth, kBadgeHeight));
 

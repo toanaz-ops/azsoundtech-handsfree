@@ -44,6 +44,11 @@ add_executable(HandsFreeTests
     test_loopgainestimator.cpp
     test_soundcheck_candidates.cpp
     test_soundcheckcontroller.cpp
+    test_hostsettings.cpp
+    test_appsettings.cpp
+    test_dumbstatus.cpp
+    test_lane_u_wiring.cpp
+    test_setupwizardmodel.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
@@ -64,6 +69,7 @@ target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
     HandsFreeFonts
     melatonin_blur
+    az_host_settings
     juce::juce_audio_devices
     juce::juce_gui_basics
     juce::juce_cryptography

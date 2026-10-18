@@ -53,10 +53,13 @@ public:
     // component's interface.
     juce::ComboBox deviceTypeBox, deviceBox, sampleRateBox, bufferSizeBox;
 
-private:
     // stop() -> set -> start(): both setters apply on the NEXT start(), by
-    // design, so a device change is always a restart.
+    // design, so a device change is always a restart. Public since lane U: the
+    // setup wizard changes the device through THIS path, hooks and all, rather
+    // than a second copy of it.
     void restartWith (const juce::String& typeName, const juce::String& deviceName);
+
+private:
     void applySampleRate();
     void applyBufferSize();
     void report (const juce::String& message);

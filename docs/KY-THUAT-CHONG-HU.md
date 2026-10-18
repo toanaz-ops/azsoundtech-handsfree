@@ -672,6 +672,40 @@ preset khác. Muốn bảo vệ phòng ngừa quay lại đầy đủ thì **ch�
 đối xứng này (đặt thì vĩnh viễn, nạp lại thì tự nhả) nằm trong danh sách owner
 phải xác nhận.
 
+### 3.8 Hai chế độ giao diện và bộ nhớ cấu hình (1.4.0, lane U)
+
+Spec: `docs/superpowers/specs/2026-10-18-dumb-geek-mode-design.md`. **Không đổi
+hằng số DSP, topology, gain hay buffer.** Ba thứ chạm gần đường tín hiệu:
+
+- **Peak meter đầu vào** cho bước 2 của wizard
+  (`AudioEngine::setInputMeterEnabled` / `takeInputPeak`). Trong callback: chỉ
+  đọc mẫu vào, `max(|x|)` mỗi kênh rồi `load`+`store` relaxed vào một
+  `std::atomic<float>`; giới hạn bởi `min(numInputChannels, 8)`, bỏ qua con trỏ
+  null; tắt thì không làm gì. Không cấp phát, không lock, không ghi mẫu ra (test
+  `TheMeterNeverChangesAnOutputSample` so từng bit). Một đỉnh có thể mất khi GUI
+  `exchange(0)` xen giữa — chấp nhận được cho một thanh mức để nhìn.
+- **Khôi phục routing lúc khởi động** (`MainComponent::enableSettings` →
+  `startAudio`). Thứ tự là phần an toàn: (1) 8 `SlotConfig` ghi vào engine **khi
+  còn dừng**; (2) driver đã lưu thắng nếu có trên máy; (3) sau `start()`, nếu JUCE
+  mở **thiết bị khác** (nó tự rơi về mặc định khi thiết bị đã lưu mất) thì mọi
+  slot bị tắt qua `changeSlotConfig` trước khi detector nào chạy; (4) rate/buffer
+  đã lưu đi qua đúng hook §6.5 `onBeforeRestart/onAfterRestart`; (5) kiểm slot
+  với số kênh **chỉ ở tick đầu tiên số kênh > 0** — số kênh bằng 0 tới khi audio
+  chạy, và so với 0 thì slot nào cũng "sai". Slot không khớp bị **tắt, không kẹp**.
+- **Wizard** đổi thiết bị qua `DevicePanel::restartWith` (cùng hook) và ghi
+  routing qua `changeSlotConfig` (restart cycle + `setWidth` + gating). Không có
+  đường thứ hai tới engine.
+
+`settings.json` do thư viện dùng chung `libs/host_settings` (target
+`az_host_settings`, INTERFACE — người dùng biên dịch nguồn như một module JUCE)
+đọc/ghi: ghi atomic qua file tạm; JSON hỏng → đổi tên `.bad`, dùng mặc định;
+`schema` mới hơn → để nguyên và **không bao giờ ghi đè** (hạ cấp bản alpha không
+phá cấu hình bản mới). Trí nhớ thiết bị chỉ bị thay bởi một thiết bị **đã mở
+thành công** do người dùng chọn.
+
+Engine vẫn chỉ mở 2 kênh vào / 2 kênh ra (`kNumChannels`); wizard chỉ liệt kê
+kênh callback thật sự nhận. Mở rộng số kênh là một thay đổi audio path riêng.
+
 ## 4. Preset
 
 File JSON `%APPDATA%/AZSoundtech/HandsFree/presets/*.json`: version, device

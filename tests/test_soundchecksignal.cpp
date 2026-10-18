@@ -79,7 +79,7 @@ TEST (SoundcheckSignal, NegativeIndexReturnsZero)
 {
     const SoundcheckSignal s { defaultParams() };
 
-    for (std::int64_t n : { -1LL, -100LL, -24000LL, -(std::int64_t) (0.5 * kSr) })
+    for (std::int64_t n : std::initializer_list<std::int64_t> { -1, -100, -24000, -(std::int64_t) (0.5 * kSr) })
         EXPECT_FLOAT_EQ (s.sampleAt (n), 0.0f) << "n=" << n;
 
     EXPECT_FLOAT_EQ (s.sampleAt (s.totalSamples()), 0.0f);
