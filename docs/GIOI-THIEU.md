@@ -184,6 +184,35 @@ nào thì dừng chứ không đoán là phòng sạch. `DỪNG` là đường d
 **≤ 51 ms ở buffer 1024**, cộng độ trễ driver/amp, và ramp tắt do chính callback
 audio sinh nên không có đường cắt phựt.
 
+## Hai chế độ giao diện: Đơn giản ⇄ Geek (1.4.0, lane U)
+
+App có hai mặt, chuyển qua lại bằng một nút nhỏ ở góc phải trên (`GEEK` ở chế
+độ Đơn giản, `ĐƠN GIẢN` ở chế độ Geek). App nhớ lần cuối bạn dùng mặt nào.
+
+**Đơn giản** — cho người chỉ cần app chạy:
+
+- Một **đèn lớn nói bằng câu**: "An toàn", "Đang chặn 3 điểm", "Sắp hú",
+  "Đang hú — đang xử lý", "Đang TẮT", "Cần cài đặt". Không có số dB hay Hz.
+- **Ba nút**: `ĐO PHÒNG` (chính là `ĐO` của lane M, cùng hộp xác nhận hạ
+  master), `BẬT CHỐNG HÚ` (= AUTO), `TẮT` (= BYPASS). Lúc đang đo, nút trái
+  thành `DỪNG` và `TẮT` bị khoá — y như `BYPASS` trong Geek; khi có kết quả,
+  hai nút trái thành `ÁP DỤNG` / `BỎ`.
+- **Trình cài đặt 3 bước** tự mở khi chưa có gì được cài: chọn sound card →
+  chọn kênh mic (nói vào mic, thanh mức của kênh đúng sẽ nhảy) → chọn kênh ra.
+  Kết quả là một đường xử lý (slot 01); nếu đang có nhiều đường, app hỏi trước
+  khi thay. Chạm vào đèn "Cần cài đặt" để mở lại.
+
+**Geek** — console đầy đủ như trước, không đổi gì.
+
+**App nay nhớ cấu hình** (`%APPDATA%\AZSoundtech\HandsFree\settings.json`):
+chế độ giao diện, driver, sound card, sample rate, buffer và bảng routing. Lần
+sau mở là đúng như lần trước. Nếu sound card đã lưu **không còn cắm**, app
+**không** chạy routing cũ lên card khác — mọi đường bị tắt, đèn báo "Cần cài
+đặt", và cấu hình đã lưu được giữ nguyên cho tới khi bạn cài lại. Máy mới cài
+mở ở chế độ Đơn giản; máy đã có preset từ bản trước mở ở Geek.
+
+Không đổi gì ở phần xử lý âm thanh: cùng một cấu hình thì mức ra y như 1.3.0.
+
 ## Freeware
 
 Theo quyết định chủ sở hữu **D-07** (23/08/2026): bản phát hành đầu là

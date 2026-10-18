@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-10-18. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane U, cần G — G đã hạ cánh 1.2.0; main `f36ce29`, 1.3.0 alpha, suite 714/714).
 **Sổ quyết định:** [`../decisions/2026-10-18-lane-u-dumb-geek-mode.md`](../decisions/2026-10-18-lane-u-dumb-geek-mode.md) (Q1–Q4 owner chọn; Q5–Q12 điều phối tự chọn, owner CHƯA duyệt).
-**Trạng thái:** **rev 2** — sau phản biện read-only độc lập vòng 1 (6 BLOCKER / 7 IMPORTANT / 6 MINOR, bảng đối chiếu ở §8). Rev 1 không dùng làm cơ sở cho code.
+**Trạng thái:** **rev 3** — rev 2 + ba chỗ chỉnh khi triển khai (§9). Rev 2: sau phản biện read-only độc lập vòng 1 (6 BLOCKER / 7 IMPORTANT / 6 MINOR, bảng đối chiếu ở §8). Rev 1 không dùng làm cơ sở cho code. **Đã triển khai** trên `feat/lane-u-dumb-geek-mode` (PR #7), suite 769/769 (Linux/clang); chưa merge.
 **Đụng audio path:** không về DSP — không đổi hệ số, gain, buffer, detector. Nhưng **có đổi cái gì được mở lúc khởi động** (§3.2): app nay nhớ thiết bị + routing. Mức thay đổi dự kiến: **0 dB** trên mọi đường tín hiệu có cấu hình giống lần chạy trước; khác biệt duy nhất người nghe gặp được là sau khi mở lại app, các đường đã cấu hình **vẫn còn** thay vì về mặc định slot 0 `{0,1}→{0,1}`. Peak meter của wizard chỉ đọc mẫu vào (§3.6).
 **Release:** 1.4.0 (`-Part minor`), không gộp lane khác.
 
@@ -273,3 +273,13 @@ preset trong Dumb; phổ trong Dumb.
 | 12 | IMPORTANT | `showMessage` vô hình trong Dumb | dòng thông báo |
 | 13 | IMPORTANT | Tester 1.3.x bị coi như cài mới | Q11 |
 | m | MINOR | STATIC vs INTERFACE; "giống PresetManager" sai; schema mới bị phá; peak meter biên; displayedSlot cũ; test 0-kênh pass sai lý do | §3.1, §3.2, §3.6, §5 |
+
+## 9. Sai lệch khi triển khai (rev 3)
+
+| Chỗ | Rev 2 nói | Code làm | Lý do |
+|---|---|---|---|
+| §3.5 HUỶ | không lưu thiết bị mới | thiết bị đổi ở bước 1 **được nhớ** | đổi qua `DevicePanel::restartWith`, mà `onAfterRestart` lưu — thiết bị người vận hành tự chọn là một lựa chọn có chủ đích, như ở Geek; slot không còn khớp vẫn bị tắt (không kẹp) |
+| §3.6 | mảng 2 phần tử (= `kNumChannels`) | `kInputMeterChannels = 8`, vòng lặp chặn bởi `min(numInputChannels, 8)` | để khi engine mở thêm kênh thì meter không lặng lẽ cắt ở 2; không đổi gì khi engine còn 2 kênh |
+| §3.3 tiêu đề | (không nói) | câu chính viết **sentence case**, không `toUpperCase()` | ảnh render: `towupper` để nguyên phần lớn chữ Việt ngoài locale Việt — "ĐANG CHặN 3 điểM"; nhãn nút được viết HOA sẵn trong mã nguồn vì L&F tự uppercase |
+| §3.3 đèn cyan | (không nói màu) | màu `settled` (ICE) | `trace` là amber — ảnh đầu tiên ra đèn cam cho "đang đo" |
+| §3.4 | nút `ĐƠN GIẢN` ở góc | ở **mép phải ngoài cùng** của masthead, badge dịch vào trong | ảnh render: đặt cạnh badge thì đè chip "NO DEVICE" |

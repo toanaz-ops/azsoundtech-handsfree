@@ -75,7 +75,7 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 | C | chờ D nhãn: mở khi có ≥ 300 verdict từ ≥ 3 session | |
 | L | chờ D | |
 | A | **chờ M merge** (G đã merge: fallback notch dùng thang G). M **cấp** cho A: loop gain theo bin của toàn bộ phần vật lý của vòng (`H_dB[k]`, `margin = −H_dB`), băng tin cậy 100 Hz–6 kHz, trên cùng FFT 2048 / hop 512 mà detector dùng. M **KHÔNG cấp**: **trễ vòng loa→mic** — phép đo của M là một tỉ số **năng lượng theo bin**, cố tình không tương quan theo thời gian và cố tình không ước lượng trễ (spec §4.4, §6). Lane A phải tự đo trễ | 2026-09-16 |
-| U | chờ G; chưa brainstorm | 2026-09-06 |
+| U | **đang làm** trên nhánh `feat/lane-u-dumb-geek-mode` (PR #7): spec rev 2 sau phản biện vòng 1, Q1–Q4 owner chọn 18/10/2026, Q5–Q12 điều phối chốt tạm; code xong (DumbView, wizard, `settings.json` qua thư viện `az_host_settings`, peak meter đầu vào), suite 769/769 trên Linux/clang; chờ CI Windows + verifier + owner "merge"; release dự kiến 1.4.0 | 2026-10-18 |
 
 **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
 plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút
