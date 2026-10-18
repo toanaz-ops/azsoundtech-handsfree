@@ -951,11 +951,23 @@ MainComponent::MainComponent()
             // Back on the remembered card -- possibly the one a start-up
             // fallback had lost. Its own routing comes back with it, and is
             // checked against its channels at the first real count.
-            deviceMismatch_ = false;
+            //
+            // Round 3: every changeSlotConfig runs onAfterRestart, which SAVES
+            // (the wizard is already closed). With the mismatch still set those
+            // saves write the memory back unchanged; clearing it first made the
+            // first save store slots 1-7 as off -- to disk AND into settings_,
+            // which the loop then read back. So: a local copy, the flag held
+            // until the loop is done, one save after.
             if (wizardSnapshotMismatch_ && settings_.hasRouting)
+            {
+                const auto remembered = settings_.slots;
+                deviceMismatch_ = true;
                 for (int i = 0; i < kMaxSlots; ++i)
-                    changeSlotConfig (i, settings_.slots[(std::size_t) i]);
+                    changeSlotConfig (i, remembered[(std::size_t) i]);
+            }
+            deviceMismatch_ = false;
             restorePending_ = true;
+            saveSettings();
         }
 
         slotPanel_.refresh();
@@ -2747,7 +2759,8 @@ void MainComponent::timerCallback()
         // but has not yet delivered a callback (counts 0) -- both would read
         // "not configured" for a rig that is.
         const bool countsKnown = ! engine_.isRunning()
-                              || (engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0);
+                              || (engine_.hasDeliveredSinceStart()
+                                  && engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0);
         if (audioStarted_ && ! wizardAutoOpenDone_ && ! restorePending_ && countsKnown)
         {
             wizardAutoOpenDone_ = true;

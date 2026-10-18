@@ -288,3 +288,4 @@ preset trong Dumb; phổ trong Dumb.
 | `DumbStatus` thứ tự hàng | "Cần cài đặt" là hàng 1 | ba hàng soundcheck đứng TRƯỚC | verifier B-1: đo bắt đầu ở Geek trên slot ≠ 0 rồi sang Dumb thì mất `DỪNG` và `TẮT` sống giữa lúc quét |
 | `loadHostSettings` | file không đọc được = hỏng | file có byte mà đọc ra rỗng → giữ nguyên, `mayOverwrite=false` | verifier MINOR: file đang bị sync/AV giữ không phải là file hỏng |
 | HUỶ sau khi đổi card | cờ "đã chọn ở bước 1" = mismatch | so card đang mở với card trong snapshot | verifier vòng 2 I-1: chọn Y rồi về X rồi HUỶ đã tắt bảo vệ trên X giữa show; về đúng card đã nhớ thì routing đã nhớ quay lại |
+| khôi phục routing khi về card đã nhớ | (không nói) | sao chép slot ra biến cục bộ, giữ cờ mismatch suốt vòng lặp, lưu MỘT lần sau | verifier vòng 3: mỗi `changeSlotConfig` gọi `onAfterRestart` → lưu; xoá cờ trước vòng lặp thì lần lưu đầu ghi slot 1–7 = tắt vào đĩa VÀ vào `settings_`, vòng lặp đọc lại chính nó |
