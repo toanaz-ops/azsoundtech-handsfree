@@ -148,6 +148,12 @@ public:
     int getNumInputChannels() const;
     int getNumOutputChannels() const;
 
+    // Lane U: true once the CURRENT device has delivered a callback since it
+    // was (re)started, i.e. the counts above describe it rather than the card
+    // before it. False from audioDeviceAboutToStart() to the first callback.
+    bool hasDeliveredSinceStart() const
+        { return deliveredSinceStart_.load (std::memory_order_acquire); }
+
     // The most recent audioDeviceError() message, or empty when healthy.
     // Previously the message was logged and discarded, so a device failure
     // darkened the status indicator with the reason available nowhere in the
@@ -462,6 +468,7 @@ private:
     // stores per callback, no ordering relationship with anything else, and
     // they are only ever read for display.
     std::atomic<bool> inputMeterEnabled_ { false };
+    std::atomic<bool> deliveredSinceStart_ { false };
     std::array<std::atomic<float>, kInputMeterChannels> inputPeak_ {};
     std::atomic<int> numInputChannels_  { 0 };
     std::atomic<int> numOutputChannels_ { 0 };

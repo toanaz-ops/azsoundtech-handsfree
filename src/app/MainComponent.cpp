@@ -840,7 +840,9 @@ MainComponent::MainComponent()
     setupWizard_.currentDeviceProvider = [this] { return engine_.getCurrentDeviceName(); };
     setupWizard_.channelCountsProvider = [this]
     {
-        if (! engine_.isRunning())
+        // Only counts the CURRENT device has delivered: after a card swap the
+        // getters still describe the old card until the first callback.
+        if (! engine_.isRunning() || ! engine_.hasDeliveredSinceStart())
             return std::pair<int, int> {};
         return std::pair<int, int> { engine_.getNumInputChannels(), engine_.getNumOutputChannels() };
     };
@@ -888,9 +890,20 @@ MainComponent::MainComponent()
                                safe->wizardConfirmPending_ = false;
 
                                // Answered about THIS wizard, on THIS device?
-                               if (ok && safe->setupWizard_.isOpen()
+                               if (! ok)
+                                   return;
+
+                               if (safe->setupWizard_.isOpen()
                                    && generation == safe->wizardGeneration_)
+                               {
                                    safe->applyWizardResult (slot0);
+                                   return;
+                               }
+
+                               // Round 2 MINOR: an OK that no longer applies
+                               // says so, rather than vanishing.
+                               safe->showMessage (juce::String::fromUTF8 (
+                                   "Sound card \xc4\x91\xc3\xa3 \xc4\x91\xe1\xbb\x95i \xe2\x80\x94 b\xe1\xba\xa5m XONG l\xe1\xba\xa1i."));
                            });
     };
     setupWizard_.onCancel = [this]
@@ -904,8 +917,23 @@ MainComponent::MainComponent()
         // card nobody confirmed) and the memory is kept for the next start.
         settings_ = wizardSnapshot_;
 
-        if (wizardChangedDevice_)
+        if (! wizardChangedDevice_)
         {
+            deviceMismatch_ = wizardSnapshotMismatch_;
+            refreshDumbView();
+            return;
+        }
+
+        // Step 1 restarted the device. What matters is WHICH card is open now,
+        // not that a pick happened (round 2, I-1): Y then back to X is X.
+        const auto& remembered = wizardSnapshot_.device;
+        const bool  onRemembered = remembered.type.isEmpty()
+            || (engine_.getCurrentDeviceType() == remembered.type
+                && (remembered.name.isEmpty() || engine_.getCurrentDeviceName() == remembered.name));
+
+        if (! onRemembered)
+        {
+            // A card nobody confirmed: the old routing must not run on it.
             deviceMismatch_     = true;
             mismatchDeviceName_ = engine_.getCurrentDeviceName();
             restorePending_     = false;
@@ -917,13 +945,20 @@ MainComponent::MainComponent()
                 c.enabled = false;
                 changeSlotConfig (i, c);
             }
-            slotPanel_.refresh();
         }
         else
         {
-            deviceMismatch_ = wizardSnapshotMismatch_;
+            // Back on the remembered card -- possibly the one a start-up
+            // fallback had lost. Its own routing comes back with it, and is
+            // checked against its channels at the first real count.
+            deviceMismatch_ = false;
+            if (wizardSnapshotMismatch_ && settings_.hasRouting)
+                for (int i = 0; i < kMaxSlots; ++i)
+                    changeSlotConfig (i, settings_.slots[(std::size_t) i]);
+            restorePending_ = true;
         }
 
+        slotPanel_.refresh();
         refreshDumbView();
     };
     wizardConfirmHook = [] (const juce::String& text, std::function<void (bool)> onAnswer)
@@ -2697,7 +2732,9 @@ void MainComponent::timerCallback()
     // device's channels at the FIRST tick that has any -- the counts read 0
     // until audio has flowed (AudioEngine.h), and every slot is "invalid"
     // against 0.
-    if (restorePending_ && engine_.isRunning()
+    // hasDeliveredSinceStart: after a restart the counts still describe the
+    // previous card until this one's first callback.
+    if (restorePending_ && engine_.isRunning() && engine_.hasDeliveredSinceStart()
         && engine_.getNumInputChannels() > 0 && engine_.getNumOutputChannels() > 0)
         validateRestoredSlots (engine_.getNumInputChannels(), engine_.getNumOutputChannels());
 

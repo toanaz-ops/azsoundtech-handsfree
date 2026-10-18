@@ -522,3 +522,22 @@ TEST (LaneUWizard, CancelPutsTheMemoryBackAsItWas)
     EXPECT_EQ (back.device, saved.device);
     EXPECT_TRUE (back.slots[1].enabled);
 }
+
+TEST (LaneUInputMeter, CountsAreFreshOnlyAfterTheFirstCallbackSinceStart)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    EXPECT_FALSE (engine.hasDeliveredSinceStart());
+
+    Block b (0.1f, 0.1f);
+    b.run (engine);
+    EXPECT_TRUE (engine.hasDeliveredSinceStart());
+    EXPECT_EQ (engine.getNumInputChannels(), 2);
+
+    // A restart: the counts stay (a preset load must not see 0 and clamp),
+    // but they are no longer this device's.
+    engine.audioDeviceStopped();
+    engine.audioDeviceAboutToStart (nullptr);
+    EXPECT_FALSE (engine.hasDeliveredSinceStart());
+    EXPECT_EQ (engine.getNumInputChannels(), 2);
+}

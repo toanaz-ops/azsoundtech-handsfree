@@ -666,6 +666,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // can advertise channels the callback is not given.
     numInputChannels_.store (numInputChannels, std::memory_order_relaxed);
     numOutputChannels_.store (numOutputChannels, std::memory_order_relaxed);
+    deliveredSinceStart_.store (true, std::memory_order_release);
 
     // Lane U (spec 3.6): the wizard's input meter. Reads input samples only;
     // bounded by what this callback was handed AND by the meter's own size;
@@ -1042,6 +1043,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
+    // Lane U: the counts the getters report still belong to the PREVIOUS
+    // device until this one's first callback.
+    deliveredSinceStart_.store (false, std::memory_order_release);
+
     if (device != nullptr)
     {
         const double sampleRate = device->getCurrentSampleRate();
@@ -1130,14 +1135,14 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
 void AudioEngine::audioDeviceStopped()
 {
-    // The notch chains are reset in audioDeviceAboutToStart() on the next
-    // start. The channel counts are not a property of the next device: left
-    // as they were, a card swap reported the OLD card's channels until the
-    // new one's first callback, and the lane U wizard offered (and the cancel
-    // check measured against) channels that did not exist. 0 is the honest
-    // "nothing has flowed yet" the getters already document.
-    numInputChannels_.store (0, std::memory_order_relaxed);
-    numOutputChannels_.store (0, std::memory_order_relaxed);
+    // Nothing to release here yet: the notch chains are reset in
+    // audioDeviceAboutToStart() on the next start. The override is kept so
+    // the device lifecycle is explicit.
+    //
+    // The channel counts are deliberately NOT zeroed here (lane U round 2):
+    // a preset load while the card is gone falls back to 2x2 on a zero count
+    // and clamps every slot onto it. Freshness is asked separately, through
+    // hasDeliveredSinceStart().
 }
 
 void AudioEngine::audioDeviceError (const juce::String& errorMessage)

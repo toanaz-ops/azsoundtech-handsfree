@@ -39,6 +39,19 @@ LoadResult loadHostSettings (const juce::File& file)
     // not quarantine a good file, and do not let this session save over it.
     if (text.isEmpty() && file.getSize() > 0)
     {
+        // ...unless the bytes are all NUL: that is what a power cut mid-write
+        // leaves on some filesystems, it will never read differently, and
+        // holding it would stop every future save (round 2 MINOR).
+        juce::MemoryBlock bytes;
+        if (file.loadFileAsData (bytes))
+        {
+            bool allNul = bytes.getSize() > 0;
+            for (size_t i = 0; i < bytes.getSize() && allNul; ++i)
+                allNul = bytes[i] == 0;
+            if (allNul)
+                return malformed (file, "settings file is all NUL bytes");
+        }
+
         LoadResult r;
         r.error        = "settings file could not be read, left untouched: " + file.getFullPathName();
         r.mayOverwrite = false;

@@ -112,3 +112,18 @@ TEST (HostSettings, EmptyFileIsMalformedNotUnreadable)
     EXPECT_FALSE (r.error.isEmpty());
     EXPECT_TRUE (r.mayOverwrite);   // 0 bytes: nothing to protect
 }
+
+TEST (HostSettings, AllNulFileIsQuarantinedSoSavingCanResume)
+{
+    TempDir t;
+    {
+        juce::FileOutputStream out (t.file());
+        ASSERT_TRUE (out.openedOk());
+        const char zeros[64] {};
+        out.write (zeros, sizeof (zeros));
+    }
+    const auto r = az::host::loadHostSettings (t.file());
+    EXPECT_FALSE (r.error.isEmpty());
+    EXPECT_TRUE (r.mayOverwrite);
+    EXPECT_TRUE (t.dir.getChildFile ("settings.json.bad").existsAsFile());
+}
