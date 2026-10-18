@@ -74,6 +74,15 @@ struct Rig
         = SoundcheckController::State::Idle;
     std::vector<juce::var> log;
 
+    // `sc` is declared ABOVE `log` and the detection fields, so it would be
+    // destroyed AFTER them -- and its destructor stops a live run, which logs
+    // the abort through logEvent into a vector that no longer exists (ASan:
+    // heap-use-after-free, RefusesWhenRingRiskIsRising; seen on Linux as
+    // "malloc(): unaligned tcache chunk"). Stop it while everything it calls
+    // back into is still alive; the destructor's own stop() then has no run
+    // left to abort.
+    ~Rig() { sc.stop (1000); }
+
     explicit Rig (int chans = 2) : channels (chans)
     {
         in.assign  ((std::size_t) channels, std::vector<float> ((std::size_t) frames, 0.0f));
