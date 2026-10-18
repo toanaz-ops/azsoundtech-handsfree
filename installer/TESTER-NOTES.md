@@ -43,6 +43,23 @@ nhờ test bản cũ.
    đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
    **hú mà chip vẫn LOW**.
 
+## Mới trong 1.4.0 (so với 1.3.0) — giao diện, không đổi âm thanh
+
+**Không đổi DSP/gain/buffer.** Cùng cấu hình thì mức ra y như 1.3.0. Chi tiết:
+`docs/release-notes/1.4.0-alpha.md`.
+
+1. **Mở lần đầu**: máy đã có preset từ bản trước mở ở **Geek** (như cũ); máy
+   mới cài mở ở **Đơn giản** và tự hiện trình cài đặt 3 bước.
+2. **App nay nhớ cấu hình** (driver, sound card, rate, buffer, routing, chế độ).
+   **Hạ master trước khi mở app trên rig thật** — routing lần trước tự quay lại.
+3. **Rút sound card rồi mở app** → mọi đường bị tắt, đèn "Cần cài đặt"; cắm lại
+   và chọn đúng card thì routing cũ quay lại. Báo lại nếu app chạy routing cũ
+   lên một card KHÁC.
+4. **Chế độ Đơn giản**: thử `ĐO PHÒNG` (cùng hộp thoại hạ master như `ĐO`),
+   `BẬT CHỐNG HÚ`, `TẮT`. Lúc đang đo, `TẮT` bị khoá — dùng `DỪNG`.
+5. Trình cài đặt bước 2: nói vào mic, thanh mức của kênh đúng phải nhảy. Báo lại
+   nếu thanh nhảy ở kênh sai.
+
 ## Mới trong 1.3.0 (so với 1.2.0) — **HẠ MASTER TRƯỚC**
 
 Bản này app **tự phát tín hiệu ra PA** lần đầu tiên. Từ trước tới giờ nó chỉ
