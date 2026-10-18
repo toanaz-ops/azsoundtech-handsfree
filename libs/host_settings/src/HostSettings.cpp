@@ -32,7 +32,20 @@ LoadResult loadHostSettings (const juce::File& file)
     if (! file.existsAsFile())
         return {};
 
-    const juce::var root = juce::JSON::parse (file.loadFileAsString());
+    const juce::String text = file.loadFileAsString();
+
+    // A file with bytes that reads back empty was not readable just now (a
+    // sync client or an AV scanner holding it). That is not "malformed": do
+    // not quarantine a good file, and do not let this session save over it.
+    if (text.isEmpty() && file.getSize() > 0)
+    {
+        LoadResult r;
+        r.error        = "settings file could not be read, left untouched: " + file.getFullPathName();
+        r.mayOverwrite = false;
+        return r;
+    }
+
+    const juce::var root = juce::JSON::parse (text);
 
     auto* obj = root.getDynamicObject();
     if (obj == nullptr)

@@ -15,21 +15,7 @@ DumbStatus dumbStatusFor (const DumbInputs& in)
     s.middleOn    = in.autoMode;
     s.leftEnabled = in.measureAllowed;
 
-    // 1. Nothing can be protected until the rig is set up. Only TẮT and the
-    //    lamp (which opens the wizard) do anything.
-    if (! in.configured)
-    {
-        s.lamp            = DumbStatus::Lamp::Grey;
-        s.headline        = utf8 ("C\xe1\xba\xa7n c\xc3\xa0i \xc4\x91\xe1\xba\xb7t");
-        s.subline         = utf8 ("Ch\xe1\xba\xa1m v\xc3\xa0o \xc4\x91\xc3\xa2y \xc4\x91\xe1\xbb\x83 ch\xe1\xbb\x8dn sound card, mic v\xc3\xa0 ng\xc3\xb5 ra.");
-        s.lampOpensWizard = true;
-        s.leftEnabled     = false;
-        s.middleEnabled   = false;
-        s.middleOn        = false;
-        return s;
-    }
-
-    // 2. A measurement owns the left button until it ends.
+    // 1. A measurement owns the left button until it ends.
     if (in.phase == DumbInputs::Phase::Measuring)
     {
         s.lamp          = DumbStatus::Lamp::Cyan;
@@ -43,7 +29,7 @@ DumbStatus dumbStatusFor (const DumbInputs& in)
         return s;
     }
 
-    // 3. Results wait for a decision; both left buttons become that decision.
+    // 2. Results wait for a decision; both left buttons become that decision.
     if (in.phase == DumbInputs::Phase::Results)
     {
         s.lamp     = DumbStatus::Lamp::Cyan;
@@ -61,7 +47,7 @@ DumbStatus dumbStatusFor (const DumbInputs& in)
         return s;
     }
 
-    // 4. Applied: the report stays until BỎ (lane M Q20).
+    // 3. Applied: the report stays until BỎ (lane M Q20).
     if (in.phase == DumbInputs::Phase::Applied)
     {
         s.lamp        = DumbStatus::Lamp::Cyan;
@@ -71,6 +57,23 @@ DumbStatus dumbStatusFor (const DumbInputs& in)
         s.leftEnabled = false;
         s.middle      = DumbStatus::Middle::Dismiss;
         s.middleOn    = false;
+        return s;
+    }
+
+    // 4. Nothing can be protected until the rig is set up. AFTER the three
+    //    soundcheck rows, never before them (verification B-1): a run started
+    //    in Geek on a slot other than 0 reads "not configured" here, and this
+    //    row would hide DỪNG and leave TẮT live in the middle of a sweep. Only TẮT and the
+    //    lamp (which opens the wizard) do anything.
+    if (! in.configured)
+    {
+        s.lamp            = DumbStatus::Lamp::Grey;
+        s.headline        = utf8 ("C\xe1\xba\xa7n c\xc3\xa0i \xc4\x91\xe1\xba\xb7t");
+        s.subline         = utf8 ("Ch\xe1\xba\xa1m v\xc3\xa0o \xc4\x91\xc3\xa2y \xc4\x91\xe1\xbb\x83 ch\xe1\xbb\x8dn sound card, mic v\xc3\xa0 ng\xc3\xb5 ra.");
+        s.lampOpensWizard = true;
+        s.leftEnabled     = false;
+        s.middleEnabled   = false;
+        s.middleOn        = false;
         return s;
     }
 

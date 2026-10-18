@@ -278,8 +278,11 @@ preset trong Dumb; phổ trong Dumb.
 
 | Chỗ | Rev 2 nói | Code làm | Lý do |
 |---|---|---|---|
-| §3.5 HUỶ | không lưu thiết bị mới | thiết bị đổi ở bước 1 **được nhớ** | đổi qua `DevicePanel::restartWith`, mà `onAfterRestart` lưu — thiết bị người vận hành tự chọn là một lựa chọn có chủ đích, như ở Geek; slot không còn khớp vẫn bị tắt (không kẹp) |
+| §3.5 HUỶ | không lưu thiết bị mới | đúng như spec, **sau verifier code I-1**: lúc wizard mở không lưu gì (`onAfterRestart` bỏ qua `saveSettings`); HUỶ đưa bộ nhớ về snapshot lúc mở; nếu bước 1 đã đổi card thì đó là một mismatch — mọi slot tắt, bộ nhớ giữ | bản đầu lưu luôn trong `onAfterRestart`, và sau một mismatch thì ghi đè routing đã lưu bằng routing toàn-tắt |
 | §3.6 | mảng 2 phần tử (= `kNumChannels`) | `kInputMeterChannels = 8`, vòng lặp chặn bởi `min(numInputChannels, 8)` | để khi engine mở thêm kênh thì meter không lặng lẽ cắt ở 2; không đổi gì khi engine còn 2 kênh |
 | §3.3 tiêu đề | (không nói) | câu chính viết **sentence case**, không `toUpperCase()` | ảnh render: `towupper` để nguyên phần lớn chữ Việt ngoài locale Việt — "ĐANG CHặN 3 điểM"; nhãn nút được viết HOA sẵn trong mã nguồn vì L&F tự uppercase |
 | §3.3 đèn cyan | (không nói màu) | màu `settled` (ICE) | `trace` là amber — ảnh đầu tiên ra đèn cam cho "đang đo" |
-| §3.4 | nút `ĐƠN GIẢN` ở góc | ở **mép phải ngoài cùng** của masthead, badge dịch vào trong | ảnh render: đặt cạnh badge thì đè chip "NO DEVICE" |
+| §3.4 | nút `ĐƠN GIẢN` ở góc | ở **mép phải ngoài cùng** của masthead, badge dịch vào trong | ảnh render: đặt cạnh badge thì đè chip "NO DEVICE" || `AudioEngine::audioDeviceStopped` | (không nói) | số kênh về 0 | verifier I-2: đổi card thì số kênh của card CŨ còn treo tới callback đầu của card mới — wizard đề xuất kênh không tồn tại |
+| wizard xác nhận ghi đè | `SafePointer` | + bộ đếm thế hệ, một hộp mỗi lần | verifier I-3: OK trên hộp cũ sau HUỶ → mở lại áp kết quả cũ |
+| `DumbStatus` thứ tự hàng | "Cần cài đặt" là hàng 1 | ba hàng soundcheck đứng TRƯỚC | verifier B-1: đo bắt đầu ở Geek trên slot ≠ 0 rồi sang Dumb thì mất `DỪNG` và `TẮT` sống giữa lúc quét |
+| `loadHostSettings` | file không đọc được = hỏng | file có byte mà đọc ra rỗng → giữ nguyên, `mayOverwrite=false` | verifier MINOR: file đang bị sync/AV giữ không phải là file hỏng |

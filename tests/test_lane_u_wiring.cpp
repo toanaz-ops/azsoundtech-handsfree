@@ -474,3 +474,51 @@ TEST (LaneUWizard, FinishedWizardIsRememberedAndClearsAMismatch)
     EXPECT_FALSE (mc.deviceMismatchForTest());
     EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
 }
+
+TEST (LaneUWizard, AnOldConfirmationAnsweredAfterReopeningIsDropped)
+{
+    // Verification I-3: XONG (box opens) -> HUỶ -> reopen -> OK on the old box.
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.changeSlotConfig (2, monoRoute (0, 1));
+
+    std::vector<std::function<void (bool)>> answers;
+    mc.wizardConfirmHook = [&] (const juce::String&, std::function<void (bool)> a)
+    {
+        answers.push_back (std::move (a));
+    };
+
+    mc.openSetupWizard();
+    auto& w = mc.getSetupWizardForTest();
+    w.onFinish (monoRoute (1, 1));
+    w.onFinish (monoRoute (1, 1));             // second XONG: no second box
+    ASSERT_EQ (answers.size(), 1u);
+
+    w.getCancelButtonForTest().onClick();
+    mc.openSetupWizard();
+    answers[0] (true);
+
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (2).enabled);   // untouched
+    EXPECT_TRUE (w.isOpen());
+}
+
+TEST (LaneUWizard, CancelPutsTheMemoryBackAsItWas)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    const auto saved = routedSettings();
+    writeSettings (t.file(), saved);
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Fallback");
+
+    mc.openSetupWizard();
+    mc.getSetupWizardForTest().getCancelButtonForTest().onClick();
+
+    EXPECT_TRUE (mc.deviceMismatchForTest());
+    ASSERT_TRUE (mc.saveSettings());
+    const auto back = appSettingsFromHost (az::host::loadHostSettings (t.file()).settings);
+    EXPECT_EQ (back.device, saved.device);
+    EXPECT_TRUE (back.slots[1].enabled);
+}

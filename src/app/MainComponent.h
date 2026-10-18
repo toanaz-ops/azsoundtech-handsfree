@@ -591,6 +591,14 @@ private:
     juce::TextButton simpleModeButton_;   // Geek's way back to Dumb (Q2)
     gui::SetupWizard setupWizard_;        // over everything, Dumb only
     bool wizardChangedDevice_ = false;
+    // Verification I-1: what the memory said when the wizard opened. A
+    // cancelled wizard leaves it exactly so, whatever step 1 restarted.
+    AppSettings wizardSnapshot_;
+    bool        wizardSnapshotMismatch_ = false;
+    // Verification I-3: bumped at every open, close and device restart; an
+    // overwrite confirmation answered under another generation is dropped.
+    int  wizardGeneration_    = 0;
+    bool wizardConfirmPending_ = false;
     bool wizardAutoOpenDone_  = false;    // Q7: once per session, by itself
     bool audioStarted_        = false;
 

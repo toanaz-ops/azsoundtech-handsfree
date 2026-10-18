@@ -651,7 +651,14 @@ MainComponent::MainComponent()
             && engine_.getCurrentDeviceName() != mismatchDeviceName_)
             deviceMismatch_ = false;
 
-        saveSettings();
+        // While the wizard is open, a device change is not yet a decision:
+        // only XONG commits it (verification I-1). Saving here would let a
+        // HUỶ leave the step-1 card -- and, after a mismatch, an all-off
+        // routing -- in the memory.
+        if (setupWizard_.isOpen())
+            ++wizardGeneration_;
+        else
+            saveSettings();
     };
 
     // A setting the hardware refused. Held rather than flashed: the user needs
@@ -833,6 +840,8 @@ MainComponent::MainComponent()
     setupWizard_.currentDeviceProvider = [this] { return engine_.getCurrentDeviceName(); };
     setupWizard_.channelCountsProvider = [this]
     {
+        if (! engine_.isRunning())
+            return std::pair<int, int> {};
         return std::pair<int, int> { engine_.getNumInputChannels(), engine_.getNumOutputChannels() };
     };
     setupWizard_.inputPeakProvider = [this] (int ch) { return engine_.takeInputPeak (ch); };
@@ -847,6 +856,9 @@ MainComponent::MainComponent()
     };
     setupWizard_.onFinish = [this] (const SlotConfig& slot0)
     {
+        if (wizardConfirmPending_)
+            return;   // one box at a time (I-3)
+
         std::array<SlotConfig, kMaxSlots> current;
         for (int i = 0; i < kMaxSlots; ++i)
             current[(std::size_t) i] = engine_.getSlotConfig (i);
@@ -865,22 +877,53 @@ MainComponent::MainComponent()
             return;   // no way to ask = no overwrite
 
         juce::Component::SafePointer<MainComponent> safe (this);
+        const int generation  = wizardGeneration_;
+        wizardConfirmPending_ = true;
         wizardConfirmHook (juce::String::fromUTF8 ("Thay ") + juce::String (on)
                                + juce::String::fromUTF8 (" \xc4\x91\xc6\xb0\xe1\xbb\x9dng hi\xe1\xbb\x87n c\xc3\xb3 b\xe1\xba\xb1ng 1 \xc4\x91\xc6\xb0\xe1\xbb\x9dng?"),
-                           [safe, slot0] (bool ok)
+                           [safe, slot0, generation] (bool ok)
                            {
-                               if (ok && safe != nullptr && safe->setupWizard_.isOpen())
+                               if (safe == nullptr)
+                                   return;
+                               safe->wizardConfirmPending_ = false;
+
+                               // Answered about THIS wizard, on THIS device?
+                               if (ok && safe->setupWizard_.isOpen()
+                                   && generation == safe->wizardGeneration_)
                                    safe->applyWizardResult (slot0);
                            });
     };
     setupWizard_.onCancel = [this]
     {
-        // Spec 3.5 HUỶ: no routing is written. A device changed in step 1 is a
-        // device the operator picked (DevicePanel's own path remembered it), so
-        // whatever no longer fits it comes off -- disabled, never clamped.
-        if (wizardChangedDevice_ && engine_.getNumInputChannels() > 0
-            && engine_.getNumOutputChannels() > 0)
-            validateRestoredSlots (engine_.getNumInputChannels(), engine_.getNumOutputChannels());
+        ++wizardGeneration_;
+
+        // Spec 3.5 HUỶ: nothing is committed. The memory goes back to what it
+        // was when the wizard opened (I-1). If step 1 changed the card, the
+        // card now open is NOT the remembered one -- which is exactly a
+        // mismatch: every slot comes off (the old routing must not run on a
+        // card nobody confirmed) and the memory is kept for the next start.
+        settings_ = wizardSnapshot_;
+
+        if (wizardChangedDevice_)
+        {
+            deviceMismatch_     = true;
+            mismatchDeviceName_ = engine_.getCurrentDeviceName();
+            restorePending_     = false;
+            for (int i = 0; i < kMaxSlots; ++i)
+            {
+                auto c = engine_.getSlotConfig (i);
+                if (! c.enabled)
+                    continue;
+                c.enabled = false;
+                changeSlotConfig (i, c);
+            }
+            slotPanel_.refresh();
+        }
+        else
+        {
+            deviceMismatch_ = wizardSnapshotMismatch_;
+        }
+
         refreshDumbView();
     };
     wizardConfirmHook = [] (const juce::String& text, std::function<void (bool)> onAnswer)
@@ -1142,8 +1185,11 @@ void MainComponent::startAudio()
     engine_.start();
     audioStarted_ = true;
 
-    // Before any detector thread starts: if JUCE fell back to another device,
-    // the restored routing comes off here, while nothing consumes the taps.
+    // If JUCE fell back to another device, the restored routing comes off
+    // here. Each changeSlotConfig runs the paired 6.5 hooks, so the detectors
+    // and the lane M thread are started by them a moment before the loop below
+    // would start them -- harmless: start() is idempotent and the save inside
+    // the hook writes back the routing read from disk (deviceMismatch_).
     if (settingsFile_ != juce::File() && saved.type.isNotEmpty())
         checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
@@ -1348,7 +1394,10 @@ void MainComponent::openSetupWizard()
         return;
     }
 
-    wizardChangedDevice_ = false;
+    wizardChangedDevice_    = false;
+    wizardSnapshot_         = settings_;
+    wizardSnapshotMismatch_ = deviceMismatch_;
+    ++wizardGeneration_;
     setupWizard_.setBounds (getLocalBounds());
     setupWizard_.open();
 }
@@ -1372,6 +1421,7 @@ void MainComponent::applyWizardResult (const SlotConfig& slot0)
     restorePending_ = false;
     slotPanel_.refresh();
     setupWizard_.close();
+    ++wizardGeneration_;
     saveSettings();
     refreshDumbView();
 }

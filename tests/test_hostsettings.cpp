@@ -103,3 +103,12 @@ TEST (HostSettings, OutOfRangeRateAndBufferReadAsNotSaved)
     EXPECT_EQ (r.settings.device.sampleRate, 0.0);
     EXPECT_EQ (r.settings.device.bufferSize, 0);
 }
+
+TEST (HostSettings, EmptyFileIsMalformedNotUnreadable)
+{
+    TempDir t;
+    ASSERT_TRUE (t.file().replaceWithText (""));
+    const auto r = az::host::loadHostSettings (t.file());
+    EXPECT_FALSE (r.error.isEmpty());
+    EXPECT_TRUE (r.mayOverwrite);   // 0 bytes: nothing to protect
+}

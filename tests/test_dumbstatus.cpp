@@ -187,3 +187,24 @@ TEST (DumbStatus, NoRowSpeaksInDecibelsOrHertz)
                 EXPECT_FALSE (s.headline.isEmpty());
             }
 }
+
+TEST (DumbStatus, AMeasurementOutranksNotConfigured)
+{
+    // Verification B-1: Geek routes slot 1 only, starts ĐO, switches to Dumb.
+    DumbInputs in;
+    in.configured = false;
+    in.phase      = DumbInputs::Phase::Measuring;
+    const auto s = dumbStatusFor (in);
+    EXPECT_EQ (s.left, DumbStatus::Left::Stop);
+    EXPECT_TRUE (s.leftEnabled);
+    EXPECT_FALSE (s.offEnabled);
+    EXPECT_FALSE (s.lampOpensWizard);
+
+    in.phase = DumbInputs::Phase::Results;
+    in.resultCount = 2;
+    EXPECT_EQ (dumbStatusFor (in).left, DumbStatus::Left::Apply);
+    EXPECT_EQ (dumbStatusFor (in).middle, DumbStatus::Middle::Dismiss);
+
+    in.phase = DumbInputs::Phase::Applied;
+    EXPECT_EQ (dumbStatusFor (in).middle, DumbStatus::Middle::Dismiss);
+}

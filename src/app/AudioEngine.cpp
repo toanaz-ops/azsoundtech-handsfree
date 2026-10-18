@@ -1130,9 +1130,14 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
 void AudioEngine::audioDeviceStopped()
 {
-    // Nothing to release here yet: the notch chains are reset in
-    // audioDeviceAboutToStart() on the next start. The override is kept so
-    // the device lifecycle is explicit.
+    // The notch chains are reset in audioDeviceAboutToStart() on the next
+    // start. The channel counts are not a property of the next device: left
+    // as they were, a card swap reported the OLD card's channels until the
+    // new one's first callback, and the lane U wizard offered (and the cancel
+    // check measured against) channels that did not exist. 0 is the honest
+    // "nothing has flowed yet" the getters already document.
+    numInputChannels_.store (0, std::memory_order_relaxed);
+    numOutputChannels_.store (0, std::memory_order_relaxed);
 }
 
 void AudioEngine::audioDeviceError (const juce::String& errorMessage)
