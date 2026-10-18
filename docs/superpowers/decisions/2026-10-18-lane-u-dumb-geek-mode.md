@@ -4,9 +4,9 @@ Mỗi mục là một ngả rẽ thiết kế đã hỏi owner trong brainstorm.
 các phương án đã đề xuất (kèm phương án khuyên dùng), và lựa chọn của owner.
 Lật lại khi cần đổi hướng; đừng hỏi lại câu đã có đáp án ở đây.
 
-**Trạng thái:** Q1–Q4 owner đã chọn 2026-10-18; Q5–Q12 điều phối tự chọn tạm, owner chưa duyệt.
+**Trạng thái:** Q1–Q4 owner chọn 2026-10-18; Q5–Q12 điều phối chốt tạm, **owner chấp nhận ở Q13** ("merge, chạy tiếp cho tới khi xong", 2026-10-18) — lật lại sau khi nghe rig.
 
-Spec đích: `docs/superpowers/specs/2026-10-18-dumb-geek-mode-design.md` (rev 2).
+Spec đích: `docs/superpowers/specs/2026-10-18-dumb-geek-mode-design.md` (rev 3).
 Người hỏi: Claude (điều phối). Người quyết: owner (ToanAZ).
 
 ## Bối cảnh nêu trước khi hỏi
@@ -147,3 +147,13 @@ Người hỏi: Claude (điều phối). Người quyết: owner (ToanAZ).
 | 2 | Áp routing đã lưu nếu chỉ số kênh còn trong biên | |
 
 **Chọn: 1.** — điều phối tự chọn 2026-10-18, owner CHƯA duyệt.
+
+## Q13 — Merge PR #7 với các phương án Q5–Q12 đang chốt tạm?
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Merge; chấp nhận tạm Q5–Q12, lật lại sau khi nghe rig** (tiền lệ lane M Q24) | khuyên dùng |
+| 2 | Duyệt từng mục Q5–Q12 trước khi merge | |
+
+**Chọn: 1.** — owner: "merge, chạy tiếp cho tới khi xong" (2026-10-18). Lời này không
+trả lời riêng từng mục; đọc là chấp nhận các phương án khuyên dùng như lane M Q24.
