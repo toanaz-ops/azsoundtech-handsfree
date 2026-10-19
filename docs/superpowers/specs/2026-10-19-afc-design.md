@@ -3,7 +3,7 @@
 **Ngày:** 2026-10-19. **Roadmap:** [`2026-09-04-anti-feedback-v2-roadmap.md`](2026-09-04-anti-feedback-v2-roadmap.md) (lane A; cần M + G — đã merge; main `ea6e93c`, suite 775/775).
 **Sổ quyết định:** [`../decisions/2026-10-19-lane-a-afc.md`](../decisions/2026-10-19-lane-a-afc.md) (Q1–Q4, Q7 owner chọn; Q5, Q6 điều phối chốt tạm).
 **Phạm vi:** **A1** = lõi AFC, tham chiếu = đầu ra của chính làn (Q1-1). **A2** (ngõ vào tham chiếu riêng + mở engine > 2 kênh, Q1-2) là PR/release sau (Q5).
-**Trạng thái:** **rev 2** — sau phản biện read-only vòng 1 (3 BLOCKER / 7 IMPORTANT / 5 MINOR, bảng §10). Rev 1 không dùng làm cơ sở cho code.
+**Trạng thái:** **DỪNG 2026-10-19 — KHÔNG triển khai vào app.** Owner đặt ràng buộc cứng "không chấp nhận bất kỳ méo mó tiêu cực nào về âm thanh" (sổ, Q3 lật lại); mô phỏng không chứng minh được PEM-AFC đạt ràng buộc đó trên tín hiệu có màu (§9). Rev 2 giữ nguyên làm nghiên cứu; code ở `tools/afc/` (không biên dịch vào app). Trước đó: rev 2 sau phản biện vòng 1 (3 BLOCKER / 7 IMPORTANT, §10).
 **Đụng audio path:** **có — nặng nhất của dự án.** Mức thay đổi: §6.
 **Release:** 1.5.0 (`-Part minor`).
 
@@ -229,9 +229,23 @@ Mô phỏng vòng kín trong test (không thiết bị), tool `tools/AfcSim` đ�
 - Tín hiệu tonal (nốt dài, hợp âm) để lại bias (§3.4).
 - Tối đa 4 làn có AFC.
 
-## 9. Số đo mô phỏng
+## 9. Số đo mô phỏng (2026-10-19, `tools/afc/afcsim.cpp`)
 
-(Điền khi có: μ chọn, thời gian hội tụ, MSG đạt được theo nguồn a/b, CPU.)
+Vòng kín, phòng giả trễ 300 mẫu + đuôi 60 ms, 48 kHz, PEM bậc 32 (16 không đủ ở
+48 kHz: sai số dải formant +6,7 dB → +0,6 dB khi lên 32).
+
+| Cấu hình | MSG | SNR e/s ở −3 dB (nền 13,5 dB) |
+|---|---|---|
+| Vòng hở, nhiễu trắng | độ lệch −57 dB (không PEM), −18 dB (PEM) | — |
+| Vòng kín, nguồn trắng, μ 0.005 | +11 dB (nền +1) | 16,9 dB |
+| Vòng kín, nguồn formant, μ 0.1 | +13 dB "ổn định" | **6 dB — tiếng hỏng** |
+| Vòng kín, nguồn formant, μ 0.005–0.02 | +3..+5 dB | 7–10 dB (xấu hơn không AFC) |
+| Vòng kín, μ 0.002, học 60 s, 4 nguồn (formant, giọng, hợp âm) | +3 dB | 15,7 dB — **cùng con số tới 0,1 dB cho mọi nguồn**, độ lệch +0,1 dB: bộ lọc gần như không học |
+| Dịch tần 5 Hz + AFC | +7 dB | 20,8 dB — **bị loại**: đổi tiếng |
+
+Đọc: lõi đúng (vòng hở, nguồn trắng). Trên tín hiệu có màu, nguồn đóng vai nhiễu
+mạnh hơn phản hồi ~17 dB và PEM không khử hết bias; bước học đủ lớn để có lợi thì
+làm méo, bước đủ nhỏ để không méo thì gần như không học. Không đạt ràng buộc owner.
 
 ## 10. Phản biện vòng 1 → rev 2
 
