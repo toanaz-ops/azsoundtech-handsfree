@@ -14,6 +14,7 @@
 namespace
 {
 constexpr double kFs = 48000.0;
+constexpr double kPi = 3.14159265358979323846;   // M_PI is not standard; MSVC lacks it
 bool gPem = true;
 double gShiftHz = 0.0;
 
@@ -31,7 +32,7 @@ struct Shifter
         for (auto& s : i) a = s.run (a);
         for (auto& s : q) b = s.run (b);
         const double bq = qd; qd = b;            // one-sample delay on one branch
-        ph += 2 * M_PI * hz / kFs; if (ph > 2 * M_PI) ph -= 2 * M_PI;
+        ph += 2 * kPi * hz / kFs; if (ph > 2 * kPi) ph -= 2 * kPi;
         return a * std::cos (ph) - bq * std::sin (ph);
     }
 };
@@ -48,7 +49,7 @@ std::vector<float> makeSource (int n, int mode, unsigned seed)
     std::vector<Biquad2> formants;
     for (auto [f, bw] : { std::pair { 500.0, 80.0 }, { 1500.0, 120.0 }, { 2500.0, 200.0 } })
     {
-        const double r = std::exp (-M_PI * bw / kFs), th = 2 * M_PI * f / kFs;
+        const double r = std::exp (-kPi * bw / kFs), th = 2 * kPi * f / kFs;
         formants.push_back ({ -2 * r * std::cos (th), r * r });
     }
 
@@ -60,19 +61,19 @@ std::vector<float> makeSource (int n, int mode, unsigned seed)
         const double t = i / kFs;
         double v = g (rng);
         if (mode != 2 && mode != 4) { for (auto& f : formants) v = f.run (v); v *= 0.02; }
-        const double env = (mode == 3) ? 1.0 : 0.6 + 0.4 * std::pow (std::sin (2 * M_PI * 3.7 * t), 2.0);
+        const double env = (mode == 3) ? 1.0 : 0.6 + 0.4 * std::pow (std::sin (2 * kPi * 3.7 * t), 2.0);
         double p = 0;
         if (mode == 5)
         {
             p = 0;
             for (double f : { 261.6, 329.6, 392.0, 523.3 })
-                for (int k = 1; k < 5; ++k) p += std::sin (2 * M_PI * f * k * t) / (k * k);
+                for (int k = 1; k < 5; ++k) p += std::sin (2 * kPi * f * k * t) / (k * k);
             v *= 0.05;
         }
         if (mode == 1)
         {
-            const double f0 = 140 + 30 * std::sin (2 * M_PI * 0.3 * t + phase0) + 10 * std::sin (2 * M_PI * 5.5 * t);
-            ph += 2 * M_PI * f0 / kFs;
+            const double f0 = 140 + 30 * std::sin (2 * kPi * 0.3 * t + phase0) + 10 * std::sin (2 * kPi * 5.5 * t);
+            ph += 2 * kPi * f0 / kFs;
             for (int k = 1; k < 8; ++k) p += std::sin (k * ph) / k;
         }
         s[(size_t) i] = (float) (mode == 5 ? (v + 0.3 * p) * env : (0.7 * v + 0.3 * p * 0.3) * env);
@@ -103,7 +104,7 @@ double maxMagnitude (const std::vector<float>& h)
     double best = 0;
     for (int b = 1; b < 4096; ++b)
     {
-        const double w = M_PI * b / 4096.0;
+        const double w = kPi * b / 4096.0;
         double re = 0, im = 0;
         for (size_t i = 0; i < h.size(); ++i) { re += h[i] * std::cos (w * i); im -= h[i] * std::sin (w * i); }
         best = std::max (best, std::sqrt (re * re + im * im));
@@ -168,7 +169,7 @@ bool runLoop (const std::vector<float>& s, const std::vector<float>& h, double m
 
         // Per-band error: |F^ - F|^2 / |F|^2 in octave-ish bands, and source power.
         auto dft = [] (const std::vector<double>& x, double f) {
-            double re = 0, im = 0; const double w = 2 * M_PI * f / kFs;
+            double re = 0, im = 0; const double w = 2 * kPi * f / kFs;
             for (size_t i = 0; i < x.size(); ++i) { re += x[i] * std::cos (w * i); im -= x[i] * std::sin (w * i); }
             return re * re + im * im; };
         std::vector<double> diff ((size_t) (AfcCanceller::L + 64), 0.0), tru ((size_t) (AfcCanceller::L + 64), 0.0);
