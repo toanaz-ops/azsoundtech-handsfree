@@ -49,6 +49,10 @@ add_executable(HandsFreeTests
     test_dumbstatus.cpp
     test_lane_u_wiring.cpp
     test_setupwizardmodel.cpp
+    test_afc.cpp
+    # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
+    ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
+    ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
     ${HANDSFREE_CORE_SOURCES}
 )
 
@@ -79,6 +83,7 @@ target_link_libraries(HandsFreeTests PRIVATE
 
 target_include_directories(HandsFreeTests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tools/afc
 )
 
 # Task 26's two shipped presets are read off disk BY THE REAL LOADER rather

@@ -85,3 +85,16 @@ if(MSVC)
     # is much shallower, but there is no reason to run it any tighter.
     target_link_options(PeakinessSweep PRIVATE "/STACK:8388608")
 endif()
+
+# AfcSim -- lane A research (STOPPED 2026-10-19, see
+# docs/superpowers/decisions/2026-10-19-lane-a-afc.md). Closed-loop simulation of
+# an adaptive feedback canceller that is deliberately NOT part of the app: the
+# owner's constraint is "no audible degradation", and PEM-AFC could not be shown
+# to meet it. Kept so the work can be resumed from measured numbers.
+add_executable(AfcSim
+    afc/afcsim.cpp
+    afc/AfcCanceller.cpp
+    afc/AfcCanceller.h
+)
+target_include_directories(AfcSim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/afc)
+target_link_libraries(AfcSim PRIVATE juce::juce_dsp juce::juce_recommended_config_flags)
