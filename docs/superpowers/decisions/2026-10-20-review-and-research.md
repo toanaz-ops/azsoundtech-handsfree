@@ -128,3 +128,30 @@ Mức thay đổi dự kiến:
 - Ngưỡng < 10: nhiều notch hơn, tức nhiều chỗ bị cắt hơn, ứng với hú yếu hơn.
 
 Phải ghi vào release note để tester dùng AGGRESSIVE thử ở âm lượng nhỏ.
+
+## Q8: Sau P1, làm tiếp P2 ngay hay dừng chờ merge?
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Dừng ở P1, chờ merge.** P2 (notch hẹp, Q thích nghi) đổi Q của mọi notch và đụng ramp của lane G: đổi Q là "thiết kế mới", nên state bị reset. P2 phải xây trên P1 đã merge, và trên cả B1/I1/I2/I3/M1/M6, nếu không sẽ thành 7 PR DSP chồng lên nhau chưa ai nghe | chọn |
+| 2 | Làm luôn P2 trên nhánh của P1 | |
+
+**Chọn: 1.** Tám PR đang mở đều xanh hoặc đang chạy CI. Owner nói "merge" thì
+điều phối gộp release note 1.4.0 (nhiều PR cùng chạm vào), rồi làm P2 trên `main`
+mới.
+
+## Trạng thái cuối đợt (2026-10-20)
+
+| Mục | PR | Trạng thái |
+|---|---|---|
+| Sổ quyết định, khảo sát, báo cáo review | #12 | chỉ docs |
+| B1: detector theo sample rate của card | #13 | CI xanh |
+| I2: Bypass cộng như Auto | #14 | CI xanh |
+| I1: restart do driver | #16 | CI xanh |
+| I3: scorer dùng ngưỡng sống | #17 | CI xanh |
+| I4, M2, M9: docs | #19 | chỉ docs |
+| M1, M6: kẹp Q, NaN-heal | #23 | CI xanh |
+| M4d, M7, M10, logstats | #25 | CI đang chạy |
+| M5: CI Linux + ASan/UBSan | #26 | local 795/795 dưới sanitizer; CI đang chạy |
+| P1: tần số notch dưới-bin | #27 | CI đang chạy |
+| Còn treo, chờ owner | | P4 (giấy phép `rta-tool`), link "isovoice", nghe tất cả ở alpha |
