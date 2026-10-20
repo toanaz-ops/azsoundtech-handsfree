@@ -43,6 +43,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 
 inline const char* defaultDeviceTypeName()
@@ -363,6 +364,23 @@ public:
     // any chain in the 8x2 grid.
     const NotchChain& getNotchChainForTest (int channel) const;
     const NotchChain& getNotchChainForTest (int slot, int lane) const;
+
+    // Device lifecycle hooks (review 2026-10-20, I1). A restart the APP starts
+    // goes through MainComponent's onBeforeRestart/onAfterRestart, which join
+    // every ring consumer first (bridge design §6.5). A restart the DRIVER
+    // starts does not: JUCE's ASIO device answers kAsioResetRequest,
+    // kAsioBufferSizeChange and a sample-rate change from its own timer with
+    // close() -> audioDeviceStopped() ... start() -> audioDeviceAboutToStart(),
+    // and the rings were cleared below with the detectors still running.
+    //
+    // onDeviceStopping runs FIRST in audioDeviceStopped(); onDeviceStarted
+    // runs LAST in audioDeviceAboutToStart(), after every ring is cleared.
+    // Both run on whatever thread JUCE stops/starts the device on -- the
+    // message thread for every path this app knows -- and the owner must
+    // clear them before it is destroyed. Empty by default: tests and tools
+    // that drive the engine directly see no change.
+    std::function<void()> onDeviceStopping;
+    std::function<void()> onDeviceStarted;
 
     // AudioIODeviceCallback interface
     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
