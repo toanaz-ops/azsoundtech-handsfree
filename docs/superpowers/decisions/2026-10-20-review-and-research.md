@@ -88,3 +88,43 @@ Mức level dự kiến của P1:
 - Phải kẹp độ lệch |Δf| ≤ 0,5 bin và có NaN-guard.
 
 Sau review, BLOCKER/IMPORTANT (Q3) **đi trước P1**.
+
+## Kết quả review (2026-10-20)
+
+Báo cáo: `docs/superpowers/audits/2026-10-20-full-project-review.md`. Review chạy trên
+`origin/main` @ `f2cc11e`, chỉ đọc, với model Fable. Kết quả: 1 BLOCKER, 4 IMPORTANT,
+10 MINOR. Điều phối đã tự kiểm lại từng mục B1, I1, I2 trước khi sửa: đọc code, đọc
+mã nguồn JUCE ASIO cho I1, và viết test đỏ trước khi sửa.
+
+## Q6: Sửa mục nào, theo nhóm nào?
+
+| Mục | Quyết định | PR |
+|---|---|---|
+| B1 detector cứng 48 kHz | sửa: `setSampleRate` cạnh `setWidth` | #13 |
+| I2 Bypass ghi đè | sửa: cộng dồn như Auto | #14 |
+| I1 restart do driver | sửa: hook `onDeviceStopping/onDeviceStarted` trên engine | #16 |
+| I3 scorer dùng hằng 10 | **sửa**, xem Q7 | riêng |
+| I4, M2, M9 docs | sửa | docs |
+| M1 Q preset không chặn, M6 NaN-heal làm kẹt ramp | sửa | an toàn |
+| M4d grep-guard `src/dsp`, M7 comment stale, M10 curl Linux, logstats bản ghi mồ côi | sửa | hygiene |
+| M5 CI Linux + sanitizer | sửa: thêm job | CI |
+| M3 test tự gọi `setSampleRate(48000)` | để nguyên; test mới của B1 đi qua đường wiring thật | — |
+| M8 `tools/afc` nằm trong gate | để nguyên: test của lõi nghiên cứu vẫn xanh, và tách ra không làm gate an toàn hơn | — |
+
+## Q7: I3 có sửa không? (đổi hành vi dò)
+
+| # | Phương án | |
+|---|---|---|
+| 1 | **Sửa: scorer dùng ngưỡng đang đặt cho cả gate lẫn `pNorm`** | chọn |
+| 2 | Giữ nguyên, đổi nhãn/slider cho khớp (ngưỡng < 10 = 10) | |
+| 3 | Chờ owner | |
+
+**Chọn: 1.** Owner dặn "tự quyết định". Lý do:
+- Ngưỡng mặc định 10 không đổi: ở ngưỡng ≥ 10, gate cho kết quả giống hệt.
+- Chỉ người chọn AGGRESSIVE (ngưỡng 8), hoặc kéo slider xuống dưới 10, mới thấy khác. Đó đúng là điều họ đã chọn mà trước đây không có tác dụng.
+
+Mức thay đổi dự kiến:
+- Ngưỡng ≥ 10: 0 dB.
+- Ngưỡng < 10: nhiều notch hơn, tức nhiều chỗ bị cắt hơn, ứng với hú yếu hơn.
+
+Phải ghi vào release note để tester dùng AGGRESSIVE thử ở âm lượng nhỏ.
