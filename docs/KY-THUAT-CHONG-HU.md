@@ -209,6 +209,12 @@ Peakiness chỉ là một nhân tử. Điểm cuối = **peakiness × rise × no
 khóa thì điểm nhân thêm 0.5. Không có chỗ cho việc cắt bội số của nốt nhạc —
 harmonic của keyboard không phải hú.
 
+Cổng "không hồi sinh bin đã bị loại" của scorer dùng **đúng ngưỡng peakiness
+đang chạy** của analyzer (`PeakinessAnalyzer::getThreshold()`), không phải hằng
+số 10.0 lúc biên dịch. Lưu ý: trục peakiness vẫn chuẩn hoá theo 10.0 (bão hoà ở
+10×), nên hạ ngưỡng xuống 6/8 mở cổng nhưng KHÔNG tự làm điểm chạm 0.7 — đó là
+quyết định chuẩn hoá của owner, chưa đổi (audit 2026-10-21).
+
 Hai tham số thời gian của scorer đều runtime-tunable (brief 2026-08-24):
 **rise reference** mặc định 250 ms (chỉnh được 100–1000 ms) — mag hiện tại so
 với mag ~250 ms trước; và **persistence** mặc định 3 block liên tiếp (chỉnh

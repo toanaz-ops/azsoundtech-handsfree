@@ -676,3 +676,98 @@ TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
     EXPECT_FLOAT_EQ (rig.scorer.scoreCandidate (detected.candidates[0],
                                                 spectrum.magnitudes, {}), b.score);
 }
+
+// ---------------------------------------------------------------------------
+// The scorer's "never resurrect a rejected bin" gate follows the analyzer's
+// LIVE threshold (2026-10-21 audit), not the compile-time default.
+//
+// Both frames are primed so rise and novelty saturate (a constant 2.0 history
+// against a frame of 8.0). A candidate that passes the gate therefore shows
+// rNorm = mNorm = 1; a candidate stopped by the gate keeps the all-zero
+// breakdown. pNorm is deliberately untouched by this change (it still
+// normalises on kDefaultThreshold -- owner taste), so a candidate at or below
+// 10 passes the gate but still scores 0 through pNorm; the assertions pin
+// exactly that, so a future pNorm change is a visible, deliberate edit.
+// ---------------------------------------------------------------------------
+namespace
+{
+void primeForGateTests (CandidateScorer& s)
+{
+    std::array<float, CandidateScorer::kBins> f {};
+    f.fill (2.0f);
+    s.beginBlock (kSampleRate);
+    s.commitBlock (f.data(), 0.0);
+    s.commitBlock (f.data(), 3000.0);
+    s.commitBlock (f.data(), 100.0);
+}
+}
+
+TEST (CandidateScorerGate, LoweredThresholdLetsASubDefaultCandidateReachTheOtherAxes)
+{
+    std::array<float, CandidateScorer::kBins> now {};
+    now.fill (8.0f);
+
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin         = 43;
+    cand.frequencyHz = 1007.8125;
+    cand.magnitude   = 8.0f;
+    cand.peakiness   = 8.0f;   // above a threshold of 6, below the default 10
+
+    // Default (and explicit 10): the gate rejects it -- nothing is computed.
+    {
+        CandidateScorer scorer;
+        primeForGateTests (scorer);
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
+        EXPECT_FLOAT_EQ (b.rNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.mNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.score, 0.0f);
+        EXPECT_FLOAT_EQ (scorer.scoreCandidate (cand, now.data(), {}, 10.0f), 0.0f);
+    }
+
+    // Live threshold 6 (an operator setting TuningPanel offers): the gate
+    // opens, the rise and novelty axes are evaluated and the candidate's raw
+    // peakiness is reported -- the data the session log and the ladder read.
+    {
+        CandidateScorer scorer;
+        primeForGateTests (scorer);
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {}, 6.0f);
+        EXPECT_FLOAT_EQ (b.rawPeakiness, 8.0f);
+        EXPECT_FLOAT_EQ (b.rNorm, 1.0f);
+        EXPECT_FLOAT_EQ (b.mNorm, 1.0f);
+        EXPECT_FLOAT_EQ (b.penalty, 1.0f);
+        // pNorm still normalises on the default (10): (8/10 - 1)/9 < 0 -> 0.
+        EXPECT_FLOAT_EQ (b.pNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.score, 0.0f);
+        // The scalar overload forwards the threshold.
+        EXPECT_FLOAT_EQ (scorer.scoreCandidate (cand, now.data(), {}, 6.0f), b.score);
+    }
+}
+
+TEST (CandidateScorerGate, RaisedThresholdRejectsWhatTheDefaultWouldHaveScored)
+{
+    std::array<float, CandidateScorer::kBins> now {};
+    now.fill (8.0f);
+
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin         = 43;
+    cand.frequencyHz = 1007.8125;
+    cand.magnitude   = 8.0f;
+    cand.peakiness   = 11.0f;   // clears the default 10, not a live 12
+
+    {
+        CandidateScorer scorer;
+        primeForGateTests (scorer);
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {});
+        EXPECT_GT (b.pNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.rNorm, 1.0f);
+        EXPECT_GT (b.score, 0.0f);
+    }
+    {
+        CandidateScorer scorer;
+        primeForGateTests (scorer);
+        const auto b = scorer.scoreCandidateDetailed (cand, now.data(), {}, 12.0f);
+        EXPECT_FLOAT_EQ (b.pNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.rNorm, 0.0f);
+        EXPECT_FLOAT_EQ (b.score, 0.0f);
+    }
+}

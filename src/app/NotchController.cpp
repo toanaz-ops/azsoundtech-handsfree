@@ -1497,7 +1497,8 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
 
         const auto breakdown = la.scorer.scoreCandidateDetailed (
             cand, block.magnitudes,
-            { locked.data(), locked.size() });
+            { locked.data(), locked.size() },
+            la.analyzer.getThreshold());
         // Design §4.4: neutral at the default bonus of 1.0.
         const float asym = asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
                                                 laneAsymmetryBonus_.load (std::memory_order_relaxed));

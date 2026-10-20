@@ -70,9 +70,18 @@ public:
 
     // Pure read against committed state: scores ONE candidate. Does not
     // mutate anything.
+    //
+    // `peakinessThreshold` is the analyzer's LIVE threshold
+    // (PeakinessAnalyzer::getThreshold()). The scorer's "never resurrect a
+    // rejected bin" gate must use the same number analyse() used, or an
+    // operator-lowered threshold (TuningPanel offers 6 and 8) is half-applied.
+    // The pNorm axis still normalises on the compile-time kDefaultThreshold
+    // (owner taste, 2026-10-21 audit), so this gate alone does not move the
+    // confirm score; it removes the dead second filter.
     float scoreCandidate (const PeakinessAnalyzer::Candidate& candidate,
                           const float* magnitudes,
-                          const LockedFrequencyView& lockedFrequencies);
+                          const LockedFrequencyView& lockedFrequencies,
+                          float peakinessThreshold = PeakinessAnalyzer::kDefaultThreshold);
 
     // Lane D (data loop): the same computation, with every axis and the
     // reference frame the rise axis compared against exposed, so a session
@@ -104,7 +113,8 @@ public:
     };
     ScoreBreakdown scoreCandidateDetailed (const PeakinessAnalyzer::Candidate& candidate,
                                            const float* magnitudes,
-                                           const LockedFrequencyView& lockedFrequencies);
+                                           const LockedFrequencyView& lockedFrequencies,
+                                           float peakinessThreshold = PeakinessAnalyzer::kDefaultThreshold);
 
     // Call once per detector pump AFTER all candidates are scored: advances
     // the EMA baselines and pushes this frame into the rise-history ring.

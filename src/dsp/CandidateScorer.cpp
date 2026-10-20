@@ -33,23 +33,29 @@ void CandidateScorer::beginBlock (double sampleRate)
 
 float CandidateScorer::scoreCandidate (const PeakinessAnalyzer::Candidate& candidate,
                                        const float* magnitudes,
-                                       const LockedFrequencyView& lockedFrequencies)
+                                       const LockedFrequencyView& lockedFrequencies,
+                                       float peakinessThreshold)
 {
-    return scoreCandidateDetailed (candidate, magnitudes, lockedFrequencies).score;
+    return scoreCandidateDetailed (candidate, magnitudes, lockedFrequencies,
+                                   peakinessThreshold).score;
 }
 
 CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
     const PeakinessAnalyzer::Candidate& candidate,
     const float* magnitudes,
-    const LockedFrequencyView& lockedFrequencies)
+    const LockedFrequencyView& lockedFrequencies,
+    float peakinessThreshold)
 {
     ScoreBreakdown out;
     out.rawPeakiness = candidate.peakiness;
 
     // The scorer never resurrects a bin the analyzer already rejected: without
     // this gate, a candidate just under the threshold could still clear the
-    // confirm score through the other two axes.
-    if (candidate.peakiness <= PeakinessAnalyzer::kDefaultThreshold)
+    // confirm score through the other two axes. The gate uses the LIVE
+    // threshold the analyzer applied (2026-10-21 audit): the compile-time
+    // default made the second filter disagree with the first whenever the
+    // operator moved the threshold.
+    if (candidate.peakiness <= peakinessThreshold)
         return out;   // score 0, axes 0, penalty 1 -- product is 0 as before
 
     // Axis 1 -- peakiness. Saturates at 10x threshold: beyond that the bin is
