@@ -209,6 +209,8 @@ bool NotchController::setNotchImpl (int channel, int index, double frequency, do
     const double sampleRate = lanes_[0].detector.getSampleRate();
     if (! (sampleRate > 0.0))                       return false;
     if (! (Q > 0.0))                                return false;
+    // M1: finite and positive by now, so the clamp is well-defined.
+    Q = std::clamp (Q, kMinNotchQ, kMaxNotchQ);
     if (! (frequency > 0.0 && frequency < sampleRate * 0.5))
                                                     return false;
     if (! (depth <= 0.0))                           return false;  // positive depth would BOOST
@@ -519,7 +521,8 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches, int* 
                 // mono slot, a freq past Nyquist, a positive depth.
                 // `lane == firstLane` makes it one count per PresetNotch, not
                 // one per lane of a mirrored stereo pair.
-                if (lane == firstLane && p.depthDB < kMaxDepthDb)
+                if (lane == firstLane
+                    && (p.depthDB < kMaxDepthDb || p.Q < kMinNotchQ || p.Q > kMaxNotchQ))
                     ++clamped;
             }
         const int wanted = lastLane - firstLane + 1;
@@ -531,8 +534,10 @@ int NotchController::adoptPreset (const std::vector<PresetNotch>& notches, int* 
     }
     if (clamped > 0)
         juce::Logger::writeToLog ("preset: clamped " + juce::String (clamped)
-                                  + " notch depth(s) to " + juce::String (kMaxDepthDb, 1)
-                                  + " dB (slot " + juce::String (slotId_) + ")");
+                                  + " notch(es) to depth >= " + juce::String (kMaxDepthDb, 1)
+                                  + " dB, Q " + juce::String (kMinNotchQ, 0) + ".."
+                                  + juce::String (kMaxNotchQ, 0)
+                                  + " (slot " + juce::String (slotId_) + ")");
     if (skippedOut != nullptr)
         *skippedOut = skipped;
     return adopted;
@@ -973,7 +978,7 @@ void NotchController::setNotchDefaults (double q, double depthDb)
     // Same floors as the UI combos, widened slightly: a Q of 8 is the lowest
     // musically usable notch width here and -24 dB is deep enough to kill any
     // howl; beyond either end a preset or future panel could only do harm.
-    notchQ_.store      (std::clamp (q, 8.0, 50.0),        std::memory_order_relaxed);
+    notchQ_.store      (std::clamp (q, kMinNotchQ, kMaxNotchQ), std::memory_order_relaxed);
     notchDepthDb_.store(std::clamp (depthDb, -24.0, -6.0), std::memory_order_relaxed);
 }
 

@@ -85,6 +85,9 @@ Không phải "notch vô hạn" mà là **RBJ peaking-EQ với gain âm**, nên 
 tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo cấu trúc —
 −12 dB nghĩa là còn đúng 0.251 lần biên độ. Ba lớp phòng thủ:
 
+- **Q của mọi lệnh `Set` bị kẹp vào [8, 50]** (`NotchController::kMinNotchQ/kMaxNotchQ`),
+  với mọi Origin, kể cả preset (review 2026-10-20, M1). Trước đó chỉ Q ≤ 0 bị từ
+  chối, nên một preset sửa tay có Q 0,01 cắt −24 dB một dải rộng nhiều octave.
 - `depthDB > 0` bị **từ chối ở cả 3 tầng** (PresetManager → NotchChain → Biquad):
   dạng peaking là đối xứng, gain dương sẽ **khuếch đại đúng tần số đang hú** —
   biến phần mềm chống hú thành máy phát hú.
@@ -124,11 +127,13 @@ trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (v
 `cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
 nay cho cùng bốn số này.
 
-**Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
-non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
-không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
-khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
-cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
+**NaN self-heal (đóng 2026-10-20, review M6):** khi output một chuỗi filter
+non-finite, `AudioEngine` gọi `NotchChain::healNonFinite()`. Hàm này xoá state
+**và** cài lại thiết kế đã lưu của mọi notch Active, giống như replay của
+`setSampleRate` ở cùng rate (không cấp phát, không khoá). Trước đó self-heal chỉ
+`reset()`: ramp đang chạy bị huỷ và filter đứng lại ở độ sâu trung gian, mãi mãi,
+trong khi `NotchInfo.depthDB` đã đọc giá trị đích. Nay notch đang ramp về thẳng
+độ sâu đích.
 
 ## 3. Phát hiện hú — từ mẫu đến điểm số
 

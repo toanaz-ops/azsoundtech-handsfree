@@ -883,13 +883,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 double v = chain.processSample (x);
 
                 // A non-finite chain OUTPUT means the filter state itself is
-                // already poisoned. Reset the chain -- allocation-free, the
-                // same call the device-restart path makes -- and emit silence
-                // for this sample: the filter self-heals within one sample
-                // instead of screaming NaN until someone restarts the device.
+                // already poisoned. Heal the chain -- the coefficient replay
+                // the device-restart path makes, allocation-free -- and emit
+                // silence for this sample: the filter self-heals within one
+                // sample instead of screaming NaN until someone restarts the
+                // device, and a notch that was mid-ramp lands on its target
+                // instead of freezing half-way (review 2026-10-20, M6).
                 if (! std::isfinite (v))
                 {
-                    chain.reset();
+                    chain.healNonFinite();   // state cleared, designs re-installed
                     v = 0.0;
                 }
 
