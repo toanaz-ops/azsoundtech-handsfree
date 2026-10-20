@@ -18,6 +18,8 @@ NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
     taps_[1] = tapLane1;
     eventOutbox_.reserve ((std::size_t) kMaxPendingEvents);
     eventScratch_.reserve ((std::size_t) kMaxPendingEvents);
+    outbox_.reserve (kOutboxReserve);
+    pendingScratch_.reserve (kOutboxReserve);
 }
 
 NotchController::NotchController (LockFreeRingBuffer<float>& tap,
@@ -41,8 +43,16 @@ void NotchController::start()
 
 void NotchController::stop (int timeoutMs)
 {
+    // JUCE force-kills a thread that outlives the timeout. A kill inside a
+    // modelMutex_ region leaves the mutex locked and the next GUI
+    // setNotch()/copySnapshot() deadlocks, so the caller's 1 s is a floor, not
+    // a promise: wait at least kMinStopTimeoutMs, and make a timeout loud.
     if (isThreadRunning())
-        stopThread (timeoutMs);
+    {
+        const bool stopped = stopThread (std::max (timeoutMs, kMinStopTimeoutMs));
+        jassert (stopped);   // a thread that had to be killed may hold modelMutex_
+        juce::ignoreUnused (stopped);
+    }
     // Whatever queued since the last poll -- or ever, if the thread never
     // ran -- reaches the sink before this returns (spec test 11). A sink
     // that re-enters clearNotch()/setNotch() from THIS flush queues more
@@ -1462,7 +1472,11 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
     // notches, and lane 1's fundamental has no business halving a lane-0
     // candidate's score (design §4.3). Under LINKED the two lists are
     // identical anyway, so 1.0.4's behaviour is preserved exactly.
-    std::vector<double> locked;
+    // Stack array, not a std::vector: this runs per lane per block (~190 Hz)
+    // on the detector thread and the old vector allocated every time.
+    // kTotalSlots is the hard upper bound on active notches.
+    std::array<double, (std::size_t) kTotalSlots> locked {};
+    std::size_t lockedCount = 0;
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         for (int c = 0; c < kChannels; ++c)
@@ -1471,7 +1485,7 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                 continue;
             for (int i = 0; i < kSlots; ++i)
                 if (model_[slotOf (c, i)].active)
-                    locked.push_back (model_[slotOf (c, i)].frequency);
+                    locked[lockedCount++] = model_[slotOf (c, i)].frequency;
         }
     }
 
@@ -1497,7 +1511,7 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
 
         const auto breakdown = la.scorer.scoreCandidateDetailed (
             cand, block.magnitudes,
-            { locked.data(), locked.size() });
+            { locked.data(), lockedCount });
         // Design §4.4: neutral at the default bonus of 1.0.
         const float asym = asymmetryMultiplier (block.magnitudes, otherLaneMagnitudes, cand.bin,
                                                 laneAsymmetryBonus_.load (std::memory_order_relaxed));
@@ -1581,26 +1595,30 @@ void NotchController::setSampleRate (double sampleRate)
 
 void NotchController::flushOutbox()
 {
-    std::vector<NotchCommand> pending;
+    // pendingScratch_ is detector-thread state (like eventScratch_): swapping
+    // with it instead of with a fresh local vector keeps both buffers' reserve()
+    // alive, so a steady state of Set/Clear traffic does not reallocate.
+    pendingScratch_.clear();
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
-        pending.swap (outbox_);
+        pendingScratch_.swap (outbox_);
     }
-    if (pending.empty())
+    if (pendingScratch_.empty())
         return;
 
-    const std::size_t written = commands_.write (pending.data(), pending.size());
-    if (written < pending.size())
+    const std::size_t written = commands_.write (pendingScratch_.data(), pendingScratch_.size());
+    if (written < pendingScratch_.size())
     {
         // Short write: the ring was full. Keep the unsent tail and retry on
         // the next pump -- a full queue DELAYS a notch, never loses one, so
         // the model cannot diverge from the chain (bridge design §2).
         const std::lock_guard<std::mutex> lock (modelMutex_);
         outbox_.insert (outbox_.end(),
-                        pending.begin() + (std::ptrdiff_t) written,
-                        pending.end());
-        retryCount_.fetch_add (pending.size() - written, std::memory_order_relaxed);
+                        pendingScratch_.begin() + (std::ptrdiff_t) written,
+                        pendingScratch_.end());
+        retryCount_.fetch_add (pendingScratch_.size() - written, std::memory_order_relaxed);
     }
+    pendingScratch_.clear();
 }
 
 bool NotchController::flushEventOutbox()

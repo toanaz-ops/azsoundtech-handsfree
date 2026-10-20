@@ -2112,3 +2112,78 @@ TEST (AudioEngineSoundcheck, SettingTheChannelToMinusOneIsTheAbortBackstop)
         ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
             << "sample " << n << " -- the lane is still muted after the abort";
 }
+
+// ---------------------------------------------------------------------------
+// A ramp-out requested while the armed channel is NOT a valid output of the
+// callback (the channel count shrank without a restart) is released at once
+// (2026-10-21 audit). Nothing is audible on an unmapped channel, and the old
+// code left the request pending until the next device restart, during which
+// SoundcheckController::arm() refused with RampOutPending.
+//
+// RED IF: the callback leaves scRampOutRequested_ set for an unmapped channel.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineSoundcheck, RampOutOnAnUnmappedChannelIsReleasedInsteadOfStayingPending)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+    engine.setSoundcheckOutputChannel (5);      // the callback below has only 2 outputs
+    engine.requestSoundcheckRampOut();
+    ASSERT_TRUE (engine.isSoundcheckRampOutPending());
+
+    MultiDriver d { 2, 64 };
+    d (engine);
+
+    EXPECT_FALSE (engine.isSoundcheckRampOutPending())
+        << "the ramp-out request is stuck pending on a channel nothing can hear";
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1);
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+}
+
+// The release is for a PENDING request only: an armed, unmapped channel with no
+// request is the controller's to stop, and must not be disarmed behind its back.
+TEST (AudioEngineSoundcheck, AnUnmappedArmedChannelWithNoRampOutRequestStaysArmed)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckOutputChannel (5);
+    MultiDriver d { 2, 64 };
+    d (engine);
+
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// stop() after audioDeviceError() still removes the callback (2026-10-21
+// audit). audioDeviceError clears isRunning_ while the callback stays
+// registered; stop() used to key its teardown on isRunning_ and return early.
+//
+// RED IF: stop() goes back to keying on isRunning_.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineLifecycle, StopAfterADeviceErrorStillTearsTheCallbackDown)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setCallbackRegisteredForTest (true);   // as if start() had succeeded
+    engine.setRunningForTest (true);
+
+    engine.audioDeviceError ("ASIO driver stopped responding");
+    ASSERT_FALSE (engine.isRunning());
+    ASSERT_TRUE (engine.isCallbackRegisteredForTest());
+
+    engine.stop();
+
+    EXPECT_FALSE (engine.isCallbackRegisteredForTest())
+        << "stop() was a no-op after audioDeviceError()";
+    EXPECT_FALSE (engine.isRunning());
+
+    engine.stop();   // idempotent
+    EXPECT_FALSE (engine.isCallbackRegisteredForTest());
+}

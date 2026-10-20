@@ -683,6 +683,14 @@ private:
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
+    // Detector-thread only: flushOutbox() swaps it with outbox_ so neither
+    // buffer is reallocated per flush. Both are reserved to kOutboxReserve.
+    static constexpr std::size_t kOutboxReserve = 128;
+public:
+    // stop() waits at least this long for the detector thread (see stop()).
+    static constexpr int kMinStopTimeoutMs = 5000;
+private:
+    std::vector<NotchCommand> pendingScratch_;
 
     // Room memory (spec 4.6). Fixed arrays, guarded by modelMutex_ exactly
     // like model_ above -- roomMemoryHead_[lane] is the next slot to overwrite.

@@ -238,6 +238,10 @@ SoundcheckController::arm (std::vector<Target> targets, const RunParams& params,
     for (std::int64_t n = 0; n < signal.totalSamples(); ++n)
         reference_[(std::size_t) n] = signal.sampleAt (n);
     sweepTotalSamples_ = signal.totalSamples();
+    // A NEW run means a new reference (peak and rate may differ): drop whatever
+    // reference the estimator kept from the previous run, so the first target
+    // analyses this one (see enterTarget).
+    estimator_.reset (params_.sampleRate);
 
     dropsAtArm_    = engine_.getMicCaptureDropCount();
     micHotSinceMs_ = -1.0;
@@ -371,7 +375,12 @@ void SoundcheckController::stop (int timeoutMs)
         && ! stopRequested_.load (std::memory_order_acquire))
         requestStop (AbortReason::UserStop);
 
-    stopThread (timeoutMs);
+    // JUCE force-kills a thread that outlives the timeout, which could leave a
+    // lock held by the poll thread; treat the caller's value as a floor and make
+    // a timeout loud (2026-10-21 audit).
+    const bool stopped = stopThread (std::max (timeoutMs, NotchController::kMinStopTimeoutMs));
+    jassert (stopped);
+    juce::ignoreUnused (stopped);
 
     // The poll thread is gone; finish the abort here, synchronously.
     if (state_.load (std::memory_order_acquire) != State::Idle)
@@ -807,11 +816,12 @@ void SoundcheckController::enterTarget (int index)
     }
     targetIndex_.store (index, std::memory_order_relaxed);
 
-    estimator_.reset (params_.sampleRate);
     // X, the reference: the EXACT sequence the callback will emit, regenerated
-    // from the same SoundcheckSignal params. Pushed once per target because
-    // reset() clears every stream.
-    estimator_.pushReference (reference_.data(), (int) reference_.size());
+    // from the same SoundcheckSignal params. It is identical for every target
+    // of a run, so it is analysed ONCE (the first target) and kept across the
+    // per-target reset (2026-10-21 audit: ~280 FFT-2048s per target otherwise).
+    if (! estimator_.resetKeepingReference (params_.sampleRate))
+        estimator_.pushReference (reference_.data(), (int) reference_.size());
 
     capturedSamples_     = 0;
     noiseWindowFill_     = 0;

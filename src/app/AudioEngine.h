@@ -311,6 +311,12 @@ public:
     // accepts. Stores the same atomic start() stores.
     void setRunningForTest (bool running);
 
+    // TEST SEAM ONLY: the "callback registered with the device manager" flag
+    // stop() keys its teardown on (separate from isRunning(), which a device
+    // error clears while the callback stays registered).
+    void setCallbackRegisteredForTest (bool registered);
+    bool isCallbackRegisteredForTest() const;
+
     // TEST SEAM ONLY (B-5, F17). Multiplied into the injected sample AFTER
     // SoundcheckSignal has clamped it. 1.0f in every shipping path. It exists
     // because a seam on the PEAK achieves nothing -- the signal's constructor
@@ -463,6 +469,7 @@ private:
     std::atomic<double> currentSampleRate_ { 48000.0 };
     std::atomic<int>    currentBufferSize_ { 64 };
     std::atomic<bool>   isRunning_        { false };
+    std::atomic<bool>   callbackRegistered_ { false };   // addAudioCallback(this) done, not yet removed
 
     // Channel counts observed by the last callback. Relaxed atomics: two
     // stores per callback, no ordering relationship with anything else, and
