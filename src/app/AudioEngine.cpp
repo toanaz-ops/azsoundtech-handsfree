@@ -853,10 +853,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     if (bypass)
     {
-        // Bypass copies IN->OUT along the mapping (the detector still sees
-        // signal via the per-slot taps below).
+        // Bypass passes IN->OUT along the mapping (the detector still sees
+        // signal via the per-slot taps below). ACCUMULATED, exactly like the
+        // DSP branch (review 2026-10-20, I2): with a copy, two slots aimed at
+        // one output left only the last one -- a mic muted in BYPASS that
+        // jumped back (+6 dB on a correlated pair) on AUTO. The outputs were
+        // cleared above, so an output fed by one lane is still bit-identical
+        // to its input. Non-finite input is left to the final output guard.
         for (int i = 0; i < numLanes; ++i)
-            juce::FloatVectorOperations::copy (lanes[i].out, lanes[i].in, numSamples);
+            juce::FloatVectorOperations::add (lanes[i].out, lanes[i].in, numSamples);
     }
     else
     {

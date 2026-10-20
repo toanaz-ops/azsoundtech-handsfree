@@ -936,6 +936,40 @@ TEST (AudioEngineRouting, TwoMonoSlotsSumIntoOneOutputChannel)
         ASSERT_FLOAT_EQ (s, 0.0f);
 }
 
+// RED IF Bypass copies instead of accumulating (review 2026-10-20, I2). Same
+// routing as TwoMonoSlotsSumIntoOneOutputChannel, in Bypass: with a copy the
+// last lane overwrites the first, so slot 0's mic disappears from the shared
+// output while bypassed and comes back when AUTO is pressed.
+TEST (AudioEngineRouting, BypassAlsoSumsTwoSlotsIntoOneOutputChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    ASSERT_EQ (engine.getMode(), AudioEngine::Mode::Bypass);
+
+    SlotConfig s0; s0.enabled = true; s0.width = 1;
+    s0.inputChannels[0] = 0; s0.outputChannels[0] = 0;
+    engine.setSlotConfig (0, s0);
+
+    SlotConfig s1; s1.enabled = true; s1.width = 1;
+    s1.inputChannels[0] = 1; s1.outputChannels[0] = 0;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (512, 2, 4);
+    d.sine (0, 1000.0, 48000.0, 0.4f);
+    d.sine (1, 3000.0, 48000.0, 0.4f);
+    d (engine);
+
+    // Bypass does no DSP, so the sum is exact: the same float adds, in the
+    // same order, onto a cleared buffer.
+    for (int i = 0; i < d.frames; ++i)
+        ASSERT_EQ (d.out[0][(std::size_t) i],
+                   0.0f + d.in[0][(std::size_t) i] + d.in[1][(std::size_t) i]) << "sample " << i;
+
+    for (const float s : d.out[1])
+        ASSERT_FLOAT_EQ (s, 0.0f);
+}
+
 TEST (AudioEngineRouting, BypassFollowsTheSlotMappingNotTheChannelIndex)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
