@@ -217,6 +217,10 @@ SAFE (500 ms/4/trần −12 dB/Q40/thr 12.0), BALANCED (250/3/trần −18/30/10
 (100/1/trần −24/20/8.0), tự chuyển CUSTOM khi chỉnh tay; mỗi slot chọn theo tuning
 Global chung hoặc Custom riêng.
 
+Ngưỡng peakiness (`thr`) đi tới **cả** analyzer lẫn scorer: cổng của scorer và trục
+`pNorm = (p/thr − 1)/9` dùng ngưỡng đang đặt. Trước 2026-10-20 (review I3), scorer
+dùng hằng 10, nên mọi ngưỡng dưới 10, kể cả 8.0 của AGGRESSIVE, chạy y như 10.
+
 ### 3.4 NotchController — detector là tác giả duy nhất (D-05)
 
 Quyết định kiến trúc quan trọng nhất: **detector là người duy nhất ra lệnh

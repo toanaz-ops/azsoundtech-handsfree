@@ -990,7 +990,10 @@ double NotchController::getNotchDepthDb() const
 void NotchController::setPeakinessThreshold (float t)
 {
     for (auto& l : lanes_)
+    {
         l.analyzer.setThreshold (t);   // clamped in PeakinessAnalyzer
+        l.scorer.setPeakinessThreshold (t);   // same clamp; review I3
+    }
 }
 
 float NotchController::getPeakinessThreshold() const
