@@ -131,6 +131,10 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        # -j 2, not more: SoundcheckController.AbortAndJoinJoinsBeforeItRuns
+        # drives the real poll thread against wall time, and under ASan with
+        # eight jobs on the box it missed its window (it passes alone, and the
+        # whole suite passes at -j 2: 795/795, 136 s, 2026-10-20).
         run: |
           cd build
-          ctest --output-on-failure -j 4
+          ctest --output-on-failure -j 2
