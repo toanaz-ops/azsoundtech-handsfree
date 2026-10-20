@@ -853,10 +853,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     if (bypass)
     {
-        // Bypass copies IN->OUT along the mapping (the detector still sees
-        // signal via the per-slot taps below).
+        // Bypass routes IN->OUT along the mapping (the detector still sees
+        // signal via the per-slot taps below). It ACCUMULATES onto the cleared
+        // output, exactly like the DSP branch: several lanes aimed at one
+        // output channel SUM in Bypass as they do in Auto (2026-10-21 audit).
+        // It used to copy, so the LAST lane won and every earlier lane sharing
+        // that channel vanished from the PA the moment the operator hit the
+        // emergency BYPASS control -- and, because the tap reads `out`, the
+        // earlier lane's detector tap then carried the later lane's samples.
         for (int i = 0; i < numLanes; ++i)
-            juce::FloatVectorOperations::copy (lanes[i].out, lanes[i].in, numSamples);
+            juce::FloatVectorOperations::add (lanes[i].out, lanes[i].in, numSamples);
     }
     else
     {

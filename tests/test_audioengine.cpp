@@ -936,6 +936,56 @@ TEST (AudioEngineRouting, TwoMonoSlotsSumIntoOneOutputChannel)
         ASSERT_FLOAT_EQ (s, 0.0f);
 }
 
+// The Bypass twin of the test above (2026-10-21 audit). BYPASS is the
+// emergency control: on a rig where two slots share one output channel it must
+// still pass BOTH sources, the same sum Auto produces. Bypass used to COPY
+// in->out per lane, so the last lane overwrote the first and one mic simply
+// disappeared from the PA when the operator pressed BYPASS.
+//
+// RED IF: the Bypass branch goes back to FloatVectorOperations::copy.
+TEST (AudioEngineRouting, BypassTwoMonoSlotsSumIntoOneOutputChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Bypass);
+
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+
+    SlotConfig s0; s0.enabled = true; s0.width = 1;
+    s0.inputChannels[0] = 0; s0.outputChannels[0] = 0;
+    engine.setSlotConfig (0, s0);
+
+    SlotConfig s1; s1.enabled = true; s1.width = 1;
+    s1.inputChannels[0] = 1; s1.outputChannels[0] = 0;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (512, 2, 4);
+    d.sine (0, 1000.0, 48000.0, 0.25f);
+    d.sine (1, 3000.0, 48000.0, 0.25f);
+    d.poisonOutputs (0.9f);   // the callback must overwrite, not add onto, stale buffers
+    d (engine);
+
+    std::vector<float> expectedSum ((std::size_t) d.frames);
+    for (int i = 0; i < d.frames; ++i)
+        expectedSum[(std::size_t) i] = d.in[0][(std::size_t) i] + d.in[1][(std::size_t) i];
+
+    // Bypass is a pure sum: bit-exact, no notch, no tolerance needed.
+    for (int i = 0; i < d.frames; ++i)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) i], expectedSum[(std::size_t) i]) << "sample " << i;
+
+    // Neither lane may be missing: each input is individually recoverable
+    // from the sum by subtracting the other.
+    EXPECT_GT (worstRelativeError (d.in[0], d.out[0]), 0.1)
+        << "output equals lane 0 alone -- lane 1 vanished";
+    EXPECT_GT (worstRelativeError (d.in[1], d.out[0]), 0.1)
+        << "output equals lane 1 alone -- lane 0 vanished";
+
+    for (const float s : d.out[1])
+        ASSERT_FLOAT_EQ (s, 0.0f);
+}
+
 TEST (AudioEngineRouting, BypassFollowsTheSlotMappingNotTheChannelIndex)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
