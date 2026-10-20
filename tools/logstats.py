@@ -54,6 +54,14 @@ def summarise(events: list[dict]) -> dict:
                  # it moved. Both start at the placement values.
                  "depth_db": e.get("depth_db"), "deepest_db": e.get("depth_db"),
                  "retunes": 0}
+            # A Set onto a key whose previous record never saw its Clear (a
+            # lost Clear, a log cut short) closes that record here: left open
+            # it reads "still active" for the whole session (review
+            # 2026-10-20, M9).
+            old = open_by_key.get(key(e))
+            if old is not None:
+                old["clear_t"] = n["set_t"]
+                old["reason"] = "superseded"
             notches.append(n)
             open_by_key[key(e)] = n
         elif ev == "notch_retune":
@@ -115,6 +123,7 @@ def summarise(events: list[dict]) -> dict:
         # pattern worth seeing at a glance, and because a fixture can then pin
         # that the reason name survives the whole C++ -> JSON -> reader path.
         "soundcheck_replaced": sum(1 for n in notches if n["reason"] == "soundcheck_replace"),
+        "superseded": sum(1 for n in notches if n["reason"] == "superseded"),
         "dropped": end.get("dropped_events"),
     }
 
@@ -151,6 +160,9 @@ def print_report(s: dict) -> None:
           f"  unjudged {s['unjudged']} ({(s['unjudged'] / total * 100 if total else 0):.0f}%)")
     if s["soundcheck_replaced"]:
         print(f"soundcheck replaced {s['soundcheck_replaced']} notch(es) from an earlier run")
+    if s["superseded"]:
+        print(f"{s['superseded']} notch record(s) closed by a later Set on the same slot "
+              "(their Clear is missing from the log)")
     if s["dropped"]:
         print(f"WARNING: logger dropped {s['dropped']} event(s)")
 
@@ -164,6 +176,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-recurrence-max", type=int)
     ap.add_argument("--expect-retunes", type=int)
     ap.add_argument("--expect-soundcheck-replaced", type=int)
+    ap.add_argument("--expect-superseded", type=int)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -186,6 +199,8 @@ def main(argv: list[str]) -> int:
             and s["soundcheck_replaced"] != args.expect_soundcheck_replaced):
         failures.append(
             f"soundcheck-replaced {s['soundcheck_replaced']} != {args.expect_soundcheck_replaced}")
+    if args.expect_superseded is not None and s["superseded"] != args.expect_superseded:
+        failures.append(f"superseded {s['superseded']} != {args.expect_superseded}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

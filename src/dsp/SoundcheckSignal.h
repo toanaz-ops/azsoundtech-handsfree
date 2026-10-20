@@ -47,8 +47,9 @@ public:
 
     // [0, kSoundcheckMaxPeak]. NaN and infinity map to 0 (silence), not to the
     // maximum: any comparison with NaN picks an arbitrary branch, so the
-    // non-finite case is decided explicitly, exactly as AudioEngine.cpp:642
-    // decides it for the output clamp.
+    // non-finite case is decided explicitly, exactly as the final output guard
+    // in AudioEngine::audioDeviceIOCallbackWithContext decides it for the
+    // output clamp.
     static float clampPeak (float requested) noexcept;
 
     struct Params

@@ -415,9 +415,9 @@ private:
 //
 // It exists because Origin::Soundcheck has TWO producers. This function is
 // one; the legacy 15 s soundcheck MODE is the other -- placeConfirmed stamps
-// Origin::Soundcheck whenever soundcheckActive() (NotchController.cpp:1093),
-// and MainComponent turns that on for Mode::Soundcheck (MainComponent.cpp:
-// 802-803). So "clear every Origin::Soundcheck notch on this slot" would
+// Origin::Soundcheck whenever soundcheckActive() (NotchController::
+// placeConfirmed), and MainComponent turns that on for Mode::Soundcheck
+// (MainComponent::applyModeGating). So "clear every Origin::Soundcheck notch on this slot" would
 // silently delete protection the operator locked in by hand with the mode
 // switch, at the moment they pressed AP DUNG.
 //
