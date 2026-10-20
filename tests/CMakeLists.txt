@@ -131,7 +131,13 @@ if(Python3_Interpreter_FOUND)
                 --expect-notches 5 --expect-verdicts 3 --expect-false 1
                 --expect-recurrence-max 2 --expect-retunes 2
                 --expect-soundcheck-replaced 1)
+    # Lane L: the copilot's finding rules. Offline; the --ask tools are
+    # covered only where the anthropic package happens to be installed.
+    add_test(NAME copilot_findings
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_copilot.py)
 else()
     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME copilot_findings COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(copilot_findings PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
 endif()
