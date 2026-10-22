@@ -936,6 +936,56 @@ TEST (AudioEngineRouting, TwoMonoSlotsSumIntoOneOutputChannel)
         ASSERT_FLOAT_EQ (s, 0.0f);
 }
 
+// The Bypass twin of the test above (2026-10-21 audit). BYPASS is the
+// emergency control: on a rig where two slots share one output channel it must
+// still pass BOTH sources, the same sum Auto produces. Bypass used to COPY
+// in->out per lane, so the last lane overwrote the first and one mic simply
+// disappeared from the PA when the operator pressed BYPASS.
+//
+// RED IF: the Bypass branch goes back to FloatVectorOperations::copy.
+TEST (AudioEngineRouting, BypassTwoMonoSlotsSumIntoOneOutputChannel)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Bypass);
+
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+
+    SlotConfig s0; s0.enabled = true; s0.width = 1;
+    s0.inputChannels[0] = 0; s0.outputChannels[0] = 0;
+    engine.setSlotConfig (0, s0);
+
+    SlotConfig s1; s1.enabled = true; s1.width = 1;
+    s1.inputChannels[0] = 1; s1.outputChannels[0] = 0;
+    engine.setSlotConfig (1, s1);
+
+    RoutingDriver d (512, 2, 4);
+    d.sine (0, 1000.0, 48000.0, 0.25f);
+    d.sine (1, 3000.0, 48000.0, 0.25f);
+    d.poisonOutputs (0.9f);   // the callback must overwrite, not add onto, stale buffers
+    d (engine);
+
+    std::vector<float> expectedSum ((std::size_t) d.frames);
+    for (int i = 0; i < d.frames; ++i)
+        expectedSum[(std::size_t) i] = d.in[0][(std::size_t) i] + d.in[1][(std::size_t) i];
+
+    // Bypass is a pure sum: bit-exact, no notch, no tolerance needed.
+    for (int i = 0; i < d.frames; ++i)
+        ASSERT_FLOAT_EQ (d.out[0][(std::size_t) i], expectedSum[(std::size_t) i]) << "sample " << i;
+
+    // Neither lane may be missing: each input is individually recoverable
+    // from the sum by subtracting the other.
+    EXPECT_GT (worstRelativeError (d.in[0], d.out[0]), 0.1)
+        << "output equals lane 0 alone -- lane 1 vanished";
+    EXPECT_GT (worstRelativeError (d.in[1], d.out[0]), 0.1)
+        << "output equals lane 1 alone -- lane 0 vanished";
+
+    for (const float s : d.out[1])
+        ASSERT_FLOAT_EQ (s, 0.0f);
+}
+
 TEST (AudioEngineRouting, BypassFollowsTheSlotMappingNotTheChannelIndex)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
@@ -2111,4 +2161,115 @@ TEST (AudioEngineSoundcheck, SettingTheChannelToMinusOneIsTheAbortBackstop)
     for (int n = 0; n < 256; ++n)
         ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
             << "sample " << n << " -- the lane is still muted after the abort";
+}
+
+// ---------------------------------------------------------------------------
+// Commands queued while no device was open survive the device opening
+// (2026-10-21 audit, finding "model says Active, chain is empty").
+//
+// The failing story: ASIO is not ready at launch, a preset load / manual notch
+// writes a Set into the command ring, nothing drains it (no callback), the
+// operator then picks the device and audioDeviceAboutToStart() ran
+// queue.clear() -- so the notch table showed protection the chain did not have.
+//
+// RED IF: audioDeviceAboutToStart() clears the command rings again.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineCommands, CommandsQueuedBeforeDeviceOpenSurviveAboutToStart)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 3, 1000.0f, 30.0f, -12.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    // No callback has run: the chain cannot have seen the command.
+    ASSERT_NE (engine.getNotchChainForTest (0).getNotchInfo (3).state,
+               NotchChain::NotchState::Active);
+
+    engine.audioDeviceAboutToStart (nullptr);   // the device opens
+
+    EXPECT_EQ (q.getAvailableRead(), 1u) << "the command was discarded";
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_EQ (engine.getNotchChainForTest (0).getNotchInfo (3).state,
+               NotchChain::NotchState::Active);
+    EXPECT_DOUBLE_EQ (engine.getNotchChainForTest (0).getNotchInfo (3).frequency, 1000.0);
+}
+
+// ---------------------------------------------------------------------------
+// A ramp-out requested while the armed channel is NOT a valid output of the
+// callback (the channel count shrank without a restart) is released at once
+// (2026-10-21 audit). Nothing is audible on an unmapped channel, and the old
+// code left the request pending until the next device restart, during which
+// SoundcheckController::arm() refused with RampOutPending.
+//
+// RED IF: the callback leaves scRampOutRequested_ set for an unmapped channel.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineSoundcheck, RampOutOnAnUnmappedChannelIsReleasedInsteadOfStayingPending)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckPeak (SoundcheckSignal::kSoundcheckMaxPeak);
+    engine.setSoundcheckSampleIndex (0);
+    engine.setSoundcheckOutputChannel (5);      // the callback below has only 2 outputs
+    engine.requestSoundcheckRampOut();
+    ASSERT_TRUE (engine.isSoundcheckRampOutPending());
+
+    MultiDriver d { 2, 64 };
+    d (engine);
+
+    EXPECT_FALSE (engine.isSoundcheckRampOutPending())
+        << "the ramp-out request is stuck pending on a channel nothing can hear";
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), -1);
+    EXPECT_FALSE (engine.soundcheckIsEmitting());
+}
+
+// The release is for a PENDING request only: an armed, unmapped channel with no
+// request is the controller's to stop, and must not be disarmed behind its back.
+TEST (AudioEngineSoundcheck, AnUnmappedArmedChannelWithNoRampOutRequestStaysArmed)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setRunningForTest (true);
+    routeMono (engine, 0, 0, 0);
+
+    engine.setSoundcheckOutputChannel (5);
+    MultiDriver d { 2, 64 };
+    d (engine);
+
+    EXPECT_EQ (engine.getSoundcheckOutputChannel(), 5);
+}
+
+// ---------------------------------------------------------------------------
+// stop() after audioDeviceError() still removes the callback (2026-10-21
+// audit). audioDeviceError clears isRunning_ while the callback stays
+// registered; stop() used to key its teardown on isRunning_ and return early.
+//
+// RED IF: stop() goes back to keying on isRunning_.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineLifecycle, StopAfterADeviceErrorStillTearsTheCallbackDown)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setCallbackRegisteredForTest (true);   // as if start() had succeeded
+    engine.setRunningForTest (true);
+
+    engine.audioDeviceError ("ASIO driver stopped responding");
+    ASSERT_FALSE (engine.isRunning());
+    ASSERT_TRUE (engine.isCallbackRegisteredForTest());
+
+    engine.stop();
+
+    EXPECT_FALSE (engine.isCallbackRegisteredForTest())
+        << "stop() was a no-op after audioDeviceError()";
+    EXPECT_FALSE (engine.isRunning());
+
+    engine.stop();   // idempotent
+    EXPECT_FALSE (engine.isCallbackRegisteredForTest());
 }

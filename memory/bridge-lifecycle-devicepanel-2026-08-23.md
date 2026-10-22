@@ -22,6 +22,14 @@ thứ tự này.
 ## Hệ quả cho phiên sau
 
 - Thêm bất kỳ đường restart thiết bị nào mới → phải bọc bằng hai hook đó.
+- **Có một đường restart không do app khởi xướng** (review 2026-10-20, I1). Driver
+  ASIO trả lời reset, đổi buffer hay đổi rate bằng timer riêng của JUCE:
+  `close()` → `audioDeviceStopped()` → `open()` → `start()` → `audioDeviceAboutToStart()`.
+  Đường này không chạy hook nào, nên vòng clear ring đua với 8 thread detector.
+  Từ 2026-10-20, `AudioEngine::onDeviceStopping` và `onDeviceStarted` bắt đường
+  này. Khi thiết bị dừng mà detector vẫn chạy, tức là driver tự restart:
+  `onBeforeRestart()` chạy ngay, còn `onAfterRestart()` được hẹn qua message loop.
+  Không dùng cờ: mọi restart do app khởi xướng đều join detector trước.
 - Đừng "dọn dẹp" hai hook vì thấy "không ai gọi" — chúng được gọi từ lambda
   trong constructor của MainComponent.
 

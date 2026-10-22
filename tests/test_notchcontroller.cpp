@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -2079,6 +2080,44 @@ TEST (NotchControllerLadder, AdoptPresetClampsADeepPresetNotch)
     p.index = 0; p.freq = 1000.0; p.Q = 30.0; p.depthDB = -40.0;
     EXPECT_EQ (h.controller.adoptPreset ({ p }), 1);
     EXPECT_DOUBLE_EQ (h.controller.depthDbForTest (0, 0), -24.0);
+}
+
+// RED IF Q is not clamped into [kMinNotchQ, kMaxNotchQ] for every origin
+// (review 2026-10-20, M1). Before, only Q <= 0 was refused: a hand-edited
+// preset with Q 0.01 put a -24 dB cut several octaves wide on the PA.
+TEST (NotchControllerLadder, QOutsideTheUsableRangeIsClampedForEveryOrigin)
+{
+    const NotchController::Origin origins[] = { NotchController::Origin::Detector,
+                                                NotchController::Origin::Preset,
+                                                NotchController::Origin::Manual,
+                                                NotchController::Origin::Soundcheck };
+    for (auto origin : origins)
+    {
+        for (const auto [asked, expected] : { std::pair { 0.01, NotchController::kMinNotchQ },
+                                              std::pair { 500.0, NotchController::kMaxNotchQ },
+                                              std::pair { 30.0, 30.0 } })
+        {
+            Harness h;
+            ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, asked, -12.0, origin));
+            h.controller.runOnce();
+
+            NotchCommand cmd {};
+            ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+            EXPECT_FLOAT_EQ (cmd.Q, (float) expected) << "asked Q " << asked;
+        }
+    }
+}
+
+TEST (NotchControllerLadder, AdoptPresetClampsAWidePresetNotch)
+{
+    Harness h;
+    PresetNotch p;
+    p.index = 0; p.freq = 1000.0; p.Q = 0.01; p.depthDB = -12.0;
+    EXPECT_EQ (h.controller.adoptPreset ({ p }), 1);
+    h.controller.runOnce();
+    NotchCommand cmd {};
+    ASSERT_EQ (h.commands.read (&cmd, 1), 1u);
+    EXPECT_FLOAT_EQ (cmd.Q, (float) NotchController::kMinNotchQ);
 }
 
 // RED IF pushRetuneLocked stops stamping stageChangedAtMs itself and the

@@ -43,6 +43,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 
 inline const char* defaultDeviceTypeName()
@@ -311,6 +312,12 @@ public:
     // accepts. Stores the same atomic start() stores.
     void setRunningForTest (bool running);
 
+    // TEST SEAM ONLY: the "callback registered with the device manager" flag
+    // stop() keys its teardown on (separate from isRunning(), which a device
+    // error clears while the callback stays registered).
+    void setCallbackRegisteredForTest (bool registered);
+    bool isCallbackRegisteredForTest() const;
+
     // TEST SEAM ONLY (B-5, F17). Multiplied into the injected sample AFTER
     // SoundcheckSignal has clamped it. 1.0f in every shipping path. It exists
     // because a seam on the PEAK achieves nothing -- the signal's constructor
@@ -363,6 +370,25 @@ public:
     // any chain in the 8x2 grid.
     const NotchChain& getNotchChainForTest (int channel) const;
     const NotchChain& getNotchChainForTest (int slot, int lane) const;
+
+    // Device lifecycle hooks (review 2026-10-20, I1). A restart the APP starts
+    // goes through MainComponent's onBeforeRestart/onAfterRestart, which join
+    // every ring consumer first (bridge design §6.5). A restart the DRIVER
+    // starts does not: JUCE's ASIO device answers kAsioResetRequest,
+    // kAsioBufferSizeChange and a sample-rate change from its own timer with
+    // close() -> audioDeviceStopped() ... start() -> audioDeviceAboutToStart(),
+    // and the tap rings and micCapture_ were cleared with the detectors and
+    // the lane M thread still reading them.
+    //
+    // onDeviceStopping runs FIRST in audioDeviceStopped(); onDeviceStarted
+    // runs LAST in audioDeviceAboutToStart(), after the audio rings are
+    // cleared (the command queues are kept -- see the end of that function).
+    // Both run on whatever thread JUCE stops/starts the device on -- the
+    // message thread for every path this app knows -- and the owner must
+    // clear them before it is destroyed. Empty by default: tests and tools
+    // that drive the engine directly see no change.
+    std::function<void()> onDeviceStopping;
+    std::function<void()> onDeviceStarted;
 
     // AudioIODeviceCallback interface
     // (JUCE 9 replaced the legacy 5-arg audioDeviceIOCallback with
@@ -463,6 +489,7 @@ private:
     std::atomic<double> currentSampleRate_ { 48000.0 };
     std::atomic<int>    currentBufferSize_ { 64 };
     std::atomic<bool>   isRunning_        { false };
+    std::atomic<bool>   callbackRegistered_ { false };   // addAudioCallback(this) done, not yet removed
 
     // Channel counts observed by the last callback. Relaxed atomics: two
     // stores per callback, no ordering relationship with anything else, and

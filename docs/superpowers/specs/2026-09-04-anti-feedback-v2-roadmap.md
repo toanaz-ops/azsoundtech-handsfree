@@ -76,6 +76,7 @@ S và D **song song** được: S đụng `AudioEngine`/`NotchController`/DSP, D
 | L | chờ D | |
 | A | **DỪNG 2026-10-19** (owner: "không chấp nhận bất kỳ méo mó tiêu cực nào"): spec rev 2 + mô phỏng cho thấy PEM-AFC chỉ PEM không chứng minh được "không méo" trên tín hiệu có màu (+2 dB MSG, bộ lọc gần như không học ở bước an toàn); dịch tần cho +6 dB nhưng đổi tiếng → loại. Nghiên cứu giữ ở `tools/afc/` + `docs/superpowers/decisions/2026-10-19-lane-a-afc.md`. Mở lại khi có khử tương quan không đổi tiếng + bộ đo "không méo" trên ghi âm rig | 2026-10-19 |
 | U | **đã merge main** qua PR #7 (owner "merge, chạy tiếp cho tới khi xong" 18/10/2026, Q13 chấp nhận tạm Q5–Q12): Dumb/Geek, wizard 3 bước, `settings.json` qua thư viện `az_host_settings`, peak meter đầu vào; CI Windows 775/775; spec 1 vòng + code 4 vòng phản biện, 0 finding mở ngoài minor ghi trong PR; **chưa đóng gói 1.4.0** (release chạy trên máy Windows có NSIS + ổ `Z:`) | 2026-10-18 |
+| F | **P1 (2026-10-20)**: ước lượng tần số dưới-bin (nội suy parabol log-biên độ, sai số ≤ 0,016 bin), notch đặt đúng tần số hú; ở 315 Hz độ cắt tại tần số hú −4,5 → −18 dB. Từ khảo sát `docs/research/2026-10-20-defeedback-landscape.md`; P2 (notch hẹp, Q thích nghi) đi sau, P3 (PHPR + độ đều tốc độ tăng) chờ nhạc thu và nhãn D, P4 (soundcheck pha + coherence) chờ rig và quyết định giấy phép `rta-tool` | 2026-10-20 |
 
 **Quyết định điều phối viên (Task 3, lane D, 2026-09-05):** amendment A-9 của
 plan lane D — "reset Detector của lane 1 khi một slot widen 1→2" — bị **rút

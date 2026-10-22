@@ -16,6 +16,23 @@ double CandidateScorer::getRiseReferenceMs() const
     return riseReferenceMs_.load (std::memory_order_relaxed);
 }
 
+void CandidateScorer::setPeakinessThreshold (float threshold)
+{
+    // NaN would fail every comparison below and gate nothing; keep the old
+    // value instead. The clamp is the analyzer's, so the two always agree.
+    if (! std::isfinite (threshold))
+        return;
+    peakinessThreshold_.store (std::clamp (threshold,
+                                           PeakinessAnalyzer::kMinThreshold,
+                                           PeakinessAnalyzer::kMaxThreshold),
+                               std::memory_order_relaxed);
+}
+
+float CandidateScorer::getPeakinessThreshold() const
+{
+    return peakinessThreshold_.load (std::memory_order_relaxed);
+}
+
 void CandidateScorer::beginBlock (double sampleRate)
 {
     sampleRate_ = sampleRate;
@@ -49,13 +66,13 @@ CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
     // The scorer never resurrects a bin the analyzer already rejected: without
     // this gate, a candidate just under the threshold could still clear the
     // confirm score through the other two axes.
-    if (candidate.peakiness <= PeakinessAnalyzer::kDefaultThreshold)
+    const float threshold = peakinessThreshold_.load (std::memory_order_relaxed);
+    if (candidate.peakiness <= threshold)
         return out;   // score 0, axes 0, penalty 1 -- product is 0 as before
 
     // Axis 1 -- peakiness. Saturates at 10x threshold: beyond that the bin is
     // peaky "enough" and extra sharpness must not substitute for novelty.
-    float pNorm = (candidate.peakiness / PeakinessAnalyzer::kDefaultThreshold - 1.0f)
-                  / 9.0f;
+    float pNorm = (candidate.peakiness / threshold - 1.0f) / 9.0f;
     pNorm = std::min (std::max (pNorm, 0.0f), 1.0f);
     out.pNorm = pNorm;
 
@@ -104,7 +121,8 @@ CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
             const float was  = std::max (reference[candidate.bin], 1e-12f);
             const float rise = magnitudes[candidate.bin] / was;
             out.riseRatio = rise;   // lane G: the raw ratio, unsaturated
-            rNorm = (rise - 1.0f) / 0.5f;
+            // (kRiseThreshold - 1) == 0.5: the rise that maps to rNorm 1.
+            rNorm = (rise - 1.0f) / static_cast<float> (kRiseThreshold - 1.0);
             rNorm = std::min (std::max (rNorm, 0.0f), 1.0f);
         }
         // else: history too young -- rNorm stays 0 (see above).
