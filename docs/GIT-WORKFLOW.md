@@ -261,6 +261,48 @@ không dài thêm.
 
 ---
 
+## 5b. Nhiều phiên Claude cùng làm một repo — một bảng việc, một chủ
+
+**Chuyện đã xảy ra (20–21/10/2026).** Owner bảo "God mode, làm tiếp không hỏi".
+Hai phiên cùng chạy một bản audit độc lập lên cùng `main` (`f2cc11e`) và cùng sửa
+những lỗi giống nhau, mỗi phiên trên prefix nhánh riêng (`fix/*` và `claude/*`).
+Kết quả: **6 PR trùng nhau** (Bypass, NaN-heal, ngưỡng scorer, docs, restart…),
+CI chạy hai lần cho cùng một bản sửa, rồi phải mất thêm một vòng đóng, rút gọn và
+gộp PR. Không phiên nào sai luật. Lỗi nằm ở chỗ **không có chỗ nào ghi "việc này
+đã có người nhận"**.
+
+### Luật
+
+1. **Chỉ DEV MASTER phát việc.** Phiên dự án nhận việc từ DEV MASTER, hoặc từ
+   owner gõ trực tiếp. Một phiên tự sinh việc mới (audit, nghiên cứu, một lane mới)
+   phải **báo DEV MASTER trước** bằng cross-session message, rồi mới bắt đầu.
+   Không chạy hai audit toàn repo song song.
+2. **Bảng việc là GitHub Issues.** Mỗi việc là một issue: một finding của review,
+   một lane, hoặc một mục roadmap. Nhận việc bằng cách gắn label `claimed` và
+   comment `claimed by <tên phiên> — nhánh <branch>`, **trước khi viết dòng code
+   đầu tiên**. Issue đã có `claimed` thì phiên khác không làm, kể cả khi thấy cách
+   sửa hay hơn: comment đề xuất vào issue đó.
+3. **Kiểm trùng trước khi tạo nhánh.** Liệt kê PR đang mở và issue có `claimed`.
+   Tìm theo **mã finding** (B1, I2, M6…) **và theo tên file** sắp sửa. Trùng thì
+   dừng và báo DEV MASTER.
+4. **Mã finding là khoá chung.** Mọi báo cáo review/audit đánh mã cho từng phát
+   hiện và mở mỗi phát hiện thành một issue. Tiêu đề PR mang mã đó, ví dụ
+   `fix: ... (review I2)`, để hai PR cùng mã lộ ra ngay trong danh sách PR.
+5. **Prefix nhánh theo phiên, không push vào nhánh phiên khác.** Ngoại lệ duy
+   nhất: khi owner bảo merge, phiên làm việc merge được phép thêm **merge commit**
+   gỡ conflict vào nhánh của phiên khác. Không rebase, không force-push nhánh đó.
+6. **Không đóng PR của phiên khác.** Chỉ đóng khi DEV MASTER hoặc owner bảo, và
+   kèm một comment nói PR nào thay nó.
+7. **Release note dạng mảnh rời.** Mỗi PR chạm audio path ghi
+   `docs/release-notes/unreleased/<slug>.md`, kèm *expected level change*. Không
+   sửa thẳng `docs/release-notes/<version>-alpha.md`: năm PR cùng thêm vào một chỗ
+   trong file đó là năm conflict. Các mảnh được gộp lúc đóng gói.
+8. **Trước khi merge một chuỗi PR, dựng nhánh tích hợp local.** Merge đúng thứ
+   tự, build, chạy `ctest`. Mỗi PR chỉ được CI test riêng trên `main` cũ; tổ hợp
+   của chúng thì chưa ai test.
+
+---
+
 ## 6. Bẫy đã biết
 
 **Build local MSVC xanh KHÔNG phải là cổng CI.** Ngày 2026-09-15, cú push đầu
