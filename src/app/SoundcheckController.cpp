@@ -126,7 +126,7 @@ SoundcheckController::validateTargets (const std::vector<Target>& targets) const
             return Refusal::SlotDisabled;
 
         // F26: the lane loop merely `continue`s past a bad pair
-        // (AudioEngine.cpp:546-548), so a routing fault would otherwise read as
+        // (the lane loop in AudioEngine::audioDeviceIOCallbackWithContext), so a routing fault would otherwise read as
         // "could not measure" -- a very different message for the operator.
         if (t.lane < 0 || t.lane >= cfg.width
             || t.inChannel  < 0 || t.inChannel  >= ins
@@ -1172,8 +1172,8 @@ void SoundcheckController::notifyStateChanged() const
 // MESSAGE THREAD ONLY (spec 4.6e, invariant 17).
 //
 // setNotch/clearNotch are policy entry points declared message-thread
-// (NotchController.h:225-230), and setNotchImpl additionally reads width_
-// (NotchController.cpp:199) and the detector's sample rate (:209) OUTSIDE
+// (see the threading note on NotchController::setNotch), and setNotchImpl
+// additionally reads width_ and the detector's sample rate OUTSIDE
 // modelMutex_. This is a FREE FUNCTION rather than a SoundcheckController
 // method so that no route exists by which the lane M thread could reach it:
 // that class holds no NotchController pointer at all.
@@ -1186,7 +1186,7 @@ namespace
 // ever needed six, because lane 0 and lane 1 have entirely separate chains.
 //
 // TOP-DOWN (15, 14, 13 ...) while the detector allocates bottom-up
-// (firstFreeIndexLocked scans i = 0..kSlots, NotchController.cpp:1066-1069),
+// (NotchController::firstFreeIndexLocked scans i = 0..kSlots),
 // so the two only meet when the chain is nearly full.
 //
 // `lane < 0` means "must be free on every DRIVEN lane" -- a LINKED pair, the
@@ -1195,7 +1195,7 @@ namespace
 // 1 is never written and never marked, so scanning it would report every index
 // free and hand 15 out twice.
 //
-// Only ACTIVE notches enter the snapshot (NotchController.cpp:577), so "not
+// Only ACTIVE notches enter the snapshot (NotchController::runOnce builds the list), so "not
 // present in snap" is exactly "free".
 int firstFreeIndexTopDown (const NotchController::SnapshotBuffer& snap,
                            const std::array<std::array<bool, NotchController::kSlots>,
@@ -1336,7 +1336,7 @@ SoundcheckApplyStats applySoundcheckResults (
     // isLinked() || width_ < 2 || taps_[1] == nullptr, so it already covers
     // both the operator's switch and the cases where independence is
     // impossible. Deriving it from SnapshotBuffer::linked instead would read a
-    // value republished only at hop cadence (NotchController.cpp:641), so an
+    // value republished only at hop cadence (NotchController::runOnce publishes it), so an
     // operator who flipped LINK less than ~10.7 ms ago would have their first
     // proposal placed in the OTHER mode.
     const bool linkedNow = controller.effectiveLinked();
@@ -1366,8 +1366,8 @@ SoundcheckApplyStats applySoundcheckResults (
 
     // --- (b) replace THIS SLOT's previous proposals, and ONLY those (C-2) ----
     // Origin::Soundcheck has two producers: this function, and the legacy 15 s
-    // soundcheck MODE (placeConfirmed, NotchController.cpp:1093, turned on at
-    // MainComponent.cpp:802-803). Clearing by origin alone would delete a notch
+    // soundcheck MODE (NotchController::placeConfirmed, which MainComponent turns on
+    // when Mode::Soundcheck is selected). Clearing by origin alone would delete a notch
     // the operator locked in by hand, at the moment they pressed AP DUNG. So
     // the ledger -- what the PREVIOUS apply placed on this slot -- is the
     // authority, and an entry only counts if the notch still sitting at that
@@ -1448,7 +1448,7 @@ SoundcheckApplyStats applySoundcheckResults (
         // result.lane is about to index takenThisCall and reach setNotch, and
         // it arrives from a Target the GUI built -- so it is checked here
         // rather than trusted. setNotch would itself refuse a lane >= width_
-        // (NotchController.cpp:199), but takenThisCall is indexed BEFORE that,
+        // (NotchController::setNotchImpl), but takenThisCall is indexed BEFORE that,
         // and a lane 1 result on a mono slot is a routing fault worth naming
         // rather than a silent no-op.
         if (result.lane < 0 || result.lane >= laneCount)
@@ -1516,8 +1516,8 @@ SoundcheckApplyStats applySoundcheckResults (
             {
                 // ALL-OR-NOTHING (N4): one lane protected while the GUI claims
                 // both is worse than placing nothing -- the same reasoning
-                // placeConfirmed (NotchController.cpp:1265) and adoptPreset
-                // (:530) already follow.
+                // NotchController::placeConfirmed and NotchController::adoptPreset
+                // already follow.
                 int  placedLanes = 0;
                 bool ok = true;
                 for (int lane = 0; lane < laneCount && ok; ++lane)

@@ -411,7 +411,7 @@ public:
         // private and SnapshotNotch is the only view outward, so without this
         // field nothing can find the preventive notches of a previous
         // soundcheck run in order to replace them -- and they never
-        // auto-release (NotchController.cpp:729), so the chain drains.
+        // auto-release (the age-release pass in NotchController::runOnce), so the chain drains.
         Origin origin = Origin::Detector;
         std::uint8_t channel = 0;
         std::uint8_t index   = 0;

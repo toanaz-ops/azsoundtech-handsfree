@@ -35,7 +35,7 @@
 // DUNG IS THE OFFICIAL STOP; Esc IS BEST EFFORT (F14)
 // ===================================================
 // keyPressed only sees a key when this component has focus, and the preset name
-// field takes keys too (MainComponent.cpp:255-290). So the button is the path
+// field takes keys too (see the MainComponent constructor's preset-name field). So the button is the path
 // that is always there, and Esc is the shortcut for whoever happens to have
 // focus here. Esc is refused outside Running: once the run is over the only two
 // answers are AP DUNG and BO, and an Esc that silently meant one of them would

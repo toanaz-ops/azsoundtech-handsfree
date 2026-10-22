@@ -12,7 +12,7 @@
 // WHAT H_dB MEANS. X is dBFS at the app's OUTPUT and Y is dBFS at the app's
 // INPUT, so H is the transfer function of the entire PHYSICAL part of the loop.
 // The loop closes through the app, and the app is unity at every frequency with
-// no notch (AudioEngine.cpp:592-624). Therefore howling happens at any bin with
+// no notch (the per-lane chain in AudioEngine::audioDeviceIOCallbackWithContext). Therefore howling happens at any bin with
 // H_dB[k] >= 0, and that bin's margin is -H_dB[k] dB.
 //
 // WHY NO DELAY COMPENSATION, AND WHERE THAT ARGUMENT STOPS BEING TRUE. This is
