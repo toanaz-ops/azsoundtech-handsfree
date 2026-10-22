@@ -86,6 +86,9 @@ Không phải "notch vô hạn" mà là **RBJ peaking-EQ với gain âm**, nên 
 tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo cấu trúc —
 −12 dB nghĩa là còn đúng 0.251 lần biên độ. Ba lớp phòng thủ:
 
+- **Q của mọi lệnh `Set` bị kẹp vào [8, 50]** (`NotchController::kMinNotchQ/kMaxNotchQ`),
+  với mọi Origin, kể cả preset (review 2026-10-20, M1). Trước đó chỉ Q ≤ 0 bị từ
+  chối, nên một preset sửa tay có Q 0,01 cắt −24 dB một dải rộng nhiều octave.
 - `depthDB > 0` bị **từ chối ở cả 3 tầng** (PresetManager → NotchChain → Biquad):
   dạng peaking là đối xứng, gain dương sẽ **khuếch đại đúng tần số đang hú** —
   biến phần mềm chống hú thành máy phát hú.

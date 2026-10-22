@@ -105,6 +105,11 @@ public:
     // [8, 50], depth dB in [-24, -6]; clamped on set.
     static constexpr double kDefaultNotchQ      = 30.0;
     static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
+    // Every Set this controller emits, for ANY Origin, carries a Q in this
+    // range (review 2026-10-20, M1). A preset is not a trusted source: Q 0.01
+    // at -24 dB is a cut several octaves wide.
+    static constexpr double kMinNotchQ = 8.0;
+    static constexpr double kMaxNotchQ = 50.0;
 
     // === Lane G: the depth ladder (spec 4.9). Fixed for 1.2.0 and
     // deliberately NOT exposed on the GUI -- these are the numbers the
