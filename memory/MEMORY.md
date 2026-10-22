@@ -29,6 +29,8 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [Lane U Dumb/Geek](lane-u-dumb-geek-2026-10-18.md) — số kênh = 0 tới callback đầu nên kiểm slot ở tick đầu có kênh (test headless pass vì lý do sai); JUCE lặng lẽ mở thiết bị KHÁC khi thiết bị đã lưu mất → so tên sau `start()`; `startAudio` đè driver; `toUpperCase()` hỏng chữ Việt trên Linux; fixture `Rig` lane M có use-after-free (ASan, Linux); thư viện dùng chung với JUCE phải INTERFACE; ảnh render bắt 4 lỗi 769 test bỏ qua.
 - [Lane A AFC stopped](lane-a-afc-stopped-2026-10-19.md) — owner cấm mọi méo tiếng ⇒ dịch tần bị loại, PEM-AFC không chứng minh được "không méo" (bước lớn: MSG +13 dB nhưng tiếng hỏng; bước nhỏ: gần như không học); "ổn định" ≠ "tốt", đo kèm độ giống nguồn; kiểm vòng hở trước; chuẩn hóa NLMS bằng tổng K partition; PEM bậc ~32 ở 48 kHz; cổng kích thích đo trên tham chiếu chưa làm trắng.
 - [Lane L1 copilot offline](lane-l-copilot-offline-2026-10-20.md) — luật cố định + LLM giải thích qua 4 tool chỉ đọc; không có lời gọi mạng trong app; dùng lại `logstats.summarise`; "chạm trần" loại notch oan; SDK ném `TypeError` (không phải 401) khi không có nguồn đăng nhập.
+- [De-feedback landscape](defeedback-landscape-2026-10-20.md) — thứ gì cho GBF cao hơn notch đều đổi tiếng; notch đặt ở tâm bin chỉ cắt −3,9 dB ở 300 Hz khi lệch nửa bin (P1); thêm PHPR và độ đều tốc độ tăng vào detector; rta-tool là AGPL; proxy chặn web ngoài GitHub.
+- [Sub-bin notch frequency](subbin-notch-frequency-2026-10-20.md) — "Q 30 rộng hơn một bin" chỉ đúng từ ~1 kHz; ở 300 Hz notch đặt ở tâm bin chỉ cắt −3,9 dB; nội suy parabol log-biên độ (Hann) sai số ≤ 0,016 bin; kẹp ±0,45 bin để `lround(hz/binWidth)` giữ đúng bin.
 
 ## Conventions (tóm tắt)
 
