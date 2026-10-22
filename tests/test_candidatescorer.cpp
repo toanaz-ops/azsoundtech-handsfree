@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -675,4 +676,64 @@ TEST (CandidateScorer, ScoreStaysTheProductOfTheSameFourFactors)
     EXPECT_FLOAT_EQ (b.score, b.pNorm * b.rNorm * b.mNorm * b.penalty);
     EXPECT_FLOAT_EQ (rig.scorer.scoreCandidate (detected.candidates[0],
                                                 spectrum.magnitudes, {}), b.score);
+}
+
+// RED IF the scorer gates on kDefaultThreshold instead of the live threshold
+// (review 2026-10-20, I3). The analyzer accepts a peakiness-9 bin once the
+// threshold is 8 (the AGGRESSIVE preset); before the fix the scorer then
+// returned 0 for it, so every threshold below 10 behaved exactly like 10.
+TEST (CandidateScorerThreshold, ALiveThresholdBelowTenLetsAPeakinessNineBinScore)
+{
+    std::array<float, CandidateScorer::kBins> mags {};
+    mags.fill (0.01f);
+    mags[200] = 1.0f;
+
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin         = 200;
+    cand.frequencyHz = 200.0 * kSampleRate / Detector::kFftSize;
+    cand.magnitude   = 1.0f;
+    cand.peakiness   = 9.0f;
+
+    const CandidateScorer::LockedFrequencyView none {};
+
+    CandidateScorer atDefault;
+    atDefault.beginBlock (kSampleRate);
+    EXPECT_EQ (atDefault.scoreCandidateDetailed (cand, mags.data(), none).score, 0.0f);
+
+    CandidateScorer aggressive;
+    aggressive.setPeakinessThreshold (8.0f);
+    aggressive.beginBlock (kSampleRate);
+    const auto b = aggressive.scoreCandidateDetailed (cand, mags.data(), none);
+    EXPECT_FLOAT_EQ (b.pNorm, (9.0f / 8.0f - 1.0f) / 9.0f);
+    EXPECT_GT (b.score, 0.0f);
+}
+
+// Thresholds at or above the default are unchanged by the fix: the gate and
+// pNorm are the same numbers they always were at 10.
+TEST (CandidateScorerThreshold, DefaultThresholdScoresExactlyAsBefore)
+{
+    CandidateScorer scorer;
+    EXPECT_FLOAT_EQ (scorer.getPeakinessThreshold(), PeakinessAnalyzer::kDefaultThreshold);
+
+    std::array<float, CandidateScorer::kBins> mags {};
+    mags.fill (0.01f);
+    mags[200] = 1.0f;
+    PeakinessAnalyzer::Candidate cand;
+    cand.bin = 200; cand.frequencyHz = 200.0 * kSampleRate / Detector::kFftSize;
+    cand.magnitude = 1.0f; cand.peakiness = 30.0f;
+
+    scorer.beginBlock (kSampleRate);
+    const auto b = scorer.scoreCandidateDetailed (cand, mags.data(), {});
+    EXPECT_FLOAT_EQ (b.pNorm, (30.0f / 10.0f - 1.0f) / 9.0f);
+}
+
+TEST (CandidateScorerThreshold, ClampsLikeTheAnalyzerAndIgnoresNaN)
+{
+    CandidateScorer scorer;
+    scorer.setPeakinessThreshold (1.0f);
+    EXPECT_FLOAT_EQ (scorer.getPeakinessThreshold(), PeakinessAnalyzer::kMinThreshold);
+    scorer.setPeakinessThreshold (99.0f);
+    EXPECT_FLOAT_EQ (scorer.getPeakinessThreshold(), PeakinessAnalyzer::kMaxThreshold);
+    scorer.setPeakinessThreshold (std::numeric_limits<float>::quiet_NaN());
+    EXPECT_FLOAT_EQ (scorer.getPeakinessThreshold(), PeakinessAnalyzer::kMaxThreshold);
 }
