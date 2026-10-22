@@ -210,6 +210,26 @@ mù. **Caveat**: sweep đo trên đây làm với hình học 1024 điểm — n
 **chưa được đo lại** với FFT 2048; nó runtime-tunable trong [5, 20], và cần một
 lượt calibration thực địa trước khi tin default này.
 
+**Tần số đặt notch: ước lượng dưới-bin (P1, 2026-10-20).** Một bin ở 48 kHz rộng
+23,4 Hz, nên đặt notch ở tâm bin có thể lệch tới nửa bin (11,7 Hz) so với tần số hú.
+Notch Q 30, −18 dB đặt lệch như vậy chỉ cắt được **−1,4 dB ở 150 Hz, −3,9 dB ở 300 Hz,
+−8,0 dB ở 600 Hz** tại đúng tần số hú, và thang lane G phải đào sâu hơn mức cần.
+
+`PeakinessAnalyzer::subBinOffset` dựng một parabol qua log-biên độ của bin đỉnh và
+hai bin kề bên. Cách tính:
+- độ lệch δ = ½(a−c)/(a−2b+c), với a, b, c là log-biên độ của bin trái, bin đỉnh,
+  bin phải;
+- δ bị kẹp vào ±0,45 bin, nên `lround(hz/binWidth)` vẫn trả về đúng bin đã dò.
+  Vòng reinforce, bộ nhớ phòng và phép "trong một bin" của soundcheck vì thế không
+  đổi;
+- δ = 0 khi ba điểm không tạo thành đỉnh: bin ở rìa, đỉnh phẳng, biên độ 0 hoặc
+  không hữu hạn.
+
+Kết quả đo với tone thật qua Detector (Hann, FFT 2048), vị trí tone từ −0,4 tới +0,4
+bin: sai số **≤ 0,016 bin (≈ 0,4 Hz)** từ 155 Hz tới 4,7 kHz. Một notch Q 30, −18 dB
+đặt theo ước lượng cắt **−18,0 dB** tại tone 315 Hz; đặt ở tâm bin chỉ cắt −4,5 dB
+(`tests/test_peakiness.cpp`, `PeakinessSubBin.*`).
+
 ### 3.3 CandidateScorer — không phải mọi gai đều đáng khóa
 
 Peakiness chỉ là một nhân tử. Điểm cuối = **peakiness × rise × novelty**, kèm
