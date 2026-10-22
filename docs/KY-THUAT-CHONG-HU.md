@@ -818,6 +818,7 @@ một preset viết tay không có khối đó vẫn im lặng nhận trần −
 | Thread lane M chết giữa lúc phát | Ramp-out do **chính callback** sinh; nó tự đặt `scOutChannel_ = -1`. Không cần thread nào khác còn sống |
 | Ramp-out bắt đầu ở envelope 0 = cắt phựt ở buffer lớn | Message thread chỉ **xin** (`scRampOutRequested_`); **callback chốt** `scRampOutAtSample_` ở block đầu tiên nó thấy cờ, nên envelope luôn khởi đúng ở 1.0 |
 | Restart thiết bị giữa lúc đo | `onBeforeRestart` abort + **join** lane M **TRƯỚC** khi stop detector; `micCapture_.clear()` trong cùng khối drain; `audioDeviceAboutToStart` xoá cả tám atomic soundcheck |
+| Driver tự restart (ASIO reset / đổi buffer / đổi rate trong control panel) | Không đi qua hook của app. `AudioEngine::onDeviceStopping` thấy detector còn chạy thì chạy `onBeforeRestart` (abort lane M, join 8 detector) **trước** khi ring bị xoá; `onDeviceStarted` hẹn `onAfterRestart` qua message loop (sửa 2026-10-20, review I1) |
 | Chỉ số kênh ngoài phạm vi sau restart | Kiểm lại **MỖI callback** với số kênh của **chính callback đó** (`src/app/AudioEngine.cpp:686-689`) |
 | Tắt làn bằng `continue` đóng băng state DF1 ⇒ "cạch" lúc mở lại | `NotchChain::clearState()` mỗi block cho làn đang tắt — **state-only**, không đụng `rampRemaining_` (dùng `reset()` sẽ làm kẹt ramp độ sâu của lane G) |
 | Phát sweep vào một phòng đang ngân | Cổng nền 0,5 s so với **ngưỡng peakiness sống của detector**, băng 100 Hz–6 kHz, **hỏng theo hướng đóng**; kênh ngõ ra chỉ được arm **SAU** khi cổng qua; và `arm()` từ chối khi RING RISK ≥ RISING |

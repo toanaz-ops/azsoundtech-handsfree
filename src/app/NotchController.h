@@ -198,6 +198,8 @@ public:
     // immediately, if the thread never ran) -- see flushEventOutbox().
     void start();
     void stop (int timeoutMs);
+    // True while the poll thread runs (MainComponent's driver-restart hooks).
+    bool isRunning() const { return isThreadRunning(); }
 
     // Routing-slot width: how many lanes (channels 0..width-1) THIS slot's
     // controller drives. Accepts 1 or 2; anything else clamps into [1, 2].

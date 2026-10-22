@@ -1184,10 +1184,18 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // The 8 tap rings and micCapture_ above ARE cleared: their content is audio
     // of the previous device and rate, which is wrong the moment the rate
     // changes. Nothing of that kind lives in a command.
+
+    if (onDeviceStarted != nullptr)
+        onDeviceStarted();
 }
 
 void AudioEngine::audioDeviceStopped()
 {
+    // Before anything else: a driver-initiated restart must have every ring
+    // consumer joined before audioDeviceAboutToStart() clears the rings.
+    if (onDeviceStopping != nullptr)
+        onDeviceStopping();
+
     // Nothing to release here yet: the notch chains are reset in
     // audioDeviceAboutToStart() on the next start. The override is kept so
     // the device lifecycle is explicit.
