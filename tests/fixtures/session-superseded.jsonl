@@ -1,0 +1,4 @@
+{"ev":"session_start","t":0,"app_version":"1.4.0","os":"Linux","device":"Fake","sample_rate":48000,"buffer_size":256}
+{"ev":"notch_set","t":1000.0,"slot":0,"lane":0,"index":0,"hz":500.0,"q":30,"depth_db":-6,"origin":"detector"}
+{"ev":"notch_set","t":5000.0,"slot":0,"lane":0,"index":0,"hz":800.0,"q":30,"depth_db":-6,"origin":"detector"}
+{"ev":"session_end","t":9000.0,"dropped_events":0}
