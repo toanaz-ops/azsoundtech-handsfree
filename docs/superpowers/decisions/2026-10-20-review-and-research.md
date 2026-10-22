@@ -172,4 +172,4 @@ chốt và đã làm. Owner muốn đổi ô nào thì bỏ dấu và ghi lý do
 - [x] **Bỏ "isovoice" khỏi so sánh** cho tới khi owner gửi link.
 - [x] **Việc tiếp theo: P2** (notch hẹp, Q thích nghi) trên `main` mới.
 - [x] **Chưa ra bản alpha.** Theo lời DEV MASTER; script release cần máy Windows.
-- [ ] **Tạo label `claimed` trên repo** (owner làm: công cụ của phiên không tạo được label).
+- [x] **Tạo label `claimed` trên repo.** Đã tạo qua `gh api` (22/10/2026).
