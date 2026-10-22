@@ -155,3 +155,21 @@ mới.
 | M5: CI Linux + ASan/UBSan | #26 | local 795/795 dưới sanitizer; CI đang chạy |
 | P1: tần số notch dưới-bin | #27 | CI đang chạy |
 | Còn treo, chờ owner | | P4 (giấy phép `rta-tool`), link "isovoice", nghe tất cả ở alpha |
+
+## Q9: Hộp quyết định cho owner dò lại (2026-10-22)
+
+Owner (22/10/2026): "You do it all dont wait me. Just leave a decision box checklist
+for me to review and switch if needed", rồi "Merge all". Mỗi ô dưới đây điều phối đã
+chốt và đã làm. Owner muốn đổi ô nào thì bỏ dấu và ghi lý do; điều phối sẽ đảo lại.
+
+- [x] **Merge #27 (P1, notch dưới-bin).** Ngoài tần số hú: 0 dB. Tại tần số hú: độ cắt
+  về gần depth đã đặt (300 Hz, lệch nửa bin: −3,9 dB → ~−18 dB). Đã merge.
+- [x] **Merge #28, #30, #25, #26, #10** sau khi mỗi PR xanh CI trên `main` mới. Tích hợp
+  local cả năm PR trên `main` @ `510c6a8`: 819/819.
+- [x] **Sanitizer (ASan/UBSan) chạy nightly**, không chạy mỗi PR. Windows vẫn chạy mỗi PR.
+- [x] **Không dùng lại code `rta-tool` (AGPL-3.0).** Viết lại từ bài báo/nguyên lý. Đổi
+  ô này nếu owner cấp lại giấy phép cho phần đó.
+- [x] **Bỏ "isovoice" khỏi so sánh** cho tới khi owner gửi link.
+- [x] **Việc tiếp theo: P2** (notch hẹp, Q thích nghi) trên `main` mới.
+- [x] **Chưa ra bản alpha.** Theo lời DEV MASTER; script release cần máy Windows.
+- [ ] **Tạo label `claimed` trên repo** (owner làm: công cụ của phiên không tạo được label).
