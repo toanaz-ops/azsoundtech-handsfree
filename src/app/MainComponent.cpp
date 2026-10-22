@@ -633,9 +633,15 @@ MainComponent::MainComponent()
         // setWidth() is only legal while the thread is stopped, so the width
         // from the (freshly restarted) engine config is applied here, then
         // the poll loop relaunches.
+        // The detector's rate too (review 2026-10-20, B1): it was built at
+        // 48 kHz and nothing else ever retargets it, so on a 44.1 or 96 kHz
+        // device every bin mapped to the wrong frequency and the chain --
+        // which DOES follow the device -- notched beside the howl.
+        const double rate = engine_.getCurrentSampleRateHz();
         for (int i = 0; i < kMaxSlots; ++i)
         {
             auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setSampleRate (rate);
             controller.setWidth (engine_.getSlotConfig (i).width);
             controller.start();
         }
@@ -1308,11 +1314,13 @@ void MainComponent::startAudio()
         checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
     // The device is open: the detectors can start pumping. start() is a no-op
-    // if the thread already runs. Width first, for the same reason as the
-    // after-restart hook: setWidth() needs the thread stopped.
+    // if the thread already runs. Rate and width first, for the same reason
+    // as the after-restart hook: setWidth() needs the thread stopped.
+    const double rate = engine_.getCurrentSampleRateHz();
     for (int i = 0; i < kMaxSlots; ++i)
     {
         auto& controller = *notchControllers_[(std::size_t) i];
+        controller.setSampleRate (rate);
         controller.setWidth (engine_.getSlotConfig (i).width);
         controller.start();
     }

@@ -90,6 +90,9 @@ tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo c�
   biến phần mềm chống hú thành máy phát hú.
 - Tham số không hợp lệ (Q ≤ 0, freq ≥ Nyquist...) bị chặn trước khi chạm hệ số;
   pole ngoài vòng tròn đơn vị đã được đo bùng tới 3.7e77 chỉ sau 208 mẫu.
+- Detector đi theo sample rate của device: `MainComponent` gọi
+  `NotchController::setSampleRate` sau mỗi lần start/restart (sửa 2026-10-20, review B1;
+  trước đó detector cứng 48 kHz nên ở 44,1/96 kHz notch tự động đặt lệch tần số hú).
 - Đổi sample rate khiến notch vượt Nyquist mới → notch về trạng thái Idle giữ
   nguyên tham số (**D-00**: hủy kích hoạt, không clamp, không xóa). Clamp là thứ
   từng tạo đỉnh đầu ra 4.11e18.
