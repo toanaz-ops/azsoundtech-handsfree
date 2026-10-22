@@ -104,7 +104,8 @@ CandidateScorer::ScoreBreakdown CandidateScorer::scoreCandidateDetailed (
             const float was  = std::max (reference[candidate.bin], 1e-12f);
             const float rise = magnitudes[candidate.bin] / was;
             out.riseRatio = rise;   // lane G: the raw ratio, unsaturated
-            rNorm = (rise - 1.0f) / 0.5f;
+            // (kRiseThreshold - 1) == 0.5: the rise that maps to rNorm 1.
+            rNorm = (rise - 1.0f) / static_cast<float> (kRiseThreshold - 1.0);
             rNorm = std::min (std::max (rNorm, 0.0f), 1.0f);
         }
         // else: history too young -- rNorm stays 0 (see above).

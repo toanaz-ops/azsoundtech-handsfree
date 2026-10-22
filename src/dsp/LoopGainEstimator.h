@@ -69,6 +69,15 @@ public:
     // sample rate.
     void reset (double sampleRate);
 
+    // reset(), except the REFERENCE stream and its accumulator are kept. The
+    // reference is the same sweep for every target of a run, and pushing it is
+    // ~280 FFT-2048s; recomputing it per target put that on the lane M thread
+    // 16 times. Returns true when the reference was kept; false when there was
+    // nothing to keep (no reference pushed yet) or the rate changed (a
+    // reference analysed at another rate is wrong) -- in that case this did a
+    // full reset() and the caller must pushReference() again.
+    [[nodiscard]] bool resetKeepingReference (double sampleRate);
+
     void pushNoiseFloor (const float* samples, int numSamples);
     void pushReference  (const float* samples, int numSamples);
     void pushCapture    (const float* samples, int numSamples);
