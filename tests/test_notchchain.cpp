@@ -631,38 +631,3 @@ TEST(NotchChain, ADepthOnlyRetuneMovesOverkRampMsRatherThanInOneStep)
     }
     EXPECT_GT(maxDiff, fullStep) << "the two chains never diverged: the retune did nothing";
 }
-
-// RED IF the NaN self-heal strands a ramping notch (review 2026-10-20, M6).
-// Before the fix the callback called reset(), which cancels the ramp without
-// re-installing the design: the filter stayed at whatever depth the ramp had
-// reached, for ever. healNonFinite() must leave the chain coefficient-for-
-// coefficient where a fresh install of the TARGET design puts it.
-TEST(NotchChain, HealNonFiniteLandsARampingNotchOnItsTarget)
-{
-    NotchChain chain (48000.0);
-    chain.setNotch (0, 1000.0, 30.0, -6.0);
-    chain.setNotch (0, 1000.0, 30.0, -18.0);   // same freq + Q: a depth ramp
-    for (int n = 0; n < 50; ++n)
-        chain.processSample (0.1);
-    ASSERT_GT (chain.getFilterForTest (0).rampRemainingForTest(), 0) << "test needs a ramp in flight";
-
-    chain.healNonFinite();
-
-    NotchChain fresh (48000.0);
-    fresh.setNotch (0, 1000.0, 30.0, -18.0);
-
-    const auto healed = chain.getFilterForTest (0).coeffsForTest();
-    const auto target = fresh.getFilterForTest (0).coeffsForTest();
-    EXPECT_EQ (chain.getFilterForTest (0).rampRemainingForTest(), 0);
-    EXPECT_DOUBLE_EQ (healed.b0, target.b0);
-    EXPECT_DOUBLE_EQ (healed.b1, target.b1);
-    EXPECT_DOUBLE_EQ (healed.b2, target.b2);
-    EXPECT_DOUBLE_EQ (healed.a1, target.a1);
-    EXPECT_DOUBLE_EQ (healed.a2, target.a2);
-
-    // And the state is clean: the poisoned history does not survive the heal.
-    const auto st = chain.getFilterForTest (0).stateForTest();
-    EXPECT_EQ (st.z1, 0.0);
-    EXPECT_EQ (st.z2, 0.0);
-    EXPECT_EQ (chain.getNotchInfo (0).state, NotchChain::NotchState::Active);
-}

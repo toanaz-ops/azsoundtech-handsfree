@@ -127,13 +127,11 @@ trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (v
 `cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
 nay cho cùng bốn số này.
 
-**NaN self-heal (đóng 2026-10-20, review M6):** khi output một chuỗi filter
-non-finite, `AudioEngine` gọi `NotchChain::healNonFinite()`. Hàm này xoá state
-**và** cài lại thiết kế đã lưu của mọi notch Active, giống như replay của
-`setSampleRate` ở cùng rate (không cấp phát, không khoá). Trước đó self-heal chỉ
-`reset()`: ramp đang chạy bị huỷ và filter đứng lại ở độ sâu trung gian, mãi mãi,
-trong khi `NotchInfo.depthDB` đã đọc giá trị đích. Nay notch đang ramp về thẳng
-độ sâu đích.
+**Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
+non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
+không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
+khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
+cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
 
 ## 3. Phát hiện hú — từ mẫu đến điểm số
 

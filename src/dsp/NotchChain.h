@@ -106,16 +106,6 @@ public:
     void   setSampleRate(double sampleRate);
     double getSampleRate() const;
 
-    // The audio callback's NaN self-heal (review 2026-10-20, M6). reset()
-    // alone cancels every in-flight depth ramp and leaves each filter at the
-    // ramp's intermediate depth while NotchInfo.depthDB reads the target, for
-    // ever. This clears the state AND re-installs every Active notch's stored
-    // design -- setSampleRate() at the current rate, which never allocates and
-    // never locks, so it is legal per sample on the audio thread. A notch
-    // mid-ramp lands on its target at once; the state was being thrown away
-    // anyway.
-    void   healNonFinite();
-
     const NotchInfo& getNotchInfo(int index) const;
     int              getActiveNotchCount() const;
 
