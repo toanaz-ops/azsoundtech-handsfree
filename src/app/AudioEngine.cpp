@@ -88,15 +88,20 @@ void AudioEngine::start()
     // 3) Register this as the audio callback. If the device is already
     //    running, audioDeviceAboutToStart() is invoked before this returns.
     deviceManager_.addAudioCallback (this);
+    callbackRegistered_.store (true, std::memory_order_release);
     isRunning_.store (true, std::memory_order_release);
 }
 
 void AudioEngine::stop()
 {
-    // Exchange-and-check: tear down exactly once even if stop() is called
-    // twice, or the device died underneath us (audioDeviceError also clears
-    // the flag from the device thread).
-    if (! isRunning_.exchange (false, std::memory_order_acq_rel))
+    isRunning_.store (false, std::memory_order_release);
+
+    // Tear down exactly once, keyed on "our callback is registered", NOT on
+    // isRunning_: audioDeviceError() (device thread) clears isRunning_ while the
+    // callback stays registered and the device stays open, so keying on
+    // isRunning_ made stop() a no-op after a device error and the callback was
+    // never removed (2026-10-21 audit).
+    if (! callbackRegistered_.exchange (false, std::memory_order_acq_rel))
         return;
 
     // removeAudioCallback() blocks until the audio thread has released the
@@ -456,6 +461,18 @@ std::uint64_t AudioEngine::getMicCaptureDropCount() const
     return micCaptureDrops_.load (std::memory_order_relaxed);
 }
 
+void AudioEngine::setCallbackRegisteredForTest (bool registered)
+{
+    // TEST SEAM ONLY. Lets a headless test stand in for "start() succeeded and
+    // the device later errored" without a real device.
+    callbackRegistered_.store (registered, std::memory_order_release);
+}
+
+bool AudioEngine::isCallbackRegisteredForTest() const
+{
+    return callbackRegistered_.load (std::memory_order_acquire);
+}
+
 void AudioEngine::setRunningForTest (bool running)
 {
     // TEST SEAM ONLY (B-4). isRunning_ is otherwise written only by start()
@@ -492,7 +509,7 @@ LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue()
 
 LockFreeRingBuffer<NotchCommand>& AudioEngine::getCommandQueue (int slot)
 {
-    return commandQueues_[(std::size_t) (slot < 0 ? 0 : (slot >= kMaxSlots ? 0 : slot))];
+    return commandQueues_[(std::size_t) clampSlot (slot)];
 }
 
 void AudioEngine::setSlotConfig (int slotIndex, const SlotConfig& config)
@@ -853,10 +870,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     if (bypass)
     {
-        // Bypass copies IN->OUT along the mapping (the detector still sees
-        // signal via the per-slot taps below).
+        // Bypass routes IN->OUT along the mapping (the detector still sees
+        // signal via the per-slot taps below). It ACCUMULATES onto the cleared
+        // output, exactly like the DSP branch: several lanes aimed at one
+        // output channel SUM in Bypass as they do in Auto (2026-10-21 audit).
+        // It used to copy, so the LAST lane won and every earlier lane sharing
+        // that channel vanished from the PA the moment the operator hit the
+        // emergency BYPASS control -- and, because the tap reads `out`, the
+        // earlier lane's detector tap then carried the later lane's samples.
         for (int i = 0; i < numLanes; ++i)
-            juce::FloatVectorOperations::copy (lanes[i].out, lanes[i].in, numSamples);
+            juce::FloatVectorOperations::add (lanes[i].out, lanes[i].in, numSamples);
     }
     else
     {
@@ -883,13 +906,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 double v = chain.processSample (x);
 
                 // A non-finite chain OUTPUT means the filter state itself is
-                // already poisoned. Reset the chain -- allocation-free, the
-                // same call the device-restart path makes -- and emit silence
-                // for this sample: the filter self-heals within one sample
-                // instead of screaming NaN until someone restarts the device.
+                // already poisoned. Heal the chain -- allocation-free -- and
+                // emit silence for this sample: the filter self-heals within
+                // one sample instead of screaming NaN until someone restarts
+                // the device. healState(), not reset(): reset() would cancel
+                // every in-flight depth ramp in the chain and strand the
+                // filter at an intermediate depth while the model reads the
+                // target (the old GAP); healState() replays the target design.
                 if (! std::isfinite (v))
                 {
-                    chain.reset();
+                    chain.healState();
                     v = 0.0;
                 }
 
@@ -955,6 +981,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             scRampOutAtSample_.store  (-1,    std::memory_order_relaxed);
             scRampOutRequested_.store (false, std::memory_order_relaxed);
         }
+    }
+
+    // A ramp-out was requested but the armed channel is not a valid output for
+    // THIS callback (the channel count shrank without a restart): nothing is
+    // audible on it, and without this release the request would sit pending
+    // until the next device restart -- arm() refuses RampOutPending in the
+    // meantime (2026-10-21 audit). Only a PENDING request releases: an armed
+    // channel with no request is the controller's to stop, and a null output
+    // table (headless callers) is not "unmapped".
+    else if (scOutChannel >= 0 && scRampOutReq && outputChannelData != nullptr
+             && scOutChannel >= numOutputChannels)
+    {
+        scOutChannel_.store       (-1,    std::memory_order_relaxed);
+        scRampOutAtSample_.store  (-1,    std::memory_order_relaxed);
+        scRampOutRequested_.store (false, std::memory_order_relaxed);
     }
 
     // Final output guard: every sample actually handed to the driver is forced

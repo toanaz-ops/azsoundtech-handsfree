@@ -413,7 +413,7 @@ public:
         // private and SnapshotNotch is the only view outward, so without this
         // field nothing can find the preventive notches of a previous
         // soundcheck run in order to replace them -- and they never
-        // auto-release (NotchController.cpp:729), so the chain drains.
+        // auto-release (the age-release pass in NotchController::runOnce), so the chain drains.
         Origin origin = Origin::Detector;
         std::uint8_t channel = 0;
         std::uint8_t index   = 0;
@@ -685,6 +685,14 @@ private:
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
+    // Detector-thread only: flushOutbox() swaps it with outbox_ so neither
+    // buffer is reallocated per flush. Both are reserved to kOutboxReserve.
+    static constexpr std::size_t kOutboxReserve = 128;
+public:
+    // stop() waits at least this long for the detector thread (see stop()).
+    static constexpr int kMinStopTimeoutMs = 5000;
+private:
+    std::vector<NotchCommand> pendingScratch_;
 
     // Room memory (spec 4.6). Fixed arrays, guarded by modelMutex_ exactly
     // like model_ above -- roomMemoryHead_[lane] is the next slot to overwrite.

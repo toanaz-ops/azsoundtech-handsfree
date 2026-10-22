@@ -531,3 +531,61 @@ TEST (LoopGainEstimator, ResetClearsEveryStream)
     EXPECT_EQ (again.captureFrames, before.captureFrames);
     EXPECT_NEAR (meanMidBandDb (again), meanMidBandDb (before), 1.0e-4);
 }
+
+// ---------------------------------------------------------------------------
+// resetKeepingReference() (2026-10-21 audit): the reference sweep is identical
+// for every target, so the per-target reset keeps it instead of re-running
+// ~280 FFT-2048s. The kept reference must give EXACTLY the result a full
+// reset + pushReference gives.
+// ---------------------------------------------------------------------------
+TEST (LoopGainEstimatorKeepReference, MatchesAFullResetAndRepush)
+{
+    const auto x    = renderSweep();
+    const auto y    = flatRoom (x, 5.0, 0.5, 0.7);
+    const auto quiet = noise ((std::size_t) (kSr * 0.5), 0.0005f, 7u);
+
+    LoopGainEstimator kept { kSr };
+    kept.pushReference (x.data(), (int) x.size());
+    kept.pushNoiseFloor (quiet.data(), (int) quiet.size());
+    kept.pushCapture (y.data(), (int) y.size());
+    (void) kept.finish();                         // target 0 done
+
+    ASSERT_TRUE (kept.resetKeepingReference (kSr));   // target 1: reference kept
+    kept.pushNoiseFloor (quiet.data(), (int) quiet.size());
+    kept.pushCapture (y.data(), (int) y.size());
+    const auto a = kept.finish();
+
+    LoopGainEstimator fresh { kSr };
+    fresh.reset (kSr);
+    fresh.pushReference (x.data(), (int) x.size());
+    fresh.pushNoiseFloor (quiet.data(), (int) quiet.size());
+    fresh.pushCapture (y.data(), (int) y.size());
+    const auto b = fresh.finish();
+
+    ASSERT_GT (b.referenceFrames, 0);
+    EXPECT_EQ (a.referenceFrames, b.referenceFrames);
+    EXPECT_EQ (a.noiseFrames,     b.noiseFrames);
+    EXPECT_EQ (a.captureFrames,   b.captureFrames);
+    EXPECT_EQ (a.measured,        b.measured);
+    EXPECT_FLOAT_EQ (a.bandSnrDb, b.bandSnrDb);
+    for (int k = 0; k < LoopGainEstimator::kNumBins; ++k)
+    {
+        ASSERT_FLOAT_EQ (a.hDb[(std::size_t) k], b.hDb[(std::size_t) k]) << "bin " << k;
+        ASSERT_EQ (a.trusted[(std::size_t) k], b.trusted[(std::size_t) k]) << "bin " << k;
+    }
+}
+
+TEST (LoopGainEstimatorKeepReference, DropsTheReferenceWhenThereIsNoneOrTheRateChanged)
+{
+    const auto x = renderSweep();
+
+    LoopGainEstimator e { kSr };
+    EXPECT_FALSE (e.resetKeepingReference (kSr))
+        << "nothing was pushed, so nothing can have been kept";
+
+    e.pushReference (x.data(), (int) x.size());
+    ASSERT_TRUE (e.resetKeepingReference (kSr));
+    EXPECT_FALSE (e.resetKeepingReference (44100.0))
+        << "a reference analysed at 48 kHz is wrong at 44.1 kHz";
+    EXPECT_EQ (e.finish().referenceFrames, 0) << "the stale reference was not dropped";
+}
