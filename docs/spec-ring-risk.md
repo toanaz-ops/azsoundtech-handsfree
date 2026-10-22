@@ -218,6 +218,11 @@ Not optimised before anything has measured a problem.
 
 ## Known gaps (owner)
 
+- ~~`NotchController::setSampleRate` has **no production caller**~~ — **fixed
+  2026-10-20** (independent review, B1): the missing call was not a readout
+  detail. The detector stayed at 48 kHz, so every automatic notch landed at
+  the wrong frequency on any other rate. MainComponent now calls it next to
+  `setWidth` after every device start and restart. Original note:
 - `NotchController::setSampleRate` has **no production caller** (found in R1).
   A device or sample-rate change reaches the controller only through
   `setWidth`, which happens to reset the same state. It is exercised by tests

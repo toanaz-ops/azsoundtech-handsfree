@@ -105,12 +105,10 @@ void NotchController::setWidth (int lanes)
     // -- see SDD ledger 2026-09-05-data-loop, Task 3 ruling.
     width_ = newWidth;
 
-    // A-R4 reset boundary, and the one that actually fires in the shipping
-    // app: MainComponent's onAfterRestart hook calls setWidth() on every slot
-    // after EVERY engine restart -- device change, sample-rate change, buffer
-    // change (DevicePanel::onBeforeRestart/onAfterRestart) -- so this covers
-    // the device/SR case even though nothing outside tests calls
-    // setSampleRate(). Unconditional for that reason: a restart that keeps
+    // A-R4 reset boundary: MainComponent's onAfterRestart hook calls
+    // setSampleRate() and then setWidth() on every slot after EVERY engine
+    // restart -- device change, sample-rate change, buffer change
+    // (DevicePanel::onBeforeRestart/onAfterRestart). Unconditional: a restart that keeps
     // the same width still invalidated the scorer's view of the room. A brief
     // N/A on the chip is honest; a stale number is not. Readout only -- the
     // scorer, the persistence streaks and the model are untouched here.
@@ -1570,9 +1568,9 @@ void NotchController::setSampleRate (double sampleRate)
         l.blocksSinceReset = 0;
     }
 
-    // m-7: this has no production caller today (the device path reaches the
-    // controller through setWidth), but the wipe belongs here for the day it
-    // does -- and for tools/snapshot.cpp and the tests, which do call it.
+    // Called by MainComponent next to setWidth() after every device start
+    // and restart (review 2026-10-20, B1 -- until then nothing in production
+    // called it and the detector ran at 48 kHz on every device).
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
         clearRoomMemoryLocked();
