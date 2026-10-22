@@ -2112,3 +2112,39 @@ TEST (AudioEngineSoundcheck, SettingTheChannelToMinusOneIsTheAbortBackstop)
         ASSERT_FLOAT_EQ (d.out[0][(std::size_t) n], 0.3f)
             << "sample " << n << " -- the lane is still muted after the abort";
 }
+
+// ---------------------------------------------------------------------------
+// Commands queued while no device was open survive the device opening
+// (2026-10-21 audit, finding "model says Active, chain is empty").
+//
+// The failing story: ASIO is not ready at launch, a preset load / manual notch
+// writes a Set into the command ring, nothing drains it (no callback), the
+// operator then picks the device and audioDeviceAboutToStart() ran
+// queue.clear() -- so the notch table showed protection the chain did not have.
+//
+// RED IF: audioDeviceAboutToStart() clears the command rings again.
+// ---------------------------------------------------------------------------
+TEST (AudioEngineCommands, CommandsQueuedBeforeDeviceOpenSurviveAboutToStart)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    auto& q = engine.getCommandQueue();
+    const NotchCommand set { NotchCommandType::Set, 0, 3, 1000.0f, 30.0f, -12.0f };
+    ASSERT_EQ (q.write (&set, 1), 1u);
+
+    // No callback has run: the chain cannot have seen the command.
+    ASSERT_NE (engine.getNotchChainForTest (0).getNotchInfo (3).state,
+               NotchChain::NotchState::Active);
+
+    engine.audioDeviceAboutToStart (nullptr);   // the device opens
+
+    EXPECT_EQ (q.getAvailableRead(), 1u) << "the command was discarded";
+
+    float* out[2] = { nullptr, nullptr };
+    const float* in[2] = { nullptr, nullptr };
+    engine.audioDeviceIOCallbackWithContext (in, 2, out, 2, 64, {});
+
+    EXPECT_EQ (engine.getNotchChainForTest (0).getNotchInfo (3).state,
+               NotchChain::NotchState::Active);
+    EXPECT_DOUBLE_EQ (engine.getNotchChainForTest (0).getNotchInfo (3).frequency, 1000.0);
+}

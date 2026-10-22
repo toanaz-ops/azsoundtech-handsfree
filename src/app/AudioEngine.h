@@ -371,10 +371,12 @@ public:
     // starts does not: JUCE's ASIO device answers kAsioResetRequest,
     // kAsioBufferSizeChange and a sample-rate change from its own timer with
     // close() -> audioDeviceStopped() ... start() -> audioDeviceAboutToStart(),
-    // and the rings were cleared below with the detectors still running.
+    // and the tap rings and micCapture_ were cleared with the detectors and
+    // the lane M thread still reading them.
     //
     // onDeviceStopping runs FIRST in audioDeviceStopped(); onDeviceStarted
-    // runs LAST in audioDeviceAboutToStart(), after every ring is cleared.
+    // runs LAST in audioDeviceAboutToStart(), after the audio rings are
+    // cleared (the command queues are kept -- see the end of that function).
     // Both run on whatever thread JUCE stops/starts the device on -- the
     // message thread for every path this app knows -- and the owner must
     // clear them before it is destroyed. Empty by default: tests and tools
