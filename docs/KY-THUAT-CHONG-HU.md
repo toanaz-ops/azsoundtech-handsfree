@@ -66,7 +66,7 @@ không có race.
 
 1. Driver đưa một block vào callback; mỗi slot bật lấy đúng kênh vào/ra nó
    được route.
-2. **Bypass mode**: copy thẳng in → out. **Auto/Soundcheck**: mỗi mẫu đi qua
+2. **Bypass mode**: chuyển thẳng in → out (CỘNG DỒN vào ngõ ra, nên nhiều làn cùng ngõ ra vẫn cộng lại như Auto). **Auto/Soundcheck**: mỗi mẫu đi qua
    chuỗi 16 biquad notch của làn nó trong slot.
 3. Sau khi xử lý, **mỗi làn sau notch của MỖI slot** được copy một lần vào
    tap ring riêng của làn đó (8 slot × 2 làn = 16 ring) — ở mọi mode, kể cả
@@ -308,7 +308,7 @@ stateDiagram-v2
     Soundcheck --> Bypass : nút BYPASS
 
     state Bypass {
-        note right of Bypass : Copy thẳng in→out.<br/>Tap VẪN chạy — detector vẫn thấy phòng
+        note right of Bypass : Chuyển thẳng in→out (cộng dồn).<br/>Tap VẪN chạy — detector vẫn thấy phòng
     }
     state Soundcheck {
         note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả (KD-7).<br/>Hết 15 s detector tự NGỪNG DÒ<br/>nhưng mode KHÔNG tự chuyển —<br/>chờ người vận hành bấm AUTO
