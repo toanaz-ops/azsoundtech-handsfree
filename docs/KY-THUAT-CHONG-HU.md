@@ -1,7 +1,8 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
-> đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
+> đang chạy (`src/`). Phần đầu viết tại 07/09/2026, v1.2.0; §3.7 (lane M, 1.3.0), §3.8
+> (lane U, 1.4.0) và các sửa lỗi review 2026-10-20 bổ sung sau. Mốc ban đầu: v1.2.0 (đã hiện thực và qua gate
 > ctest, **547/547** tại `63c1759`; **đã đóng gói** 2026-09-07 21:46 qua
 > `release-alpha.ps1 -Part minor`, SHA-256 `F701FFFCF563…`, 26 848 726 byte (25,6 MB); 1.2.0 = lane G,
 > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
