@@ -12,7 +12,7 @@
 // WHAT H_dB MEANS. X is dBFS at the app's OUTPUT and Y is dBFS at the app's
 // INPUT, so H is the transfer function of the entire PHYSICAL part of the loop.
 // The loop closes through the app, and the app is unity at every frequency with
-// no notch (AudioEngine.cpp:592-624). Therefore howling happens at any bin with
+// no notch (the per-lane chain in AudioEngine::audioDeviceIOCallbackWithContext). Therefore howling happens at any bin with
 // H_dB[k] >= 0, and that bin's margin is -H_dB[k] dB.
 //
 // WHY NO DELAY COMPENSATION, AND WHERE THAT ARGUMENT STOPS BEING TRUE. This is
@@ -68,6 +68,15 @@ public:
     // reallocate: the scratch and the windows are sized by kFftSize, not by the
     // sample rate.
     void reset (double sampleRate);
+
+    // reset(), except the REFERENCE stream and its accumulator are kept. The
+    // reference is the same sweep for every target of a run, and pushing it is
+    // ~280 FFT-2048s; recomputing it per target put that on the lane M thread
+    // 16 times. Returns true when the reference was kept; false when there was
+    // nothing to keep (no reference pushed yet) or the rate changed (a
+    // reference analysed at another rate is wrong) -- in that case this did a
+    // full reset() and the caller must pushReference() again.
+    [[nodiscard]] bool resetKeepingReference (double sampleRate);
 
     void pushNoiseFloor (const float* samples, int numSamples);
     void pushReference  (const float* samples, int numSamples);

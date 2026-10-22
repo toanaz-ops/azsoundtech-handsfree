@@ -104,14 +104,33 @@ const Biquad& NotchChain::getFilterForTest(int index) const
 
 void NotchChain::reset()
 {
-    // GAP (spec 4.7, m-5): this cancels every in-flight depth ramp and does
-    // NOT re-apply the stored design, so a reset that is not followed by
-    // setSampleRate()'s coefficient replay -- AudioEngine's per-sample NaN
-    // self-heal is the one such caller -- strands the filter at the ramp's
+    // This cancels every in-flight depth ramp and does NOT re-apply the stored
+    // design (spec 4.7, m-5), so a reset that is not followed by
+    // setSampleRate()'s coefficient replay strands the filter at the ramp's
     // intermediate depth while NotchInfo.depthDB already reads the target.
+    // Callers that reset a LIVE chain must use healState() instead.
     for (int i = 0; i < MAX_NOTCHES; ++i)
     {
         filters_[i].reset();
+    }
+}
+
+void NotchChain::healState()
+{
+    for (int i = 0; i < MAX_NOTCHES; ++i)
+    {
+        filters_[i].reset();   // state AND any in-flight ramp
+    }
+
+    // Replay the stored target design for every Active notch.
+    for (int i = 0; i < MAX_NOTCHES; ++i)
+    {
+        if (notchInfo_[i].state == NotchState::Active
+            && ! filters_[i].setNotchFilter(notchInfo_[i].frequency, notchInfo_[i].Q,
+                                            sampleRate_, notchInfo_[i].depthDB))
+        {
+            notchInfo_[i].state = NotchState::Idle;
+        }
     }
 }
 

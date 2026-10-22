@@ -64,6 +64,14 @@ public:
     void   setRiseReferenceMs (double ms);
     double getRiseReferenceMs() const;
 
+    // The LIVE peakiness threshold, same value and same clamp as
+    // PeakinessAnalyzer::setThreshold (review 2026-10-20, I3: the gate and
+    // pNorm used kDefaultThreshold, so every threshold below 10 -- the
+    // AGGRESSIVE preset's 8 among them -- behaved exactly like 10). Message
+    // thread; read relaxed on the detector thread.
+    void  setPeakinessThreshold (float threshold);
+    float getPeakinessThreshold() const;
+
     // Call once per detector pump BEFORE scoring candidates. Sizes the
     // internal buffers on the first call (allocation-free afterwards).
     void beginBlock (double sampleRate);
@@ -121,6 +129,7 @@ private:
     double clockMs_        = 0.0;
     bool   buffersReady_   = false;
     std::atomic<double>    riseReferenceMs_ { kDefaultRiseReferenceMs };
+    std::atomic<float>     peakinessThreshold_ { PeakinessAnalyzer::kDefaultThreshold };
 
     std::array<double, kBins> baselineEma_ {};
 

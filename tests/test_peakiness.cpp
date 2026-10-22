@@ -29,12 +29,14 @@
 #include <gtest/gtest.h>
 
 #include "dsp/Detector.h"
+#include "dsp/NotchChain.h"
 #include "dsp/LockFreeRingBuffer.h"
 #include "dsp/PeakinessAnalyzer.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -224,7 +226,9 @@ TEST (Peakiness, ToneInNoiseIsDetectedAndNoiseAloneIsNot)
     const auto detected = analyzer.analyse (spectrum);
     ASSERT_EQ (detected.count, 1u);
     EXPECT_EQ (detected.candidates[0].bin, kToneBin);
-    EXPECT_DOUBLE_EQ (detected.candidates[0].frequencyHz, 1007.8125);
+    // Bin 43's centre is 1007.8 Hz; the tone is at 1000 Hz. The sub-bin
+    // estimate (P1, 2026-10-20) reports the tone, not the bin.
+    EXPECT_NEAR (detected.candidates[0].frequencyHz, 1000.0, 1.0);
     EXPECT_FLOAT_EQ (detected.candidates[0].peakiness, tonePeakiness);
     EXPECT_FLOAT_EQ (detected.candidates[0].score, PeakinessAnalyzer::kCandidateScore);
 
@@ -636,4 +640,106 @@ TEST (Peakiness, ThresholdIsExclusive)
     const auto result = analyzer.analyse (wrap (mags));
     ASSERT_EQ (result.count, 1u);
     EXPECT_EQ (result.candidates[0].bin, 200);
+}
+
+
+// ---------------------------------------------------------------------------
+// P1 (2026-10-20): sub-bin frequency. RED IF the candidate goes back to the
+// bin centre. Real tones through the real Detector, placed anywhere inside a
+// bin, low and high in the band: the estimate must land within a tenth of a
+// bin (2.3 Hz at 48 kHz) -- the bin centre is up to half a bin (11.7 Hz) off.
+// ---------------------------------------------------------------------------
+TEST (PeakinessSubBin, EstimateLandsWithinATenthOfABinOfTheTone)
+{
+    const double binHz = kSampleRate / Detector::kFftSize;
+    for (const int baseBin : { 7, 13, 43, 200 })
+    {
+        for (const double frac : { -0.4, -0.25, 0.0, 0.2, 0.4 })
+        {
+            const double toneHz = (baseBin + frac) * binHz;
+            LockFreeRingBuffer<float> tap (kTapCapacity);
+            Detector detector (kSampleRate);
+            const auto signal = makeToneInNoise (toneHz, 1.0f, 0.01f, 777u,
+                                                 4 * static_cast<std::size_t> (Detector::kFftSize));
+            const auto spectrum = primedSpectrum (detector, tap, signal);
+
+            PeakinessAnalyzer analyzer;
+            analyzer.setMinFrequencyHz (50.0);
+            const auto r = analyzer.analyse (spectrum);
+            ASSERT_GE (r.count, 1u) << toneHz << " Hz";
+
+            // The strongest candidate is the tone.
+            const auto* best = &r.candidates[0];
+            for (std::size_t i = 1; i < r.count; ++i)
+                if (r.candidates[i].magnitude > best->magnitude)
+                    best = &r.candidates[i];
+
+            EXPECT_NEAR (best->frequencyHz, toneHz, 0.1 * binHz)
+                << "tone " << toneHz << " Hz, bin " << best->bin;
+            // And it stays inside the bin it was detected in, so every
+            // lround(hz / binWidth) consumer still finds that bin.
+            EXPECT_EQ (std::lround (best->frequencyHz / binHz), best->bin);
+        }
+    }
+}
+
+// What the estimate buys at the speaker: the cut actually delivered AT the
+// howl by the default notch (Q 30, -18 dB) placed where the analyzer says.
+// At 300 Hz, half a bin off, the bin-centre placement delivered -3.9 dB.
+TEST (PeakinessSubBin, ANotchPlacedOnTheEstimateCutsTheHowlNearItsDesignDepth)
+{
+    const double binHz  = kSampleRate / Detector::kFftSize;
+    const double toneHz = (13 + 0.45) * binHz;   // ~315 Hz, nearly half a bin off
+
+    LockFreeRingBuffer<float> tap (kTapCapacity);
+    Detector detector (kSampleRate);
+    const auto spectrum = primedSpectrum (detector, tap,
+        makeToneInNoise (toneHz, 1.0f, 0.01f, 99u, 4 * static_cast<std::size_t> (Detector::kFftSize)));
+    PeakinessAnalyzer analyzer;
+    analyzer.setMinFrequencyHz (50.0);
+    const auto r = analyzer.analyse (spectrum);
+    ASSERT_GE (r.count, 1u);
+    const auto* best = &r.candidates[0];
+    for (std::size_t i = 1; i < r.count; ++i)
+        if (r.candidates[i].magnitude > best->magnitude)
+            best = &r.candidates[i];
+
+    auto cutAtTone = [&] (double notchHz)
+    {
+        NotchChain chain (kSampleRate);
+        chain.setNotch (0, notchHz, 30.0, -18.0);
+        double inE = 0.0, outE = 0.0;
+        const int n = 48000;
+        for (int i = 0; i < n; ++i)
+        {
+            const double x = std::sin (2.0 * kPi * toneHz * i / kSampleRate);
+            const double y = chain.processSample (x);
+            if (i >= n / 2) { inE += x * x; outE += y * y; }   // steady state
+        }
+        return 10.0 * std::log10 (outE / inE);
+    };
+
+    const double atBinCentre = cutAtTone (best->bin * binHz);
+    const double atEstimate  = cutAtTone (best->frequencyHz);
+    EXPECT_GT (atBinCentre, -6.0) << "the old placement: barely touches the howl";
+    EXPECT_LT (atEstimate, -16.0) << "the estimate must put the -18 dB on the howl (measured -18.0)";
+}
+
+TEST (PeakinessSubBin, DegenerateNeighbourhoodsFallBackToTheBinCentre)
+{
+    std::vector<float> m (static_cast<std::size_t> (Detector::kNumBins), 1.0f);
+    // Edges, a flat top, a zero and a NaN neighbour: no vertex to find.
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, 0), 0.0);
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, Detector::kNumBins - 1), 0.0);
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, 100), 0.0);
+    m[100] = 5.0f; m[99] = 0.0f;
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, 100), 0.0);
+    m[99] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, 100), 0.0);
+    // A lopsided peak is still clamped inside the bin.
+    m[99] = 1.0e-6f; m[101] = 4.9f;
+    const double off = PeakinessAnalyzer::subBinOffset (m.data(), Detector::kNumBins, 100);
+    EXPECT_GT (off, 0.0);
+    EXPECT_LE (off, PeakinessAnalyzer::kMaxSubBinOffset);
+    EXPECT_EQ (PeakinessAnalyzer::subBinOffset (nullptr, Detector::kNumBins, 100), 0.0);
 }
