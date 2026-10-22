@@ -97,18 +97,15 @@
 // stop leaves the filter at an intermediate depth while NotchInfo.depthDB
 // already reads the target -- 10 ms of disagreement, accepted (spec 4.7, m-5).
 //
-// reset() also fires by accident, per sample: AudioEngine.cpp:617 calls
-// chain.reset() from inside the per-sample audio loop as a NaN self-heal
-// whenever the chain's output goes non-finite, and NotchChain::reset() loops
-// every filter, so one bad sample cancels every in-flight ramp in that
-// chain -- not just the one that produced it. Unlike a device-restart reset,
-// this path is NOT followed by setSampleRate()'s coefficient replay
-// (NotchChain.cpp:110), so the filter is left frozen at whatever intermediate
-// depth the ramp had reached, indefinitely, while NotchInfo.depthDB keeps
-// reading the target the ramp never finished walking to. This class does not
-// re-arm the ramp on its own; whether a NaN heal should re-apply the target
-// is a decision for the caller that wires the ramp (NotchChain::setNotch),
-// not for Biquad.
+// reset() also cancels a ramp as a side effect, and one caller used to fire it
+// by accident, per sample: AudioEngine's NaN self-heal (a non-finite chain
+// output) called chain.reset(), which loops every filter, so one bad sample
+// cancelled every in-flight ramp in that chain and left the filter frozen at
+// the intermediate depth while NotchInfo.depthDB read the target (the
+// "GAP", spec 4.7 m-5). That caller now uses NotchChain::healState(), which
+// clears the state AND replays each Active notch's stored design, so a heal
+// lands on the target depth. This class still does not re-arm a ramp on its
+// own; the caller that wires the ramp (NotchChain) owns that decision.
 
 #pragma once
 

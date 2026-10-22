@@ -53,7 +53,7 @@ struct TwoNotchController
 
     TwoNotchController()
     {
-        controller.setNotch (0, 0, 987.0, 4.0, -12.0,
+        controller.setNotch (0, 0, 987.0, 12.0, -12.0,
                              NotchController::Origin::Manual);
         controller.setNotch (1, 3, 2400.0, 8.0, -6.0,
                              NotchController::Origin::Manual);
@@ -189,7 +189,7 @@ TEST (NotchListPanel, TwoPublishedNotchesProduceExactlyTwoRows)
             EXPECT_EQ (row.depth.toStdString(),
                        (juce::String::charToString ((juce::juce_wchar) 0x2212)
                         + "12.0 dB").toStdString());
-            EXPECT_EQ (row.q.toStdString(), "4.0");
+            EXPECT_EQ (row.q.toStdString(), "12.0");
         }
         if (row.freq == "2.4 kHz")
             saw2400 = true;

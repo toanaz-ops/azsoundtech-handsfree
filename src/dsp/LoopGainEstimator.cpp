@@ -47,6 +47,23 @@ void LoopGainEstimator::reset (double sampleRate)
     std::fill (scratch_.begin(), scratch_.end(), 0.0f);
 }
 
+bool LoopGainEstimator::resetKeepingReference (double sampleRate)
+{
+    const double newRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    if (referenceStream_.frames == 0 || newRate != sampleRate_)
+    {
+        reset (sampleRate);
+        return false;
+    }
+
+    noiseStream_   = Stream {};
+    captureStream_ = Stream {};
+    noiseAccum_.fill (0.0);
+    captureAccum_.fill (0.0);
+    std::fill (scratch_.begin(), scratch_.end(), 0.0f);
+    return true;
+}
+
 void LoopGainEstimator::pushNoiseFloor (const float* samples, int numSamples)
 {
     pushInto (noiseStream_, noiseAccum_, samples, numSamples);

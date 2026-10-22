@@ -105,6 +105,11 @@ public:
     // [8, 50], depth dB in [-24, -6]; clamped on set.
     static constexpr double kDefaultNotchQ      = 30.0;
     static constexpr double kDefaultNotchDepthDb = -18.0;   // was -12 pre-brief
+    // Every Set this controller emits, for ANY Origin, carries a Q in this
+    // range (review 2026-10-20, M1). A preset is not a trusted source: Q 0.01
+    // at -24 dB is a cut several octaves wide.
+    static constexpr double kMinNotchQ = 8.0;
+    static constexpr double kMaxNotchQ = 50.0;
 
     // === Lane G: the depth ladder (spec 4.9). Fixed for 1.2.0 and
     // deliberately NOT exposed on the GUI -- these are the numbers the
@@ -198,6 +203,8 @@ public:
     // immediately, if the thread never ran) -- see flushEventOutbox().
     void start();
     void stop (int timeoutMs);
+    // True while the poll thread runs (MainComponent's driver-restart hooks).
+    bool isRunning() const { return isThreadRunning(); }
 
     // Routing-slot width: how many lanes (channels 0..width-1) THIS slot's
     // controller drives. Accepts 1 or 2; anything else clamps into [1, 2].
@@ -683,6 +690,14 @@ private:
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
     std::vector<NotchCommand> outbox_;
+    // Detector-thread only: flushOutbox() swaps it with outbox_ so neither
+    // buffer is reallocated per flush. Both are reserved to kOutboxReserve.
+    static constexpr std::size_t kOutboxReserve = 128;
+public:
+    // stop() waits at least this long for the detector thread (see stop()).
+    static constexpr int kMinStopTimeoutMs = 5000;
+private:
+    std::vector<NotchCommand> pendingScratch_;
 
     // Room memory (spec 4.6). Fixed arrays, guarded by modelMutex_ exactly
     // like model_ above -- roomMemoryHead_[lane] is the next slot to overwrite.

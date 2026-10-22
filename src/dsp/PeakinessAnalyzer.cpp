@@ -34,6 +34,38 @@ double PeakinessAnalyzer::getMinFrequencyHz() const
     return minFrequencyHz_;
 }
 
+double PeakinessAnalyzer::subBinOffset (const float* magnitudes, int numBins, int bin) noexcept
+{
+    if (magnitudes == nullptr || bin < 1 || bin >= numBins - 1)
+        return 0.0;
+
+    const double left   = magnitudes[bin - 1];
+    const double centre = magnitudes[bin];
+    const double right  = magnitudes[bin + 1];
+
+    // log() of zero, a negative or a non-finite magnitude would make the
+    // parabola meaningless; the bin centre is the honest answer then.
+    if (! (left > 0.0 && centre > 0.0 && right > 0.0)
+        || ! std::isfinite (left) || ! std::isfinite (centre) || ! std::isfinite (right))
+        return 0.0;
+
+    const double a = std::log (left);
+    const double b = std::log (centre);
+    const double c = std::log (right);
+
+    // A peak curves DOWN. Zero or positive curvature (a flat top, a dip)
+    // has no vertex between the neighbours.
+    const double curvature = a - 2.0 * b + c;
+    if (! (curvature < 0.0))
+        return 0.0;
+
+    const double offset = 0.5 * (a - c) / curvature;
+    if (! std::isfinite (offset))
+        return 0.0;
+
+    return std::clamp (offset, -kMaxSubBinOffset, kMaxSubBinOffset);
+}
+
 float PeakinessAnalyzer::peakinessAt (const float* magnitudes, int numBins, int bin)
 {
     if (magnitudes == nullptr)
@@ -141,7 +173,9 @@ PeakinessAnalyzer::Result PeakinessAnalyzer::analyse (const Detector::Spectrum& 
 
         Candidate candidate;
         candidate.bin         = bin;
-        candidate.frequencyHz = static_cast<double> (bin) * spectrum.sampleRate
+        candidate.frequencyHz = (static_cast<double> (bin)
+                                 + subBinOffset (mags, Detector::kNumBins, bin))
+                              * spectrum.sampleRate
                               / static_cast<double> (Detector::kFftSize);
         candidate.magnitude   = mags[bin];
         candidate.peakiness   = peakiness;

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace
@@ -632,9 +633,15 @@ MainComponent::MainComponent()
         // setWidth() is only legal while the thread is stopped, so the width
         // from the (freshly restarted) engine config is applied here, then
         // the poll loop relaunches.
+        // The detector's rate too (review 2026-10-20, B1): it was built at
+        // 48 kHz and nothing else ever retargets it, so on a 44.1 or 96 kHz
+        // device every bin mapped to the wrong frequency and the chain --
+        // which DOES follow the device -- notched beside the howl.
+        const double rate = engine_.getCurrentSampleRateHz();
         for (int i = 0; i < kMaxSlots; ++i)
         {
             auto& controller = *notchControllers_[(std::size_t) i];
+            controller.setSampleRate (rate);
             controller.setWidth (engine_.getSlotConfig (i).width);
             controller.start();
         }
@@ -659,6 +666,54 @@ MainComponent::MainComponent()
             ++wizardGeneration_;
         else
             saveSettings();
+    };
+
+    // Review 2026-10-20, I1: a restart the DRIVER starts -- JUCE's ASIO device
+    // answering a reset, buffer-size or sample-rate request from its own
+    // timer -- reaches the engine without passing through the two hooks above,
+    // and audioDeviceAboutToStart() cleared every ring with eight detector
+    // threads still reading and writing them. Every restart the APP starts
+    // joins the detectors in onBeforeRestart() BEFORE it touches the device,
+    // so a device that stops while a detector still runs is, by construction,
+    // one nobody here asked for. That test needs no flag to keep in step with
+    // the half-dozen call sites that run the hooks.
+    deferToMessageLoop = [] (std::function<void()> fn)
+    {
+        juce::MessageManager::callAsync (std::move (fn));
+    };
+    engine_.onDeviceStopping = [this]
+    {
+        if (! anyDetectorRunning())
+            return;   // an app restart: onBeforeRestart already ran
+
+        // The hooks drive the GUI and join threads; off the message thread
+        // there is nothing safe to do but leave the old behaviour.
+        if (! juce::MessageManager::existsAndIsCurrentThread())
+        {
+            jassertfalse;
+            return;
+        }
+
+        devicePanel_.onBeforeRestart();
+        driverRestartPending_ = true;
+    };
+    engine_.onDeviceStarted = [this]
+    {
+        if (! std::exchange (driverRestartPending_, false))
+            return;
+
+        // NOT inline: this runs inside the device's start(), under JUCE's
+        // audio callback lock, and onAfterRestart() saves settings and
+        // starts threads. The detectors stay joined until the loop runs it --
+        // detection is off for that moment, nothing else is.
+        juce::Component::SafePointer<MainComponent> safe (this);
+        deferToMessageLoop ([safe]
+        {
+            // An app restart that ran in between already relaunched them.
+            if (safe == nullptr || safe->anyDetectorRunning())
+                return;
+            safe->devicePanel_.onAfterRestart();
+        });
     };
 
     // A setting the hardware refused. Held rather than flashed: the user needs
@@ -1011,6 +1066,11 @@ MainComponent::~MainComponent()
 {
     stopTimer();
 
+    // engine_.stop() below fires audioDeviceStopped(): the hooks must not
+    // reach a component that is half torn down.
+    engine_.onDeviceStopping = nullptr;
+    engine_.onDeviceStarted  = nullptr;
+
     // LANE M FIRST, and explicitly rather than by relying on member order.
     // stop() stands the RUN down, not just the thread: it joins, then restores
     // detection, lifts the tap suspension and logs the abort ON THIS THREAD. It
@@ -1033,6 +1093,14 @@ MainComponent::~MainComponent()
     for (auto& controller : notchControllers_)
         controller->setEventSink (nullptr);   // threads are joined: precondition holds
     engine_.stop();
+}
+
+bool MainComponent::anyDetectorRunning() const
+{
+    for (const auto& controller : notchControllers_)
+        if (controller->isRunning())
+            return true;
+    return false;
 }
 
 AudioEngine& MainComponent::getAudioEngine()
@@ -1246,11 +1314,13 @@ void MainComponent::startAudio()
         checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
     // The device is open: the detectors can start pumping. start() is a no-op
-    // if the thread already runs. Width first, for the same reason as the
-    // after-restart hook: setWidth() needs the thread stopped.
+    // if the thread already runs. Rate and width first, for the same reason
+    // as the after-restart hook: setWidth() needs the thread stopped.
+    const double rate = engine_.getCurrentSampleRateHz();
     for (int i = 0; i < kMaxSlots; ++i)
     {
         auto& controller = *notchControllers_[(std::size_t) i];
+        controller.setSampleRate (rate);
         controller.setWidth (engine_.getSlotConfig (i).width);
         controller.start();
     }
