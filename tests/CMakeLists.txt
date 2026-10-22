@@ -148,9 +148,15 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-superseded.jsonl
                 --expect-notches 2 --expect-superseded 1)
+    # Lane L: the copilot's finding rules. Offline; the --ask tools are
+    # covered only where the anthropic package happens to be installed.
+    add_test(NAME copilot_findings
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_copilot.py)
 else()
     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_superseded COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_superseded PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME copilot_findings COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(copilot_findings PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
 endif()

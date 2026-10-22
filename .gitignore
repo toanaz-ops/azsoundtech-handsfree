@@ -76,3 +76,6 @@ shots/
 # shortcut a tester dropped there — both untracked at root, 2026-09-04.
 /Testing/
 /*.lnk
+
+# Python bytecode from tools/ and tests/ scripts
+__pycache__/
