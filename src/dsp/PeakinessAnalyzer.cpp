@@ -101,7 +101,7 @@ PeakinessAnalyzer::Result PeakinessAnalyzer::analyse (const Detector::Spectrum& 
     const double firstBinExact = std::ceil (minFrequencyHz_ / binWidth);
 
     // At every supported rate kNeighbourOuterRadius, not minFrequencyHz_, is
-    // what binds: 5 * 48000/1024 = 234.375 Hz, well above the 100 Hz default.
+    // what binds: 5 * 48000/2048 = 117.19 Hz at 48 kHz, above the 100 Hz default.
     // That blind spot is documented in PeakinessAnalyzer.h.
     int firstBin = kNeighbourOuterRadius;
     if (firstBinExact > static_cast<double> (lastBin))

@@ -50,6 +50,8 @@ cũng chỉ lộ ở vòng review thứ hai của R2.
 
 ## 6. `NotchController::setSampleRate` không có caller production
 
+**Kết luận dưới đây SAI, đã sửa 2026-10-20 (review độc lập, B1).** Thiếu caller không chỉ là chuyện readout: detector chạy cứng 48 kHz, nên ở 44,1 kHz hay 96 kHz mọi notch tự động bị đặt sai tần số. Bản sửa: `MainComponent` gọi `setSampleRate` trước `setWidth` sau mỗi lần start/restart. Bài học: một hàm "chưa có caller" thì phải truy xem trạng thái nó giữ có ĐƯỢC DÙNG ở chỗ khác không, đừng kết luận chỉ từ phần mình đang làm.
+
 Phát hiện ở R1, chưa sửa (ngoài phạm vi lane R): đổi device / đổi sample rate
 chỉ tới controller qua `setWidth`, vốn tình cờ reset đúng phần state cần reset.
 `setSampleRate` hiện chỉ được gọi từ test và `tools/snapshot.cpp`. Đã ghi vào

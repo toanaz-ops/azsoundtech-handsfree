@@ -870,10 +870,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     if (bypass)
     {
-        // Bypass copies IN->OUT along the mapping (the detector still sees
-        // signal via the per-slot taps below).
+        // Bypass routes IN->OUT along the mapping (the detector still sees
+        // signal via the per-slot taps below). It ACCUMULATES onto the cleared
+        // output, exactly like the DSP branch: several lanes aimed at one
+        // output channel SUM in Bypass as they do in Auto (2026-10-21 audit).
+        // It used to copy, so the LAST lane won and every earlier lane sharing
+        // that channel vanished from the PA the moment the operator hit the
+        // emergency BYPASS control -- and, because the tap reads `out`, the
+        // earlier lane's detector tap then carried the later lane's samples.
         for (int i = 0; i < numLanes; ++i)
-            juce::FloatVectorOperations::copy (lanes[i].out, lanes[i].in, numSamples);
+            juce::FloatVectorOperations::add (lanes[i].out, lanes[i].in, numSamples);
     }
     else
     {
@@ -900,13 +906,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 double v = chain.processSample (x);
 
                 // A non-finite chain OUTPUT means the filter state itself is
-                // already poisoned. Reset the chain -- allocation-free, the
-                // same call the device-restart path makes -- and emit silence
-                // for this sample: the filter self-heals within one sample
-                // instead of screaming NaN until someone restarts the device.
+                // already poisoned. Heal the chain -- allocation-free -- and
+                // emit silence for this sample: the filter self-heals within
+                // one sample instead of screaming NaN until someone restarts
+                // the device. healState(), not reset(): reset() would cancel
+                // every in-flight depth ramp in the chain and strand the
+                // filter at an intermediate depth while the model reads the
+                // target (the old GAP); healState() replays the target design.
                 if (! std::isfinite (v))
                 {
-                    chain.reset();
+                    chain.healState();
                     v = 0.0;
                 }
 
@@ -1157,12 +1166,24 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // produce a sample without scOutChannel_, and the controller sets both at
     // Arm. Clearing them would only add two stores nothing reads.
 
-    // All 16 rings (8 taps + 8 command queues) are cleared under the same
-    // precondition (no producer/consumer running); the detector side is
-    // stopped by MainComponent BEFORE any device restart reaches this point
-    // (bridge design §6.5).
-    for (auto& queue : commandQueues_)
-        queue.clear();
+    // The eight COMMAND queues are deliberately NOT cleared (2026-10-21 audit).
+    // They used to be, and that discarded notches whenever the device opened
+    // after the commands were queued -- ASIO not ready at launch, then a preset
+    // load / manual notch / soundcheck APPLY, then the operator picks the
+    // device: the model and the GUI said "Active" while the chain was empty.
+    //
+    // Keeping them is safe because a Set carries Hz, not a coefficient set:
+    // NotchChain::setNotch re-validates frequency against the rate this very
+    // function just installed, and rejects what the new rate cannot hold. The
+    // model (NotchController) survives a restart too, so a command still in
+    // the ring is the model's own intent that the chain has not caught up
+    // with yet. Ring order is preserved, so a queued Clear still follows its
+    // Set. A full ring only DELAYS a notch (NotchController::flushOutbox
+    // retries), it never loses one.
+    //
+    // The 8 tap rings and micCapture_ above ARE cleared: their content is audio
+    // of the previous device and rate, which is wrong the moment the rate
+    // changes. Nothing of that kind lives in a command.
 }
 
 void AudioEngine::audioDeviceStopped()

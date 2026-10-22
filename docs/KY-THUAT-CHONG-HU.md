@@ -66,7 +66,7 @@ không có race.
 
 1. Driver đưa một block vào callback; mỗi slot bật lấy đúng kênh vào/ra nó
    được route.
-2. **Bypass mode**: copy thẳng in → out. **Auto/Soundcheck**: mỗi mẫu đi qua
+2. **Bypass mode**: chuyển thẳng in → out (CỘNG DỒN vào ngõ ra, nên nhiều làn cùng ngõ ra vẫn cộng lại như Auto). **Auto/Soundcheck**: mỗi mẫu đi qua
    chuỗi 16 biquad notch của làn nó trong slot.
 3. Sau khi xử lý, **mỗi làn sau notch của MỖI slot** được copy một lần vào
    tap ring riêng của làn đó (8 slot × 2 làn = 16 ring) — ở mọi mode, kể cả
@@ -90,6 +90,9 @@ tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo c�
   biến phần mềm chống hú thành máy phát hú.
 - Tham số không hợp lệ (Q ≤ 0, freq ≥ Nyquist...) bị chặn trước khi chạm hệ số;
   pole ngoài vòng tròn đơn vị đã được đo bùng tới 3.7e77 chỉ sau 208 mẫu.
+- Detector đi theo sample rate của device: `MainComponent` gọi
+  `NotchController::setSampleRate` sau mỗi lần start/restart (sửa 2026-10-20, review B1;
+  trước đó detector cứng 48 kHz nên ở 44,1/96 kHz notch tự động đặt lệch tần số hú).
 - Đổi sample rate khiến notch vượt Nyquist mới → notch về trạng thái Idle giữ
   nguyên tham số (**D-00**: hủy kích hoạt, không clamp, không xóa). Clamp là thứ
   từng tạo đỉnh đầu ra 4.11e18.
@@ -124,11 +127,12 @@ trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (v
 `cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
 nay cho cùng bốn số này.
 
-**Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
-non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
-không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
-khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
-cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
+**Khoảng trống (đã đóng 2026-10-21):** `AudioEngine.cpp` từng `reset()` chuỗi
+filter mỗi khi output non-finite (NaN self-heal), **hủy mọi ramp đang bay** và
+không replay hệ số, nên filter đứng lại ở độ sâu trung gian trong khi
+`NotchInfo.depthDB` đã đọc giá trị đích. Giờ self-heal gọi
+`NotchChain::healState()`: xóa state rồi áp lại thiết kế đích đã lưu của mọi
+notch Active, nên heal luôn đáp ở độ sâu đích.
 
 ## 3. Phát hiện hú — từ mẫu đến điểm số
 
@@ -305,7 +309,7 @@ stateDiagram-v2
     Soundcheck --> Bypass : nút BYPASS
 
     state Bypass {
-        note right of Bypass : Copy thẳng in→out.<br/>Tap VẪN chạy — detector vẫn thấy phòng
+        note right of Bypass : Chuyển thẳng in→out (cộng dồn).<br/>Tap VẪN chạy — detector vẫn thấy phòng
     }
     state Soundcheck {
         note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả (KD-7).<br/>Hết 15 s detector tự NGỪNG DÒ<br/>nhưng mode KHÔNG tự chuyển —<br/>chờ người vận hành bấm AUTO
