@@ -18,6 +18,9 @@ on:
     # macOS là cross-build smoke check (hệ số 10x phút) -> chạy 1 lần/tuần,
     # thứ Hai 08:00 giờ VN = 01:00 UTC. Chỉ job `macos` đọc lịch này.
     - cron: '0 1 * * 1'
+    # Sanitizers: hằng đêm 02:30 giờ VN = 19:30 UTC, trên main. Chỉ job
+    # `linux-sanitizers` đọc lịch này (so theo github.event.schedule).
+    - cron: '30 19 * * *'
 
 # One run per ref. A PR pushed three times in ten minutes used to leave three
 # matrix builds racing; the stale ones told nobody anything.
@@ -71,7 +74,8 @@ jobs:
   macos:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'schedule' && vars.CI_HEAVY != 'off')
+      (github.event_name == 'schedule' && github.event.schedule == '0 1 * * 1'
+       && vars.CI_HEAVY != 'off')
     runs-on: macos-latest
     steps:
       - name: Checkout code with submodules
@@ -89,3 +93,59 @@ jobs:
         run: |
           cd build
           ctest -C Release --output-on-failure
+
+  # Linux + AddressSanitizer/UBSan (review 2026-10-20, M5). Not the product --
+  # no ASIO -- but the only place a use-after-free or a data-race-shaped
+  # lifetime bug gets caught before the PA does: ASan on Linux found the lane M
+  # `Rig` fixture's use-after-free (memory/lane-u-dumb-geek-2026-10-18.md) that
+  # every MSVC Release run had passed. GCC, because the stock Ubuntu clang here
+  # has been seen without its ASan runtime. Same CI_HEAVY valve as Windows;
+  # ubuntu runners are the cheap ones (1x).
+  #
+  # NIGHTLY, not per PR (owner 2026-10-22: "có cần chạy nhiều CI như vậy
+  # không"). It takes ~15 min and finds lifetime bugs, which do not need to
+  # be caught on the same push that introduced them -- the next morning is
+  # early enough, and a PR that needs it can still be run by hand
+  # (workflow_dispatch on its branch).
+  linux-sanitizers:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '30 19 * * *'
+       && vars.CI_HEAVY != 'off')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install JUCE build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev \
+            libxi-dev libxcomposite-dev libxrender-dev libgl1-mesa-dev
+
+      - name: Configure CMake (GCC, ASan + UBSan)
+        run: >-
+          cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
+          "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
+          "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+
+      - name: Build tests
+        run: cmake --build build --target HandsFreeTests -j 4
+
+      - name: Run tests under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        # -j 2, not more: SoundcheckController.AbortAndJoinJoinsBeforeItRuns
+        # drives the real poll thread against wall time, and under ASan with
+        # eight jobs on the box it missed its window (it passes alone, and the
+        # whole suite passes at -j 2: 795/795, 136 s, 2026-10-20).
+        run: |
+          cd build
+          ctest --output-on-failure -j 2

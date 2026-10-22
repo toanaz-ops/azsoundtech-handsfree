@@ -112,6 +112,15 @@ target_compile_definitions(HandsFreeTests PRIVATE
     JUCE_USE_CURL=0
 )
 
+# Same two switches as the app target (CMakeLists.txt): nothing here fetches a
+# URL or embeds a browser, and on Linux JUCE_USE_CURL=1 makes juce_core link
+# against libcurl, so a machine without it failed to link this target while the
+# app linked fine (review 2026-10-20, M10).
+target_compile_definitions(HandsFreeTests PRIVATE
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+)
+
 # MSVC: silence "warning C4996: 'std::copy_n': ... was declared deprecated" etc.
 if(MSVC)
     target_compile_definitions(HandsFreeTests PRIVATE
