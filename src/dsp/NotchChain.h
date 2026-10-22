@@ -92,6 +92,17 @@ public:
 
     void   reset();
 
+    // NaN self-heal (2026-10-21 audit). Like reset() it clears every filter's
+    // state, but it then REPLAYS the stored design (frequency, Q, depth) of
+    // every Active notch, so an in-flight depth ramp that the clear cancelled
+    // lands on its TARGET depth instead of stranding at an intermediate one
+    // while NotchInfo.depthDB reads the target. It is setSampleRate()'s replay
+    // without the rate write. A design the biquad now rejects (cannot happen
+    // for one it accepted before at this rate) deactivates the slot, exactly
+    // like setSampleRate(). Allocation-free and lock-free: safe on the audio
+    // thread, which calls it from the non-finite-output branch.
+    void   healState();
+
     // Sample-rate retarget: recomputes coefficients for every Active notch
     // against the new rate so each notch keeps its intended frequency in Hz.
     // Any Active notch whose frequency is no longer below the NEW Nyquist is
