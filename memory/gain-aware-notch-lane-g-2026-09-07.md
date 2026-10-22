@@ -222,6 +222,9 @@ cách máy móc là cách làm hỏng. Đọc từng chỗ gọi trước khi x�
   có khối đó vẫn im lặng nhận trần −12.
 - **`NotchController::setSampleRate` vẫn không có caller production** (carry-over
   từ lane R). Lane G vẫn xóa bộ nhớ phòng ở đó vì đó là chỗ đúng của nó.
+  **Đánh giá này sai (review 2026-10-20, B1):** đây không phải chuyện readout. Thiếu
+  caller nên detector chạy cứng 48 kHz, và ở rate khác mọi notch tự động bị đặt sai
+  tần số. Đã sửa ở PR #13.
 - **`releaseFrozen` publish nhưng chưa vẽ** (Q9): chip và đồng hồ nhả có thể lệch
   nhau, và một slot không hiển thị có thể đang đóng băng mà màn hình không nói gì.
 - **`kDepthStepDb = 6` không có code nào đọc** — tài liệu dưới dạng hằng số, và

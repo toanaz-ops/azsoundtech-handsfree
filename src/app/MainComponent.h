@@ -215,6 +215,12 @@ public:
     std::function<void (const juce::String& text,
                         std::function<void (bool)> onAnswer)> soundcheckConfirmHook;
 
+    // How the second half of a DRIVER-initiated restart reaches the message
+    // loop (review 2026-10-20, I1; see the engine hooks in the constructor).
+    // juce::MessageManager::callAsync by default; injectable because the
+    // headless suite has no message pump to run it.
+    std::function<void (std::function<void()>)> deferToMessageLoop;
+
     // THE one route a routing-table change takes (the SlotPanel lambda calls
     // this): the same detector stop/apply/start cycle as a device change,
     // then the CURRENT mode's detection gating re-applied to the changed slot,
@@ -387,6 +393,13 @@ public:
     void parentHierarchyChanged() override;
 
 private:
+    // True while any slot's detector thread runs. The driver-restart hooks
+    // read it to tell a restart nobody here asked for (review I1).
+    bool anyDetectorRunning() const;
+    // Set when a driver-initiated stop ran onBeforeRestart(); consumed by the
+    // next device start. Message thread only.
+    bool driverRestartPending_ = false;
+
     // How tall the bottom floor band should be given the vertical space left
     // under the transport. paint() and resized() BOTH need this figure and it
     // must agree between them, so neither computes it inline.

@@ -126,6 +126,12 @@ public:
     static constexpr float  kMaxThreshold           = 20.0f;
     static constexpr float  kCandidateScore         = 0.5f;   // plan Task 11
     static constexpr int    kMaxCandidates          = 32;
+    // Sub-bin frequency estimate (P1, 2026-10-20). The offset from the peak
+    // bin's centre is kept strictly inside half a bin, so every consumer that
+    // maps Hz back to a bin with lround(hz / binWidth) -- the reinforcement
+    // loop, room memory, the soundcheck "within one bin" test -- still lands
+    // on the bin that was detected.
+    static constexpr double kMaxSubBinOffset        = 0.45;
 
     static_assert (kNeighbourInnerRadius > kMainLobeRadius,
                    "the neighbourhood must start OUTSIDE the Hann main lobe");
@@ -135,7 +141,11 @@ public:
     struct Candidate
     {
         int    bin         = 0;
-        double frequencyHz = 0.0;   // bin * sampleRate / Detector::kFftSize
+        // (bin + subBinOffset) * sampleRate / Detector::kFftSize. The bin
+        // centre alone is up to half a bin (11.7 Hz at 48 kHz) off the howl,
+        // and a Q-30 notch centred there cuts -3.9 dB at 300 Hz instead of
+        // the -18 dB it was designed for (research 2026-10-20, §7).
+        double frequencyHz = 0.0;
         float  magnitude   = 0.0f;
         float  peakiness   = 0.0f;
         float  score       = 0.0f;  // kCandidateScore; Tasks 12+ adjust it
@@ -164,6 +174,13 @@ public:
     // Exposed because Task 14's auto-release must re-test a locked notch's bin
     // without re-running candidate selection.
     static float peakinessAt (const float* magnitudes, int numBins, int bin);
+
+    // Where between bin-1 and bin+1 the peak really sits, in bins, from a
+    // parabola through the three log magnitudes (for a Hann window this lands
+    // within a few hundredths of a bin of a steady tone). 0 whenever the
+    // three points do not describe a peak -- an edge bin, a flat top, a zero
+    // or non-finite magnitude -- and never beyond +-kMaxSubBinOffset.
+    static double subBinOffset (const float* magnitudes, int numBins, int bin) noexcept;
 
 private:
     std::atomic<float> threshold_;
