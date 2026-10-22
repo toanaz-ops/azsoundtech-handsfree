@@ -1,7 +1,8 @@
 # Kỹ thuật chống hú — AZ Soundtech Hands-free
 
 > Tài liệu mô tả cách hệ thống loại bỏ acoustic feedback, khớp với code
-> đang chạy (`src/`) tại thời điểm 07/09/2026, v1.2.0 (đã hiện thực và qua gate
+> đang chạy (`src/`). Phần đầu viết tại 07/09/2026, v1.2.0; §3.7 (lane M, 1.3.0), §3.8
+> (lane U, 1.4.0) và các sửa lỗi review 2026-10-20 bổ sung sau. Mốc ban đầu: v1.2.0 (đã hiện thực và qua gate
 > ctest, **547/547** tại `63c1759`; **đã đóng gói** 2026-09-07 21:46 qua
 > `release-alpha.ps1 -Part minor`, SHA-256 `F701FFFCF563…`, 26 848 726 byte (25,6 MB); 1.2.0 = lane G,
 > thang độ sâu + nhả dần; 1.1.3 = lane R, chip RING RISK). Số liệu lấy trực tiếp từ
@@ -66,7 +67,7 @@ không có race.
 
 1. Driver đưa một block vào callback; mỗi slot bật lấy đúng kênh vào/ra nó
    được route.
-2. **Bypass mode**: copy thẳng in → out. **Auto/Soundcheck**: mỗi mẫu đi qua
+2. **Bypass mode**: chuyển thẳng in → out (CỘNG DỒN vào ngõ ra, nên nhiều làn cùng ngõ ra vẫn cộng lại như Auto). **Auto/Soundcheck**: mỗi mẫu đi qua
    chuỗi 16 biquad notch của làn nó trong slot.
 3. Sau khi xử lý, **mỗi làn sau notch của MỖI slot** được copy một lần vào
    tap ring riêng của làn đó (8 slot × 2 làn = 16 ring) — ở mọi mode, kể cả
@@ -85,11 +86,17 @@ Không phải "notch vô hạn" mà là **RBJ peaking-EQ với gain âm**, nên 
 tham số thật: tại chính tâm tần số, `|H| = 10^(depthDB/20)` theo cấu trúc —
 −12 dB nghĩa là còn đúng 0.251 lần biên độ. Ba lớp phòng thủ:
 
+- **Q của mọi lệnh `Set` bị kẹp vào [8, 50]** (`NotchController::kMinNotchQ/kMaxNotchQ`),
+  với mọi Origin, kể cả preset (review 2026-10-20, M1). Trước đó chỉ Q ≤ 0 bị từ
+  chối, nên một preset sửa tay có Q 0,01 cắt −24 dB một dải rộng nhiều octave.
 - `depthDB > 0` bị **từ chối ở cả 3 tầng** (PresetManager → NotchChain → Biquad):
   dạng peaking là đối xứng, gain dương sẽ **khuếch đại đúng tần số đang hú** —
   biến phần mềm chống hú thành máy phát hú.
 - Tham số không hợp lệ (Q ≤ 0, freq ≥ Nyquist...) bị chặn trước khi chạm hệ số;
   pole ngoài vòng tròn đơn vị đã được đo bùng tới 3.7e77 chỉ sau 208 mẫu.
+- Detector đi theo sample rate của device: `MainComponent` gọi
+  `NotchController::setSampleRate` sau mỗi lần start/restart (sửa 2026-10-20, review B1;
+  trước đó detector cứng 48 kHz nên ở 44,1/96 kHz notch tự động đặt lệch tần số hú).
 - Đổi sample rate khiến notch vượt Nyquist mới → notch về trạng thái Idle giữ
   nguyên tham số (**D-00**: hủy kích hoạt, không clamp, không xóa). Clamp là thứ
   từng tạo đỉnh đầu ra 4.11e18.
@@ -124,11 +131,12 @@ trong lane G: `Biquad` và `NotchChain` **không đổi kể từ `cf023eb`** (v
 `cf023eb` chỉ sửa một comment trong `NotchChain.h`), nên mọi binary từ đó tới
 nay cho cùng bốn số này.
 
-**Khoảng trống đã biết:** `AudioEngine.cpp` reset chuỗi filter mỗi khi output
-non-finite (NaN self-heal). Đường đó **hủy mọi ramp đang bay** trong chuỗi và
-không có replay hệ số theo sau, nên filter đứng lại ở độ sâu trung gian trong
-khi `NotchInfo.depthDB` đã đọc giá trị đích. Tự lành ở lệnh `Set` kế tiếp; việc
-cho self-heal áp lại độ sâu đích là follow-up ngoài lane G.
+**Khoảng trống (đã đóng 2026-10-21):** `AudioEngine.cpp` từng `reset()` chuỗi
+filter mỗi khi output non-finite (NaN self-heal), **hủy mọi ramp đang bay** và
+không replay hệ số, nên filter đứng lại ở độ sâu trung gian trong khi
+`NotchInfo.depthDB` đã đọc giá trị đích. Giờ self-heal gọi
+`NotchChain::healState()`: xóa state rồi áp lại thiết kế đích đã lưu của mọi
+notch Active, nên heal luôn đáp ở độ sâu đích.
 
 ## 3. Phát hiện hú — từ mẫu đến điểm số
 
@@ -237,6 +245,10 @@ SAFE (500 ms/4/trần −12 dB/Q40/thr 12.0), BALANCED (250/3/trần −18/30/10
 (100/1/trần −24/20/8.0), tự chuyển CUSTOM khi chỉnh tay; mỗi slot chọn theo tuning
 Global chung hoặc Custom riêng.
 
+Ngưỡng peakiness (`thr`) đi tới **cả** analyzer lẫn scorer: cổng của scorer và trục
+`pNorm = (p/thr − 1)/9` dùng ngưỡng đang đặt. Trước 2026-10-20 (review I3), scorer
+dùng hằng 10, nên mọi ngưỡng dưới 10, kể cả 8.0 của AGGRESSIVE, chạy y như 10.
+
 ### 3.4 NotchController — detector là tác giả duy nhất (D-05)
 
 Quyết định kiến trúc quan trọng nhất: **detector là người duy nhất ra lệnh
@@ -325,7 +337,7 @@ stateDiagram-v2
     Soundcheck --> Bypass : nút BYPASS
 
     state Bypass {
-        note right of Bypass : Copy thẳng in→out.<br/>Tap VẪN chạy — detector vẫn thấy phòng
+        note right of Bypass : Chuyển thẳng in→out (cộng dồn).<br/>Tap VẪN chạy — detector vẫn thấy phòng
     }
     state Soundcheck {
         note right of Soundcheck : Khóa mọi đỉnh tìm thấy,<br/>KHÔNG tự nhả (KD-7).<br/>Hết 15 s detector tự NGỪNG DÒ<br/>nhưng mode KHÔNG tự chuyển —<br/>chờ người vận hành bấm AUTO
@@ -834,6 +846,7 @@ một preset viết tay không có khối đó vẫn im lặng nhận trần −
 | Thread lane M chết giữa lúc phát | Ramp-out do **chính callback** sinh; nó tự đặt `scOutChannel_ = -1`. Không cần thread nào khác còn sống |
 | Ramp-out bắt đầu ở envelope 0 = cắt phựt ở buffer lớn | Message thread chỉ **xin** (`scRampOutRequested_`); **callback chốt** `scRampOutAtSample_` ở block đầu tiên nó thấy cờ, nên envelope luôn khởi đúng ở 1.0 |
 | Restart thiết bị giữa lúc đo | `onBeforeRestart` abort + **join** lane M **TRƯỚC** khi stop detector; `micCapture_.clear()` trong cùng khối drain; `audioDeviceAboutToStart` xoá cả tám atomic soundcheck |
+| Driver tự restart (ASIO reset / đổi buffer / đổi rate trong control panel) | Không đi qua hook của app. `AudioEngine::onDeviceStopping` thấy detector còn chạy thì chạy `onBeforeRestart` (abort lane M, join 8 detector) **trước** khi ring bị xoá; `onDeviceStarted` hẹn `onAfterRestart` qua message loop (sửa 2026-10-20, review I1) |
 | Chỉ số kênh ngoài phạm vi sau restart | Kiểm lại **MỖI callback** với số kênh của **chính callback đó** (`src/app/AudioEngine.cpp:686-689`) |
 | Tắt làn bằng `continue` đóng băng state DF1 ⇒ "cạch" lúc mở lại | `NotchChain::clearState()` mỗi block cho làn đang tắt — **state-only**, không đụng `rampRemaining_` (dùng `reset()` sẽ làm kẹt ramp độ sâu của lane G) |
 | Phát sweep vào một phòng đang ngân | Cổng nền 0,5 s so với **ngưỡng peakiness sống của detector**, băng 100 Hz–6 kHz, **hỏng theo hướng đóng**; kênh ngõ ra chỉ được arm **SAU** khi cổng qua; và `arm()` từ chối khi RING RISK ≥ RISING |

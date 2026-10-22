@@ -3157,3 +3157,176 @@ TEST (MainComponentSoundcheck, AnAbortTellsTheOperatorWhy)
     EXPECT_FALSE (app.getAudioEngine().soundcheckIsEmitting());
     EXPECT_EQ    (app.getSoundcheckPanelForTest().getMode(), gui::SoundcheckPanel::Mode::Hidden);
 }
+
+namespace
+{
+// Just enough of a device for audioDeviceAboutToStart(): it reads the rate and
+// the buffer size and nothing else.
+class FixedRateDevice final : public juce::AudioIODevice
+{
+public:
+    explicit FixedRateDevice (double rate) : juce::AudioIODevice ("Fake", "Fake"), rate_ (rate) {}
+
+    juce::StringArray getOutputChannelNames() override { return { "1", "2" }; }
+    juce::StringArray getInputChannelNames() override  { return { "1", "2" }; }
+    juce::Array<double> getAvailableSampleRates() override { return { rate_ }; }
+    juce::Array<int> getAvailableBufferSizes() override    { return { 256 }; }
+    int getDefaultBufferSize() override                    { return 256; }
+    juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+    void close() override {}
+    bool isOpen() override { return true; }
+    void start (juce::AudioIODeviceCallback*) override {}
+    void stop() override {}
+    bool isPlaying() override { return false; }
+    juce::String getLastError() override { return {}; }
+    int getCurrentBufferSizeSamples() override { return 256; }
+    double getCurrentSampleRate() override     { return rate_; }
+    int getCurrentBitDepth() override          { return 24; }
+    juce::BigInteger getActiveOutputChannels() const override { return 3; }
+    juce::BigInteger getActiveInputChannels() const override  { return 3; }
+    int getOutputLatencyInSamples() override { return 0; }
+    int getInputLatencyInSamples() override  { return 0; }
+
+private:
+    double rate_;
+};
+} // namespace
+
+// RED IF the detectors are not retargeted to the device's rate after a
+// restart (review 2026-10-20, B1). The Detector is built at 48 kHz and,
+// before the fix, nothing in production ever called setSampleRate: on a
+// 44.1 kHz card a 1000 Hz howl landed in bin 46 and was reported -- and
+// notched, by a chain that DID follow the device -- at 1078 Hz. The published
+// spectrum carries the rate the detector believes in, so that is what this
+// reads. Every other wiring test pins 48 kHz by hand, which is how this hid.
+TEST (GuiWiring, DeviceRestartRetargetsTheDetectorsToTheDeviceRate)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    FixedRateDevice device (44100.0);
+    app.getAudioEngine().audioDeviceAboutToStart (&device);
+    ASSERT_DOUBLE_EQ (app.getAudioEngine().getCurrentSampleRateHz(), 44100.0);
+
+    app.getDevicePanelForTest().onAfterRestart();
+
+    for (int slot : { 0, kMaxSlots - 1 })
+    {
+        auto* controller = app.getNotchControllerForTest (slot);
+        ASSERT_NE (controller, nullptr);
+        controller->stop (1000);   // drive it by hand, as the other tests do
+
+        std::vector<float> hop (512, 0.25f);
+        app.getAudioEngine().getTapBuffer (slot).write (hop.data(), hop.size());
+        controller->runOnce();
+
+        NotchController::SnapshotBuffer snap {};
+        controller->copySnapshot (snap);
+        EXPECT_DOUBLE_EQ (snap.sampleRate, 44100.0) << "slot " << slot;
+    }
+}
+
+namespace
+{
+// A device that reports a rate and nothing else; audioDeviceAboutToStart()
+// reads only the rate and the buffer size.
+class DriverResetDevice final : public juce::AudioIODevice
+{
+public:
+    DriverResetDevice() : juce::AudioIODevice ("Reset", "Reset") {}
+
+    juce::StringArray getOutputChannelNames() override { return { "1", "2" }; }
+    juce::StringArray getInputChannelNames() override  { return { "1", "2" }; }
+    juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
+    juce::Array<int> getAvailableBufferSizes() override    { return { 256 }; }
+    int getDefaultBufferSize() override                    { return 256; }
+    juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+    void close() override {}
+    bool isOpen() override { return true; }
+    void start (juce::AudioIODeviceCallback*) override {}
+    void stop() override {}
+    bool isPlaying() override { return false; }
+    juce::String getLastError() override { return {}; }
+    int getCurrentBufferSizeSamples() override { return 256; }
+    double getCurrentSampleRate() override     { return 48000.0; }
+    int getCurrentBitDepth() override          { return 24; }
+    juce::BigInteger getActiveOutputChannels() const override { return 3; }
+    juce::BigInteger getActiveInputChannels() const override  { return 3; }
+    int getOutputLatencyInSamples() override { return 0; }
+    int getInputLatencyInSamples() override  { return 0; }
+};
+
+bool anyRunning (MainComponent& app)
+{
+    for (int s = 0; s < kMaxSlots; ++s)
+        if (app.getNotchControllerForTest (s)->isRunning())
+            return true;
+    return false;
+}
+} // namespace
+
+// RED IF a restart the DRIVER starts clears the rings with the detectors still
+// running (review 2026-10-20, I1). JUCE's ASIO device answers a reset,
+// buffer-size or rate request from its own timer with stop() -> start(), i.e.
+// audioDeviceStopped() then audioDeviceAboutToStart(), and never runs the
+// app's onBeforeRestart/onAfterRestart. The engine's stop hook must join every
+// detector BEFORE the start clears the rings, and the threads must come back
+// afterwards -- deferred, because the start runs inside the device.
+TEST (GuiWiring, DriverInitiatedRestartJoinsTheDetectorsAndRelaunchesThem)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    std::vector<std::function<void()>> deferred;
+    app.deferToMessageLoop = [&deferred] (std::function<void()> fn)
+    {
+        deferred.push_back (std::move (fn));
+    };
+
+    // The app is running: every detector thread is up.
+    app.getDevicePanelForTest().onAfterRestart();
+    ASSERT_TRUE (anyRunning (app));
+
+    // The driver's reset: stop ...
+    app.getAudioEngine().audioDeviceStopped();
+    EXPECT_FALSE (anyRunning (app)) << "the rings are cleared next, with these still running";
+
+    // ... start. The rings are cleared here; nothing may be running yet.
+    DriverResetDevice device;
+    app.getAudioEngine().audioDeviceAboutToStart (&device);
+    EXPECT_FALSE (anyRunning (app));
+    ASSERT_EQ (deferred.size(), 1u);
+
+    deferred.front()();
+    EXPECT_TRUE (anyRunning (app)) << "detection never came back after the driver reset";
+    for (int s = 0; s < kMaxSlots; ++s)
+        app.getNotchControllerForTest (s)->stop (1000);
+}
+
+// The APP's own restart must not be doubled: onBeforeRestart has already
+// joined the detectors when the device stops, so the hooks stay out of it.
+TEST (GuiWiring, AppInitiatedRestartIsNotHandledTwice)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    std::vector<std::function<void()>> deferred;
+    app.deferToMessageLoop = [&deferred] (std::function<void()> fn)
+    {
+        deferred.push_back (std::move (fn));
+    };
+
+    app.getDevicePanelForTest().onAfterRestart();
+    ASSERT_TRUE (anyRunning (app));
+
+    app.getDevicePanelForTest().onBeforeRestart();
+    app.getAudioEngine().audioDeviceStopped();
+    DriverResetDevice device;
+    app.getAudioEngine().audioDeviceAboutToStart (&device);
+    app.getDevicePanelForTest().onAfterRestart();
+
+    EXPECT_TRUE (deferred.empty());
+    EXPECT_TRUE (anyRunning (app));
+    for (int s = 0; s < kMaxSlots; ++s)
+        app.getNotchControllerForTest (s)->stop (1000);
+}

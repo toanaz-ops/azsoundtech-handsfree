@@ -13,6 +13,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace
@@ -630,4 +631,78 @@ TEST(NotchChain, ADepthOnlyRetuneMovesOverkRampMsRatherThanInOneStep)
                                   - control.processSample(tone[static_cast<std::size_t>(i)])));
     }
     EXPECT_GT(maxDiff, fullStep) << "the two chains never diverged: the retune did nothing";
+}
+
+// ---------------------------------------------------------------------------
+// healState(): the NaN self-heal replays the stored target design
+// (2026-10-21 audit). reset() cancels an in-flight depth ramp and leaves the
+// filter at an intermediate depth while NotchInfo.depthDB reads the target.
+// ---------------------------------------------------------------------------
+TEST(NotchChain, ResetStrandsAnInFlightRampAtAnIntermediateDepth)
+{
+    // Control: documents the defect healState() exists to avoid, so the next
+    // test cannot pass because the ramp happened to finish by itself.
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+    chain.setNotch(0, 1000.0, 30.0, -18.0);          // starts a 480-sample ramp
+    for (int i = 0; i < 100; ++i) chain.processSample(0.1);
+    ASSERT_GT(chain.getFilterForTest(0).rampRemainingForTest(), 0);
+
+    chain.reset();
+
+    Biquad target;
+    ASSERT_TRUE(target.setNotchFilter(1000.0, 30.0, 48000.0, -18.0));
+    EXPECT_EQ(chain.getFilterForTest(0).rampRemainingForTest(), 0);
+    EXPECT_NE(chain.getFilterForTest(0).coeffsForTest().b0, target.coeffsForTest().b0)
+        << "reset() landed on the target: the stranded-ramp premise is gone";
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, -18.0);
+}
+
+TEST(NotchChain, HealStateLandsAnInFlightRampOnTheTargetDesignAndClearsState)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -6.0);
+    chain.setNotch(3, 3000.0, 20.0, -12.0);          // a second, untouched notch
+    chain.setNotch(0, 1000.0, 30.0, -18.0);          // starts a 480-sample ramp
+    for (int i = 0; i < 100; ++i) chain.processSample(0.1);
+    ASSERT_GT(chain.getFilterForTest(0).rampRemainingForTest(), 0);
+
+    chain.healState();
+
+    // The ramped notch is exactly the -18 dB design, with no ramp left.
+    Biquad target0, target3;
+    ASSERT_TRUE(target0.setNotchFilter(1000.0, 30.0, 48000.0, -18.0));
+    ASSERT_TRUE(target3.setNotchFilter(3000.0, 20.0, 48000.0, -12.0));
+    EXPECT_EQ(chain.getFilterForTest(0).rampRemainingForTest(), 0);
+    const Biquad::Coeffs got0 = chain.getFilterForTest(0).coeffsForTest();
+    const Biquad::Coeffs want0 = target0.coeffsForTest();
+    EXPECT_DOUBLE_EQ(got0.b0, want0.b0);
+    EXPECT_DOUBLE_EQ(got0.b1, want0.b1);
+    EXPECT_DOUBLE_EQ(got0.b2, want0.b2);
+    EXPECT_DOUBLE_EQ(got0.a1, want0.a1);
+    EXPECT_DOUBLE_EQ(got0.a2, want0.a2);
+    EXPECT_DOUBLE_EQ(chain.getFilterForTest(3).coeffsForTest().b0, target3.coeffsForTest().b0);
+
+    // Model unchanged: still Active at the target depth.
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
+    EXPECT_DOUBLE_EQ(chain.getNotchInfo(0).depthDB, -18.0);
+    EXPECT_EQ(chain.getActiveNotchCount(), 2);
+
+    // State is clear: silence in, silence out.
+    for (int i = 0; i < 64; ++i)
+        EXPECT_DOUBLE_EQ(chain.processSample(0.0), 0.0);
+}
+
+TEST(NotchChain, HealStateRecoversAChainWhoseStateWasPoisonedWithNaN)
+{
+    NotchChain chain(48000.0);
+    chain.setNotch(0, 1000.0, 30.0, -18.0);
+    chain.processSample(std::numeric_limits<double>::quiet_NaN());
+    ASSERT_FALSE(std::isfinite(chain.processSample(0.5))) << "the NaN did not poison the state";
+
+    chain.healState();
+
+    for (int i = 0; i < 256; ++i)
+        ASSERT_TRUE(std::isfinite(chain.processSample(0.5)));
+    EXPECT_EQ(chain.getNotchInfo(0).state, NotchChain::NotchState::Active);
 }

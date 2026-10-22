@@ -212,7 +212,7 @@ public:
     //
     // IT IS FED LANE M'S OWN ARRAYS, NEVER copySnapshot(). The detector's
     // publish happens inside NotchController's drain loop
-    // (NotchController.cpp:568-582 builds the list, :617-650 publishes), and
+    // (NotchController::runOnce builds the list and publishes it), and
     // lane M runs with the taps SUSPENDED -- so nothing is drained and
     // copySnapshot() returns the SAME frozen frame for the whole 72 s run.
     // An overlay sourced from it would be showing the room as it was before
