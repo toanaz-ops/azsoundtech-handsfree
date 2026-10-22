@@ -98,3 +98,11 @@ add_executable(AfcSim
 )
 target_include_directories(AfcSim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/afc)
 target_link_libraries(AfcSim PRIVATE juce::juce_dsp juce::juce_recommended_config_flags)
+
+# No URL fetch, no browser: same switches as the app (review 2026-10-20, M10);
+# without them a Linux box with no libcurl cannot link any tool.
+foreach(tool HandsFreeSnapshot PeakinessSweep AfcSim)
+    if(TARGET ${tool})
+        target_compile_definitions(${tool} PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    endif()
+endforeach()
