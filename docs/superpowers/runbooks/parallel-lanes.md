@@ -108,6 +108,19 @@ git config --worktree submodule."external/JUCE".ignore all
 git status --short          # must be clean
 ```
 
+**`external/RTNeural` (từ lane C1) KHÔNG dùng junction.** Submodule nhỏ (~13 MB, header),
+mỗi worktree tự clone: trong worktree đó chạy
+
+```bash
+git submodule update --init external/RTNeural
+```
+
+Git đặt gitdir của nó dưới `.git/worktrees/<lane>/modules/`, nên nó biến mất cùng worktree
+và không đụng checkout gốc. **Đừng** áp `git config --worktree submodule."external/RTNeural".active false`
+(chỉ JUCE cần cặp khoá đó). Thiếu nó thì configure dừng bằng `FATAL_ERROR` — không âm thầm
+build thiếu. Lúc dọn, `git worktree remove --force` đã là bước chuẩn ở trên; một worktree có
+submodule được khởi tạo từ chối remove nếu thiếu `--force`.
+
 Worktree nằm **trong** repo (`.claude/worktrees/`) chứ không còn ở
 `D:/hf-lanes/`: một chỗ duy nhất để `git worktree list` và mọi phiên nhìn thấy
 nhau. Thư mục **build** thì vẫn ở ngoài repo trên đường dẫn ngắn — xem §5, và

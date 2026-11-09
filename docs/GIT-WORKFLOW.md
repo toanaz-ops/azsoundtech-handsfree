@@ -366,6 +366,9 @@ tải tay, không bao giờ commit) và `installer/vendor` **không** đi theo
 Thiếu `asiosdk` **không** làm configure fail — nó warn rồi tắt ASIO im lặng
 ([`memory/asio-sdk-silent-disable-2026-08-24.md`](../memory/asio-sdk-silent-disable-2026-08-24.md)).
 Còn `external/JUCE` thì cần junction, xem `parallel-lanes.md` §2.
+`external/RTNeural` (lane C1) thì **không** junction: mỗi worktree chạy
+`git submodule update --init external/RTNeural` (~13 MB); thiếu nó configure dừng bằng
+`FATAL_ERROR` nêu đúng lệnh này. Xem `parallel-lanes.md` §3.
 
 **CI xanh không chứng minh đường ASIO.** Runner Windows của GitHub không có ASIO
 SDK, nên `JUCE_ASIO` tắt ở đó — đúng cơ chế im lặng vừa nói. CI chứng minh code
@@ -393,6 +396,7 @@ Copy thẳng vào handoff hoặc báo cáo lane:
 [ ] git fetch origin
 [ ] git worktree add .claude/worktrees/<lane>-<mmdd> -b <type>/<lane> origin/main
 [ ] junction JUCE + git config --worktree     (parallel-lanes.md muc 2-3)
+[ ] git submodule update --init external/RTNeural   (moi worktree tu clone, KHONG junction)
 [ ] chep external/asiosdk + installer/vendor tu checkout goc (neu can build)
 [ ] commit nho, git add <path> tuong minh, khong bao gio git add .
 [ ] git push -u origin <type>/<lane>          <-- ngay commit dau, de CI chay

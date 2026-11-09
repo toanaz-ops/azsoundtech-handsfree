@@ -80,3 +80,25 @@ Phải đo trong build của mình, trên MSVC và clang:
 `ModelT` + backend STL, ghim theo SHA, đưa vào bằng submodule; chỉ chạy ở chế độ bóng
 (ghi quyết định vào log, không tác động vào notch). Chưa có dữ liệu `candidate_features`
 thật thì chưa huấn luyện được: C1 cần C0 tới tay tester trước.
+
+## Phụ lục — Kết quả đo C1a
+
+Đo ngày 09/11/2026 trong build của mình: MSVC (VS Build Tools 2026), Release, x64, backend STL,
+RTNeural `95c3c0f`, model 16→16→8→1 (417 tham số) với trọng số fixture ngẫu nhiên có seed.
+Chạy: `build/tests/Release/CandidateClassifierAllocTest.exe` và
+`build/tests/Release/HandsFreeTests.exe --gtest_filter='CandidateClassifier*'`.
+
+| Điều kiện Q5 | Kết quả |
+|---|---|
+| 1. Cấp phát quanh `forward()` | `score()` ×1000 (983 có ý kiến, phần còn lại là đầu vào NaN/denormal): `operator new` = **0**, `operator delete` = **0**. Đối chứng dương (`std::vector<int>(100)`): new = 1, delete = 1, nên bộ đếm nhìn thấy cấp phát. |
+| 2. So khớp tham chiếu Python | 64 ca (mono + stereo + biên kẹp): sai số tuyệt đối lớn nhất **8,15e-8** trên score 0..1 (dung sai đặt 1e-5). |
+| 3. Denormal / NaN | NaN, +inf, −inf ở từng trường thô → không có ý kiến; biên độ denormal và giá trị cực lớn → score hữu hạn trong 0..1. |
+| 4. Đổi model bằng hai bộ đệm | Chưa làm: C1a không đổi model khi chạy (Q20). |
+| 5. Model trên heap, dựng ngoài luồng detector | Có: `std::make_unique<Net>()` trong `load()`. |
+
+Chi phí: `score()` trung vị **256 ns/lần** (15 lô × 20 000 lần, min 251, max 268) trên máy này, gồm
+chuẩn hoá đặc trưng, `ScopedNoDenormals` và forward. Bản thiết kế ước lượng ~1 µs; thực tế thấp hơn.
+
+Chưa đo: clang, GCC, Linux, `RTNEURAL_ENABLE_RADSAN`; số cấp phát trong app chạy đủ 8 slot (thuộc C1b).
+Một thay đổi so với bản đọc mã: `RTNeural.h` cần `RTNEURAL_DEFAULT_ALIGNMENT` được định nghĩa, nếu
+không mỗi file in một `#pragma message` (không phải lỗi).

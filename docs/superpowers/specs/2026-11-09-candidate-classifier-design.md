@@ -35,9 +35,23 @@ tester, thứ 1.5.0 mới bắt đầu sinh ra.
 - `#include <RTNeural/RTNeural.h>` nằm trong đúng một file `.cpp`, sau một pimpl; file đó `#error`
   nếu `RTNEURAL_USE_EIGEN` hoặc `RTNEURAL_USE_XSIMD` được định nghĩa.
 - Không junction thư mục này giữa các worktree; mỗi worktree tự clone.
-- **Việc đầu tiên của C1a:** đọc lại ở đúng SHA các điểm bản thiết kế mới chỉ nhớ chứ chưa kiểm: tên
-  define backend, chữ ký `ModelT`, cách lấy lớp (`get<N>()`), dạng tham số `setWeights`/`setBias`,
-  `forward()` có ghi trạng thái không, có submodule lồng không. Sai khác thì sửa spec này.
+- **Đã kiểm ở đúng SHA (C1a, 09/11/2026):** các chi tiết bản thiết kế nhớ lại đều đúng, trừ ba
+  điểm sửa bên dưới.
+  - Backend: không có define `RTNEURAL_USE_STL` nào; STL là thứ còn lại khi `RTNEURAL_USE_EIGEN` và
+    `RTNEURAL_USE_XSIMD` đều không được định nghĩa (`#if` của macro chưa định nghĩa = 0). Cả hai đều
+    bị `#error` trong `CandidateClassifier.cpp`.
+  - `ModelT<T, in_size, out_size, Layers...>`; lấy lớp bằng `get<int Index>()` (chỉ số tính cả lớp
+    activation: Dense = 0, 2, 4).
+  - `DenseT::setWeights` nhận `const std::vector<std::vector<T>>&` hoặc `T**`, hình `[out][in]`;
+    `setBias` nhận `const T*` dài `out`. (Sửa: spec cũ chưa nêu hình.)
+  - `forward(const T*)` **có ghi trạng thái**: `outs` của từng lớp và của model. Không ghi trọng số.
+    Nghĩa là một instance không được gọi từ hai luồng; trọng số thì không bao giờ bị đổi trong `forward`.
+  - `ModelT.h` include `model_loader.h` ⇒ kéo `modules/json/json.hpp` (nlohmann). Chỉ tốn thời gian
+    biên dịch; file nằm trong cây RTNeural (không phải submodule lồng), và `modules/Eigen`,
+    `modules/xsimd` không cần cho đường STL. **Không** init submodule lồng.
+  - (Sửa) Cần `RTNEURAL_DEFAULT_ALIGNMENT=16` đặt trong target INTERFACE, không thì mỗi file include
+    RTNeural in một `#pragma message`. Backend STL không dùng giá trị này để căn hàng đầu vào.
+  - (Sửa) Dự án build C++17 (`CMAKE_CXX_STANDARD 17`), không phải C++20.
 - Nếu backend STL không build được trên MSVC: dừng và hỏi owner (điều kiện Q5), không tự đổi thư viện.
 
 ## 3. Lớp `CandidateClassifier`
@@ -64,7 +78,7 @@ Tất cả suy ra được từ cả dòng `candidate_features` lẫn `notch_set
 
 | # | Đặc trưng | Kẹp |
 |---|---|---|
-| 0 | `log2(hz / 1000)` | theo dải tần hợp lệ |
+| 0 | `log2(hz / 1000)` | hz kẹp vào 20..20000 trước khi lấy log |
 | 1 | `log10(peakiness)` (tỉ số không chặn) | 0..4 |
 | 2, 3, 5 | `pNorm`, `rNorm`, `mNorm` (0..1) | 0..1 |
 | 4 | `log2(riseRatio)` (tỉ số, trung tính 1,0) | −4..8 |
@@ -73,7 +87,13 @@ Tất cả suy ra được từ cả dòng `candidate_features` lẫn `notch_set
 | 8 | `log10(lrRatio)`; 0 khi mono | ±3 |
 | 9–12 | bin −2, −1, +1, +2 tính bằng dB so với bin giữa | −60..0 |
 | 13–14 | trung bình váy dưới / trên (bin ±3..5), dB so với bin giữa | −60..0 |
-| 15 | `log10(biên độ bin giữa)` — phụ thuộc gain staging, bỏ được nếu owner muốn | |
+| 15 | `log10(biên độ bin giữa)` — phụ thuộc gain staging, bỏ được nếu owner muốn | −12..6 |
+
+Chi tiết số học cố định bởi `tools/nn/reference_forward.py` (và test so khớp): sàn `1e-12` cho biên
+độ / `riseRatio` / `lrRatio` trước khi lấy log; `peakiness` sàn 1; "dB so với bin giữa" là
+`20·log10(max(m, 1e-12) / max(giữa, 1e-12))`; váy dưới/trên là **trung bình tuyến tính** của biên độ
+ba bin (−5..−3, +3..+5) rồi mới đổi dB; mono thì đặc trưng 7 và 8 bằng 0.
+Kiểm `isfinite` áp lên **mọi** trường thô (kể cả `lrRatio` khi mono) trước mọi phép kẹp.
 
 Không đưa vào: `score` (tích của các số trên), `asymmetry` (hằng số ở cấu hình mặc định), `thr`, `persist`.
 File trọng số mang `feature_set`, `input_offset`, `input_scale`; C++ từ chối file lệch `feature_set`.
@@ -95,6 +115,11 @@ File trọng số mang `feature_set`, `input_offset`, `input_scale`; C++ từ ch
 Bộ đếm cấp phát thay mọi dạng `operator new`/`delete` toàn cục (kể cả dạng `align_val_t`), chỉ đếm khi
 một probe `thread_local` đang bật, và nằm trong **một file chạy riêng** `CandidateClassifierAllocTest`:
 thay `operator new` ngay trong `HandsFreeTests` sẽ đè bộ cấp phát của ASan/TSan ở job đêm.
+
+Tên suite thật: `CandidateClassifierTest` (cần model nạp sẵn), `CandidateClassifierLoad`,
+`CandidateClassifierBench`, `CandidateClassifierAlloc`; filter `CandidateClassifier*` bắt hết. Thêm một
+test `RawFeaturesFollowTheSpecTable` ghim bảng đặc trưng. Một ctest `classifier_reference_parity` chạy
+chính tham chiếu Python trên cùng file khớp, nên hai phía cùng bị ghim vào một bộ số.
 
 Tham chiếu Python (`tools/nn/reference_forward.py`) chỉ dùng thư viện chuẩn để chạy được trong `ctest`.
 
@@ -127,7 +152,7 @@ Tham chiếu Python (`tools/nn/reference_forward.py`) chỉ dùng thư viện ch
 
 ## 7. Chưa kiểm / rủi ro
 
-- Các chi tiết API của RTNeural ở §2 là nhớ lại, chưa đọc ở SHA đã ghim.
+- Chi tiết API ở §2 đã đọc ở SHA đã ghim (C1a) và build được trên MSVC (VS 2026). Chưa thử clang/GCC.
 - Backend STL không nằm trong CI Windows của chính RTNeural.
 - "MSVC và clang": clang chỉ chạy ở job macOS hằng tuần; job Linux dùng GCC. Chạy `workflow_dispatch`
   trên nhánh trước khi merge nếu được.
