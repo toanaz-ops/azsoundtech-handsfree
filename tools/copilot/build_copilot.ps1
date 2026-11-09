@@ -25,31 +25,36 @@ $exe     = Join-Path $out 'HandsFreeCopilot\HandsFreeCopilot.exe'
 $fixture = Join-Path $root 'tests\fixtures\session-sample.jsonl'
 $script  = Join-Path $root 'tools\copilot\copilot.py'
 $reqs    = Join-Path $PSScriptRoot 'requirements-build.txt'
+$runtimeReqs = Join-Path $PSScriptRoot 'requirements-runtime.txt'
 
 New-Item -ItemType Directory -Force $out | Out-Null
 if (-not (Test-Path $venvPy)) {
     Invoke-Checked 'venv creation' { python -m venv $venv }
 }
-Invoke-Checked 'pip install' { & $venvPy -m pip install --disable-pip-version-check -q -r $reqs }
+Invoke-Checked 'pip install' { & $venvPy -m pip install --disable-pip-version-check -q -r $reqs -r $runtimeReqs }
 
 $distDir = Join-Path $out 'HandsFreeCopilot'
 if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir }
 
 Invoke-Checked 'PyInstaller' {
     & $venvPy -m PyInstaller --onedir --name HandsFreeCopilot --console --noconfirm --clean `
-        --exclude-module anthropic --paths (Join-Path $root 'tools') `
+        --paths (Join-Path $root 'tools') `
         --distpath $out --workpath (Join-Path $out 'work') --specpath $out $script
 }
 if (-not (Test-Path $exe)) { Fail "missing $exe" }
 
 # --- smoke gate: compare raw bytes, never console-decoded text ---------------
-function Get-StdoutBytes([string]$file, [string[]]$argList) {
+function Get-StdoutBytes([string]$file, [string[]]$argList, [hashtable]$envMap = @{}, [string]$stdinText = $null) {
     $psi = [System.Diagnostics.ProcessStartInfo]::new($file)
     foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+    foreach ($k in $envMap.Keys) { $psi.Environment[$k] = [string]$envMap[$k] }
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
+    $psi.RedirectStandardInput  = ($null -ne $stdinText)
+    if ($null -ne $stdinText) { $psi.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false) }
     $psi.UseShellExecute = $false
     $p = [System.Diagnostics.Process]::Start($psi)
+    if ($null -ne $stdinText) { $p.StandardInput.Write($stdinText); $p.StandardInput.Close() }
     $ms = [System.IO.MemoryStream]::new()
     $errTask = $p.StandardError.ReadToEndAsync()
     $p.StandardOutput.BaseStream.CopyTo($ms)
@@ -66,6 +71,66 @@ if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$frozen.Bytes, [byte[]]
     Fail "smoke gate: frozen stdout ($($frozen.Bytes.Length) B) differs from source ($($source.Bytes.Length) B)"
 }
 Write-Host "smoke gate OK: $($frozen.Bytes.Length) identical bytes, exit 0"
+
+# The frozen bundle must carry the credential code: with an empty store, --has-key says 1.
+$credDir = Join-Path $out 'smoke-credentials'
+if (Test-Path $credDir) { Remove-Item -Recurse -Force $credDir }
+New-Item -ItemType Directory -Force $credDir | Out-Null
+$env:HANDSFREE_COPILOT_CREDENTIALS_DIR = $credDir
+try { $hk = Get-StdoutBytes $exe @('--has-key', '--provider', 'anthropic') }
+finally { Remove-Item Env:\HANDSFREE_COPILOT_CREDENTIALS_DIR -ErrorAction SilentlyContinue }
+if ($hk.Exit -ne 1) { Fail "credential smoke: --has-key exit $($hk.Exit), expected 1: $($hk.Err)" }
+Write-Host 'credential smoke OK: --has-key on an empty store exits 1'
+
+# --- frozen-bundle gates: the exe must really make a request, and really import the SDK ---
+$fakeServer = Join-Path $PSScriptRoot 'smoke_fake_server.py'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+
+# (a) OpenAI-compatible round trip against a local fake server (stdlib path of the bundle).
+$srvPsi = [System.Diagnostics.ProcessStartInfo]::new($venvPy)
+$srvPsi.ArgumentList.Add($fakeServer)
+$srvPsi.RedirectStandardOutput = $true
+$srvPsi.UseShellExecute = $false
+$srv = [System.Diagnostics.Process]::Start($srvPsi)
+try {
+    $portTask = $srv.StandardOutput.ReadLineAsync()
+    if (-not $portTask.Wait(10000)) { Fail 'ask gate: fake server printed no port' }
+    $port = $portTask.Result.Trim()
+    $askCred = Join-Path $out 'smoke-ask-credentials'
+    if (Test-Path $askCred) { Remove-Item -Recurse -Force $askCred }
+    New-Item -ItemType Directory -Force $askCred | Out-Null
+    $r = Get-StdoutBytes $exe @($fixture, '--ask', 'Vì sao hú?', '--json', '--provider', 'openai_compatible',
+                                '--base-url', "http://127.0.0.1:$port", '--model', 'smoke') `
+                         @{ HANDSFREE_COPILOT_CREDENTIALS_DIR = $askCred }
+    if ($r.Exit -ne 0) { Fail "ask gate: frozen exe exit $($r.Exit): $($r.Err)" }
+    try { $doc = $utf8.GetString($r.Bytes) | ConvertFrom-Json } catch { Fail "ask gate: stdout is not JSON: $($_.Exception.Message)" }
+    if ([string]::IsNullOrWhiteSpace($doc.answer)) { Fail 'ask gate: empty answer' }
+    if ($doc.blocked -ne $false) { Fail 'ask gate: blocked is not false' }
+    Write-Host "ask gate OK: frozen exe round-tripped a fake OpenAI-compatible server (answer: $($doc.answer))"
+}
+finally {
+    if (-not $srv.HasExited) { $srv.Kill() }
+    $srv.Dispose()
+}
+
+# (b) `import anthropic` must work INSIDE the bundle: a connection failure is expected and
+# is told apart from "SDK missing in the bundle" by the message and the absence of import errors.
+$anthCred = Join-Path $out 'smoke-anthropic-credentials'
+if (Test-Path $anthCred) { Remove-Item -Recurse -Force $anthCred }
+New-Item -ItemType Directory -Force $anthCred | Out-Null
+$credEnv = @{ HANDSFREE_COPILOT_CREDENTIALS_DIR = $anthCred }
+$sk = Get-StdoutBytes $exe @('--store-key', '--provider', 'anthropic') $credEnv 'smoke-dummy-key-not-real'
+if ($sk.Exit -ne 0) { Fail "sdk gate: --store-key exit $($sk.Exit): $($sk.Err)" }
+$clock = [System.Diagnostics.Stopwatch]::StartNew()
+$r = Get-StdoutBytes $exe @($fixture, '--ask', 'Vì sao hú?', '--provider', 'anthropic', '--timeout', '5') `
+        @{ HANDSFREE_COPILOT_CREDENTIALS_DIR = $anthCred; ANTHROPIC_BASE_URL = 'http://127.0.0.1:9' }
+$clock.Stop()
+if ($r.Exit -ne 3) { Fail "sdk gate: expected exit 3 (connection failed), got $($r.Exit): $($r.Err)" }
+foreach ($bad in @('Traceback', 'ModuleNotFoundError', 'ImportError', 'cần gói')) {
+    if ($r.Err -like "*$bad*") { Fail "sdk gate: bundle is missing the SDK or a dependency ('$bad'): $($r.Err)" }
+}
+if ($r.Err -notlike '*kết nối*') { Fail "sdk gate: stderr is not a connection failure: $($r.Err)" }
+Write-Host ("sdk gate OK: import anthropic works in the bundle (connection refused as expected, {0:N1} s)" -f $clock.Elapsed.TotalSeconds)
 
 $mb = (Get-ChildItem $distDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("bundle: {0} ({1:N1} MB)" -f $distDir, $mb)

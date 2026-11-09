@@ -166,3 +166,93 @@ lane U và bốn bản vá audio path trong `docs/release-notes/unreleased/`. Vi
 vậy chờ owner (Q11), không tự chạy khi L2a xong.
 
 Tài liệu đi cùng: `docs/GIOI-THIEU.md` (hành vi nhìn thấy được), `installer/TESTER-NOTES.md`.
+
+
+## L2b sidecar contract
+
+Đây là hợp đồng mà phía C++ cài đặt theo. Nguồn thật là `tools/copilot/copilot.py` và
+`tests/test_copilot.py`.
+
+### Cờ dòng lệnh
+
+| Cờ | Ý nghĩa |
+|---|---|
+| `<file>` | File log. Bắt buộc, trừ khi dùng `--store-key` / `--delete-key` / `--has-key`. |
+| `--json` | Không `--ask`: danh sách findings (không đổi). Có `--ask`: MỘT object JSON (xem dưới). |
+| `--ask QUESTION` | Hỏi mô hình. |
+| `--provider {anthropic,openai_compatible}` | Mặc định `anthropic`. |
+| `--model ID` | Mặc định `claude-opus-5-5` cho `anthropic`; **bắt buộc** cho `openai_compatible`. |
+| `--base-url URL` | **Bắt buộc** cho `openai_compatible` (chỉ `http://` hoặc `https://`; ví dụ `https://api.openai.com/v1`, `http://localhost:11434/v1`); bị từ chối với `anthropic`. Sidecar gọi `POST {base-url}/chat/completions`. |
+| `--timeout SECONDS` | Mặc định 120; áp cho **từng request HTTP**, không phải cả lượt hỏi: vòng công cụ tối đa 12 lượt nên tổng có thể lên tới 12 × timeout; giới hạn trên thật là lệnh kill 120 s của app. |
+| `--store-key --provider P` | Đọc MỘT dòng từ **stdin**, mã hoá DPAPI, lưu. Không bao giờ nhận khoá qua argv. In một câu xác nhận không chứa khoá. |
+| `--delete-key --provider P` | Xoá khoá của `P`. |
+| `--has-key --provider P` | Thoát 0 nếu có khoá lưu cho `P`, 1 nếu không (blob hỏng tính là không, kèm một dòng stderr). |
+| `--low-priority` | Như L2a. |
+
+`--store-key`, `--delete-key`, `--has-key`, `--ask` loại trừ nhau.
+
+### Mã thoát
+
+| Mã | Nghĩa |
+|---|---|
+| 0 | Xong. |
+| 1 | Chỉ `--has-key`: không có khoá. Không đường nào khác trả 1. |
+| 2 | Log rỗng, không đọc được, sai UTF-8, hoặc có dòng JSON không phải object. |
+| 3 | `--ask` thất bại (thiếu SDK, thiếu thông tin đăng nhập, kết nối, quá hạn, HTTP không 2xx, từ chối/`content_filter`, không có trả lời, vòng công cụ quá 12 lượt) hoặc thao tác kho khoá thất bại, hoặc bất kỳ ngoại lệ không lường trước nào (stderr chỉ có TÊN kiểu ngoại lệ, không bao giờ nội dung hay traceback). Lý do ở stderr, đã gỡ khoá. |
+| 4 | Câu trả lời bị bộ lọc an toàn chặn. Câu cố định "Câu trả lời của mô hình đã bị chặn vì nó khuyên một việc có thể gây hú. Hãy hỏi lại, hoặc đổi mô hình." ra stdout (không `--json`: chữ thường; có `--json`: object bên dưới). Câu bị chặn không bao giờ được in. |
+| 5 | Tham số sai (mọi lỗi cú pháp, thiếu/thừa `--model`/`--base-url`, URL không phải http/https, `--timeout` ≤ 0, khoá rỗng trên stdin). Cố ý dùng 5 thay cho mã 2 của argparse để không đụng "log rỗng". |
+
+### Kết quả `--ask --json` (stdout, một object, UTF-8)
+
+```json
+{"answer": "…", "provider": "openai_compatible", "model": "llama3",
+ "usage": {"input_tokens": 123, "output_tokens": 45},
+ "findings": [ {"code": "…", "severity": "…", "title": "…", "advice": "…", "evidence": {}} ]}
+```
+
+`usage.*` là `null` khi nhà cung cấp không báo. Với `--ask --json`, stdout LUÔN là đúng MỘT object
+JSON khi mã thoát là 0, 3 hoặc 4, và rỗng với mã 2 và 5:
+
+| Mã | stdout |
+|---|---|
+| 0 | object ở trên, thêm `"blocked": false` |
+| 3 | `{"error": "<lý do một dòng, đã gỡ khoá, y hệt dòng stderr>"}`; ngoại lệ không lường trước: `{"error": "Lỗi không lường trước trong trợ lý (<TênKiểu>)"}` |
+| 4 | `{"blocked": true, "message": "<câu cố định ở bảng mã thoát>"}` — không bao giờ có câu trả lời của mô hình |
+| 2, 5 | rỗng |
+
+Chuỗi `error` đi qua cùng bộ gỡ khoá với stderr (khoá đã lưu, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`). Không `--json`, `--ask` in findings, một dòng trống,
+rồi câu trả lời; mọi thứ khác không đổi. (Chế độ findings `--json` không `--ask` vẫn in một mảng
+JSON như cũ.)
+
+### Giới hạn và an toàn gửi khoá
+
+- Thân phản hồi HTTP tối đa 4 MiB (quá = lỗi, mã 3). Mỗi kết quả công cụ trả cho mô hình tối đa
+  64 KiB: danh sách bị cắt còn tiền tố dài nhất vừa khung, bọc thành
+  `{"truncated": true, "total": N, "items": [...]}` (luôn là JSON hợp lệ).
+- `--base-url` `http://` tới máy KHÔNG phải loopback (`localhost`, `127.0.0.0/8`, `::1`) chỉ được
+  phép khi không có khoá nào sẽ được gửi; nếu có khoá thì từ chối trước mọi I/O mạng, mã 3.
+  `https://` không đổi.
+- Bộ lọc an toàn chuẩn hoá (NFKC, bỏ ký tự định dạng, casefold, bỏ dấu, đ→d) rồi chặn động từ
+  "tăng" + đối tượng mức (gain, âm lượng, fader, ...) trong cửa sổ 4 từ, và "+N dB"; lời phủ định
+  ngay trước động từ (đừng, không (nên), do not, never, ...) thì cho qua. Nghi ngờ thì chặn.
+
+### Kho khoá
+
+- File: `%APPDATA%\AZSoundtech\HandsFree\copilot-credentials.json`, UTF-8:
+  `{"version": 1, "profiles": {"<provider>": {"blob": "<base64>"}}}`, ghi nguyên tử (file tạm rồi thay). `--store-key` gặp file không đọc được thì `os.replace` nó sang `copilot-credentials.json.corrupt` (đè bản `.corrupt` cũ, không bao giờ xoá), in một dòng stderr, rồi mới ghi file mới.
+  `<provider>` là `anthropic` hoặc `openai_compatible`.
+- `blob` = base64 của đầu ra `CryptProtectData` (theo tài khoản Windows, cờ
+  `CRYPTPROTECT_UI_FORBIDDEN`) trên các byte UTF-8 của khoá, với **optional entropy** là
+  đúng các byte ASCII `AZSoundtech.HandsFree.Copilot.v1` (hằng `DPAPI_ENTROPY` trong
+  `copilot.py`; bên C++ dùng đúng chuỗi này).
+- Biến môi trường `HANDSFREE_COPILOT_CREDENTIALS_DIR` thay thư mục (dành cho test).
+- Thứ tự tìm khoá: khoá lưu cho provider đó; rồi `anthropic` → mặc định của SDK (biến môi
+  trường hoặc profile `ant`), `openai_compatible` → biến `OPENAI_API_KEY`; riêng
+  `openai_compatible` được phép không có khoá (Ollama tại máy) và khi đó không gửi header
+  `Authorization`. Blob hỏng = "không có khoá" + một dòng stderr.
+- Khoá không bao giờ xuất hiện ở stdout, stderr, thông báo lỗi hay log. Đây là bộ lọc cụm từ
+  chứ không phải bảo đảm tuyệt đối: `violates_safety` bắt các cách nói phổ biến (tiếng Việt
+  và tiếng Anh), không bắt mọi cách diễn đạt.
+- `openai_compatible` không theo chuyển hướng HTTP (3xx là lỗi, mã 3) để header
+  `Authorization` không bay sang máy chủ khác.

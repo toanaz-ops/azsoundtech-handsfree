@@ -171,3 +171,45 @@ lệnh notch sống qua lúc mở thiết bị, các lỗi mức thấp của en
 Phát hành là thao tác tới tay người khác và tới loa PA; điều phối không tự chạy.
 
 **Chọn:** chờ owner. Khuyên 1.
+
+## Q12 — Ô "hỏi AI" và phần cài đặt nằm ở đâu?
+
+Bảng COPILOT chỉ cao tối thiểu 144 px; phần cài đặt (nhà cung cấp, model, địa chỉ, khoá,
+ô đồng ý) cần khoảng sáu hàng.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Một hàng hỏi ở đáy bảng COPILOT; nút `CÀI AI` mở một lớp phủ che cột trái (danh sách notch + bảng COPILOT) cho tới khi đóng** | không mở cửa sổ mới; chụp ảnh render được; bảng vẫn gọn | lúc đang cài thì không thấy danh sách notch |
+| 2 | Cửa sổ hộp thoại riêng | không che gì | hộp thoại async khó test headless, không chụp được bằng snapshot |
+| 3 | Đặt vào DevicePanel | cùng chỗ với cài đặt khác | DevicePanel là của thiết bị âm thanh; lẫn hai việc |
+
+Lớp phủ chỉ mở khi người dùng bấm, và nút `ĐÓNG` luôn thấy. Chế độ SOUNDCHECK/AUTO vẫn
+chạy bên dưới; lớp phủ không chặn nút BYPASS ở cột phải.
+
+**Chọn: 1 (điều phối chốt tạm, 09/11/2026).**
+
+## Q13 — Bộ lọc câu trả lời nghiêng về phía nào khi không chắc?
+
+Soát độc lập cho thấy bộ lọc cụm từ ban đầu để lọt "tăng âm lượng lên", "đẩy fader lên",
+"turn it up", "+3 dB", tiếng Việt không dấu và chữ chèn ký tự ẩn.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Chuẩn hoá chữ (NFKC, bỏ dấu, bỏ ký tự ẩn) rồi bắt "động từ tăng + đối tượng mức" trong cửa sổ ngắn; không chắc thì chặn** | lọt ít hơn nhiều | đôi khi chặn oan một câu vô hại; người dùng thấy câu từ chối cố định và phải hỏi lại |
+| 2 | Giữ danh sách cụm từ cố định | không chặn oan | lọt các cách nói thường gặp |
+| 3 | Dùng một lượt gọi model thứ hai để chấm | bắt được diễn đạt lạ | tốn tiền, chậm, và chính nó cũng sai được |
+
+Chặn oan tốn một câu trên màn hình; để lọt thì lời khuyên tăng gain tới một dàn PA.
+Phủ định ("không nên tăng gain", "đừng tăng âm lượng") vẫn được cho qua.
+
+**Chọn: 1 (điều phối chốt tạm, 09/11/2026).** Đây vẫn là bộ lọc, không phải bảo đảm.
+
+## Q14 — Khi hỏi thất bại, app hiện gì?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Tiến trình phụ in lý do (đã gỡ khoá) dạng JSON `{"error": …}`; bảng hiện đúng câu đó** | tester phân biệt được sai khoá, mất mạng, sai model | thêm một nhánh hợp đồng giữa hai phía |
+| 2 | Một câu chung "không hỏi được" | đơn giản | tester không biết sửa gì |
+
+**Chọn: 1 (điều phối chốt tạm, 09/11/2026).** Kèm theo: địa chỉ `http://` không phải máy
+này bị từ chối khi có khoá sẽ gửi đi (khoá không đi dạng chữ thường qua mạng).
