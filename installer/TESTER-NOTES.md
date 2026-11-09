@@ -1,9 +1,12 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.5.0
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.5.1
 
-Ngày build: 2026-11-09 (`main` `5d47b9e`) · gate ctest 951/951 · installer
-`AZSoundtech-Handsfree-Setup-1.5.0.exe`.
+Ngày build: 2026-11-10 (`main` `aee13f0`) · gate ctest đạt (980 test đăng ký) · installer
+`AZSoundtech-Handsfree-Setup-1.5.1.exe`.
 
-SHA-256 của Setup 1.5.0: **BA205503520E3890FC24B737E7A01334DF8C67511DABF348D9590A65CB0C16BE** · dung lượng: **42 137 569 B (40,2 MB)** — lớn hơn 1.4.1 khoảng 14,5 MB vì lần đầu kèm `HandsFreeCopilot.exe`.
+SHA-256 của Setup 1.5.1: **93C25753C2CECFAF83EF9AFE9DD2D98CB23844A5C90FD0D435CD6C470A26CD26** · dung lượng: **42 214 075 B (40,3 MB)**.
+
+Bản 1.5.0 (build 2026-11-09, `main` `5d47b9e`, gate 951/951, 42 137 569 B / 40,2 MB) SHA-256
+`BA205503520E3890FC24B737E7A01334DF8C67511DABF348D9590A65CB0C16BE` — **đừng dùng ô hỏi AI của bản này, cài 1.5.1**
 
 Bản 1.4.1 (build 2026-11-09 19:23, `main` `7408f73`, gate 847/847, 26 919 339 B / 25,7 MB) SHA-256
 `616C62E85FD963CD84E331745770ED85719ABEA6EAAF898928CB552FBD4391BB`
@@ -19,24 +22,17 @@ Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
-Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.5.0** (đóng gói không dọn bản cũ) —
+Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.5.1** (đóng gói không dọn bản cũ) —
 cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
-> **ĐÍNH CHÍNH 09/11/2026 cho 1.5.0 — đọc trước khi dùng ô hỏi AI.** Bản ghi chú này và release note
-> từng viết rằng câu trả lời khuyên tăng gain hay tắt chống hú "bị thay bằng một thông báo cố định".
-> Soát lại sau khi phát hành cho thấy điều đó **không đúng với phần lớn cách nói thông thường**: bộ lọc bỏ
-> lọt những câu như "mở monitor to hơn", "tắt tính năng chống hú ở slot này", "để gain ở +3", "xoá notch
-> này đi", và cả câu trả lời bằng ngôn ngữ khác. Nó cũng chặn nhầm một số lời khuyên an toàn.
-> **Coi mọi câu trả lời của AI là lời khuyên chưa được kiểm chứng. Không tăng gain, âm lượng, trần độ sâu,
-> không xoá notch, không tắt hay bypass chống hú chỉ vì AI bảo.** Nút `PHÂN TÍCH` (không dùng AI) không bị
-> ảnh hưởng. Ba điều nữa về khoá và cài đặt, cho tới khi có bản sửa:
-> 1. Chế độ "Tương thích OpenAI": nếu máy có biến môi trường `OPENAI_API_KEY`, khoá đó **được gửi** tới địa
->    chỉ bạn nhập dù màn hình báo "Chưa có khoá"; và khoá đã lưu sẽ đi theo **bất kỳ** địa chỉ nào bạn đổi
->    sang. Đừng trỏ địa chỉ sang nhà cung cấp khác với nhà cung cấp của khoá.
-> 2. Máy có cấu hình proxy HTTP: đừng dùng địa chỉ `http://localhost…` hay `http://127.0.0.1…` kèm khoá —
->    khoá có thể đi tới proxy ở dạng không mã hoá.
-> 3. Tắt công tắc đồng ý trong lúc một ô khác đang báo lỗi thì thay đổi **không được lưu**. Mở lại `CÀI AI`
->    để kiểm công tắc đã tắt thật chưa.
+> **1.5.1: 0 dB ở mọi ngõ ra — bản sửa cho ô hỏi AI của 1.5.0. Đang dùng 1.5.0 thì cài bản này.**
+> Soát lại sau khi phát hành 1.5.0 thấy bốn lỗi ở ô hỏi AI: bộ lọc câu trả lời bỏ lọt phần lớn lời khuyên nguy
+> hiểm, khoá trong biến môi trường bị gửi dù màn hình báo "Chưa có khoá", khoá gửi tới `http://localhost` có thể
+> đi qua proxy, và tắt đồng ý có lúc không được lưu. 1.5.1 sửa cả bốn — xem mục "Mới trong 1.5.1".
+> **Bộ lọc vẫn KHÔNG phải bảo đảm:** đo độc lập cho thấy khoảng 1 trong 5 lời khuyên nguy hiểm diễn đạt tự nhiên
+> vẫn lọt. **Coi mọi câu trả lời của AI là lời khuyên chưa được kiểm chứng. Không tăng gain, âm lượng, trần độ
+> sâu, không xoá notch, không làm notch nông đi, không tắt / tạm dừng / bypass chống hú, không hạ độ nhạy
+> detector chỉ vì AI bảo.** Nút `PHÂN TÍCH` (không dùng AI) không bị ảnh hưởng.
 >
 > **1.5.0: 0 dB ở mọi ngõ ra.** Không đổi hệ số lọc, gain, buffer, clamp hay quyết định đặt notch. Thêm bảng `COPILOT` (Geek mode), ô hỏi AI bằng khoá của chính bạn, và log ghi thêm ứng viên suýt thành notch — xem mục "Mới trong 1.5.0". **File cài lần đầu kèm một chương trình phụ (`HandsFreeCopilot.exe`): antivirus có thể hỏi.**
 >
@@ -52,6 +48,27 @@ cài bản số cao nhất trừ khi được nhờ test bản cũ.
 >
 > **1.2.0 cũng CÓ đụng đường audio**: độ sâu của một notch thay đổi theo thời
 > gian — xem mục "Mới trong 1.2.0".
+
+## Mới trong 1.5.1 (so với 1.5.0) — 0 dB ở mọi ngõ ra
+
+Chi tiết: `docs/release-notes/1.5.1-alpha.md`. Không đụng đường audio.
+
+1. **Dòng cảnh báo cố định dưới mọi câu trả lời AI:** "AI có thể sai. Đừng tăng gain hay tắt chống hú theo lời
+   này." Kiểm: nó có hiện, có đè lên chân `model · N in / M out` không.
+2. **Bộ lọc câu trả lời viết lại.** Đo độc lập: lời khuyên nguy hiểm tự nhiên còn lọt 29/145 (bản 1.5.0: 27/32),
+   câu an toàn bị chặn nhầm 7/74. **Việc cần bạn giúp nhất:** thấy AI khuyên tăng mức, tắt / tạm dừng chống hú,
+   hạ độ nhạy, xoá notch hay làm notch nông đi mà **không bị chặn** — gửi lại nguyên văn câu trả lời. Câu vô hại
+   bị chặn cũng gửi lại.
+3. **Khoá.** App chỉ dùng khoá đã lưu trong `CÀI AI` (không dùng biến môi trường nữa). Loại "Tương thích
+   OpenAI": khoá gắn với máy chủ lúc lưu — **khoá đã lưu bằng 1.5.0 phải lưu lại một lần**; đổi địa chỉ sang máy
+   chủ khác thì ô khoá báo "Khoá đã lưu cho địa chỉ khác. Nhập lại khoá.". Khoá Claude không đổi gì.
+4. **Tắt công tắc đồng ý luôn được lưu.** Kiểm: nhập địa chỉ sai, tắt công tắc, `ĐÓNG`, mở lại — phải đang tắt.
+5. **Gỡ cài đặt hỏi riêng về file khoá API**, kèm đường dẫn đầy đủ, mặc định giữ. Đường này mới được biên dịch
+   kiểm, **chưa ai chạy thử**: nếu bạn gỡ cài, báo lại hai hộp thoại hiện ra thế nào và file khoá còn hay mất.
+6. **Bộ cài kèm `THIRD-PARTY-NOTICES.txt`** (ghi công phần mềm bên thứ ba) cạnh file exe.
+7. **Log có `log_schema: 3`** và trường `nn_score` trên một số dòng: một mạng nơ-ron **chưa huấn luyện** chạy
+   bóng, điểm của nó chưa có nghĩa gì và không quyết định nào đọc nó. Việc của bạn không đổi: chấm TRUE / FALSE
+   và **gửi lại file `session-*.jsonl`** — cần ít nhất 300 lượt chấm từ ít nhất 6 buổi để huấn luyện.
 
 ## Mới trong 1.5.0 (so với 1.4.1) — 0 dB ở mọi ngõ ra
 
@@ -71,9 +88,7 @@ Chi tiết: `docs/release-notes/1.5.0-alpha.md`. Không đụng đường audio.
    rời, **không** chặn phần mềm độc hại chạy dưới chính tài khoản của bạn — đừng dùng khoá có hạn
    mức lớn để thử. Giới hạn đã biết: các bản sao khoá nằm thoáng qua trong ô nhập được giải phóng
    mà không bị ghi đè số 0.
-5. **Bộ lọc câu trả lời yếu hơn mô tả ban đầu — xem ĐÍNH CHÍNH ở đầu file.** Nó chỉ bắt được một số
-   cách nói; phần lớn lời khuyên tăng gain / tắt chống hú diễn đạt tự nhiên vẫn lọt qua. Đừng làm
-   theo lời AI khi nó bảo tăng mức hay gỡ bảo vệ; báo lại câu trả lời đó.
+5. **Bộ lọc câu trả lời của 1.5.0 bỏ lọt phần lớn lời khuyên nguy hiểm** — đã sửa một phần ở 1.5.1, xem trên.
 6. **Log buổi diễn có thêm dòng `candidate_features`** (ứng viên suýt thành notch). Bạn không cần
    làm gì khác: cứ chấm TRUE/FALSE như cũ và **gửi lại file `session-*.jsonl`** — đây là dữ liệu
    để huấn luyện bộ phân loại hú / nốt nhạc ở bước sau. Tệ nhất khoảng 1,4 MB mỗi giờ mỗi slot.
