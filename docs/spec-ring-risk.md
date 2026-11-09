@@ -89,8 +89,17 @@ appears in the NEXT snapshot, one hop after the chip went Critical.
 
 `ringRiskValid` is true only when detection is armed **and** at least one active
 lane's scorer has committed >= 1 block of history since the last reset — start,
-device change, sample-rate change, or `setWidth` (A-R4). Detection off means
-`N/A`, never a reassuring `Low`.
+device change, sample-rate change, or `setWidth` **of that slot** (A-R4). Detection
+off means `N/A`, never a reassuring `Low`.
+
+**Reset boundary (A-R4, amended — owner HW-174.Q3, 2026-11-09).** A device change,
+sample-rate change or driver restart resets **all eight** slots (the tap rings are
+cleared and every detector is re-targeted). A routing edit of **one** slot resets
+**only that slot**: its detector is stopped, re-targeted (`setSampleRate`,
+`setWidth`), its tap backlog drained, and relaunched; the other seven keep running
+and keep their room memory and ring-risk history. Slot edits never touch the
+rings of other slots, so §6.5 of the bridge design (consumer joined before a ring
+is cleared) holds per slot.
 
 ### 2. Map score to state — in the GUI, not the DSP
 

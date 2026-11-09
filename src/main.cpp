@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "app/MainComponent.h"
 #include "app/SessionLogger.h"
+#include "app/WindowFit.h"
 
 class HandsFreeApplication : public juce::JUCEApplication
 {
@@ -67,7 +68,16 @@ private:
             setResizeLimits(MainComponent::kMinimumWidth,
                             MainComponent::kMinimumHeight,
                             16384, 16384);
-            centreWithSize(getWidth(), getHeight());
+            // First open: clamp to the primary display's usable area (taskbar
+            // excluded) so a 1366x768 screen does not lose the bottom edge.
+            // No window state is persisted yet; when it is, restored bounds
+            // should go through fitWindowBounds too (keep on-screen only).
+            if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+                setBounds(fitWindowBounds({ getWidth(), getHeight() },
+                                          { MainComponent::kMinimumWidth, MainComponent::kMinimumHeight },
+                                          display->userArea));
+            else
+                centreWithSize(getWidth(), getHeight());
             setVisible(true);
 
             // Opening the audio device is an explicit call, not a MainComponent

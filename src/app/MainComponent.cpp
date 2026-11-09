@@ -615,55 +615,8 @@ MainComponent::MainComponent()
     // DevicePanel instance; re-parenting it into the drawer changed nothing.
     devicePanel_.onBeforeRestart = [this]
     {
-        // LANE M FIRST (F15). audioDeviceAboutToStart() clears EVERY ring, and
-        // that is only legal with "no producer and no consumer running"
-        // (LockFreeRingBuffer.h) -- micCapture_ joined that block in Task 5, and
-        // the lane M thread is its consumer. abortAndJoin() requests the stop,
-        // JOINS, and only then stands the run down, so the caller is the one
-        // thread left inside the machine (C-2).
-        //
-        // It is also the moment that makes the injected callbacks safe to touch
-        // again (I-10) -- not that this hook touches them.
-        // C-1 (round 2). EVERY CONFIRMATION ASKED BEFORE THIS POINT IS NOW
-        // STALE, and the state checks alone cannot see that: with the machine
-        // Idle and the box open, this hook tears the console down and puts the
-        // lock back to None, so a later OK would find "Idle, unlocked, fine"
-        // and arm with targets captured against the PREVIOUS device's routing.
-        ++soundcheckConsoleGeneration_;
-
-        // WAS THERE A MEASUREMENT TO LOSE? Mode::Applied is NOT one (review
-        // M-2): the run is over, its proposals are placed, and the report on
-        // screen is a record of work already done. Saying "your measurement was
-        // stopped" there is a lie about something that finished successfully.
-        const bool wasMeasuring =
-            soundcheck_.getState() != SoundcheckController::State::Idle
-            || soundcheckPanel_.getMode() == gui::SoundcheckPanel::Mode::Running;
-
-        const bool idle = soundcheck_.abortAndJoin();
-
-        if (! idle)
-        {
-            // The machine did NOT reach Idle after a request-join-stand-down.
-            // That is not "your measurement was cancelled", it is a state this
-            // code believes impossible -- the poll thread is joined and the
-            // caller is the only thread left (C-2). A DIFFERENT sentence,
-            // because the operator's next move is different: check the device
-            // before measuring again (review M-4).
-            jassertfalse;
-            showMessage (juce::String::fromUTF8 (kScRestartJoinFailed));
-        }
-        else if (wasMeasuring)
-        {
-            // A restart the operator did not ask for CAN happen (the spec says
-            // so), so it aborts rather than being locked out -- but a
-            // measurement that vanished has to SAY it vanished, or the operator
-            // waits for results that will never come.
-            showMessage (juce::String::fromUTF8 (kScAbortedByRestart));
-        }
-
-        // Unlock, hand detection back to the mode, put the strip away. A run
-        // torn down by a device change has no results worth showing.
-        endSoundcheckSession (gui::SoundcheckPanel::Mode::Hidden);
+        // LANE M FIRST (F15) -- the shared abort, see abortSoundcheckForRestart().
+        abortSoundcheckForRestart();
 
         // §6.5 for EVERY slot: all detector threads must be joined before a
         // device restart can clear the rings.
@@ -687,6 +640,9 @@ MainComponent::MainComponent()
         // splice-drop counts. The caller is the only consumer right now, so it
         // drains it (an ordinary SPSC read, no clear()) and rebases the counts.
         engine_.discardTapBacklog();
+
+        // This all-eight relaunch does the job a queued driver relaunch would.
+        driverRelaunchQueued_ = false;
 
         const double rate = engine_.getCurrentSampleRateHz();
         for (int i = 0; i < kMaxSlots; ++i)
@@ -757,10 +713,16 @@ MainComponent::MainComponent()
         // starts threads. The detectors stay joined until the loop runs it --
         // detection is off for that moment, nothing else is.
         juce::Component::SafePointer<MainComponent> safe (this);
+        driverRelaunchQueued_ = true;
         deferToMessageLoop ([safe]
         {
-            // An app restart that ran in between already relaunched them.
-            if (safe == nullptr || safe->anyDetectorRunning())
+            if (safe == nullptr)
+                return;
+            // An app restart that ran in between already relaunched them (and
+            // cleared the flag). A slot edit in between does NOT count: it
+            // leaves the flag set and starts no controller.
+            const bool queued = std::exchange (safe->driverRelaunchQueued_, false);
+            if (! queued || safe->anyDetectorRunning())
                 return;
             safe->devicePanel_.onAfterRestart();
         });
@@ -1048,6 +1010,7 @@ MainComponent::MainComponent()
                 c.enabled = false;
                 changeSlotConfig (i, c);
             }
+            saveSettings();   // once per batch; the mismatch flag keeps the memory
         }
         else
         {
@@ -1534,10 +1497,9 @@ void MainComponent::startAudio()
     audioStarted_ = true;
 
     // If JUCE fell back to another device, the restored routing comes off
-    // here. Each changeSlotConfig runs the paired 6.5 hooks, so the detectors
-    // and the lane M thread are started by them a moment before the loop below
-    // would start them -- harmless: start() is idempotent and the save inside
-    // the hook writes back the routing read from disk (deviceMismatch_).
+    // here. changeSlotConfig restarts only the slot it edits (and only when the
+    // engine runs), and does not save: checkRestoredDevice saves ONCE after its
+    // loop, which writes back the routing read from disk (deviceMismatch_).
     if (settingsFile_ != juce::File() && saved.type.isNotEmpty())
         checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
@@ -1644,8 +1606,9 @@ void MainComponent::checkRestoredDevice (const juce::String& openType, const juc
             continue;
         c.enabled = false;
         changeSlotConfig (i, c);   // THE path; deviceMismatch_ is already set,
-                                   // so the save inside it keeps the memory
+                                   // so the save below keeps the memory
     }
+    saveSettings();   // once per batch (HW-174.Q3)
     slotPanel_.refresh();
 
     showMessage (juce::String::fromUTF8 ("Kh\xc3\xb4ng th\xe1\xba\xa5y ")
@@ -1664,18 +1627,16 @@ bool MainComponent::openDeviceIsRemembered (const juce::String& openType,
 
 void MainComponent::restoreRememberedRouting (const juce::String& openName)
 {
-    // Round 3: every changeSlotConfig runs onAfterRestart, which SAVES (the
-    // wizard is already closed). With the mismatch still set those saves write
-    // the memory back unchanged; clearing it first made the first save store
-    // slots 1-7 as off -- to disk AND into settings_, which the loop then read
-    // back. So: a local copy, the flag held until the loop is done, one save
-    // after.
+    // Round 3: a save while the mismatch is still set writes the memory back
+    // unchanged; clearing the flag first would make a save store slots 1-7 as
+    // off -- to disk AND into settings_, which the loop then reads back. So: a
+    // local copy, the flag held until the loop is done, one save after.
+    // (changeSlotConfig itself no longer saves; HW-174.Q3.)
     const auto rememberedSlots = settings_.slots;
     deviceMismatch_ = true;
-    // onAfterRestart clears the flag whenever the open card differs from
-    // mismatchDeviceName_ -- and the remembered card always does. Point it at
-    // the open card so the flag really holds (round 4): no partial routing
-    // reaches the disk mid-loop.
+    // resolveMismatchAfterRestart clears the flag whenever the open card
+    // differs from mismatchDeviceName_ -- and the remembered card always does.
+    // Point it at the open card so the flag really holds (round 4).
     mismatchDeviceName_ = openName;
     for (int i = 0; i < kMaxSlots; ++i)
         changeSlotConfig (i, rememberedSlots[(std::size_t) i]);
@@ -1738,6 +1699,7 @@ void MainComponent::validateRestoredSlots (const int numIn, const int numOut)
 
     if (disabled > 0)
     {
+        saveSettings();   // once per batch (HW-174.Q3)
         slotPanel_.refresh();
         showMessage (juce::String (disabled)
                      + juce::String::fromUTF8 (" \xc4\x91\xc6\xb0\xe1\xbb\x9dng \xc4\x91\xc3\xa3 l\xc6\xb0u kh\xc3\xb4ng kh\xe1\xbb\x9b\x70 sound card, \xc4\x91\xc3\xa3 t\xe1\xba\xaft."));
@@ -1778,6 +1740,7 @@ bool MainComponent::saveSettings()
         return false;
 
     settings_ = out;
+    ++settingsWriteCount_;
     return true;
 }
 
@@ -1973,27 +1936,157 @@ void MainComponent::applyModeGating (int slotIndex)
     }
 }
 
+void MainComponent::abortSoundcheckForRestart()
+{
+    // LANE M FIRST (F15). audioDeviceAboutToStart() clears EVERY ring, and
+    // that is only legal with "no producer and no consumer running"
+    // (LockFreeRingBuffer.h) -- micCapture_ joined that block in Task 5, and
+    // the lane M thread is its consumer. abortAndJoin() requests the stop,
+    // JOINS, and only then stands the run down, so the caller is the one
+    // thread left inside the machine (C-2).
+    //
+    // It is also the moment that makes the injected callbacks safe to touch
+    // again (I-10) -- not that this hook touches them.
+    // C-1 (round 2). EVERY CONFIRMATION ASKED BEFORE THIS POINT IS NOW
+    // STALE, and the state checks alone cannot see that: with the machine
+    // Idle and the box open, this hook tears the console down and puts the
+    // lock back to None, so a later OK would find "Idle, unlocked, fine"
+    // and arm with targets captured against the PREVIOUS device's routing.
+    ++soundcheckConsoleGeneration_;
+
+    // WAS THERE A MEASUREMENT TO LOSE? Mode::Applied is NOT one (review
+    // M-2): the run is over, its proposals are placed, and the report on
+    // screen is a record of work already done. Saying "your measurement was
+    // stopped" there is a lie about something that finished successfully.
+    const bool wasMeasuring =
+        soundcheck_.getState() != SoundcheckController::State::Idle
+        || soundcheckPanel_.getMode() == gui::SoundcheckPanel::Mode::Running;
+
+    const bool idle = soundcheck_.abortAndJoin();
+
+    if (! idle)
+    {
+        // The machine did NOT reach Idle after a request-join-stand-down.
+        // That is not "your measurement was cancelled", it is a state this
+        // code believes impossible -- the poll thread is joined and the
+        // caller is the only thread left (C-2). A DIFFERENT sentence,
+        // because the operator's next move is different: check the device
+        // before measuring again (review M-4).
+        jassertfalse;
+        showMessage (juce::String::fromUTF8 (kScRestartJoinFailed));
+    }
+    else if (wasMeasuring)
+    {
+        // A restart the operator did not ask for CAN happen (the spec says
+        // so), so it aborts rather than being locked out -- but a
+        // measurement that vanished has to SAY it vanished, or the operator
+        // waits for results that will never come.
+        showMessage (juce::String::fromUTF8 (kScAbortedByRestart));
+    }
+
+    // Unlock, hand detection back to the mode, put the strip away. A run
+    // torn down by a device change has no results worth showing.
+    endSoundcheckSession (gui::SoundcheckPanel::Mode::Hidden);
+}
+
+bool MainComponent::slotEditDisturbsSoundcheck (int slotIndex, const SlotConfig& next) const
+{
+    const auto state = soundcheck_.getState();
+
+    if (state == SoundcheckController::State::Idle)
+    {
+        // Nothing measuring, but a confirmation asked against the old routing
+        // or a results/applied strip computed against it is now stale.
+        return soundcheckLock_ != SoundcheckLock::None || soundcheckConfirmPending_;
+    }
+
+    // Results / Abort: no target is being measured, the strip is about to
+    // become stale -- tear it down like any restart does.
+    if (state == SoundcheckController::State::Results
+        || state == SoundcheckController::State::Abort)
+        return true;
+
+    // A run is measuring one (slot, lane, out, in). Leave it alone unless this
+    // edit touches that slot, or moves any lane of the edited slot (before or
+    // after the edit) onto the measured input or output channel. When the
+    // target cannot be identified, abort -- the safe answer.
+    const auto targets = buildSoundcheckTargets();
+    const int  index   = soundcheck_.getCurrentTargetIndex();
+    if (index < 0 || index >= (int) targets.size())
+        return true;
+
+    const auto& t = targets[(std::size_t) index];
+    if (t.slot == slotIndex)
+        return true;
+
+    const auto touches = [&t] (const SlotConfig& c)
+    {
+        if (! c.enabled)
+            return false;
+        for (int lane = 0; lane < kMaxSlotLanes; ++lane)
+            if (c.inputChannels[lane] == t.inChannel || c.outputChannels[lane] == t.outChannel)
+                return true;
+        return false;
+    };
+    return touches (engine_.getSlotConfig (slotIndex)) || touches (next);
+}
+
 void MainComponent::changeSlotConfig (int slotIndex, const SlotConfig& config)
 {
-    jassert (devicePanel_.onBeforeRestart != nullptr);
+    // Owner HW-174.Q3 = A (review 2026-11-09 MEDIUM-3): a routing edit of ONE
+    // slot restarts ONLY that slot's detector. AudioEngine::setSlotConfig is a
+    // handful of relaxed atomics -- no device restart, no ring clear -- so the
+    // only bridge 6.5 obligation is this slot's own: its consumer is joined
+    // before anything of its rings/state is touched. The other seven detectors
+    // keep running with their room memory and ring-risk history; a device,
+    // rate or driver restart (the paired hooks) still resets all eight.
+    //
+    // This does NOT save: batch callers save once at the end, and the
+    // interactive path (slotPanel_.onSlotConfigChanged) saves once itself.
+    if (slotIndex < 0 || slotIndex >= kMaxSlots)
+        return;
 
-    if (devicePanel_.onBeforeRestart != nullptr)
-        devicePanel_.onBeforeRestart();
+    // Decide on the soundcheck BEFORE anything moves: the answer depends on
+    // the routing as it still is.
+    const bool abortSoundcheck = slotEditDisturbsSoundcheck (slotIndex, config);
+    if (abortSoundcheck)
+        abortSoundcheckForRestart();
+
+    auto& controller = *notchControllers_[(std::size_t) slotIndex];
+    const bool wasRunning = controller.isRunning();
+    controller.stop (1000);
 
     engine_.setSlotConfig (slotIndex, config);
 
-    if (devicePanel_.onAfterRestart != nullptr)
-        devicePanel_.onAfterRestart();
+    // This slot's rings may hold audio from the OLD routing. This thread is
+    // now their only consumer; the other slots' consumers are untouched.
+    engine_.discardTapBacklog (slotIndex);
 
-    // The restart cycle above restores widths and threads but NOT the
-    // detection gate. A slot enabled or re-mapped while Auto/Soundcheck is
-    // already running would otherwise stay DEAF until the next mode request
-    // -- protection shown on screen that does not exist in the chains. Re-arm
-    // it to whatever the current mode says, right now. Soundcheck windows are
-    // measured in each controller's OWN live time (D-06), so a slot armed
-    // mid-show gets its own full 15 s live-time window; there is no shared
-    // clock to inherit a partial one from.
-    applyModeGating (slotIndex);
+    controller.setSampleRate (engine_.getCurrentSampleRateHz());
+    controller.setWidth (engine_.getSlotConfig (slotIndex).width);
+
+    // Like startWorkersIfEngineRunning(): no thread where none ran and no
+    // device feeds it.
+    // EXCEPT while a driver reset's all-eight relaunch is queued: starting one
+    // controller now would make that relaunch think an app restart already ran
+    // and leave the other seven stopped. It starts all eight with the current
+    // rate and width, which were applied just above.
+    if (! driverRelaunchQueued_ && (wasRunning || engine_.isRunning()))
+        controller.start();
+
+    // abortAndJoin() leaves the poll thread stopped (SoundcheckController.h).
+    if (abortSoundcheck)
+        soundcheck_.start();
+
+    // The restart cycle restores widths and threads but NOT the detection
+    // gate. A slot enabled or re-mapped while Auto/Soundcheck is already
+    // running would otherwise stay DEAF until the next mode request --
+    // protection shown on screen that does not exist in the chains. Re-arm it
+    // to whatever the current mode says, right now. EXCEPT while a lane M run
+    // is measuring: detection is deliberately off on every slot then, and
+    // endSoundcheckSession() regates them all when the run ends.
+    if (soundcheckLock_ != SoundcheckLock::Measuring)
+        applyModeGating (slotIndex);
 }
 
 //==============================================================================

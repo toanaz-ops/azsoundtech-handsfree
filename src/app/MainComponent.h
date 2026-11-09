@@ -141,6 +141,11 @@ public:
     // the rig (spec 3.2, I-9).
     bool saveSettings();
 
+    // TEST SEAM: how many times saveSettings() actually wrote the file. Lane U
+    // batch callers (restore, mismatch, wizard) must write once per batch, not
+    // once per slot (review 2026-11-09 MEDIUM-3, owner HW-174.Q3).
+    [[nodiscard]] int settingsWriteCountForTest() const { return settingsWriteCount_; }
+
     void setUiMode (UiMode mode);
     [[nodiscard]] UiMode getUiMode() const { return uiMode_; }
 
@@ -233,7 +238,8 @@ public:
     std::function<void (std::function<void()>)> deferToMessageLoop;
 
     // THE one route a routing-table change takes (the SlotPanel lambda calls
-    // this): the same detector stop/apply/start cycle as a device change,
+    // this): stop/apply/start of THAT SLOT's detector only (HW-174.Q3; a device
+    // change resets all eight through the hooks), no save -- callers save once,
     // then the CURRENT mode's detection gating re-applied to the changed slot,
     // so a slot enabled mid-Auto/-Soundcheck is armed immediately instead of
     // waiting for the next mode request. Public so tests drive the exact path
@@ -431,12 +437,26 @@ public:
     void parentHierarchyChanged() override;
 
 private:
+    int settingsWriteCount_ = 0;
+
     // True while any slot's detector thread runs. The driver-restart hooks
     // read it to tell a restart nobody here asked for (review I1).
     bool anyDetectorRunning() const;
+    // The soundcheck half of a restart: join the poll thread, say so if a run
+    // was lost, tear the console down. Shared by onBeforeRestart (device
+    // restart) and changeSlotConfig (a slot edit that disturbs the run).
+    void abortSoundcheckForRestart();
+    // True when editing slot `slotIndex` to `next` invalidates the soundcheck
+    // in flight, an open confirmation or a results strip.
+    [[nodiscard]] bool slotEditDisturbsSoundcheck (int slotIndex, const SlotConfig& next) const;
     // Set when a driver-initiated stop ran onBeforeRestart(); consumed by the
     // next device start. Message thread only.
     bool driverRestartPending_ = false;
+    // Set when onDeviceStarted queued the all-eight relaunch, cleared when that
+    // relaunch (or an app restart's onAfterRestart) has run. While true, a slot
+    // edit must not start its controller: it would make anyDetectorRunning()
+    // true and the queued relaunch would skip the other seven. Message thread only.
+    bool driverRelaunchQueued_ = false;
 
     // How tall the bottom floor band should be given the vertical space left
     // under the transport. paint() and resized() BOTH need this figure and it

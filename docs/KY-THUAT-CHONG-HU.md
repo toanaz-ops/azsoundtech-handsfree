@@ -73,6 +73,11 @@ không có race.
    tap ring riêng của làn đó (8 slot × 2 làn = 16 ring) — ở mọi mode, kể cả
    Bypass — detector nghe đúng thứ người nghe được, kể cả khi notch đã cắt.
    Slot mono chỉ ghi làn 0; làn 1 của nó không có ai đọc.
+   Tap của mỗi làn lấy đúng tín hiệu sau notch CỦA LÀN ĐÓ (scratch riêng, đã kẹp
+   hữu hạn và ±1.0 như ngõ ra), không phải kênh ra chung: nhiều làn cùng một ngõ ra
+   vẫn cộng lại ở ngõ ra (đổi mức 0 dB), nhưng detector của slot này không còn
+   nghe tiếng hú của slot kia. Block lớn hơn scratch thì tap lấy kênh ra như cũ và
+   `getTapScratchFallbackCount()` tăng.
 4. Rút command queue (tối đa 256 lệnh, ngân sách dùng chung cho cả 8 queue)
    áp dụng `Set`/`Clear` vào NotchChain.
 5. Trả output cho driver. Toàn bộ bước trên: **zero allocation, zero lock**.
@@ -372,6 +377,16 @@ làn đang chạy đã commit ≥ 1 block lịch sử **kể từ lần reset g�
 đổi device, đổi sample rate, `setWidth`). Sai → chip hiện `N/A`. Số 0 khi không
 đo được **không** được vẽ thành "LOW": một chỉ báo trấn an sai còn tệ hơn một
 chỉ báo thú nhận là nó không biết.
+
+**Ranh giới đặt lại (A-R4, sửa 09/11/2026, quyết định HW-174.Q3).** Đổi device,
+đổi sample rate hay driver tự restart đặt lại **cả 8** slot. Sửa routing của **một**
+slot (`changeSlotConfig`) chỉ dừng → áp config → `setSampleRate`/`setWidth` → xả
+backlog tap → chạy lại detector **của slot đó**; engine áp cấu hình slot bằng atomic
+nên không restart device, không đụng ring của slot khác. Bảy detector còn lại giữ
+nguyên luồng, bộ nhớ phòng và lịch sử RING RISK. Soundcheck đo chủ động đang chạy bị
+huỷ nếu phép đo đang trỏ vào slot bị sửa hoặc vào kênh vào/ra mới của nó; nếu không
+liên quan thì chạy tiếp. Các vòng lặp nạp/khôi phục của lane U ghi `settings.json`
+đúng một lần ở cuối.
 
 **Banding (phía GUI).** `score` là tích 0..1, nên ngưỡng là
 `CandidateScorer::kConfirmScore` (0.7) và nó được **publish trong snapshot** —
@@ -909,7 +924,9 @@ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepF
 
 ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
 
-**1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**), CHƯA merge, CHƯA đóng gói.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).
+**1.4.0 (lane U + sửa lỗi review/audit 20/10–09/11/2026): đã đóng gói alpha 2026-11-09 từ `main` `2628cdf`, gate ctest 833/833; chưa nghe thử trên rig (owner quyết định đóng gói trước). Chi tiết: `docs/release-notes/1.4.0-alpha.md`.**
+
+**1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**); đã merge và đóng gói alpha 2026-09-17 (`AZSoundtech-Handsfree-Setup-1.3.0.exe`, gate 714/714). Đoạn dưới là trạng thái lúc viết, trước khi phát hành.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).
 
 Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
@@ -917,8 +934,8 @@ nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RIS
 
 - Suite: **547/547 test pass** (ctest Release, MSVC) sau fix wave final review
   của lane G (`63c1759`) — +93 so với 1.1.3 (454). Bốn bậc thang đo được đúng
-  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
-  `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
+  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Đã đóng gói alpha 2026-09-07
+  (`AZSoundtech-Handsfree-Setup-1.2.0.exe`, gate 547/547).
 - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).
 
 Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,

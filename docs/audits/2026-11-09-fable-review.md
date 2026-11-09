@@ -63,3 +63,21 @@ Still open: (a) eight detector threads start unconditionally after `engine_.star
 
 ## 4. Suggested order
 1. MEDIUM-1 → 2. MEDIUM-2 → 3. LOW-1/3/4/2/6/7 → 4. MEDIUM-3 + LOW-5 to the owner as one question → 5. LOW-8 TSan job.
+
+## 5. Fix round (2026-11-09, Opus fix-round session)
+
+| Item | Status | Where |
+|---|---|---|
+| MEDIUM-1 remembered routing | fixed | PR #35 (`1e50597`), tests in `test_lane_u_wiring.cpp` |
+| MEDIUM-2 detector flush on rate change | fixed | PR #35, `NotchController.cpp` `setSampleRate` → `l.detector.reset()`; `test_notchcontroller.cpp` |
+| LOW-1 input meter 16 ch | fixed | PR #35, `AudioEngine.h` `kInputMeterChannels = 16`; `test_audioengine.cpp` |
+| LOW-2 setWidth/setSampleRate on running controller | fixed | PR #35, `MainComponent::startWorkersIfEngineRunning` skips running controllers |
+| LOW-3 above-Nyquist notches on rate change | fixed | PR #35, `ClearReason::RateChange`; `test_notchcontroller.cpp` |
+| LOW-4 room-memory merge by bin | fixed | PR #35, `NotchController.cpp` `lround(hz / binWidth)` compare |
+| LOW-6 tap backlog after deferred restart | fixed | PR #35 |
+| LOW-7 public `SetupWizard::cancel()` | fixed | PR #35 |
+| Item (a) detectors gated on `engine_.isRunning()` | fixed | PR #35 (`startWorkersIfEngineRunning`); idle CPU with no card ~9 % → ~3–4 % of a core |
+| LOW-8 TSan CI job + duplicate block in `tests/CMakeLists.txt` | fixed | PR #41 (`linux-tsan`, nightly + dispatch); first run 833/833 green, no race reported (run 42589473992) |
+| Default window larger than small screens (UI test) | fixed | PR #36 (`fc94dc9`) |
+| UI-test #3 version string 1.3.0 | fixed | owner chose HW-188 A ("không chờ nghe thử"); 1.4.0 packaged from main 2628cdf with `release-alpha.ps1 -Part minor -Keep 0` (833/833 gate, exe reports 1.4.0); bump in PR `release/1.4.0` |
+| MEDIUM-3, LOW-5, LOW-9, item (b), UI-test #2/#4 | not touched — owner decisions (HW-174.Q3) / needs an ASIO driver |
