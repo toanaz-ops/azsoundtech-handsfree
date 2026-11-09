@@ -32,6 +32,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [De-feedback landscape](defeedback-landscape-2026-10-20.md) — thứ gì cho GBF cao hơn notch đều đổi tiếng; notch đặt ở tâm bin chỉ cắt −3,9 dB ở 300 Hz khi lệch nửa bin (P1); thêm PHPR và độ đều tốc độ tăng vào detector; rta-tool là AGPL; proxy chặn web ngoài GitHub.
 - [Parallel sessions duplicate PRs](parallel-sessions-duplicate-prs-2026-10-21.md) — hai phiên cùng audit một `main`, ra 6 cặp PR trùng nhau; "tự quyết" không có nghĩa là tự sinh việc; nhận việc bằng GitHub Issue + label `claimed`; release note dạng mảnh rời; merge chuỗi PR thì tích hợp local trước (`GIT-WORKFLOW.md` §5b).
 - [Sub-bin notch frequency](subbin-notch-frequency-2026-10-20.md) — "Q 30 rộng hơn một bin" chỉ đúng từ ~1 kHz; ở 300 Hz notch đặt ở tâm bin chỉ cắt −3,9 dB; nội suy parabol log-biên độ (Hann) sai số ≤ 0,016 bin; kẹp ±0,45 bin để `lround(hz/binWidth)` giữ đúng bin.
+- [Copilot sidecar lane L2a](copilot-sidecar-lane-l2a-2026-11-09.md) — Python đóng băng ghi stdout bằng code page ANSI khi bị pipe; `ChildProcess::kill()` để exit code 0 và `readProcessOutput` chặn; cờ huỷ bị `run()` reset là cờ mất được (dùng token theo lượt); `onedir` khởi động nguội 1,5–7,5 s; log `slot` đếm từ 0 còn console in 01; MSVC không `/utf-8`; hook chặn agent code chạy opus; ảnh render bắt 2 lỗi 849 test bỏ qua.
 
 ## Conventions (tóm tắt)
 
