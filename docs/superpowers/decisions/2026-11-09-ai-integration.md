@@ -270,6 +270,8 @@ Owner đã bảo làm C1 ngay (Q16); các câu dưới là ngả rẽ bên trong
 
 **Chọn: 1 ở bước C1a, 2 ở bước C1b.** 2 chỉ làm kèm việc ghi score vào cả `notch_set`.
 
+**Sửa 09/11/2026 (sau khi C1a merge, điều phối chốt tạm):** ở C1b dùng phương án 4 thay cho 2 — chạy bóng bằng chính bộ trọng số mẫu **chưa huấn luyện**, mang tên `untrained-fixture-v1`. Lý do: model tổng hợp và model chưa huấn luyện cho cùng một thứ đo được (CPU p99, không sập, chấm lại offline được), còn model tổng hợp đòi một nguồn "nốt nhạc giả" mà `memory/peakiness-sweep-2048-2026-09-04.md` đã ghi là không đại diện cho nhạc thật, và cái tên `synthetic-v0` dễ bị đọc thành "đã huấn luyện". Script huấn luyện để tới khi có `candidate_features` + verdict thật.
+
 ### Q18 — `CandidateClassifier` nằm ở app hay thư viện dùng chung?
 
 Q5 ghi "lớp nạp model là thư viện dùng chung"; `CLAUDE.md` cấm tách khi chưa có sản phẩm thứ hai nêu tên.
