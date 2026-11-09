@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -73,6 +74,13 @@ public:
     juce::File    currentFile() const;
     std::uint64_t droppedEvents() const { return dropped_.load (std::memory_order_relaxed); }
 
+    // Lane C0: session_end carries "dropped_candidates", the candidate queues'
+    // own drop count (NotchController::droppedCandidateEvents summed over the
+    // slots), which this logger cannot see. Optional; called from stop() on
+    // the message thread. Set once at construction time of the owner.
+    void setDroppedCandidatesProvider (std::function<std::uint64_t()> provider)
+        { droppedCandidatesProvider_ = std::move (provider); }
+
 private:
     void run() override;
     void drainToFile();
@@ -102,6 +110,7 @@ private:
     // dropped_ -- never silently lost (review round 1, Important 1).
     bool accepting_ { false };
     std::atomic<std::uint64_t> dropped_ { 0 };
+    std::function<std::uint64_t()> droppedCandidatesProvider_;
     // M-1: sticky for the session, set by writeLineNow() when the stream
     // refuses a write. Atomic because the writer thread sets it and stop()
     // (message thread) reads it. Reported in session_end.

@@ -1602,6 +1602,86 @@ TEST (GuiWiring, ModeAndTuningChangesAreLogged)
     EXPECT_NEAR ((double) (*tuning)["depth_db"], -10.0, 1e-6);
 }
 
+// Lane C0. Red if session_start loses log_schema, candidate records stop
+// reaching the log through the real wiring, or session_end stops reporting the
+// candidate queue's own drops (dropped_candidates).
+TEST (GuiWiring, CandidateFeaturesReachTheLogWithSchemaAndDropCount)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("candidates");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    NotchController::CandidateRecord rec;
+    rec.lane = 1; rec.bin = 43; rec.hz = 1007.8125f; rec.peakiness = 22.123456f;
+    rec.score = 0.5612345f; rec.pNorm = 0.9f; rec.rise = 0.7f; rec.riseRatio = 1.4012345f;
+    rec.novelty = 0.88f; rec.penalty = 1.0f; rec.asymmetry = 1.0f; rec.thr = 10.0f;
+    rec.hasLrRatio = true; rec.lrRatio = 12.3456f; rec.persist = 1; rec.persistNeeded = 3;
+    rec.nearMags = { 0.11f, 0.12f, 0.31f, 0.52f, 1.5f, 9.87654f, 1.5f, 0.52f, 0.31f, 0.12f, 0.11f };
+    for (int i = 0; i < NotchController::kMaxPendingCandidates + 3; ++i)
+        c0->pushCandidateForTest (rec);
+    c0->runOnce();   // flushes the 16 that fit
+    EXPECT_EQ (c0->droppedCandidateEvents(), 3u);
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    ASSERT_GE (events.size(), 3u);
+    EXPECT_EQ ((int) events.front()["log_schema"], 2);
+    EXPECT_EQ (events.back()["ev"].toString(), "session_end");
+    EXPECT_EQ ((int) events.back()["dropped_candidates"], 3);
+
+    int n = 0;
+    for (const auto& e : events)
+        if (e["ev"].toString() == "candidate_features")
+            ++n;
+    EXPECT_EQ (n, NotchController::kMaxPendingCandidates);
+
+    const auto* c = firstEvent (events, "candidate_features");
+    ASSERT_NE (c, nullptr);
+    for (const char* key : { "slot", "lane", "bin", "hz", "peakiness", "score", "p_norm", "rise",
+                             "rise_ratio", "novelty", "penalty", "asymmetry", "lr_ratio",
+                             "persist", "persist_needed", "thr", "near", "t" })
+        EXPECT_TRUE (c->hasProperty (key)) << key;
+    ASSERT_TRUE ((*c)["near"].isArray());
+    EXPECT_EQ ((*c)["near"].size(), NotchController::kCandidateNearBins);
+    EXPECT_FALSE (c->hasProperty ("ctx")) << "scalars only, no 1025-bin spectra";
+    EXPECT_NEAR ((double) (*c)["score"], 0.561, 1e-9) << "3 significant digits";
+
+    // One serialised line, as written to disk (size reported in the PR).
+    juce::StringArray lines;
+    lines.addLines (file.loadFileAsString());
+    for (const auto& l : lines)
+        if (l.contains ("candidate_features"))
+        {
+            std::printf ("[C0] one candidate_features line = %d bytes\n", (int) l.getNumBytesAsUTF8());
+            EXPECT_LT (l.length(), 600);
+            break;
+        }
+}
+
+// Lane C0. Red if notch_set stops carrying the raw rise ratio, or writes an
+// lr_ratio for a mono placement.
+TEST (GuiWiring, NotchSetJsonCarriesRiseRatioAndStereoOnlyLrRatio)
+{
+    NotchController::NotchEvent e;
+    e.kind = NotchController::NotchEvent::Kind::Set;
+    e.hasScore = true; e.score = 0.9f; e.riseRatio = 1.7512345f;
+    const auto mono = MainComponent::notchEventToVarForTest (e);
+    EXPECT_NEAR ((double) mono["rise_ratio"], 1.75, 1e-9);
+    EXPECT_FALSE (mono.hasProperty ("lr_ratio"));
+
+    e.hasLrRatio = true; e.lrRatio = 12.3456f;
+    const auto stereo = MainComponent::notchEventToVarForTest (e);
+    EXPECT_NEAR ((double) stereo["lr_ratio"], 12.3, 1e-9);
+
+    // A manual Set has no score: neither field is invented for it.
+    NotchController::NotchEvent manual;
+    EXPECT_FALSE (MainComponent::notchEventToVarForTest (manual).hasProperty ("rise_ratio"));
+}
+
 // Spec test 15. Red if MainComponent's teardown order lets a detector thread
 // deliver an event into a logger that is already gone (or vice versa), or if
 // the destructor stops flushing the controllers before the logger closes.

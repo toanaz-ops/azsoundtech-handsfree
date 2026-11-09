@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <utility>
 #include <vector>
@@ -4010,3 +4011,378 @@ TEST (NotchControllerRateChange, RoomMemoryMergesByBinNotByExactHz)
     h.controller.rememberReleaseForTest (0, 1031.0, -12.0);
     EXPECT_EQ (h.controller.memoryEntryCountForTest (0), 2);
 }
+
+// ===========================================================================
+// Lane C0 (candidate feature log). Near-miss candidates go to their OWN sink
+// and queue; the placement decision is untouched. `score` and kConfirmScore /
+// kCandidateLogScore are all the 0..1 PRODUCT scale, never peakiness.
+// ===========================================================================
+namespace
+{
+struct CandRecorder
+{
+    std::vector<NotchController::CandidateRecord> recs;
+    NotchController::CandidateSink sink()
+    {
+        return [this] (const NotchController::CandidateRecord& r) { recs.push_back (r); };
+    }
+};
+
+// Two sines summed at half amplitude each: two candidate bins in one block.
+struct TwoToneSource
+{
+    double f1 = 1000.0, f2 = 3000.0;
+    double nextSample = 0.0;
+    std::vector<float> hop()
+    {
+        std::vector<float> out ((std::size_t) Detector::kHopSize);
+        for (int i = 0; i < Detector::kHopSize; ++i)
+        {
+            out[(std::size_t) i] = 0.5f * (float) (std::sin (2.0 * kTestPi * f1 * nextSample / kTestSr)
+                                                   + std::sin (2.0 * kTestPi * f2 * nextSample / kTestSr));
+            nextSample += 1.0;
+        }
+        return out;
+    }
+};
+
+template <typename Src>
+void onsetBurst (Harness& h, Src& tone, int blocks)
+{
+    for (int i = 0; i < blocks; ++i)
+        pump (h, tone.hop());
+}
+
+void warm (Harness& h)
+{
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pump (h, quiet.hop());
+}
+
+// 0.1 dB/ms: measured to hold the slot's score at ~0.56 for tens of blocks,
+// i.e. inside [kCandidateLogScore, kConfirmScore) = [0.35, 0.7) -- a sustained
+// near miss that never confirms. (Faster ramps jump to 1.0; the lane G
+// fixture's 0.038 dB/ms confirms.)
+constexpr double kNearMissGainDbPerMs = 0.1;
+
+// Two ramping tones summed: two candidate bins, both near misses.
+struct RampTwoTone
+{
+    RampSineSource a, b;
+    RampTwoTone() { a.freq = 1000.0; b.freq = 2300.0;
+                    a.gainDbPerMs = b.gainDbPerMs = kNearMissGainDbPerMs; }
+    std::vector<float> hop()
+    {
+        auto x = a.hop();
+        const auto y = b.hop();
+        for (std::size_t i = 0; i < x.size(); ++i)
+            x[i] = 0.5f * (x[i] + y[i]);
+        return x;
+    }
+};
+
+bool sameCommands (const std::vector<NotchCommand>& a, const std::vector<NotchCommand>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (a[i].type != b[i].type || a[i].channel != b[i].channel || a[i].index != b[i].index
+            || a[i].frequency != b[i].frequency || a[i].Q != b[i].Q
+            || a[i].depthDB != b[i].depthDB || a[i].slot != b[i].slot)
+            return false;
+    return true;
+}
+
+// The same fixed block sequence under three candidate-log regimes. Returns
+// every NotchCommand emitted, in order. mode 0: no candidate sink, 1: sink and
+// an empty queue, 2: sink and a queue forced FULL before every block.
+std::vector<NotchCommand> runDecisionScenario (int mode, std::uint64_t* droppedOut = nullptr)
+{
+    CandRecorder rec;
+    Harness h;
+    if (mode > 0)
+        h.controller.setCandidateSink (rec.sink());
+    h.controller.setDetectionActive (true);
+
+    NotchController::CandidateRecord filler;
+    auto saturate = [&]
+    {
+        if (mode != 2)
+            return;
+        for (int i = 0; i < NotchController::kMaxPendingCandidates + 4; ++i)
+            h.controller.pushCandidateForTest (filler);
+    };
+    auto pumpOne = [&] (const std::vector<float>& hop)
+    {
+        saturate();
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (kBlockMs);
+        h.controller.runOnce();
+    };
+
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpOne (quiet.hop());
+    RampSineSource ramp;     // slow: places at -6
+    for (int i = 0; i < 150; ++i)
+        pumpOne (ramp.hop());
+    SineSource tone;         // hard onset: places at -12
+    tone.freq = 3100.0;
+    for (int i = 0; i < 40; ++i)
+        pumpOne (tone.hop());
+    for (int i = 0; i < 60; ++i)
+        pumpOne (quiet.hop());
+
+    if (droppedOut != nullptr)
+        *droppedOut = h.controller.droppedCandidateEvents();
+    std::vector<NotchCommand> out;
+    NotchCommand cmd {};
+    while (h.commands.read (&cmd, 1) == 1)
+        out.push_back (cmd);
+    return out;
+}
+} // namespace
+
+// near-miss -> exactly one event with every field. Red if the hook stops
+// logging a candidate that scored in [0.35, 0.7) and was not placed.
+TEST (CandidateLog, NearMissLogsOneEventWithEveryField)
+{
+    CandRecorder r; Harness h; h.controller.setCandidateSink (r.sink());
+    h.controller.setDetectionActive (true);
+    warm (h);
+    RampSineSource tone; tone.gainDbPerMs = kNearMissGainDbPerMs;
+    onsetBurst (h, tone, 40);
+
+    ASSERT_EQ (r.recs.size(), 1u);
+    const auto& c = r.recs[0];
+    // score and both thresholds are the 0..1 product scale.
+    EXPECT_GE (c.score, NotchController::kCandidateLogScore);
+    EXPECT_LT (c.score, CandidateScorer::kConfirmScore);
+    EXPECT_EQ (h.commands.getAvailableRead(), 0u) << "a near miss must not place";
+    EXPECT_EQ (c.slot, 0);
+    EXPECT_EQ (c.lane, 0);
+    EXPECT_NEAR (c.hz, 1000.0, kTestSr / Detector::kFftSize);
+    EXPECT_FLOAT_EQ (c.pNorm * c.rise * c.novelty * c.penalty * c.asymmetry, c.score);
+    EXPECT_GT (c.peakiness, c.thr);
+    EXPECT_FLOAT_EQ (c.thr, PeakinessAnalyzer::kDefaultThreshold);
+    EXPECT_EQ (c.persistNeeded, NotchController::kPersistenceBlocks);
+    EXPECT_EQ (c.persist, 0) << "score < 0.7 resets the streak";
+    EXPECT_GT (c.riseRatio, 0.0f);
+    EXPECT_FALSE (c.hasLrRatio) << "mono controller: no other lane";
+    EXPECT_TRUE (NotchController::candidateFeaturesFinite (c));
+    // near = bins -5..+5, peak in the middle.
+    EXPECT_EQ (c.bin, (int) std::lround (c.hz / (kTestSr / Detector::kFftSize)));
+    for (int k = 0; k < NotchController::kCandidateNearBins; ++k)
+        EXPECT_LE (c.nearMags[(std::size_t) k], c.nearMags[NotchController::kCandidateNearBins / 2]);
+    EXPECT_GT (c.nearMags[NotchController::kCandidateNearBins / 2], 0.0f);
+}
+
+// Red if a candidate below 0.35 starts producing events.
+TEST (CandidateLog, BelowTheLogScoreNothingIsWritten)
+{
+    CandRecorder r; Harness h; h.controller.setCandidateSink (r.sink());
+    h.controller.setDetectionActive (true);
+    warm (h);
+    // Fast ramp, first 15 blocks only: a candidate exists (score ~0.05-0.07)
+    // but is far under 0.35. Pure noise before it scores 0.
+    RampSineSource tone; tone.gainDbPerMs = 0.5;
+    onsetBurst (h, tone, 15);
+    NotchController::SnapshotBuffer snap; h.controller.copySnapshot (snap);
+    ASSERT_GT (snap.ringRiskScore, 0.0f) << "teeth: a scored candidate must exist";
+    ASSERT_LT (snap.ringRiskScore, NotchController::kCandidateLogScore);
+    EXPECT_TRUE (r.recs.empty());
+}
+
+// Red if the block that calls placeConfirmed also logs that bin.
+TEST (CandidateLog, APlacedCandidateIsNotAlsoLogged)
+{
+    CandRecorder r; Harness h; h.controller.setCandidateSink (r.sink());
+    h.controller.setDetectionActive (true);
+    h.controller.setPersistenceBlocks (1);
+    warm (h);
+    SineSource tone;
+    std::size_t recsAtPlacement = 0;
+    bool placed = false;
+    for (int i = 0; i < 12 && ! placed; ++i)
+    {
+        pump (h, tone.hop());
+        placed = h.commands.getAvailableRead() > 0;
+        recsAtPlacement = r.recs.size();
+    }
+    ASSERT_TRUE (placed);
+    // The hard onset climbs 0 -> 0.1 -> 1.0: nothing in [0.35, 0.7) on the way.
+    EXPECT_EQ (recsAtPlacement, 0u);
+    for (int i = 0; i < 5; ++i)
+        pump (h, tone.hop());
+    EXPECT_TRUE (r.recs.empty());
+}
+
+// Red if the +-1 bin / 2000 ms limit stops holding (FakeClock time).
+TEST (CandidateLog, SameBinIsLoggedOncePerTwoSeconds)
+{
+    CandRecorder r; Harness h; h.controller.setCandidateSink (r.sink());
+    h.controller.setDetectionActive (true);
+    warm (h);
+    RampSineSource tone; tone.gainDbPerMs = kNearMissGainDbPerMs;
+    onsetBurst (h, tone, 30);                       // sustained near miss, ~320 ms
+    ASSERT_EQ (r.recs.size(), 1u);
+
+    h.clock.advance (1500.0);                       // 1.8 s after the log: still inside 2000 ms
+    onsetBurst (h, tone, 4);
+    EXPECT_EQ (r.recs.size(), 1u) << "same bin inside 2000 ms";
+
+    h.clock.advance (400.0);                        // now > 2000 ms after the log
+    onsetBurst (h, tone, 4);
+    EXPECT_EQ (r.recs.size(), 2u) << "same bin after 2000 ms, if still a near miss";
+    EXPECT_EQ (r.recs[0].bin, r.recs[1].bin);
+}
+
+// Red if the controller-wide budget (1 per second) stops holding.
+TEST (CandidateLog, AtMostOneEventPerSecondPerController)
+{
+    CandRecorder r; Harness h; h.controller.setCandidateSink (r.sink());
+    h.controller.setDetectionActive (true);
+    warm (h);
+    RampTwoTone tone;
+    onsetBurst (h, tone, 30);                       // both bins are near misses, ~320 ms
+    ASSERT_EQ (r.recs.size(), 1u) << "two candidate bins, one budget";
+
+    h.clock.advance (1100.0);                       // a new one-second window
+    onsetBurst (h, tone, 4);
+    ASSERT_EQ (r.recs.size(), 2u) << "the other bin gets the next window";
+    EXPECT_NE (r.recs[0].bin, r.recs[1].bin);
+}
+
+// Red if candidates can evict / delay notch events, or the drop is uncounted.
+TEST (CandidateLog, ACandidateBurstCannotEvictNotchEvents)
+{
+    CandRecorder cr; Recorder r; Harness h;
+    h.controller.setCandidateSink (cr.sink());
+    h.controller.setEventSink (r.sink());
+    NotchController::CandidateRecord filler;
+    for (int i = 0; i < NotchController::kMaxPendingCandidates + 5; ++i)
+        h.controller.pushCandidateForTest (filler);
+    EXPECT_EQ (h.controller.pendingCandidatesForTest(), NotchController::kMaxPendingCandidates);
+    EXPECT_EQ (h.controller.droppedCandidateEvents(), 5u);
+
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -12.0, NotchController::Origin::Manual));
+    h.controller.clearNotch (0, 0);
+    EXPECT_EQ (h.controller.pendingEventsForTest(), 2) << "notch queue unaffected";
+    EXPECT_EQ (h.controller.droppedEvents(), 0u);
+
+    h.controller.runOnce();
+    ASSERT_EQ (r.events.size(), 2u);
+    EXPECT_EQ (r.events[0].kind, NotchController::NotchEvent::Kind::Set);
+    EXPECT_EQ (r.events[1].kind, NotchController::NotchEvent::Kind::Clear);
+    EXPECT_EQ (cr.recs.size(), (std::size_t) NotchController::kMaxPendingCandidates);
+    EXPECT_EQ (h.controller.pendingCandidatesForTest(), 0);
+}
+
+// Without a candidate sink nothing is ever queued (mirrors spec test 10).
+TEST (CandidateLog, NoCandidateSinkMeansNoAccumulation)
+{
+    Harness h;
+    NotchController::CandidateRecord filler;
+    for (int i = 0; i < 40; ++i)
+        h.controller.pushCandidateForTest (filler);
+    EXPECT_EQ (h.controller.pendingCandidatesForTest(), 0);
+    EXPECT_EQ (h.controller.droppedCandidateEvents(), 0u);
+}
+
+// THE pin: same block sequence, same NotchCommand stream, element for element,
+// with no candidate sink, an empty candidate queue, or a saturated one.
+TEST (CandidateLog, DecisionsAreIdenticalWithEmptyAndSaturatedCandidateQueue)
+{
+    std::uint64_t dropNone = 0, dropEmpty = 0, dropFull = 0;
+    const auto none  = runDecisionScenario (0, &dropNone);
+    const auto empty = runDecisionScenario (1, &dropEmpty);
+    const auto full  = runDecisionScenario (2, &dropFull);
+    ASSERT_GE (none.size(), 4u) << "teeth: the scenario must place notches";
+    EXPECT_TRUE (sameCommands (none, empty));
+    EXPECT_TRUE (sameCommands (none, full));
+    EXPECT_EQ (dropNone, 0u);
+    EXPECT_GT (dropFull, 0u) << "teeth: the queue really was saturated";
+}
+
+// Red if a NaN/inf feature can reach the log.
+TEST (CandidateLog, NonFiniteFeaturesAreNeverLogged)
+{
+    NotchController::CandidateRecord ok;
+    EXPECT_TRUE (NotchController::candidateFeaturesFinite (ok));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    {   auto r = ok; r.peakiness = nan;  EXPECT_FALSE (NotchController::candidateFeaturesFinite (r)); }
+    {   auto r = ok; r.riseRatio = inf;  EXPECT_FALSE (NotchController::candidateFeaturesFinite (r)); }
+    {   auto r = ok; r.thr = -inf;       EXPECT_FALSE (NotchController::candidateFeaturesFinite (r)); }
+    {   auto r = ok; r.hasLrRatio = true; r.lrRatio = nan;
+        EXPECT_FALSE (NotchController::candidateFeaturesFinite (r)); }
+    {   auto r = ok; r.hasLrRatio = false; r.lrRatio = nan;
+        EXPECT_TRUE (NotchController::candidateFeaturesFinite (r)) << "unused field is not logged"; }
+    {   auto r = ok; r.nearMags[7] = nan; EXPECT_FALSE (NotchController::candidateFeaturesFinite (r)); }
+}
+
+// End to end: a NaN in the OTHER lane's spectrum makes lr_ratio NaN, so a
+// candidate that logs with a clean other lane is dropped. Control first.
+TEST (CandidateLog, ANaNOtherLaneSuppressesTheEvent)
+{
+    auto run = [] (bool poison)
+    {
+        CandRecorder r; StereoHarness h; h.controller.setCandidateSink (r.sink());
+        h.controller.setDetectionActive (true);
+        NoiseSource quietL, quietR; quietR.rng.seed (999u);
+        for (int i = 0; i < kWarmupBlocks; ++i)
+            pumpStereo (h, quietL.hop(), quietR.hop());
+        RampSineSource toneL; toneL.gainDbPerMs = kNearMissGainDbPerMs;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (int i = 0; i < 30; ++i)
+        {
+            auto right = quietR.hop();
+            if (poison)
+                std::fill (right.begin(), right.end(), nan);
+            pumpStereo (h, toneL.hop(), right);
+        }
+        return r.recs;
+    };
+    const auto control = run (false);
+    ASSERT_FALSE (control.empty()) << "teeth: the clean run logs a near miss";
+    EXPECT_TRUE (control[0].hasLrRatio);
+    EXPECT_TRUE (run (true).empty());
+}
+
+// notch_set additions at the controller level: lr_ratio only when the other
+// lane exists, and it is the ratio of the frames the event carries.
+TEST (CandidateLog, SetEventCarriesLrRatioOnlyForStereo)
+{
+    {
+        Recorder r; Harness h; h.controller.setEventSink (r.sink());
+        h.controller.setDetectionActive (true);
+        int slot = -1;
+        ASSERT_NO_FATAL_FAILURE (primeAndPlace (h, slot));
+        ASSERT_GE (slot, 0);
+        const Ev* set = nullptr;
+        for (const auto& e : r.events)
+            if (e.kind == Ev::Kind::Set && e.hasScore) { set = &e; break; }
+        ASSERT_NE (set, nullptr);
+        EXPECT_FALSE (set->hasLrRatio);
+        EXPECT_GT (set->riseRatio, 0.0f);
+    }
+    {
+        Recorder r; StereoHarness h; h.controller.setEventSink (r.sink());
+        h.controller.setDetectionActive (true);
+        NoiseSource quietL; SineSource toneR;
+        ASSERT_FALSE (warmThenDrive (h, quietL, toneR).empty());
+        const Ev* set = nullptr;
+        for (const auto& e : r.events)
+            if (e.kind == Ev::Kind::Set && e.hasScore) { set = &e; break; }
+        ASSERT_NE (set, nullptr);
+        ASSERT_TRUE (set->hasLrRatio);
+        ASSERT_NE (set->ctx, nullptr);
+        const int bin = (int) std::lround (set->hz / set->ctx->binHz);
+        const float expected = set->ctx->now[(std::size_t) bin]
+                               / std::max (set->ctx->other[(std::size_t) bin], 1.0e-12f);
+        EXPECT_FLOAT_EQ (set->lrRatio, expected);
+        EXPECT_GT (set->lrRatio, 10.0f) << "howl on this lane, quiet on the other";
+    }
+}
+

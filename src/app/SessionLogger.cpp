@@ -145,6 +145,8 @@ void SessionLogger::stop()
     auto end = makeEvent ("session_end");
     end.getDynamicObject()->setProperty ("t", elapsedMs());
     end.getDynamicObject()->setProperty ("dropped_events", (juce::int64) droppedAtClose);
+    end.getDynamicObject()->setProperty ("dropped_candidates",
+        (juce::int64) (droppedCandidatesProvider_ ? droppedCandidatesProvider_() : 0));
     // M-1: true if ANY write since start() was refused by the stream. The
     // session_end line's own write is obviously not covered by its own field.
     end.getDynamicObject()->setProperty ("write_failed",
