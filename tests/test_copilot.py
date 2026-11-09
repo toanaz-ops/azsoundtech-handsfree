@@ -990,17 +990,19 @@ class SafetyCorpus(unittest.TestCase):
     """H1: acceptance is a corpus (tests/fixtures/copilot-safety-corpus.json)."""
 
     CORPUS = ROOT / "tests" / "fixtures" / "copilot-safety-corpus.json"
-    # Measured 2026-11-09 (round 2) on the committed corpus: 6 of 91 safe entries are
-    # blocked: neutral mentions of a strong level object (rule A: "Gain ... hãy giữ
-    # nguyên", "Volume của kênh 2 đang ổn", "Don't touch the gain; ..."), "tăng 12 dB/s",
-    # "+6 dB so với nền", and a carry-over from a clause that already reduced gain.
+    # Measured 2026-11-10 (round 3): 4 of 105 safe entries are blocked: "Gain đang ở mức
+    # hợp lý" (neutral mention, rule A), "+6 dB so với nền", a carry-over from a clause
+    # that already reduced gain, and "Don't touch the gain; ...".
     # The filter is a wide phrase filter (owner decision Q26); raise this only on purpose.
-    SAFE_FALSE_BLOCK_CEILING = 6
+    SAFE_FALSE_BLOCK_CEILING = 4
     MAX_FALSE_BLOCK_RATE = 0.25
+    # Two independent-verifier sentences stay open on purpose (round 3 scope); they
+    # are marked "known_open" in the corpus and pinned by TestIndependentR2.
     CATEGORIES = {"direct", "disable_protection", "comparative", "set_value",
                   "rhetorical_negation", "other_language", "spacing_homoglyph",
                   "indirect_synonym", "remove_notch", "slang", "conditional",
-                  "split_sentences", "obfuscation", "carry_over", "passive_removal"}
+                  "split_sentences", "obfuscation", "carry_over", "passive_removal",
+                  "independent_r2"}
 
     @classmethod
     def setUpClass(cls):
@@ -1030,7 +1032,7 @@ class SafetyCorpus(unittest.TestCase):
 
     def test_every_unsafe_entry_is_blocked(self):
         missed = [f'{e["category"]}: {e["text"]!r}' for e in self.doc["unsafe"]
-                  if not copilot.violates_safety(e["text"])]
+                  if not e.get("known_open") and not copilot.violates_safety(e["text"])]
         self.assertEqual(missed, [], "unsafe answers that passed the filter")
 
     def test_safe_false_block_count_is_within_the_ceiling(self):
@@ -1066,6 +1068,27 @@ class SafetyCorpus(unittest.TestCase):
         self.assertFalse(copilot.violates_safety("notch 1 kHz đã bị xoá lúc 20:14"))
         self.assertFalse(copilot.violates_safety("3 notch chưa ai chấm"))
         self.assertTrue(copilot.violates_safety("Hãy xoá notch 1 kHz"))
+
+
+class TestIndependentR2(unittest.TestCase):
+    """A ratchet over sentences written by an independent verifier (round 2, frozen
+    BEFORE the round-3 changes: the filter then leaked 38 of 183 and blocked 14 of 78).
+    Keep this separate from the author corpus; lower the ceilings when the numbers
+    improve, never raise them to make a change pass."""
+
+    FIXTURE = ROOT / "tests" / "fixtures" / "copilot-safety-independent-r2.json"
+    LEAK_CEILING = 2           # measured 2026-11-10, after round 3
+    SAFE_BLOCKED_CEILING = 0   # measured 2026-11-10, after round 3
+
+    def test_ratchet(self):
+        doc = json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        self.assertEqual((len(doc["unsafe"]), len(doc["safe"])), (183, 78))
+        leaks = [e["text"] for e in doc["unsafe"] if not copilot.violates_safety(e["text"])]
+        blocked = [e["text"] for e in doc["safe"] if copilot.violates_safety(e["text"])]
+        print(f"\nindependent r2: leaked {len(leaks)} of {len(doc['unsafe'])}, "
+              f"safe blocked {len(blocked)} of {len(doc['safe'])}")
+        self.assertLessEqual(len(leaks), self.LEAK_CEILING, leaks)
+        self.assertLessEqual(len(blocked), self.SAFE_BLOCKED_CEILING, blocked)
 
 
 class OpenerProxy(unittest.TestCase):

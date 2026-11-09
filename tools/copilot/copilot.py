@@ -690,10 +690,12 @@ _LEVEL = _index([
     ("speaker",), ("speakers",), ("pa",), ("amp",), ("signal",), ("juice",), ("limit",),
     ("limits",), ("gioi", "han"), ("am", "luong"), ("do", "loi"), ("tin", "hieu"),
     ("cuong", "do"), ("do", "to"), ("cong", "suat"), ("ganancia",), ("ganho",), ("guadagno",),
-    ("volumen",), ("pegel",), ("lautstarke",), ("verstarkung",), ("niveau",), ("puissance",)])
-# objects only comparatives ("louder", "to hơn") are paired with
+    ("volumen",), ("pegel",), ("lautstarke",), ("verstarkung",), ("niveau",), ("puissance",),
+    ("do", "nhay"), ("input", "sensitivity"), ("sensitivity",), ("do", "lon")])
+# weak level carriers: only comparatives, particle verbs and a bare "up" are paired with them
 _EXTRA = _index([("tieng",), ("sound",), ("audio",), ("nhac",), ("giong",), ("voice",),
-                 ("vocal",), ("vocals",), ("music",)])
+                 ("vocal",), ("vocals",), ("music",), ("kenh",), ("channel",), ("channels",),
+                 ("bus",), ("aux",), ("sub",), ("wedge",), ("wedges",), ("input",)])
 _PROTECT = _index([
     ("chong", "hu"), ("feedback", "suppression"), ("feedback", "suppressor"),
     ("feedback", "eliminator"), ("feedback", "protection"), ("anti", "feedback"),
@@ -701,9 +703,13 @@ _PROTECT = _index([
     ("bao", "ve"), ("safety",), ("safeguard",), ("safeguards",), ("gioi", "han"), ("limit",),
     ("limits",), ("han", "che"), ("tran",), ("ceiling",), ("larsen",), ("ruckkopplung",),
     ("realimentacion",), ("retroalimentacion",), ("acoplamiento",), ("afs",), ("suppression",),
-    ("suppressor",)])
+    ("suppressor",),
+    # the app's own indirect names for the protection
+    ("tinh", "nang"), ("che", "do", "tu", "dong"), ("tu", "dong"), ("auto",), ("triet", "hu"),
+    ("plugin",), ("the", "feature"), ("this", "mode"), ("auto", "mode")])
 _PROTECT_STRICT_ONLY = _index([("feedback",)])   # "feedback" alone: only strong disable cues
-_NOTCH = _index([("notch",), ("notches",)])
+_NOTCH = _index([("notch",), ("notches",), ("diem", "cat"), ("vet", "cat"), ("bo", "loc"),
+                 ("filter",), ("filters",), ("cut",), ("cuts",)])
 
 _RAISE_WORDS = frozenset({"tang", "nang", "bom", "khuech", "max", "rise", "rises", "rising",
                           "bump", "bumps", "bumping", "bumped",
@@ -713,10 +719,11 @@ _RAISE_STEMS = ("rais", "increas", "boost", "crank", "lift", "amplif", "pump", "
 _AMOUNT_EXTRA = frozenset({"them", "cong", "add", "plus", "up", "bump", "len"})
 _AMOUNT_FILL = frozenset({"by", "len", "them", "khoang", "about", "around", "another", "further",
                           "nua", "toi"})
-_COMPAR_WORDS = frozenset({"louder", "higher", "hotter", "hot", "stronger", "bigger", "greater"})
+_COMPAR_WORDS = frozenset({"louder", "higher", "hotter", "hot", "stronger", "bigger", "greater",
+                           "harder"})
 # soft cues: ignored when the same clause carries an explicit reduce cue
 _SOFT_WORDS = frozenset({"them", "nua", "add", "adding", "added", "adds"})
-_PAIRS_C = _index([("cho", "them"), ("mo", "them"), ("len", "chut"), ("len", "it"), ("len", "xiu"),
+_PAIRS_C = _index([("len", "them"), ("bat", "to"), ("cho", "them"), ("mo", "them"), ("len", "chut"), ("len", "it"), ("len", "xiu"),
                    ("nong", "hon"), ("a", "little"), ("a", "bit"), ("to", "hon"), ("lon", "hon"), ("cao", "hon"), ("manh", "hon"), ("to", "len"),
                    ("lon", "len"), ("manh", "len"), ("cao", "len"), ("to", "them"), ("cho", "to"),
                    ("cho", "lon"), ("cho", "manh"), ("lam", "to"), ("lam", "lon"),
@@ -724,7 +731,7 @@ _PAIRS_C = _index([("cho", "them"), ("mo", "them"), ("len", "chut"), ("len", "it
 _PV_VERBS = frozenset({"turn", "push", "bump", "bring", "crank", "ramp", "pump", "pull", "jack",
                        "dial", "step", "amp", "day", "keo", "van", "nhich", "dua", "pushing",
                        "pushed", "turning", "turned", "bringing", "pulling", "dialing", "dialling",
-                       "cranking", "ramping"})
+                       "cranking", "ramping", "go", "goes", "going"})
 _PLAIN_VERBS = frozenset({"push", "pushing", "pushed", "day", "keo", "pull", "pulling", "van",
                           "nhich"})
 _REDUCERS = frozenset({"xuong", "down", "back", "away", "ra", "xa", "lui", "giam", "lower", "nho"})
@@ -749,7 +756,8 @@ _N_WORDS = frozenset({"xoa", "go", "cleared", "clear", "clears", "clearing", "re
                       "tat"})
 _N_STEMS = ("remov", "delet", "disabl", "bypass", "erasing", "wiping")
 _N_PAIRS = _index([("turn", "off"), ("vo", "hieu"), ("don", "sach"), ("don", "dep"),
-                   ("get", "rid"), ("getting", "rid"), ("got", "rid")])
+                   ("get", "rid"), ("getting", "rid"), ("got", "rid"),
+                   ("lam", "lai", "tu", "dau"), ("start", "over")])
 _NS_PAIRS = _index([("clear", "all"), ("xoa", "het"), ("xoa", "tat", "ca"), ("reset", "all"),
                     ("xoa", "sach"), ("clear", "everything")])
 _PAST = frozenset({"bi", "duoc", "da", "been", "was", "were", "got", "tu", "auto", "automatically",
@@ -786,6 +794,8 @@ def _fold(text: str, glue: bool) -> str:
     t = t.casefold().replace("’", "'").replace("‘", "'").replace("ʼ", "'").replace("`", "'")
     t = t.replace("chớ", "đừng")   # "chớ" would fold to "cho" (= "for"), losing its negation
     t = _DUNGX.sub("dungx", t)     # "đúng" / "dùng" fold to "dung" (= đừng): keep them apart
+    t = re.sub(r"(?<!\w)dừng(?!\w)", "ngưng", t)   # "dừng" = stop, not "đừng"
+    t = re.sub(r"(?<!\w)ổn(?!\w)", "ongood", t)    # "ổn" = fine; keep it apart from English "on"
     t = t.translate(_LOOKALIKE)
     t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
     return " ".join(t.replace("đ", "d").split())
@@ -985,16 +995,48 @@ def _has_reduce(w) -> bool:
     return False
 
 
+_SHALLOW = _index([("nong",), ("shallower",), ("shallow",), ("less", "deep"), ("giam", "do", "sau"),
+                   ("giam", "bot", "do", "sau"), ("thu", "nho", "do", "sau"), ("bot", "do", "sau")])
+_DONE = frozenset({"da", "bi", "duoc", "been", "was", "were", "got", "vua"})
+_STATE_BEFORE_OFF = frozenset({"dang", "is", "are", "was", "been", "currently", "bi"})
+_ADVICE = frozenset({"nen", "can", "should", "must", "need", "needs", "phai", "hay", "please",
+                     "could", "ought", "di", "nhe", "thu", "try", "just", "simply", "may", "might",
+                     "lets"})
+_STATE_MARKS = frozenset({"hien", "nguyen", "current", "currently", "healthy", "fine", "ongood",
+                          "unchanged", "stable"})
+
+
+def _is_statement(w) -> bool:
+    """A clause about a level that gives a figure or a status and no advice word:
+    "Gain hiện tại là 35 dB", "The ceiling is at -24 dB", "Gain looks fine", "giữ nguyên"."""
+    if "giu" in w and ("nguyen" in w or "hien" in w):
+        return True
+    if "keep" in w and (any(t in w for t in ("current", "same", "unchanged"))
+                        or any(w[i] == "as" and w[i + 1:i + 2] == ["is"] for i in range(len(w)))):
+        return True
+    has_num = any(_NUMBER_RE.match(t) for t in w)
+    has_mark = any(t in _STATE_MARKS for t in w)
+    return (has_num or has_mark) and not any(t in _ADVICE for t in w)
+
+
 def _find_cues(w, lvl, prot, extra) -> list[tuple]:
     """(kind, start, end, strict) for every cue. Kinds: R needs a level object nearby,
-    C a level/extra object, S stands alone, D a protection, N a notch, F foreign."""
+    RP/C a level or carrier object, RB a bare "up"/"lên" right next to one, S stands
+    alone, D a protection, N a notch, SH a shallower notch, F foreign."""
     n = len(w)
     cues: list[tuple] = []
     for i, t in enumerate(w):
         nxt = w[i + 1] if i + 1 < n else ""
-        raiseish = t in _RAISE_WORDS or t.startswith(_RAISE_STEMS)
+        prev = w[i - 1] if i else ""
+        # "tốc độ tăng", "mức tăng" are nouns (a rate / an amount of rise), not advice
+        noun = t == "tang" and (prev == "muc" or w[max(0, i - 2):i] == ["toc", "do"])
+        raiseish = (t in _RAISE_WORDS or t.startswith(_RAISE_STEMS)) and not noun
         if raiseish:
             cues.append(("R", i, i + 1, False))
+        if t == "nang":
+            cues.append(("RP", i, i + 1, False))
+        if t == "tang" and nxt == "am" and not (i + 2 < n and w[i + 2] == "luong"):
+            cues.append(("S", i, i + 2, False))   # "tăng âm" = amplifier / boost
         if t in _COMPAR_WORDS:
             cues.append(("C", i, i + 1, False))
             if t == "louder":
@@ -1004,21 +1046,27 @@ def _find_cues(w, lvl, prot, extra) -> list[tuple]:
         for p in _PAIRS_C.get(t, ()):
             if tuple(w[i:i + len(p)]) == p:
                 cues.append(("CS" if p[0] in ("a", "cho", "mo", "len") else "C", i, i + len(p), False))
+        for p in _SHALLOW.get(t, ()):
+            if tuple(w[i:i + len(p)]) == p:
+                cues.append(("SH", i, i + len(p), False))
         if t in ("more", "extra") and any(i < s <= i + 2 for s, _ in lvl):
             cues.append(("S", i, i + 1, False))
+        pv_before = any(x in _PV_VERBS for x in w[max(0, i - 4):i])
         if t in _PV_VERBS:
             k = next((x for x in range(i + 1, min(i + 5, n)) if w[x] in _PARTICLES), None)
             if k is not None:
-                cues.append(("R", i, k + 1, False))
+                cues.append(("RP", i, k + 1, False))
         if t.startswith(("turn", "crank", "bring", "push")) and nxt in ("it", "that", "this", "them") \
                 and i + 2 < n and w[i + 2] in _PARTICLES:
             cues.append(("S", i, i + 3, False))
         if t in _PLAIN_VERBS and not any(x in _REDUCERS for x in w[i + 1:i + 6]) \
                 and any(i < s <= i + 4 for s, _ in lvl):
             cues.append(("S", i, i + 1, False))
-        if t == "up" and nxt != "to" and (i == 0 or w[i - 1] != "set") \
+        if t == "up" and nxt != "to" and not pv_before and (i == 0 or prev != "set") \
                 and any(i < s <= i + 3 for s, _ in lvl):
             cues.append(("S", i, i + 1, False))
+        if t in ("up", "len") and nxt != "to" and not pv_before and (i == 0 or prev != "set"):
+            cues.append(("RB", i, i + 1, False))
         if t[0] == "+" and _NUMBER_RE.match(t) and nxt == "db":
             cues.append(("S", i, i + 2, False))
         if (raiseish or t in _AMOUNT_EXTRA) and not any(x in _REDUCE_CTX for x in w[max(0, i - 3):i]) \
@@ -1026,15 +1074,20 @@ def _find_cues(w, lvl, prot, extra) -> list[tuple]:
             for k in range(i + 1, min(i + 4, n)):
                 if _NUMBER_RE.match(w[k]):
                     if k + 1 < n and w[k + 1] == "db":
-                        cues.append(("S", i, k + 2, False))
+                        tail = w[k + 2:k + 4]
+                        rate = tail[:2] == ["moi", "giay"] or tail[:1] == ["s"] or tail[:2] == ["per", "second"]
+                        if not rate:   # "12 dB mỗi giây" / "dB/s" is a rate, not a level change
+                            cues.append(("S", i, k + 2, False))
                     break
                 if w[k] not in _AMOUNT_FILL:
                     break
         if t in _SET_CUES:
             cues.append(("SET", i, i + 1, False))
-        # disable cues
-        strict_hit = (t == "tat" and nxt != "ca") or t.startswith(_D_STRICT_STEMS)
-        weak_hit = t.startswith(_D_WEAK_STEMS) or t in _D_WEAK_WORDS
+        # disable cues ("đang tắt" / "is off" describes a state)
+        state = any(x in _STATE_BEFORE_OFF for x in w[max(0, i - 2):i])
+        strict_hit = (t == "tat" and nxt != "ca" and not state) or t.startswith(_D_STRICT_STEMS)
+        weak_hit = (t.startswith(_D_WEAK_STEMS) or t in _D_WEAK_WORDS) \
+            and not (t == "bo" and nxt in ("loc", "triet", "chong"))   # "bộ lọc", "bộ chống hú"
         if strict_hit:
             cues.append(("D", i, i + 1, True))
         elif weak_hit:
@@ -1052,7 +1105,8 @@ def _find_cues(w, lvl, prot, extra) -> list[tuple]:
                 cues.append(("D", i, k + 1, True))
                 cues.append(("N", i, k + 1, False))
         # notch removal
-        if (t in _N_WORDS and not (t == "tat" and nxt == "ca")) or t.startswith(_N_STEMS):
+        if (t in _N_WORDS and not (t == "tat" and nxt == "ca")
+                and not (t == "bo" and nxt in ("loc", "triet", "chong"))) or t.startswith(_N_STEMS):
             cues.append(("N", i, i + 1, False))
         for p in _N_PAIRS.get(t, ()):
             if tuple(w[i:i + len(p)]) == p:
@@ -1122,10 +1176,10 @@ def _governed(w, cues, ci, flip, depth=0) -> bool:
     return False
 
 
-def _clause_violates(w: list[str], carry=(False, False, False)):
-    """(violates, (has level object, has protection, has notch)) for one clause.
-    `carry` says whether a recent clause named a level object / protection / notch:
-    a cue with no object of its own inherits it (rule B)."""
+def _clause_violates(w: list[str], carry=(False, False, False, False)):
+    """(violates, (level object, protection, notch, level-or-carrier object)) for one clause.
+    `carry` says whether a recent clause named such an object: a cue with no object of
+    its own inherits it (rule B)."""
     w = _merge_negations(w)
     n = len(w)
     lvl = _level_spans(w)
@@ -1133,13 +1187,14 @@ def _clause_violates(w: list[str], carry=(False, False, False)):
     prot = _spans(w, _PROTECT)
     strict_only = _spans(w, _PROTECT_STRICT_ONLY)
     notch = _spans(w, _NOTCH)
-    strong = [s for s in lvl if s in set(_spans(w, _STRONG))]
-    flags = (bool(lvl), bool(prot or strict_only), bool(notch))
+    strong_set = set(_spans(w, _STRONG))
+    strong = [s for s in lvl if s in strong_set]
+    flags = (bool(lvl), bool(prot or strict_only), bool(notch), bool(lvl or extra))
     cues = _find_cues(w, lvl, prot, extra)
     if not cues:
-        return (bool(strong) and not _has_reduce(w)), flags
+        return (bool(strong) and not (_has_reduce(w) or _is_statement(w))), flags
     flip = _flip_at(w)
-    carry_lvl, carry_prot, carry_notch = carry
+    carry_lvl, carry_prot, carry_notch, carry_any = carry
     governed_raise = False
     for ci, (kind, s, e, strict) in enumerate(cues):
         span = (s, e)
@@ -1147,11 +1202,22 @@ def _clause_violates(w: list[str], carry=(False, False, False)):
         if kind == "R":
             ok = any(_gap(span, o) <= _WINDOW for o in lvl) or \
                 (not lvl and (carry_lvl or pronoun))
+        elif kind == "RP":
+            ok = any(_gap(span, o) <= _WINDOW for o in lvl + extra) or \
+                (not lvl and not extra and (carry_any or pronoun))
+        elif kind == "RB":
+            pool = lvl + extra if w[s] == "up" else lvl
+            ok = any(_gap(span, o) <= 2 for o in pool)
         elif kind in ("C", "CS"):
             if kind == "CS" and _has_reduce(w):
                 continue
             ok = any(_gap(span, o) <= _WINDOW for o in lvl + extra) or \
-                (not lvl and not extra and carry_lvl)
+                (not lvl and not extra and (carry_any or pronoun))
+        elif kind == "SH":
+            ok = any(_gap(span, o) <= _NOTCH_WINDOW for o in notch) or (not notch and carry_notch)
+            if ok and any(t in _STATE_MARKS or t in _STATE_BEFORE_OFF or t == "la"
+                          for t in w[max(0, s - 3):s]):
+                ok = False   # "notch hiện tại nông 6 dB": a description
         elif kind in ("S", "OP"):
             ok = True
         elif kind == "SET":
@@ -1168,6 +1234,9 @@ def _clause_violates(w: list[str], carry=(False, False, False)):
             pool = prot + (strict_only if strict else [])
             ok = any(_gap(span, o) <= _WINDOW for o in pool) or \
                 (not prot and not strict_only and (carry_prot or pronoun))
+            if ok and kind == "D" and any(t in _DONE for t in w[max(0, s - 3):s]) \
+                    and not any(t in _ADVICE for t in w[max(0, s - 3):s]):
+                ok = False   # "hệ thống đã tự động xóa ...": a statement of fact
         elif kind == "N":
             ok = any(_gap(span, o) <= _NOTCH_WINDOW for o in notch) or \
                 (not notch and (carry_notch or pronoun))
@@ -1193,14 +1262,15 @@ def _clause_violates(w: list[str], carry=(False, False, False)):
             else:
                 return True, flags
     # Rule A: a clause naming a strong level object is blocked unless it carries an
-    # explicit reduce cue, or only raise cues that a plain negation governs.
-    if strong and not (_has_reduce(w) or governed_raise):
+    # explicit reduce cue, only raise cues that a plain negation governs, or is a
+    # statement (a figure or a status, no advice word).
+    if strong and not (_has_reduce(w) or governed_raise or _is_statement(w)):
         return True, flags
     return False, flags
 
 
 def _text_violates(t: str) -> bool:
-    carry = [0, 0, 0]
+    carry = [0, 0, 0, 0]
     for clause in _SPLIT_RE.split(t):
         if not clause.strip():
             continue
@@ -1209,7 +1279,7 @@ def _text_violates(t: str) -> bool:
         joined = _rejoin(w)
         if joined != w:
             variants.append(joined)
-        flags = [False, False, False]
+        flags = [False, False, False, False]
         for v in variants:
             bad, fl = _clause_violates(v, tuple(c > 0 for c in carry))
             if bad:
@@ -1240,7 +1310,14 @@ def violates_safety(text: str) -> bool:
          preamp, master or the depth ceiling (trần) blocks unless it carries an
          explicit reduce cue (giảm, hạ, bớt, lower, cut, ...) or only raise cues that
          a plain negation governs. Neutral mentions are blocked on purpose.
-         "độ lợi vòng", "loop gain" and "chạm trần" (the app's own findings) are exempt.
+         "độ lợi vòng", "loop gain" and "chạm trần" (the app's own findings) are exempt,
+         and so is a statement: a figure or a status ("hiện tại", "ổn", "looks fine",
+         "giữ nguyên") with no advice word and no raise cue.
+      6. Also blocked: making a notch shallower (nông hơn, shallower, giảm độ sâu);
+         the app's indirect names for the protection (tính năng, chế độ tự động, AUTO,
+         bộ triệt hú, plugin) and for notches (điểm cắt, bộ lọc, filter); a bare
+         "up"/"lên" next to a level object or carrier (kênh, bus, aux, wedge, giọng ...).
+         "tốc độ tăng"/"mức tăng" are nouns and "dB mỗi giây" is a rate, not advice.
     A plain negation directly in front of the cue ("đừng tăng", "never raise")
     excuses it; rhetorical or double negation ("sao không tăng gain?", "don't hesitate
     to push the fader") does not. A past-tense report of fact ("notch 3 đã bị xoá",
