@@ -89,6 +89,10 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotFindings.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotFindings.h
+    ${CMAKE_SOURCE_DIR}/src/app/SidecarRunner.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/SidecarRunner.h
     ${CMAKE_SOURCE_DIR}/src/app/LicenseManager.cpp
     ${CMAKE_SOURCE_DIR}/src/app/LicenseViewModel.cpp
     ${CMAKE_SOURCE_DIR}/src/app/PresetFirstRun.cpp

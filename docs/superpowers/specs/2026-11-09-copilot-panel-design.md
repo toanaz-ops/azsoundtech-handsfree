@@ -86,7 +86,9 @@ Phần tử thiếu trường thì bỏ phần tử đó, không bỏ cả danh 
   từ luồng nền. `CopilotRunResult { int exitCode; juce::String stdoutText; Status status; }`
   với `Status { ok, sidecarMissing, timedOut, failed }`.
 - `ChildProcessBackend`: bản thật, dùng `juce::ChildProcess`, đọc stdout dạng UTF-8.
-  Quá hạn (**10 s** cho phát hiện) thì `kill()` và trả `timedOut`. File exe không tồn
+  Quá hạn (**30 s** cho phát hiện) thì `kill()` và trả `timedOut`. Con số 30 s đến từ
+  phép đo: bundle `onedir` 19,4 MB khởi động nguội mất 1,5–7,5 s trên máy dev (ba lần
+  chạy, nghi do Defender quét lần đầu); 10 s là quá sát. File exe không tồn
   tại thì trả `sidecarMissing` mà không thử chạy.
 - `SidecarRunner`: sở hữu một `juce::Thread`; `request()` trả về ngay; kết quả về luồng
   message qua `MessageManager::callAsync` với `SafePointer`. Có **bộ đếm thế hệ**: kết

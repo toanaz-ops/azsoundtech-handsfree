@@ -167,6 +167,8 @@ public:
     void showMessage (const juce::String& message);
     void stopSessionLog();
     [[nodiscard]] juce::File sessionLogFileForTest() const;
+    // Active session log, or an empty File when the logger is not running.
+    [[nodiscard]] juce::File currentSessionLogFile() const;
     [[nodiscard]] int lastLoadSkippedNotchesForTest() const;
 
     // Injectable for tests: the default opens a native async FileChooser and

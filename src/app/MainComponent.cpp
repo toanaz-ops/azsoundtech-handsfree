@@ -1274,6 +1274,11 @@ juce::File MainComponent::sessionLogFileForTest() const
     return sessionLogger_.currentFile();
 }
 
+juce::File MainComponent::currentSessionLogFile() const
+{
+    return sessionLogger_.currentFile();
+}
+
 int MainComponent::lastLoadSkippedNotchesForTest() const
 {
     return lastLoadSkipped_;
