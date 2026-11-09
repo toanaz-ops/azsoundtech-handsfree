@@ -3475,3 +3475,16 @@ TEST (SlotEdit, ADeviceRestartStillResetsAndRelaunchesAllEight)
 
     slotEditStopAll (app);
 }
+
+TEST (SlotEdit, AnEditTearsDownAStaleSoundcheckStrip)
+{
+    // A results/applied strip was computed against the old routing; a slot
+    // edit puts the lock back like any restart does (no run is measuring).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+
+    app.changeSlotConfig (1, slotEditMono (1, 1));
+
+    EXPECT_EQ (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+}

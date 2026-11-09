@@ -217,6 +217,11 @@ public:
     // The CALLER must be the only consumer (every detector thread joined) --
     // it is an ordinary read(), so a running producer is fine. Message thread.
     void discardTapBacklog();
+    // Same, for ONE slot's two lane rings and drop counts -- the per-slot edit
+    // path (MainComponent::changeSlotConfig). The CALLER must be that slot's
+    // only consumer (its detector joined); the other slots' consumers keep
+    // running, so their rings are NOT touched.
+    void discardTapBacklog (int slot);
 
     std::uint64_t getTapDropCount() const;
     std::uint64_t getTapDropCount (int slot) const;

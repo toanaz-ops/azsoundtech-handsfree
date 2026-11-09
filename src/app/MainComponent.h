@@ -231,7 +231,8 @@ public:
     std::function<void (std::function<void()>)> deferToMessageLoop;
 
     // THE one route a routing-table change takes (the SlotPanel lambda calls
-    // this): the same detector stop/apply/start cycle as a device change,
+    // this): stop/apply/start of THAT SLOT's detector only (HW-174.Q3; a device
+    // change resets all eight through the hooks), no save -- callers save once,
     // then the CURRENT mode's detection gating re-applied to the changed slot,
     // so a slot enabled mid-Auto/-Soundcheck is armed immediately instead of
     // waiting for the next mode request. Public so tests drive the exact path
@@ -407,6 +408,13 @@ private:
     // True while any slot's detector thread runs. The driver-restart hooks
     // read it to tell a restart nobody here asked for (review I1).
     bool anyDetectorRunning() const;
+    // The soundcheck half of a restart: join the poll thread, say so if a run
+    // was lost, tear the console down. Shared by onBeforeRestart (device
+    // restart) and changeSlotConfig (a slot edit that disturbs the run).
+    void abortSoundcheckForRestart();
+    // True when editing slot `slotIndex` to `next` invalidates the soundcheck
+    // in flight, an open confirmation or a results strip.
+    [[nodiscard]] bool slotEditDisturbsSoundcheck (int slotIndex, const SlotConfig& next) const;
     // Set when a driver-initiated stop ran onBeforeRestart(); consumed by the
     // next device start. Message thread only.
     bool driverRestartPending_ = false;
