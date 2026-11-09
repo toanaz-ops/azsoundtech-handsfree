@@ -1,18 +1,24 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.3.0
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.4.0
 
-Ngày build: 2026-09-16 · suite test 712/712 xanh (`17f5225`, nhánh
-`feat/lane-m-active-soundcheck`) · installer `AZSoundtech-Handsfree-Setup-1.3.0.exe` (SHA-256 và dung lượng ở dòng dưới)
-· gate 714/714 ngày 2026-09-17.
+Ngày build: 2026-11-09 18:02 (`main` `2628cdf`) · gate ctest 833/833 · installer
+`AZSoundtech-Handsfree-Setup-1.4.0.exe` · đóng gói không chờ nghe thử trên rig (quyết định owner).
 
-SHA-256 của Setup 1.3.0: **C844186E2FBDD76EB345F50EDFD4E3FDC4A1025607C741F76B68321E05D05158** · dung lượng: **26 884 355 B (25,6 MB)**
+SHA-256 của Setup 1.4.0: **4A627B878A5E84866094F30B3AB5DFC51329811F08A238DBE0038976F95E8D6F** · dung lượng: **26 917 930 B (25,7 MB)**
+
+Bản 1.3.0 (build 2026-09-16, suite 712/712 tại `17f5225`, gate 714/714 ngày 2026-09-17,
+26 884 355 B / 25,6 MB) SHA-256
+`C844186E2FBDD76EB345F50EDFD4E3FDC4A1025607C741F76B68321E05D05158`
 
 Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
-Thư mục này luôn giữ **3 bản mới nhất** — cài bản số cao nhất trừ khi được
-nhờ test bản cũ.
+Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.4.0** (1.4.0 đóng gói không dọn bản cũ) —
+cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
+> **1.4.0 không đổi DSP/gain/buffer so với 1.3.0**, nhưng **routing lần trước được
+> khôi phục tự động lúc mở app → hạ master trước** (xem mục "Mới trong 1.4.0").
+>
 > **1.3.0 CÓ đụng đường audio, và đây là thay đổi lớn nhất tới nay.** Lần đầu
 > tiên app **tự phát tín hiệu ra PA** (nút `ĐO`). **HẠ MASTER TRƯỚC**, mở âm
 > lượng nhỏ, và đọc hết mục "Mới trong 1.3.0" bên dưới trước khi cắm vào dàn
