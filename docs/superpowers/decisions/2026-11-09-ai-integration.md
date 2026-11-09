@@ -4,7 +4,7 @@ Mỗi mục là một ngả rẽ. Ghi đủ: câu hỏi, các phương án (kèm
 dùng), và lựa chọn.
 
 **Trạng thái:** **Q1–Q6 owner đã chốt 09/11/2026** (trả lời trực tiếp trong
-phiên). Q7–Q10, Q12–Q14 do điều phối chốt tạm, owner chưa duyệt. **Q11 owner đã chốt
+phiên). Q7–Q10, Q12–Q14 điều phối chốt tạm, **owner duyệt 09/11/2026 (Q16)**. **Q11 owner đã chốt
 09/11/2026 (phương án 1)**; ba PR lane AI đã merge `main` cùng ngày (Q15).
 Spec: [`../specs/2026-11-09-copilot-panel-design.md`](../specs/2026-11-09-copilot-panel-design.md) (lane L2),
 [`../specs/2026-11-09-candidate-feature-log-design.md`](../specs/2026-11-09-candidate-feature-log-design.md) (lane C0).
@@ -230,3 +230,27 @@ Phủ định ("không nên tăng gain", "đừng tăng âm lượng") vẫn đ�
 
 **Chọn: 1 (điều phối chốt tạm, 09/11/2026).** Kèm theo: địa chỉ `http://` không phải máy
 này bị từ chối khi có khoá sẽ gửi đi (khoá không đi dạng chữ thường qua mạng).
+
+## Q16 — Các điểm chốt tạm, khoá thử, và thời điểm làm lane C1
+
+Hỏi qua trang quyết định (https://claude.ai/artifact/FATBschBPYtkNChuK9Jj8A) và trong chat. Ba câu
+gộp: (a) giữ hay đổi Q7–Q10, Q12–Q14; (b) thử lượt hỏi AI thật bằng khoá nào; (c) lane C1 (mạng
+neuron trên luồng detector) làm khi nào.
+
+| Câu | Phương án | Được | Mất |
+|---|---|---|---|
+| (a) | **Giữ cả bảy điểm chốt tạm** | không phải làm lại gì | không |
+| (a) | Đổi từng điểm | theo ý owner | làm lại phần tương ứng của L2a/L2b |
+| (b) | **A — khoá Anthropic của owner** | đo được độ trễ, token, lỗi thật trên đường chính | tốn tiền theo lượt gọi; owner phải tự nhập khoá |
+| (b) | B — Ollama tại máy | không tốn tiền, không gửi dữ liệu ra ngoài | chỉ kiểm đường tương thích OpenAI, không kiểm đường Claude |
+| (b) | C — chưa thử | không | lượt gọi thật vẫn là chưa biết |
+| (c) | Chờ ≥ 300 verdict từ ≥ 3 session rồi mới mở C1 (roadmap cũ) | không viết mã trước khi có dữ liệu | khi dữ liệu về mới bắt đầu làm khung |
+| (c) | **Làm khung C1 ngay** | khung suy luận, test đếm cấp phát, chế độ bóng sẵn sàng khi dữ liệu về | model huấn luyện thật vẫn phải chờ dữ liệu; thêm CPU trên luồng detector |
+
+**Chọn (owner, 09/11/2026):** (a) giữ, (b) A, (c) làm ngay. Nguyên văn: "Tất cả chốt theo khuyến
+nghị, riêng vụ mạng neuron được tôi muốn làm luôn". Cùng lượt, owner cho đóng gói bản mang lane AI
+("Đóng gói 1.5.0"): 1.5.0 đóng gói từ `main` `5d47b9e`, xem `docs/release-notes/1.5.0-alpha.md`.
+
+Hệ quả: khoá do owner tự nhập trong lớp phủ `CÀI AI`; điều phối không nhập, không đọc khoá. C1 vẫn
+phải thoả năm điều kiện của Q5 (`docs/research/2026-11-09-rtneural-realtime-audit.md`) và chỉ chạy
+ở chế độ bóng: không tác động vào notch, mức ra dự kiến đổi 0 dB.
