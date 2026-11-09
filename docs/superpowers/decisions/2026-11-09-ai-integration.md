@@ -409,3 +409,62 @@ theo bất kỳ địa chỉ nào người dùng đổi sang; proxy HTTP nhận 
 | 2 | Luôn xoá file khoá khi gỡ | sạch | gỡ để cài lại thì mất khoá; cùng rủi ro trỏ nhầm hồ sơ |
 
 **Chọn: 1.**
+
+### Q29 — Đóng gói 1.5.1 gồm các bản sửa và file ghi công bên thứ ba khi CI xanh? (và Q22)
+
+Hỏi owner ở ô bước kế tiếp sau khi báo H1/H2/M1–M3. Điều phối khuyên: có, và Q22 phương án 1.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Đóng gói 1.5.1 ngay khi PR sửa xanh và đã merge, kèm `THIRD-PARTY-NOTICES.txt`** | tester thôi dùng bản có bộ lọc yếu và đường khoá sai; đúng điều khoản giấy phép | thêm một bản trong thư mục phát hành; bộ lọc mới chặn nhầm nhiều hơn |
+| 2 | Chờ gom thêm thay đổi | ít bản hơn | 1.5.0 với các lỗi đã biết tiếp tục là bản mới nhất |
+
+**Owner 09/11/2026 (nguyên văn):** "Cứ làm liên tục cho tới khi xong, còn hiện tại các câu hỏi kiểu này bạn tự
+chọn, tôi theo đề xuất của bạn." → **Chọn 1; Q22 chọn 1** (theo khuyến nghị đã ghi). Cách hiểu của điều phối:
+các câu hỏi cùng loại (đóng gói bản sửa, lựa chọn đã có khuyến nghị ghi sẵn) tự chốt theo khuyến nghị, ghi vào
+sổ này; thao tác phá huỷ và việc khoá API vẫn hỏi riêng.
+
+### Q30 — App dùng JUCE và ASIO SDK theo điều khoản nào? **CHỜ OWNER**
+
+Nảy ra khi soạn `installer/THIRD-PARTY-NOTICES.txt` (Q22): repo không ghi ở đâu app dùng JUCE 9 theo AGPLv3
+hay giấy phép thương mại của JUCE, và ASIO SDK theo GPLv3 hay thoả thuận riêng của Steinberg. Tình trạng này
+có từ bản đầu, không do phase AI sinh ra. File ghi công chép nguyên `LICENSE.md` hai lựa chọn của JUCE và dòng
+nhãn hiệu ASIO, không khẳng định lựa chọn nào.
+
+| # | Phương án | Được | Mất / hệ quả |
+|---|---|---|---|
+| 1 | **AGPLv3 cho JUCE + GPLv3 cho ASIO SDK; ghi giấy phép của chính app là AGPLv3 trong repo và bộ cài** | không tốn phí; repo đã công khai nên nghĩa vụ đưa mã nguồn đã đáp ứng phần lớn | toàn bộ app là AGPLv3: ai nhận bản cài có quyền lấy mã nguồn và phát hành lại; khó đảo ngược với các bản đã phát hành; phần mã license (kích hoạt trả phí) về sau phải tính lại |
+| 2 | Giấy phép thương mại JUCE (gói miễn phí nếu doanh thu dưới ngưỡng của JUCE, hoặc trả phí) + thoả thuận ASIO ký với Steinberg | giữ được quyền đóng mã, bán bản quyền sau này | phải đăng ký/ký với hai bên; có thể tốn phí; cần owner tự làm |
+| 3 | Để nguyên, chưa ghi gì | không việc | bản phát hành tiếp tục không nói rõ điều khoản — rủi ro pháp lý nằm ở owner |
+
+**Chọn:** chờ owner (quyết định pháp lý/kinh doanh, không thuộc loại điều phối tự chốt). Không chặn 1.5.1: file
+ghi công không làm tình trạng xấu hơn. Điều phối nghiêng về 1 nếu sản phẩm ở lại freeware, 2 nếu định bán.
+
+### Q26 — bổ sung 10/11/2026: ba lượt đo độc lập
+
+"Đo độc lập" = một agent chỉ-đọc viết câu **trước khi đọc mã bộ lọc**, câu không nằm trong fixture nào.
+
+| Lượt | Bộ lọc | Lọt (câu nguy hiểm) | Chặn nhầm (câu an toàn) |
+|---|---|---|---|
+| review | 1.5.0 | 27/32 (84%) | 7/18 (39%) |
+| 1 | vòng 1 (động từ + đối tượng theo mệnh đề) | 36/153 (23,5%) | 2/53 (3,8%) |
+| 2 | vòng 2 (default-deny theo danh từ, mang đối tượng, cổng ngôn ngữ) | 38/183 (20,8%) | 14/78 (17,9%) |
+| 3 | vòng 3 (từ vựng của app, "lên/to hơn" trần, nông = nguy hiểm, sửa phủ định) | 30/175 (17,1%); tự nhiên 29/145 (20,0%) | 7/74 (9,5%) |
+
+Corpus của chính người viết bộ lọc báo 0 lọt ở cả ba vòng — không phải số đo.
+
+### Q31 — Bộ lọc không qua ngưỡng đặt trước: làm gì?
+
+Ngưỡng đặt trước lượt 3 (điều phối, theo tư vấn của advisor): lọt tự nhiên ≤ 10%, chặn nhầm ≤ 12%; trượt
+cũng phát hành và không có vòng 4. Kết quả: lọt 20,0% (trượt), chặn nhầm 9,5% (đạt).
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Phát hành 1.5.1 với bộ lọc vòng 3, tài liệu dẫn bằng số đo độc lập; dòng cảnh báo cố định là hàng rào chính; dừng vá danh sách từ** | tester thôi dùng bản lọt 84% và đường khoá sai; không hứa điều không đo được | 1/5 lời khuyên nguy hiểm vẫn hiện nguyên văn (kèm dòng cảnh báo) |
+| 2 | Vòng 4, 5… tới khi qua ngưỡng | có thể giảm thêm | ba vòng cho 23,5 → 20,8 → 20,0%: không hội tụ; 1.5.0 tiếp tục là bản mới nhất |
+| 3 | Tắt ô hỏi AI tới khi có cách chặn chắc | không rủi ro từ lời văn | mất tính năng owner chọn ở Q2 |
+| 4 | Đổi kiến trúc: model tự gắn cờ "có khuyên tăng mức / gỡ bảo vệ" trong đầu ra có cấu trúc, chặn theo cờ cộng bộ lọc | bắt được ý chứ không phải chữ | không đo được khi chưa có lượt gọi nhà cung cấp thật (chưa có khoá trên máy build) |
+
+**Chọn: 1** (theo uỷ quyền owner 09/11: tự chốt theo khuyến nghị). **4 là việc kế tiếp** cho bộ lọc, làm khi
+owner đã nhập khoá và có lượt gọi thật để đo. Lane tự lái (L3) không dựa vào bộ lọc này: lệnh của LLM đi bằng
+tool call có kiểu, C++ kiểm. Bài học: `memory/answer-filter-plateau-2026-11-10.md`.

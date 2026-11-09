@@ -22,6 +22,22 @@ Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.5.0** (đóng gói không dọn bản cũ) —
 cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
+> **ĐÍNH CHÍNH 09/11/2026 cho 1.5.0 — đọc trước khi dùng ô hỏi AI.** Bản ghi chú này và release note
+> từng viết rằng câu trả lời khuyên tăng gain hay tắt chống hú "bị thay bằng một thông báo cố định".
+> Soát lại sau khi phát hành cho thấy điều đó **không đúng với phần lớn cách nói thông thường**: bộ lọc bỏ
+> lọt những câu như "mở monitor to hơn", "tắt tính năng chống hú ở slot này", "để gain ở +3", "xoá notch
+> này đi", và cả câu trả lời bằng ngôn ngữ khác. Nó cũng chặn nhầm một số lời khuyên an toàn.
+> **Coi mọi câu trả lời của AI là lời khuyên chưa được kiểm chứng. Không tăng gain, âm lượng, trần độ sâu,
+> không xoá notch, không tắt hay bypass chống hú chỉ vì AI bảo.** Nút `PHÂN TÍCH` (không dùng AI) không bị
+> ảnh hưởng. Ba điều nữa về khoá và cài đặt, cho tới khi có bản sửa:
+> 1. Chế độ "Tương thích OpenAI": nếu máy có biến môi trường `OPENAI_API_KEY`, khoá đó **được gửi** tới địa
+>    chỉ bạn nhập dù màn hình báo "Chưa có khoá"; và khoá đã lưu sẽ đi theo **bất kỳ** địa chỉ nào bạn đổi
+>    sang. Đừng trỏ địa chỉ sang nhà cung cấp khác với nhà cung cấp của khoá.
+> 2. Máy có cấu hình proxy HTTP: đừng dùng địa chỉ `http://localhost…` hay `http://127.0.0.1…` kèm khoá —
+>    khoá có thể đi tới proxy ở dạng không mã hoá.
+> 3. Tắt công tắc đồng ý trong lúc một ô khác đang báo lỗi thì thay đổi **không được lưu**. Mở lại `CÀI AI`
+>    để kiểm công tắc đã tắt thật chưa.
+>
 > **1.5.0: 0 dB ở mọi ngõ ra.** Không đổi hệ số lọc, gain, buffer, clamp hay quyết định đặt notch. Thêm bảng `COPILOT` (Geek mode), ô hỏi AI bằng khoá của chính bạn, và log ghi thêm ứng viên suýt thành notch — xem mục "Mới trong 1.5.0". **File cài lần đầu kèm một chương trình phụ (`HandsFreeCopilot.exe`): antivirus có thể hỏi.**
 >
 > **1.4.1: 0 dB ở mọi ngõ ra.** Detector nghe riêng từng làn, và sửa routing một slot không còn đặt lại 7 slot kia — xem mục "Mới trong 1.4.1".
@@ -55,9 +71,9 @@ Chi tiết: `docs/release-notes/1.5.0-alpha.md`. Không đụng đường audio.
    rời, **không** chặn phần mềm độc hại chạy dưới chính tài khoản của bạn — đừng dùng khoá có hạn
    mức lớn để thử. Giới hạn đã biết: các bản sao khoá nằm thoáng qua trong ô nhập được giải phóng
    mà không bị ghi đè số 0.
-5. **Câu trả lời khuyên tăng gain, tăng âm lượng, nâng trần độ sâu hay tắt chống hú bị thay bằng
-   một thông báo cố định.** Đây là bộ lọc cụm từ, không phải bảo đảm: báo lại nếu thấy một lời
-   khuyên như vậy lọt qua.
+5. **Bộ lọc câu trả lời yếu hơn mô tả ban đầu — xem ĐÍNH CHÍNH ở đầu file.** Nó chỉ bắt được một số
+   cách nói; phần lớn lời khuyên tăng gain / tắt chống hú diễn đạt tự nhiên vẫn lọt qua. Đừng làm
+   theo lời AI khi nó bảo tăng mức hay gỡ bảo vệ; báo lại câu trả lời đó.
 6. **Log buổi diễn có thêm dòng `candidate_features`** (ứng viên suýt thành notch). Bạn không cần
    làm gì khác: cứ chấm TRUE/FALSE như cũ và **gửi lại file `session-*.jsonl`** — đây là dữ liệu
    để huấn luyện bộ phân loại hú / nốt nhạc ở bước sau. Tệ nhất khoảng 1,4 MB mỗi giờ mỗi slot.
