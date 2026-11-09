@@ -3476,6 +3476,67 @@ TEST (SlotEdit, ADeviceRestartStillResetsAndRelaunchesAllEight)
     slotEditStopAll (app);
 }
 
+namespace {
+// Drives the real engine hooks of a driver reset, capturing the queued relaunch.
+struct DriverResetHarness
+{
+    explicit DriverResetHarness (MainComponent& a) : app (a)
+    {
+        app.deferToMessageLoop = [this] (std::function<void()> fn) { queued.push_back (std::move (fn)); };
+        app.getAudioEngine().setRunningForTest (true);
+        app.startWorkersIfEngineRunningForTest();
+    }
+    void resetDriver()
+    {
+        app.getAudioEngine().onDeviceStopping();
+        app.getAudioEngine().onDeviceStarted();
+    }
+    void runQueued()
+    {
+        auto pending = std::move (queued);
+        queued.clear();
+        for (auto& fn : pending)
+            fn();
+    }
+    MainComponent& app;
+    std::vector<std::function<void()>> queued;
+};
+}
+
+TEST (SlotEdit, ADriverResetRelaunchesAllEightWhenNoEditIntervenes)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    DriverResetHarness h (app);
+
+    h.resetDriver();
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_FALSE (app.getNotchControllerForTest (s)->isRunning()) << s;
+    ASSERT_EQ (h.queued.size(), 1u);
+    h.runQueued();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << s;
+
+    slotEditStopAll (app);
+}
+
+TEST (SlotEdit, ASlotEditBetweenDriverResetAndRelaunchDoesNotPreemptTheRelaunch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    DriverResetHarness h (app);
+
+    h.resetDriver();
+    app.changeSlotConfig (1, slotEditMono (1, 1));   // runs before the queued relaunch
+    h.runQueued();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << "slot " << s;
+
+    slotEditStopAll (app);
+}
+
 TEST (SlotEdit, AnEditTearsDownAStaleSoundcheckStrip)
 {
     // A results/applied strip was computed against the old routing; a slot

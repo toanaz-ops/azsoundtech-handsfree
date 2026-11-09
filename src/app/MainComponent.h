@@ -418,6 +418,11 @@ private:
     // Set when a driver-initiated stop ran onBeforeRestart(); consumed by the
     // next device start. Message thread only.
     bool driverRestartPending_ = false;
+    // Set when onDeviceStarted queued the all-eight relaunch, cleared when that
+    // relaunch (or an app restart's onAfterRestart) has run. While true, a slot
+    // edit must not start its controller: it would make anyDetectorRunning()
+    // true and the queued relaunch would skip the other seven. Message thread only.
+    bool driverRelaunchQueued_ = false;
 
     // How tall the bottom floor band should be given the vertical space left
     // under the transport. paint() and resized() BOTH need this figure and it

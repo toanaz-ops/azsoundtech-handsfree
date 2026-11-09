@@ -600,6 +600,9 @@ MainComponent::MainComponent()
         // drains it (an ordinary SPSC read, no clear()) and rebases the counts.
         engine_.discardTapBacklog();
 
+        // This all-eight relaunch does the job a queued driver relaunch would.
+        driverRelaunchQueued_ = false;
+
         const double rate = engine_.getCurrentSampleRateHz();
         for (int i = 0; i < kMaxSlots; ++i)
         {
@@ -669,10 +672,16 @@ MainComponent::MainComponent()
         // starts threads. The detectors stay joined until the loop runs it --
         // detection is off for that moment, nothing else is.
         juce::Component::SafePointer<MainComponent> safe (this);
+        driverRelaunchQueued_ = true;
         deferToMessageLoop ([safe]
         {
-            // An app restart that ran in between already relaunched them.
-            if (safe == nullptr || safe->anyDetectorRunning())
+            if (safe == nullptr)
+                return;
+            // An app restart that ran in between already relaunched them (and
+            // cleared the flag). A slot edit in between does NOT count: it
+            // leaves the flag set and starts no controller.
+            const bool queued = std::exchange (safe->driverRelaunchQueued_, false);
+            if (! queued || safe->anyDetectorRunning())
                 return;
             safe->devicePanel_.onAfterRestart();
         });
@@ -1849,7 +1858,11 @@ void MainComponent::changeSlotConfig (int slotIndex, const SlotConfig& config)
 
     // Like startWorkersIfEngineRunning(): no thread where none ran and no
     // device feeds it.
-    if (wasRunning || engine_.isRunning())
+    // EXCEPT while a driver reset's all-eight relaunch is queued: starting one
+    // controller now would make that relaunch think an app restart already ran
+    // and leave the other seven stopped. It starts all eight with the current
+    // rate and width, which were applied just above.
+    if (! driverRelaunchQueued_ && (wasRunning || engine_.isRunning()))
         controller.start();
 
     // abortAndJoin() leaves the poll thread stopped (SoundcheckController.h).
