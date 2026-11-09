@@ -318,3 +318,43 @@ TEST (CandidateClassifierBench, ScoreCostIsReported)
                  median, nsPerCall.front(), nsPerCall.back(), (double) sink);
     EXPECT_LT (median, 50000.0);   // loose ceiling: 50 us
 }
+
+// Lane C1c: a file written by tools/nn/train_mlp.py (the synthetic bootstrap
+// model, never embedded in the app) must go through the app's own parser and
+// RTNeural path and score like the Python reference. Proves the exporter writes
+// what parseWeights reads, and that the larger weights a trained model carries
+// stay inside the tolerance C1a measured on the random fixture.
+TEST (CandidateClassifierLoad, ExportedTrainedModelLoadsAndMatchesPythonReference)
+{
+    const auto dir = juce::File (juce::String (HANDSFREE_SOURCE_DIR)).getChildFile ("tools/nn/models");
+    const auto weightsFile = dir.getChildFile ("synthetic-bootstrap-v0.json");
+    const auto parityFile = dir.getChildFile ("synthetic-bootstrap-v0.parity.json");
+    ASSERT_TRUE (weightsFile.existsAsFile());
+    ASSERT_TRUE (parityFile.existsAsFile());
+
+    CandidateClassifier cls;
+    juce::String error;
+    ASSERT_TRUE (cls.loadFromJson (weightsFile.loadFileAsString(), error)) << error;
+    EXPECT_EQ (cls.modelName(), juce::String ("synthetic-bootstrap-v0"));
+
+    juce::var parity;
+    ASSERT_TRUE (juce::JSON::parse (parityFile.loadFileAsString(), parity).wasOk());
+    const double tol = (double) parity["tolerance"];
+    const auto* cases = parity["cases"].getArray();
+    ASSERT_NE (cases, nullptr);
+    ASSERT_GE (cases->size(), 8);
+
+    double worst = 0.0;
+    int stereo = 0;
+    for (const auto& c : *cases)
+    {
+        const RawInput in = inputFromVar (c["input"]);
+        stereo += in.hasOtherLane ? 1 : 0;
+        const auto got = cls.score (in);
+        ASSERT_TRUE (got.has_value());
+        worst = std::max (worst, std::fabs ((double) *got - (double) c["expected"]));
+    }
+    std::printf ("[ C1c ] trained-model parity cases=%d (stereo %d) max_abs_error=%.3e tolerance=%.1e\n",
+                 cases->size(), stereo, worst, tol);
+    EXPECT_LE (worst, tol);
+}

@@ -318,3 +318,47 @@ tình trạng này từ trước.
 | 2 | Để sau | không việc thêm | bản phát hành kế tiếp mang RTNeural mà không có thông báo |
 
 **Chọn:** chờ owner. Khuyên 1.
+
+## Lane C1c — Q23–Q25 (điều phối chốt tạm 09/11/2026, owner chưa duyệt)
+
+Owner bảo (qua phiên điều phối MASTER DEV0, 09/11/2026) làm tiếp lane C1: đường huấn luyện, bộ đánh giá
+có tập giữ lại, test cổng; giữ chế độ bóng tới khi cổng đạt. Spec §8 của
+[`../specs/2026-11-09-candidate-classifier-design.md`](../specs/2026-11-09-candidate-classifier-design.md).
+
+### Q23 — Lấy nhãn từ đâu?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Chỉ notch có verdict** (TRUE = hú thật, FALSE = đặt oan) | nhãn do người chấm; đúng bài toán "lọc notch oan" | ít dữ liệu; không học được hú bị bỏ sót |
+| 2 | Thêm ứng viên suýt đạt làm nhãn âm | nhiều dữ liệu hơn | suýt đạt có thể là hú thật bị bỏ sót: nhãn sai, dạy mạng bỏ qua hú |
+
+**Chọn: 1.**
+
+### Q24 — Ngưỡng của cổng để một model được nhúng vào app (vẫn chạy bóng)
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Dữ liệu thật ≥ 300 verdict từ ≥ 3 session; AUC ≥ 0,80 và ≥ AUC của `score` + 0,05; giữ ≥ 95 % hú thật thì bắt ≥ 30 % đặt oan** | khớp mốc 300 verdict đã ghi ở roadmap; đòi mạng hơn hẳn luật hiện tại | các con số là ước đoán khi chưa có dữ liệu |
+| 2 | Chỉ đòi AUC ≥ mốc `score` | dễ đạt | model không hơn gì luật hiện tại vẫn được nhúng |
+| 3 | Không cổng, người xem báo cáo rồi quyết | linh hoạt | không có gì chặn một model tổng hợp lọt vào app |
+
+**Chọn: 1.** Các ngưỡng xem lại khi có lứa dữ liệu thật đầu tiên. Qua cổng chưa phải là được quyết
+định notch: bước đó cần buổi nghe và owner chốt.
+
+**Sửa 09/11/2026** (sau kiểm chứng độc lập của C1c; thêm điều kiện, không nới điều kiện nào): (a) tập giữ lại cần ≥ 10 dòng **mỗi nhãn**;
+(b) AUC và mọi tỉ lệ trong [0, 1], bộ đếm là số nguyên không âm; (c) ngưỡng "giữ 95 % hú thật" cũng được chọn trên các session huấn luyện rồi áp lên tập giữ lại,
+và ở đó phải giữ ≥ 90 % hú thật và bắt ≥ 30 % đặt oan (con số chọn ngay trên tập giữ lại chỉ là số lạc quan, vẫn phải ≥ 95 % / ≥ 30 %);
+(d) manifest và metadata huấn luyện bắt buộc, băm dataset (báo cáo = manifest = metadata) và băm trọng số phải khớp; (e) log không có `session_start` là nguồn
+`unknown`; (f) `untrained-*` chỉ được phép khi id và băm file nằm trong danh sách ghim. Lưu ý: `source` là nhãn tự khai, cổng chống tai nạn chứ không chống giả mạo.
+
+### Q25 — Chưa có log thật thì khởi động bằng gì?
+
+Đo 09/11/2026: máy build có 9 file log, không notch, không verdict.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Tập tổng hợp có ghi rõ cách sinh, đúng định dạng log; model `synthetic-bootstrap-v0` không nhúng vào app** | đường ống chạy trọn vẹn ngay; khi log thật về chỉ cần đổi đầu vào | số đo trên tập này không nói gì về hiện trường |
+| 2 | Chỉ viết mã, chờ log thật mới chạy | không có số đo dễ gây hiểu nhầm | lỗi đường ống chỉ lộ khi dữ liệu về |
+
+**Chọn: 1.** Cổng từ chối mọi báo cáo có `source` khác `real` (sửa lại Q17: model tổng hợp chỉ sống
+trong `tools/nn/`, app vẫn chạy `untrained-fixture-v1`).

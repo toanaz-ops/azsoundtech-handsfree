@@ -1,0 +1,74 @@
+{
+ "dataset_sha256": "65b632a79198dde3d4b8c7e99012420c08f9623bb203d0f059f96c2d55c63f9c",
+ "heldout": {
+  "auc_baseline": 0.2881590319792567,
+  "auc_model": 0.9721694036300778,
+  "baseline_insample_reject_label0": 0.046153846153846156,
+  "baseline_insample_retention": 0.9550561797752809,
+  "baseline_insample_threshold": 0.723493039608002,
+  "insample_reject_label0": 0.9384615384615385,
+  "insample_retention": 0.9550561797752809,
+  "insample_threshold": 0.48792078428010704,
+  "label0": 65,
+  "label1": 89,
+  "reject_label0": 0.8615384615384616,
+  "retention_label1": 0.9662921348314607,
+  "retention_target": 0.95,
+  "rows": 154,
+  "train_side_threshold": 0.3620941106179704
+ },
+ "inference": "tools/nn/reference_forward.py (same arithmetic as CandidateClassifier.cpp)",
+ "report_version": 1,
+ "rows_by_label": {
+  "0": 207,
+  "1": 369
+ },
+ "rows_total": 576,
+ "sessions_total": 8,
+ "source_composition": {
+  "synthetic": 576
+ },
+ "split": {
+  "heldout_sessions": [
+   "session-synthetic-v0-s6",
+   "session-synthetic-v0-s7"
+  ],
+  "rule": "sha256(hf-c1c-split-v1:session_id) order, first 25% held out",
+  "train_sessions": [
+   "session-synthetic-v0-s0",
+   "session-synthetic-v0-s1",
+   "session-synthetic-v0-s2",
+   "session-synthetic-v0-s3",
+   "session-synthetic-v0-s4",
+   "session-synthetic-v0-s5"
+  ]
+ },
+ "thresholds_used": {
+  "auc_margin_over_baseline": 0.05,
+  "min_auc": 0.8,
+  "min_heldout_per_label": 10,
+  "min_heldout_reject_at_train_threshold": 0.3,
+  "min_heldout_retention_at_train_threshold": 0.9,
+  "min_heldout_rows": 60,
+  "min_reject_label0": 0.3,
+  "min_rows": 300,
+  "min_sessions": 3,
+  "retention": 0.95
+ },
+ "train_side": {
+  "auc_baseline": 0.3391348088531187,
+  "auc_model": 0.9694164989939638,
+  "baseline_insample_reject_label0": 0.02112676056338028,
+  "baseline_insample_retention": 0.95,
+  "baseline_insample_threshold": 0.725160479545593,
+  "insample_reject_label0": 0.8873239436619719,
+  "insample_retention": 0.95,
+  "insample_threshold": 0.3620941106179704,
+  "label0": 142,
+  "label1": 280,
+  "retention_target": 0.95,
+  "rows": 422
+ },
+ "weights_model": "synthetic-bootstrap-v0",
+ "weights_sha256": "35cc3ca1e65fe4c98024389520404a3d32142cdb4ea45ba7e6cda39b47eca341"
+}

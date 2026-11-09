@@ -38,6 +38,7 @@ add_executable(HandsFreeTests
     test_clocksource.cpp
     test_candidatescorer.cpp
     test_notchcontroller.cpp
+    synthetic_bootstrap_generator_test.cpp
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
     test_sessionlogger.cpp
@@ -226,7 +227,19 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tools/nn/reference_forward.py
                 --weights ${CMAKE_SOURCE_DIR}/tests/fixtures/classifier-fixture-v1.json
                 --parity ${CMAKE_SOURCE_DIR}/tests/fixtures/classifier-parity-v1.json)
+    # Lane C1c: the offline training / evaluation / gate pipeline (stdlib only;
+    # the cases that need numpy skip themselves when it is missing), and the
+    # gate on every model the app embeds.
+    add_test(NAME nn_pipeline
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tests/test_nn_pipeline.py)
+    add_test(NAME nn_embedded_model_gate
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tools/nn/check_embedded_models.py
+                --models-dir ${CMAKE_SOURCE_DIR}/models)
 else()
+    add_test(NAME nn_pipeline COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(nn_pipeline PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME nn_embedded_model_gate COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(nn_embedded_model_gate PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_superseded COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
