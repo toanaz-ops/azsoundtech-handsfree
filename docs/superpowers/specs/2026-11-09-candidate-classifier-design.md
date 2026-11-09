@@ -209,8 +209,20 @@ không có notch, không có verdict. **Chưa có một nhãn thật nào.**
   chỉ đếm và dùng để xem phân bố score.
 - 16 đặc trưng tính từ dòng log bằng **cùng một mã** với bản tham chiếu `reference_forward.py`
   (một nguồn sự thật cho bảng đặc trưng ở phía Python; test so với `rawFeatures` của C++).
-- Mỗi dòng mang `session_id` và `source` (`real` hoặc `synthetic`). Log thật không được commit vào
+- Mỗi dòng mang `session_id` và `source` (`real`, `synthetic` hoặc `unknown`). Log thật không được commit vào
   repo (repo công khai); chỉ fixture và tập tổng hợp được commit.
+- **(sửa 09/11/2026, sau lượt soát toàn phase) `source` cần bằng chứng dương.** Một session là `real` chỉ khi `session_start` của nó
+  không mang dấu hiệu tổng hợp nào (`source` khác vắng / `"app"`, khoá `generator`, giá trị chuỗi nào ở cấp trên cùng chứa "synthetic"),
+  **và** có `app_version` dạng `X.Y.Z` (chuỗi phiên bản mà app ghi, ví dụ `1.5.1`), **và** `log_schema` là số nguyên ≥ 2, **và** chỉ có một dòng `session_start`.
+  Có dấu hiệu tổng hợp → `synthetic`; còn lại (thiếu bằng chứng, `source` lạ, không có `session_start`) → `unknown`. Cổng chỉ nhận `real`.
+  Trước đây thiếu trường `source` là đủ để thành `real`: tập tổng hợp bị bỏ đúng trường đó qua cả đường ống lẫn cổng.
+- **Danh tính session theo nội dung:** `session_id` = `s` + 16 chữ số hex đầu của sha256 trên nội dung chuẩn hoá của file (mỗi dòng cắt khoảng trắng,
+  bỏ dòng rỗng). Đổi tên file không đổi gì (kể cả cách chia tập); cùng một log giao hai lần (`a.jsonl`, `a (1).jsonl`) bị bỏ bản sau và đếm
+  `duplicate_sessions.identical_content` trong manifest.
+- **Một lần đặt notch = một hàng.** Đặt ở chế độ LINK ghi **hai** dòng `notch_set` (lane 0 và lane 1) từ cùng một sự kiện `scored` của
+  `NotchController::placeConfirmed`: cùng `slot`, `index`, `hz`, `confirmed_lane`, mọi trường điểm và `ctx.now`; chỉ `t` và `lane` khác. Hai dòng liên tiếp
+  như vậy, khác làn, được gộp thành một hàng. Verdict hai làn: một làn có verdict → dùng; cùng nhãn → dùng; một làn GOOD một làn FALSE → bỏ cả lần đặt
+  với lý do `conflicting_verdicts`.
 
 ### 8.2 Huấn luyện
 
@@ -230,8 +242,14 @@ và băm của tập dữ liệu.
   ≥ 60 dòng và đủ cả hai nhãn; AUC ≥ 0,80 **và** ≥ AUC của `score` + 0,05; giữ ≥ 95 % hú thật thì bắt
   được ≥ 30 % đặt oan; **và** (sửa 09/11/2026) ngưỡng chọn trên các session huấn luyện ở mức 95 % giữ ≥ 90 % hú thật và bắt ≥ 30 % đặt oan trên tập giữ lại.
   Manifest và metadata huấn luyện bắt buộc, ba băm phải khớp. Các ngưỡng là chốt tạm (Q24).
+- **Sàn thống kê (sửa 09/11/2026 sau lượt soát toàn phase; chốt tạm, owner chưa duyệt, Q24):** với 10 dòng mỗi nhãn ở tập giữ lại, sai số chuẩn của AUC
+  khoảng 0,09, nên "mốc + 0,05" nằm trong nhiễu; với 3 session thì chia ra fit 1 / kiểm định 1 / giữ lại 1. Nay: tập giữ lại ≥ **30** dòng mỗi nhãn
+  (trước: 10); tập giữ lại phủ ≥ **2 session**; tổng ≥ **6 session** (trước: 3); và cận dưới của khoảng tin cậy 95 % của AUC model (Hanley–McNeil, `AUC ± 1,96·SE`)
+  ≥ AUC của `score` hiện tại — thêm vào, không thay, các điều kiện AUC ≥ 0,80 và ≥ mốc + 0,05. `evaluate.py` ghi `auc_model_se`, `auc_model_ci95_low/high` và `heldout.sessions`.
 - Test cổng trong `ctest`: model nhúng trong app hoặc mang tên `untrained-*`, hoặc phải có báo cáo
   đánh giá đạt cổng nằm cạnh, băm trọng số khớp. Tập tổng hợp **không bao giờ** qua được cổng.
+  (sửa 09/11/2026) Test này kiểm đúng **các file CMake nhúng** (`HANDSFREE_EMBEDDED_MODELS`, một biến cho cả `juce_add_binary_data` lẫn test) chứ không quét thư mục,
+  và trượt nếu có JSON dưới `models/` ngoài danh sách đó. Máy không có Python thì test **trượt** (không còn bỏ qua) để không đóng gói một bản mà cổng bị tắt.
 - Qua cổng mới chỉ là "được nhúng để chạy bóng với score có nghĩa". Cho mạng quyền quyết định notch
   vẫn là bước riêng, cần buổi nghe và owner chốt.
 
@@ -274,7 +292,7 @@ khi thiếu), `nn_embedded_model_gate`, và `CandidateClassifierLoad.ExportedTra
   (`SyntheticBootstrap.DISABLED_GenerateSessionLogs`) chạy cảnh âm thanh qua `NotchController` thật. Detector đặt notch cho 369 / 372
   cảnh hú và 207 / 348 cảnh nhạc nên có đủ hai nhãn không cần bộ sinh dự phòng. Nhãn là loại cảnh. Chi tiết và giới hạn: `tools/nn/README.md`.
   Log commit ở dạng thu nhỏ (`ctx.now` ±16 bin + `ctx.first_bin`, bỏ `ctx.ref` / `other_lane_now`) để còn 0,64 MB; `dataset.py` cho cùng sha256 từ hai dạng.
-  Dòng `session_start` mang `source: "synthetic"` (trường **mới**, app không bao giờ ghi; thiếu = `real`).
+  Dòng `session_start` mang `source: "synthetic"` (trường **mới**, app không bao giờ ghi; luật `real` đã đổi, xem §8.1 và §8.7: thiếu trường này không còn đủ để là `real`).
 - **Số đo trên tập tổng hợp** (tập giữ lại = session s6, s7: 154 dòng, 89 nhãn 1, 65 nhãn 0): AUC model **0,972**; AUC `score` hiện tại
   **0,288**; giữ 95,5 % hú thì bắt 93,8 % đặt oan (`score`: 4,6 %). Cổng trượt đúng vì `data is not all real` (và manifest liệt kê nguồn không-real);
   mọi điều kiện về kích thước và AUC đều đạt, nên `real` là điều kiện duy nhất chặn. Các số này chỉ chứng minh đường ống chạy.
@@ -294,3 +312,25 @@ Người kiểm chứng độc lập tái tạo đúng số tổng hợp và kh�
   (số lạc quan: bắt 93,8 %). Cổng vẫn trượt tập này, chỉ vì lý do `source`.
 - Giới hạn cần biết: `source` là nhãn tự khai (cổng chống tai nạn, không chống giả mạo; người phải đọc manifest trước khi nhúng); AUC đúng bằng mốc + 0,05
   có thể trượt do làm tròn nhị phân (đóng theo mặc định).
+
+### 8.7 Sau lượt soát toàn phase (C1c, 09/11/2026)
+
+Lượt soát toàn phase tìm ra sáu lỗ Medium; đã sửa cả sáu, mỗi lỗ có test trong `tests/test_nn_pipeline.py` (đỏ trước khi sửa). Không đổi gì dưới `src/` (0 dB).
+
+| # | Lỗ | Nay |
+|---|---|---|
+| M1 | `source` thiếu = `real`: bỏ trường `source` khỏi log tổng hợp là qua cả cổng | `real` cần bằng chứng dương (§8.1): `app_version` `X.Y.Z`, `log_schema` ≥ 2, không dấu hiệu tổng hợp nào; còn lại `unknown` / `synthetic` |
+| M2 | cùng một log giao hai lần = hai session, có thể nằm hai phía của phép chia | danh tính theo nội dung (§8.1); bản trùng bị bỏ và đếm; đổi tên file không re-roll phép chia |
+| M3 | máy không có Python: `nn_embedded_model_gate` báo "skipped", ctest xanh | trượt với thông báo nêu nguyên nhân; các test Python khác giữ hành vi bỏ qua |
+| M4 | cổng quét `models/*.json` còn CMake nhúng một đường dẫn tường minh | một biến `HANDSFREE_EMBEDDED_MODELS`; cổng nhận `--model-file` đúng các đường dẫn đó và trượt nếu `models/` có JSON ngoài danh sách |
+| M5 | LINK ghi hai dòng `notch_set`, người chấm từng dòng → hai hàng giống nhau | một hàng mỗi lần đặt; hai làn mâu thuẫn → bỏ (`conflicting_verdicts`) (§8.1) |
+| M6 | 10 dòng/nhãn: SE của AUC ≈ 0,09; 3 session: chia 1/1/1 | sàn mới ở §8.3 (≥ 30 dòng/nhãn, ≥ 2 session giữ lại, ≥ 6 session, cận dưới 95 % ≥ mốc), Q24 sửa lần hai |
+
+**Việc còn mở, không phải lỗi của đường ống: điểm gọi A nằm ngoài phân bố huấn luyện.** App chấm ứng viên suýt đạt (điểm gọi A, `maybeLogCandidate`) —
+những thứ detector **không** đặt notch — nhưng hàng huấn luyện chỉ là notch đã đặt có verdict, nên model không bao giờ thấy ứng viên suýt đạt khi huấn luyện.
+Score của nó trên ứng viên vì vậy ở ngoài phân bố cho tới khi giải quyết (một nhãn cho ứng viên suýt đạt, hoặc không dùng score đó). Điều này
+không ảnh hưởng gì hôm nay (model nhúng chưa huấn luyện, chỉ chạy bóng); nó ảnh hưởng tới cách đọc `nn_score` của `candidate_features` sau này.
+
+**Số tổng hợp sau khi tái tạo** (id session đổi nên phép chia, và vì vậy trọng số, đổi; 576 hàng không đổi vì tập tổng hợp không có cặp LINK; số ở §8.5 là bản cũ):
+tập giữ lại 2 session, 146 dòng (89 nhãn 1, 57 nhãn 0); AUC model 0,968 (SE 0,014; khoảng 95 %: 0,940–0,995); AUC `score` 0,388; ngưỡng trung thực 0,343 giữ 94,4 % nhãn 1,
+bắt 82,5 % nhãn 0. Cổng vẫn trượt, và chỉ vì `source` (`data is not all real`, `no real rows`, `manifest lists non-real sources`): mọi sàn kích thước/thống kê đều đạt.

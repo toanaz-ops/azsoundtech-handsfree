@@ -11,7 +11,7 @@ các ngả rẽ: Q23–Q25 trong `docs/superpowers/decisions/2026-11-09-ai-integ
 | `train_mlp.py` | huấn luyện MLP 16-16-8-1, xuất đúng định dạng `CandidateClassifier::parseWeights` | **numpy** |
 | `evaluate.py` | AUC, mốc `score` hiện tại, tỉ lệ đặt oan bị bắt ở ngưỡng giữ 95 % hú thật; ghi `eval-report.json` | stdlib |
 | `gate.py` | cổng đóng-theo-mặc-định; ngưỡng ở **một chỗ** (`THRESHOLDS`, Q24) | stdlib |
-| `check_embedded_models.py` | ctest `nn_embedded_model_gate`: model nhúng trong app phải là `untrained-*` hoặc qua cổng | stdlib |
+| `check_embedded_models.py` | ctest `nn_embedded_model_gate`: mỗi file CMake nhúng (`HANDSFREE_EMBEDDED_MODELS`) phải là `untrained-*` ghim hoặc qua cổng; `--model-file` | stdlib |
 | `slim_log.py` | thu nhỏ log để commit được (chỉ dùng cho log tổng hợp) | stdlib |
 | `make_fixture.py` | sinh fixture C1a (trọng số ngẫu nhiên + 64 ca parity) | stdlib |
 
@@ -37,13 +37,31 @@ python tools/nn/gate.py --report tools/nn/out/real/candidate-v1.eval-report.json
 
 `dataset.py` đếm mọi dòng bị bỏ theo lý do (`manifest.json` → `dropped`): `no_verdict`, `origin_*`,
 `missing_field:<tên>`, `non_numeric:<tên>`, `non_finite`, `no_ctx`, `ctx_now_wrong_length`,
-`bin_outside_spectrum`… Đọc nó trước khi tin số hàng. Hai log không được trùng tên file (tên = `session_id`).
+`bin_outside_spectrum`, `conflicting_verdicts`… Đọc nó trước khi tin số hàng.
+
+**Danh tính session là nội dung, không phải tên file.** `session_id` = `s` + 16 hex đầu của sha256 trên nội dung chuẩn hoá của file (mỗi dòng cắt
+khoảng trắng, bỏ dòng rỗng, nối bằng LF; CRLF hay LF như nhau). Đổi tên file không đổi session và không đổi cách chia tập; cùng một log giao hai lần
+(`a.jsonl`, `a (1).jsonl`) chỉ tính một lần, các bản sau bị bỏ và đếm ở `manifest.json` → `duplicate_sessions` (`identical_content`).
+
+**`source` cần bằng chứng dương.** `real` chỉ khi `session_start` (đúng một dòng): không có `source` khác vắng / `"app"`, không khoá `generator`, không giá trị chuỗi
+cấp trên cùng nào chứa "synthetic"; **và** `app_version` khớp `^\d+\.\d+\.\d+$` (chuỗi phiên bản app ghi, ví dụ `1.5.1`); **và** `log_schema` là số nguyên ≥ 2.
+Có dấu hiệu tổng hợp → `synthetic`; thiếu bằng chứng, `source` lạ (kể cả `"real"` tự khai), không có `session_start` → `unknown`. Cổng chỉ nhận `real`.
+
+**Một lần đặt LINK = một hàng.** Đặt ở chế độ LINK ghi hai dòng `notch_set` (lane 0, lane 1) từ cùng một sự kiện `scored`: giống hệt nhau ở `slot`, `index`, `hz`, `q`,
+`depth_db`, `origin`, `confirmed_lane`, mọi trường điểm, `lr_ratio`, `nn_score` và `ctx.now`; chỉ `t` và `lane` khác. Hai dòng `notch_set` liên tiếp như vậy, khác làn, được gộp.
+Một làn có verdict → dùng; hai làn cùng nhãn → dùng; GOOD một làn và FALSE một làn → bỏ lần đặt, lý do `conflicting_verdicts`. Fixture: `tests/fixtures/session-nn-linked.jsonl`.
 
 Qua cổng **chưa** có nghĩa là app dùng nó. Muốn nhúng: (a) chép `candidate-v1.json` vào `models/`
-cùng ba file **cạnh nó**: `candidate-v1.eval-report.json`, `candidate-v1.manifest.json` và `candidate-v1.meta.json` (metadata huấn luyện); ctest
-`nn_embedded_model_gate` sẽ chạy lại cổng trên cặp đó và bắt băm trọng số lệch; (b) sửa `CMakeLists.txt` để
-nhúng file mới — một thay đổi mã app, một PR riêng, kèm release note. Cho mạng quyền quyết định
+cùng ba file **cạnh nó**: `candidate-v1.eval-report.json`, `candidate-v1.manifest.json` và `candidate-v1.meta.json` (metadata huấn luyện); (b) thêm đường dẫn vào biến
+**`HANDSFREE_EMBEDDED_MODELS`** ở `CMakeLists.txt` gốc (một biến duy nhất: cho cả `juce_add_binary_data` lẫn cổng) — một thay đổi mã app, một PR riêng, kèm release note.
+ctest `nn_embedded_model_gate` truyền đúng các đường dẫn trong biến đó cho `check_embedded_models.py --model-file ...`, chạy lại cổng trên từng file (bắt băm trọng số lệch),
+và **trượt** nếu có JSON dưới `models/` không nằm trong danh sách (thư mục và danh sách nhúng không được lệch nhau). Máy không có Python thì test này **trượt**,
+không bỏ qua. Chạy tay không cần CMake: `python tools/nn/check_embedded_models.py` (quét mọi JSON dưới `models/`) hoặc
+`python tools/nn/check_embedded_models.py --model-file models/candidate-v1.json` (đúng các file đã nêu). Cho mạng quyền quyết định
 notch là bước khác nữa, cần buổi nghe và owner chốt.
+
+**Điểm gọi A nằm ngoài phân bố huấn luyện.** App chấm cả ứng viên suýt đạt (`maybeLogCandidate`, những thứ detector không đặt notch), nhưng hàng huấn luyện chỉ là notch **đã đặt**
+có verdict. Model chưa từng thấy ứng viên suýt đạt, nên score của nó ở đó là ngoài phân bố cho tới khi giải quyết (nhãn cho ứng viên suýt đạt, hoặc không dùng score đó). Spec §8.7.
 
 ## Nhãn và cách dựng một dòng
 
@@ -102,7 +120,7 @@ chạy lại bằng toolchain khác có thể cho số hàng khác chút.
   không được áp lại vào tín hiệu), không có nhạc đa nhạc cụ, không có giọng nói, không có trống.
 - Số trong `models/synthetic-bootstrap-v0.eval-report.json` chỉ chứng minh **đường ống chạy** (dataset →
   train → evaluate → gate). AUC model 0,97 ở đó nói về độ dễ của tập tổng hợp. AUC của `score` hiện tại trên
-  cùng tập là **0,29 (< 0,5)**: ở thế giới tổng hợp này detector chấm nốt nhạc *cao hơn* hú — một tính chất
+  cùng tập là **0,39 (< 0,5)** (sau khi tái tạo theo danh tính session theo nội dung; trước là 0,29): ở thế giới tổng hợp này detector chấm nốt nhạc *cao hơn* hú — một tính chất
   của bộ sinh (cả hai loại đều đã vượt `kConfirmScore`, hàng nào cũng nằm trong dải hẹp), không phải nhận xét về `score` thật.
 - Cổng **luôn** trượt tập này (`data is not all real`), và test `CommittedSyntheticBootstrap` ghim điều đó. Model này
   **không bao giờ** được nhúng vào app (Q25).
@@ -111,8 +129,8 @@ chạy lại bằng toolchain khác có thể cho số hàng khác chút.
 
 ## Cổng: những gì nó bảo vệ và không bảo vệ
 
-- **`source` là nhãn tự khai.** Nó nằm trong `session_start` của chính log (thiếu trường trên một `session_start` có thật = `real`, vì app
-  không bao giờ ghi trường này; log **không có** `session_start` = `unknown`, cổng từ chối). Cổng chống **tai nạn** (nhúng nhầm tập tổng hợp,
+- **`source` là nhãn tự khai, nhưng `real` cần bằng chứng dương** (luật chính xác ở trên: `app_version` `X.Y.Z`, `log_schema` ≥ 2, không dấu hiệu tổng hợp;
+  không có `session_start` hoặc thiếu bằng chứng = `unknown`, cổng từ chối). Cổng chống **tai nạn** (nhúng nhầm tập tổng hợp,
   log không rõ nguồn, trộn file), không chống người cố tình giả log hay giả báo cáo. Trước khi nhúng một model, người phải đọc `manifest.json`
   (số session, nguồn, lý do bỏ dòng).
 - **Ba tài liệu phải khớp nhau:** `dataset_sha256` trong báo cáo = trong manifest = trong metadata huấn luyện (tránh "huấn luyện trên A, đánh giá
@@ -120,6 +138,9 @@ chạy lại bằng toolchain khác có thể cho số hàng khác chút.
 - **Hai con số "giữ 95 % hú thật" và cổng dùng cái nào.** `insample_*` (lạc quan): ngưỡng chọn ngay trên các dòng nhãn 1 của tập giữ lại,
   nên giữ ≥ 95 % là đúng theo cách dựng. `retention_label1` / `reject_label0` (trung thực): ngưỡng chọn trên các session huấn luyện ở mức 95 %, rồi
   áp **nguyên ngưỡng đó** lên tập giữ lại. Cổng đòi cả hai (điều kiện cũ trên số lạc quan, thêm: số trung thực giữ ≥ 90 % và bắt ≥ 30 %).
+- **Sàn thống kê (Q24, sửa lần hai, chốt tạm — owner chưa duyệt).** `gate.THRESHOLDS`: ≥ 300 hàng, **≥ 6 session**, tập giữ lại ≥ 60 hàng, **≥ 30 mỗi nhãn**, **≥ 2 session**;
+  AUC ≥ 0,80 và ≥ mốc + 0,05; **cận dưới khoảng tin cậy 95 % của AUC model ≥ AUC của `score`**. Lý do: 10 dòng mỗi nhãn cho sai số chuẩn AUC ≈ 0,09 (Hanley–McNeil), nên "mốc + 0,05"
+  nằm trong nhiễu. `evaluate.py` ghi `auc_model_se`, `auc_model_ci95_low`, `auc_model_ci95_high`, `heldout.sessions` vào báo cáo.
 - **Mép số thực:** AUC đúng bằng AUC mốc + 0,05 có thể trượt vì làm tròn nhị phân (ví dụ 0,78 + 0,05 > 0,83 trong float). Cổng đóng theo mặc
   định nên trượt; không phải lỗi.
 - **Mọi tỉ lệ và AUC phải trong [0, 1]; mọi bộ đếm là số nguyên không âm.** Ngoài khoảng là trượt.

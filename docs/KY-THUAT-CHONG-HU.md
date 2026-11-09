@@ -928,9 +928,10 @@ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepF
 Verdict `good` / `false` của soundman là nhãn; mỗi `notch_set` của detector có verdict thành một hàng
 huấn luyện (16 đặc trưng tính từ chính các trường trong dòng đó, cộng 11 bin quanh đỉnh lấy từ `ctx.now`).
 `tools/nn/` làm dataset → huấn luyện (numpy, chia tập **theo session**) → đánh giá trên các session giữ lại → **cổng**
-(`tools/nn/gate.py`): dữ liệu phải thật; ≥ 300 hàng từ ≥ 3 session; tập giữ lại ≥ 60 hàng đủ hai nhãn; AUC ≥ 0,80 và hơn AUC của
-`score` hiện tại ≥ 0,05; giữ ≥ 95 % hú thật thì bắt ≥ 30 % đặt oan. Một test trong ctest từ chối mọi model nhúng trong app không
-phải `untrained-*` mà thiếu báo cáo đạt cổng cạnh nó. Hôm nay **không có** model nào qua cổng: app vẫn chạy bóng một model chưa huấn
+(`tools/nn/gate.py`): dữ liệu phải thật (log phải mang `app_version` dạng `X.Y.Z`, `log_schema` ≥ 2 và không dấu hiệu tổng hợp); ≥ 300 hàng từ ≥ 6 session;
+tập giữ lại ≥ 60 hàng, ≥ 30 mỗi nhãn, từ ≥ 2 session; AUC ≥ 0,80, hơn AUC của `score` hiện tại ≥ 0,05, và cận dưới khoảng tin cậy 95 % của AUC không thấp hơn AUC của
+`score`; giữ ≥ 95 % hú thật thì bắt ≥ 30 % đặt oan (các sàn thống kê là chốt tạm, owner chưa duyệt). Một lần đặt LINK (hai dòng `notch_set`) là một hàng. Một test trong ctest từ chối mọi model
+nhúng trong app (đúng các file CMake nhúng) không phải `untrained-*` mà thiếu báo cáo đạt cổng cạnh nó; máy không có Python thì test này trượt, không bỏ qua. Hôm nay **không có** model nào qua cổng: app vẫn chạy bóng một model chưa huấn
 luyện, nên không gì ở đây đổi âm thanh (0 dB). Qua cổng cũng chỉ là "được nhúng để chạy bóng với score có nghĩa", chưa phải quyền quyết
 định notch. Tập tổng hợp để thử đường ống không bao giờ qua cổng. Hướng dẫn chạy: `tools/nn/README.md`; thiết kế: spec lane C1 §8.
 
