@@ -287,6 +287,16 @@ MainComponent::MainComponent()
                 sessionLogger_.log (notchEventToVar (e));
         });
 
+    // Lane C0: near-miss candidates arrive on their own sink (and queue), so
+    // they can never evict a notch_set/notch_clear. Same teardown order.
+    for (auto& controller : notchControllers_)
+        controller->setCandidateSink ([this] (const NotchController::CandidateRecord& r)
+        {
+            if (sessionLogger_.isActive())
+                sessionLogger_.log (candidateToVar (r));
+        });
+    sessionLogger_.setDroppedCandidatesProvider ([this] { return droppedCandidatesTotal(); });
+
     //==========================================================================
     // LANE M (Task 10). THE THREE CALLBACKS ARE ASSIGNED HERE, ONCE, AND NEVER
     // AGAIN (SoundcheckController.h, I-10/N-2). They are bare public
@@ -1086,7 +1096,10 @@ MainComponent::~MainComponent()
         controller->stop (1000);
     sessionLogger_.stop();   // session_end, then the file closes
     for (auto& controller : notchControllers_)
+    {
         controller->setEventSink (nullptr);   // threads are joined: precondition holds
+        controller->setCandidateSink (nullptr);
+    }
     engine_.stop();
 }
 
@@ -1176,6 +1189,11 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("asymmetry", (double) e.asymmetry);
     o->setProperty ("persist_needed", e.persistNeeded);
     o->setProperty ("thr", (double) e.thr);
+    // Lane C0: the RAW rise ratio (`rise` above saturates at rNorm 1.5) and
+    // the L/R magnitude ratio at the notch bin (stereo only).
+    o->setProperty ("rise_ratio", roundSig3 ((double) e.riseRatio));
+    if (e.hasLrRatio)
+        o->setProperty ("lr_ratio", roundSig3 ((double) e.lrRatio));
 
     if (e.ctx != nullptr)
     {
@@ -1198,10 +1216,51 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     return v;
 }
 
+juce::var MainComponent::candidateToVar (const NotchController::CandidateRecord& r)
+{
+    auto v = SessionLogger::makeEvent ("candidate_features");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("slot", r.slot);
+    o->setProperty ("lane", r.lane);
+    o->setProperty ("bin", r.bin);
+    // Same 3-significant-digit rounding as the spectra: juce::JSON prints a
+    // double with up to 18 digits (data-loop lesson, 2026-09-05).
+    o->setProperty ("hz", roundSig3 ((double) r.hz));
+    o->setProperty ("peakiness", roundSig3 ((double) r.peakiness));
+    o->setProperty ("score", roundSig3 ((double) r.score));
+    o->setProperty ("p_norm", roundSig3 ((double) r.pNorm));
+    o->setProperty ("rise", roundSig3 ((double) r.rise));
+    o->setProperty ("rise_ratio", roundSig3 ((double) r.riseRatio));
+    o->setProperty ("novelty", roundSig3 ((double) r.novelty));
+    o->setProperty ("penalty", roundSig3 ((double) r.penalty));
+    o->setProperty ("asymmetry", roundSig3 ((double) r.asymmetry));
+    if (r.hasLrRatio)
+        o->setProperty ("lr_ratio", roundSig3 ((double) r.lrRatio));
+    o->setProperty ("persist", r.persist);
+    o->setProperty ("persist_needed", r.persistNeeded);
+    o->setProperty ("thr", roundSig3 ((double) r.thr));
+    juce::Array<juce::var> nearMags;
+    for (const float m : r.nearMags)
+        nearMags.add (roundSig3 ((double) m));
+    o->setProperty ("near", nearMags);
+    return v;
+}
+
+std::uint64_t MainComponent::droppedCandidatesTotal() const
+{
+    std::uint64_t total = 0;
+    for (const auto& controller : notchControllers_)
+        if (controller != nullptr)
+            total += controller->droppedCandidateEvents();
+    return total;
+}
+
 juce::var MainComponent::sessionHeader() const
 {
     auto v = SessionLogger::makeEvent ("session_start");
     auto* o = v.getDynamicObject();
+    // Lane C0: log format version. A log without this field is schema 1.
+    o->setProperty ("log_schema", 2);
     o->setProperty ("app_version", appVersion_);
     o->setProperty ("os", juce::SystemStats::getOperatingSystemName());
     o->setProperty ("device", engine_.getCurrentDeviceName());

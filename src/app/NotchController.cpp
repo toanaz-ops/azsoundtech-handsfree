@@ -18,6 +18,8 @@ NotchController::NotchController (LockFreeRingBuffer<float>& tapLane0,
     taps_[1] = tapLane1;
     eventOutbox_.reserve ((std::size_t) kMaxPendingEvents);
     eventScratch_.reserve ((std::size_t) kMaxPendingEvents);
+    candidateOutbox_.reserve ((std::size_t) kMaxPendingCandidates);
+    candidateScratch_.reserve ((std::size_t) kMaxPendingCandidates);
     outbox_.reserve (kOutboxReserve);
     pendingScratch_.reserve (kOutboxReserve);
 }
@@ -69,6 +71,118 @@ void NotchController::setEventSink (EventSink sink)
 }
 
 std::uint64_t NotchController::droppedEvents() const { return droppedEvents_.load (std::memory_order_relaxed); }
+
+void NotchController::setCandidateSink (CandidateSink sink)
+{
+    // Precondition: thread STOPPED, same contract as setEventSink().
+    candidateSink_ = std::move (sink);
+}
+
+std::uint64_t NotchController::droppedCandidateEvents() const
+{
+    return droppedCandidates_.load (std::memory_order_relaxed);
+}
+
+int NotchController::pendingCandidatesForTest() const
+{
+    const std::lock_guard<std::mutex> lock (candidateMutex_);
+    return (int) candidateOutbox_.size();
+}
+
+void NotchController::pushCandidateForTest (const CandidateRecord& r)
+{
+    pushCandidate (r);
+}
+
+bool NotchController::candidateFeaturesFinite (const CandidateRecord& r)
+{
+    for (const float f : { r.hz, r.peakiness, r.score, r.pNorm, r.rise, r.riseRatio,
+                           r.novelty, r.penalty, r.asymmetry, r.thr })
+        if (! std::isfinite (f))
+            return false;
+    if (r.hasLrRatio && ! std::isfinite (r.lrRatio))
+        return false;
+    for (const float m : r.nearMags)
+        if (! std::isfinite (m))
+            return false;
+    return true;
+}
+
+void NotchController::pushCandidate (const CandidateRecord& r)
+{
+    // Own mutex, never modelMutex_: a candidate burst cannot touch the notch
+    // event queue, and this can be called with modelMutex_ in any state.
+    const std::lock_guard<std::mutex> lock (candidateMutex_);
+    if (candidateSink_ == nullptr)
+        return;   // no sink: nothing is ever queued
+    if ((int) candidateOutbox_.size() >= kMaxPendingCandidates)
+    {
+        droppedCandidates_.fetch_add (1, std::memory_order_relaxed);
+        return;
+    }
+    candidateOutbox_.push_back (r);   // within reserve(): no allocation
+}
+
+void NotchController::maybeLogCandidate (int lane, const PeakinessAnalyzer::Candidate& cand,
+                                         const CandidateScorer::ScoreBreakdown& breakdown,
+                                         float score, float asym, int persist, int persistNeeded,
+                                         float thr, const float* now, const float* other,
+                                         double nowMs)
+{
+    if (candidateSink_ == nullptr)
+        return;
+    const int bin = cand.bin;
+    if (bin < 0 || bin >= Detector::kNumBins)
+        return;
+
+    auto& la = lanes_[(std::size_t) lane];
+
+    // Per-second budget for the whole controller. A clock that moved backwards
+    // also opens a fresh window instead of freezing the log.
+    const bool windowOpen = (nowMs - candidateWindowStartMs_ >= 1000.0)
+                            || (nowMs < candidateWindowStartMs_);
+    if (! windowOpen && candidateWindowCount_ >= kMaxCandidateLogsPerSecond)
+        return;
+
+    // Per-bin limit, +-1 bin, same lane (lanes_ is per lane; slot is this
+    // controller's). The stamp is written at the logged bin only; a later
+    // neighbour finds it through this +-1 look.
+    for (int b = std::max (0, bin - 1); b <= std::min (Detector::kNumBins - 1, bin + 1); ++b)
+        if (nowMs - la.lastCandidateLogMs[(std::size_t) b] < kCandidateLogIntervalMs
+            && nowMs >= la.lastCandidateLogMs[(std::size_t) b])
+            return;
+
+    CandidateRecord r;
+    r.slot = slotId_; r.lane = lane; r.bin = bin;
+    r.hz = (float) cand.frequencyHz;
+    r.peakiness = breakdown.rawPeakiness;
+    r.score = score;
+    r.pNorm = breakdown.pNorm; r.rise = breakdown.rNorm; r.riseRatio = breakdown.riseRatio;
+    r.novelty = breakdown.mNorm; r.penalty = breakdown.penalty; r.asymmetry = asym;
+    r.thr = thr;
+    r.persist = persist; r.persistNeeded = persistNeeded;
+    if (other != nullptr)
+    {
+        r.hasLrRatio = true;
+        r.lrRatio = now[bin] / std::max (other[bin], 1.0e-12f);
+    }
+    for (int k = 0; k < kCandidateNearBins; ++k)
+    {
+        const int b = bin + k - kCandidateNearBins / 2;
+        r.nearMags[(std::size_t) k] = (b >= 0 && b < Detector::kNumBins) ? now[b] : 0.0f;
+    }
+    if (! candidateFeaturesFinite (r))
+        return;   // never log a NaN/inf; costs no budget
+
+    if (windowOpen)
+    {
+        candidateWindowStartMs_ = nowMs;
+        candidateWindowCount_   = 0;
+    }
+    ++candidateWindowCount_;
+    la.lastCandidateLogMs[(std::size_t) bin] = nowMs;
+    pushCandidate (r);
+}
 
 int NotchController::pendingEventsForTest() const
 {
@@ -1227,6 +1341,13 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     scored.novelty = pc.breakdown.mNorm; scored.penalty = pc.breakdown.penalty;
     scored.riseRatio = pc.breakdown.riseRatio;   // B-5: the RAW ratio, not rNorm
     scored.asymmetry = pc.asymmetry; scored.persistNeeded = pc.persistNeeded; scored.thr = pc.thr;
+    if (pc.other != nullptr && cand.bin >= 0 && cand.bin < Detector::kNumBins)
+    {
+        // Lane C0: this lane over the other lane at the notch bin; the same
+        // 1e-12 floor the scorer uses for its reference division.
+        scored.hasLrRatio = true;
+        scored.lrRatio = pc.now[cand.bin] / std::max (pc.other[cand.bin], 1.0e-12f);
+    }
     scored.ctx = ctx;
 
     int applied = 0;
@@ -1540,6 +1661,11 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
         // only -- nothing below this line looks at it.
         frameMaxScore_ = std::max (frameMaxScore_, score);
 
+        // Lane C0: set only where placeConfirmed() is actually called below.
+        bool placedThisBlock = false;
+
+        // score and kConfirmScore are both the 0..1 PRODUCT of the scorer's
+        // normalised axes (not peakiness, which is an unbounded ratio).
         if (score > CandidateScorer::kConfirmScore)
         {
             const std::uint32_t requiredBlocks =
@@ -1560,6 +1686,7 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                 pc.thr = la.analyzer.getThreshold();
                 pc.sampleRate = block.sampleRate;
                 placeConfirmed (lane, cand, linkedNow, pc);
+                placedThisBlock = true;
             }
         }
         else
@@ -1567,6 +1694,17 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
             // Any non-confirming block resets that bin's streak.
             la.persistence[(std::size_t) bin] = 0;
         }
+
+        // Lane C0 (candidate feature log): a READ-ONLY tap placed after the
+        // decision above. It touches no persistence counter, no model, no
+        // command. score >= kCandidateLogScore (0.35) and kConfirmScore (0.7)
+        // are the same 0..1 product scale.
+        if (! placedThisBlock && score >= kCandidateLogScore)
+            maybeLogCandidate (lane, cand, breakdown, score, asym,
+                               (int) la.persistence[(std::size_t) bin],
+                               persistenceBlocks_.load (std::memory_order_relaxed),
+                               la.analyzer.getThreshold(),
+                               block.magnitudes, otherLaneMagnitudes, blockNowMs);
     }
 
     la.scorer.commitBlock (block.magnitudes, elapsedMs);
@@ -1662,19 +1800,45 @@ void NotchController::flushOutbox()
 
 bool NotchController::flushEventOutbox()
 {
+    bool delivered = false;
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
-        if (eventOutbox_.empty())
-            return false;
-        eventScratch_.clear();
-        eventScratch_.swap (eventOutbox_);   // both keep their reserve()
+        if (! eventOutbox_.empty())
+        {
+            eventScratch_.clear();
+            eventScratch_.swap (eventOutbox_);   // both keep their reserve()
+            delivered = true;
+        }
     }
-    // Lock released: the sink may take its own locks, log, or call straight
-    // back into clearNotch() (spec test 9). eventSink_ is only written with
-    // the thread stopped, so reading it here is race-free.
-    if (eventSink_ != nullptr)
-        for (const auto& e : eventScratch_)
-            eventSink_ (e);
-    eventScratch_.clear();
-    return true;
+    if (delivered)
+    {
+        // Lock released: the sink may take its own locks, log, or call straight
+        // back into clearNotch() (spec test 9). eventSink_ is only written with
+        // the thread stopped, so reading it here is race-free.
+        if (eventSink_ != nullptr)
+            for (const auto& e : eventScratch_)
+                eventSink_ (e);
+        eventScratch_.clear();
+    }
+
+    // Lane C0: candidate records go out AFTER the notch events, from their own
+    // queue, so they can never delay one.
+    bool candidatesDelivered = false;
+    {
+        const std::lock_guard<std::mutex> lock (candidateMutex_);
+        if (! candidateOutbox_.empty())
+        {
+            candidateScratch_.clear();
+            candidateScratch_.swap (candidateOutbox_);   // both keep their reserve()
+            candidatesDelivered = true;
+        }
+    }
+    if (candidatesDelivered)
+    {
+        if (candidateSink_ != nullptr)
+            for (const auto& c : candidateScratch_)
+                candidateSink_ (c);
+        candidateScratch_.clear();
+    }
+    return delivered || candidatesDelivered;
 }

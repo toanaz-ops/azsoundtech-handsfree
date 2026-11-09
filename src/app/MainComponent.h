@@ -377,6 +377,8 @@ public:
     // and stays that way.
     static juce::var notchEventToVarForTest (const NotchController::NotchEvent& e)
         { return notchEventToVar (e); }
+    static juce::var candidateToVarForTest (const NotchController::CandidateRecord& r)
+        { return candidateToVar (r); }
 
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is
@@ -553,6 +555,9 @@ private:
 
     juce::var sessionHeader() const;
     static juce::var notchEventToVar (const NotchController::NotchEvent& e);
+    // Lane C0: JSON for one near-miss candidate; built at flush time.
+    static juce::var candidateToVar (const NotchController::CandidateRecord& r);
+    std::uint64_t droppedCandidatesTotal() const;
 
     // Clock first, controllers second: each controller holds a reference to
     // the clock. Declaration order = destruction order: the controllers'

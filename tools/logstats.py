@@ -109,6 +109,14 @@ def summarise(events: list[dict]) -> dict:
         else:
             groups.append({"hz": n["hz"], "count": 1})
 
+    # Lane C0: near-miss candidates (log_schema 2). Counted, never joined to a
+    # notch -- by definition no notch exists for them. An old log has none.
+    candidates_by_slot: dict[int, int] = {}
+    for e in events:
+        if e.get("ev") == "candidate_features":
+            slot = int(e.get("slot", 0))
+            candidates_by_slot[slot] = candidates_by_slot.get(slot, 0) + 1
+
     judged = [n for n in notches if n["verdict"] in ("good", "false")]
     false_count = sum(1 for n in judged if n["verdict"] == "false")
     return {
@@ -125,6 +133,9 @@ def summarise(events: list[dict]) -> dict:
         "soundcheck_replaced": sum(1 for n in notches if n["reason"] == "soundcheck_replace"),
         "superseded": sum(1 for n in notches if n["reason"] == "superseded"),
         "dropped": end.get("dropped_events"),
+        "candidates": sum(candidates_by_slot.values()),
+        "candidates_by_slot": candidates_by_slot,
+        "dropped_candidates": end.get("dropped_candidates"),
     }
 
 
@@ -165,6 +176,13 @@ def print_report(s: dict) -> None:
               "(their Clear is missing from the log)")
     if s["dropped"]:
         print(f"WARNING: logger dropped {s['dropped']} event(s)")
+    # Lane C0: printed only when the log has candidate_features, so an old log
+    # reads exactly as it always did.
+    if s["candidates"]:
+        per_slot = "  ".join(f"slot {k}: {v}" for k, v in sorted(s["candidates_by_slot"].items()))
+        print(f"candidate_features {s['candidates']}  ({per_slot})")
+    if s["dropped_candidates"]:
+        print(f"WARNING: {s['dropped_candidates']} candidate record(s) dropped (own queue)")
 
 
 def main(argv: list[str]) -> int:
@@ -177,6 +195,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-retunes", type=int)
     ap.add_argument("--expect-soundcheck-replaced", type=int)
     ap.add_argument("--expect-superseded", type=int)
+    ap.add_argument("--expect-candidates", type=int)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -201,6 +220,8 @@ def main(argv: list[str]) -> int:
             f"soundcheck-replaced {s['soundcheck_replaced']} != {args.expect_soundcheck_replaced}")
     if args.expect_superseded is not None and s["superseded"] != args.expect_superseded:
         failures.append(f"superseded {s['superseded']} != {args.expect_superseded}")
+    if args.expect_candidates is not None and s["candidates"] != args.expect_candidates:
+        failures.append(f"candidates {s['candidates']} != {args.expect_candidates}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

@@ -296,9 +296,44 @@ public:
         float score = 0.0f, peakiness = 0.0f, pNorm = 0.0f, rise = 0.0f, novelty = 0.0f,
               penalty = 1.0f, asymmetry = 1.0f, thr = 0.0f;
         int   persistNeeded = 0;
+        // Lane C0: this lane's magnitude at the notch bin divided by the other
+        // lane's at the same bin (denominator floored at 1e-12). Only when the
+        // other lane produced a block in the same drain iteration.
+        bool  hasLrRatio = false;
+        float lrRatio = 0.0f;
         std::shared_ptr<const SpectralContext> ctx;   // null unless hasScore
     };
     using EventSink = std::function<void (const NotchEvent&)>;
+
+    // Lane C0 (candidate feature log): scalar features of a candidate that
+    // nearly, but did not, become a notch. POD on purpose -- it lives in a
+    // preallocated array on the detector thread and the JSON is built only
+    // when it is flushed to the sink.
+    static constexpr int kCandidateNearBins = 11;   // bins -5..+5 around the peak
+    struct CandidateRecord
+    {
+        int   slot = 0, lane = 0, bin = 0;
+        float hz = 0.0f, peakiness = 0.0f;
+        float score = 0.0f;   // 0..1 PRODUCT, same scale as kConfirmScore (not peakiness)
+        float pNorm = 0.0f, rise = 0.0f, riseRatio = 0.0f, novelty = 0.0f,
+              penalty = 1.0f, asymmetry = 1.0f, thr = 0.0f;
+        bool  hasLrRatio = false;
+        float lrRatio = 0.0f;
+        int   persist = 0, persistNeeded = 0;
+        std::array<float, kCandidateNearBins> nearMags {};
+    };
+    using CandidateSink = std::function<void (const CandidateRecord&)>;
+
+    // Logged when score (0..1 product) >= kCandidateLogScore, the candidate was
+    // NOT placed in this block, and the rate limits below allow it. Below
+    // kConfirmScore (0.7, same 0..1 product scale) by construction OR above it
+    // with the persistence streak still short.
+    static constexpr float  kCandidateLogScore         = 0.35f;
+    static constexpr double kCandidateLogIntervalMs    = 2000.0;   // per bin (+-1), per slot and lane
+    static constexpr int    kMaxCandidateLogsPerSecond = 1;        // per controller
+    static constexpr int    kMaxPendingCandidates      = 16;       // own outbox, own drop counter
+    // True when every float feature in the record is finite (NaN/inf never logged).
+    static bool candidateFeaturesFinite (const CandidateRecord& r);
 
     static constexpr int kMaxPendingEvents = 64;
     // Lifetime: the sink must outlive this controller's LAST stop() -- the
@@ -308,8 +343,14 @@ public:
     // after that join.
     void setEventSink (EventSink sink);              // detector thread STOPPED; nullptr = off
     std::uint64_t droppedEvents() const;
+    // Lane C0. Same lifetime/threading contract as setEventSink(): detector
+    // thread STOPPED. Without a candidate sink nothing is ever queued.
+    void setCandidateSink (CandidateSink sink);
+    std::uint64_t droppedCandidateEvents() const;
     // TEST ACCESSORS ONLY
     int  pendingEventsForTest() const;
+    int  pendingCandidatesForTest() const;
+    void pushCandidateForTest (const CandidateRecord& r);   // saturation seam
     bool modelMutexIsFreeForTest();                  // try_lock + unlock
     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
 
@@ -597,6 +638,14 @@ private:
     // outbox was already empty. stop() loops on this so a sink re-entering
     // clearNotch()/setNotch() during the flush still gets drained.
     bool flushEventOutbox();
+    // Lane C0. Takes candidateMutex_ only (never modelMutex_), so it is safe
+    // from the candidate loop and cannot contend with notch events.
+    void pushCandidate (const CandidateRecord& r);
+    // Detector thread: rate limits + finiteness, then pushCandidate().
+    void maybeLogCandidate (int lane, const PeakinessAnalyzer::Candidate& cand,
+                            const CandidateScorer::ScoreBreakdown& breakdown, float score,
+                            float asym, int persist, int persistNeeded, float thr,
+                            const float* now, const float* other, double nowMs);
 
     // `otherLaneMagnitudes` is the opposite lane's spectrum, at most one hop
     // apart from `block` (runOnce()'s per-lane drain invariant), or nullptr
@@ -667,6 +716,10 @@ private:
         // than wrapping: a wrap to 0 would blink the chip to N/A once every
         // ~1.4 years of continuous running for no reason.
         std::uint32_t blocksSinceReset = 0;
+        // Lane C0 (detector-thread only): clock time of the last candidate log
+        // per bin, for the +-1 bin / 2 s limit. Far-past sentinel = never.
+        std::array<double, Detector::kNumBins> lastCandidateLogMs {};
+        LaneAnalysis() { lastCandidateLogMs.fill (-1.0e18); }
     };
     std::array<LockFreeRingBuffer<float>*, kChannels> taps_ {};   // [0] never null
     std::array<LaneAnalysis, kChannels> lanes_;
@@ -734,6 +787,19 @@ private:
     std::vector<NotchEvent> eventOutbox_;
     std::vector<NotchEvent> eventScratch_;
     std::atomic<std::uint64_t> droppedEvents_ { 0 };
+    // Lane C0: candidate records get their OWN queue, mutex and drop counter so
+    // a burst of near-misses can never evict or delay a notch_set/notch_clear.
+    // candidateOutbox_ under candidateMutex_; candidateScratch_ is
+    // detector-thread only. Both reserved to kMaxPendingCandidates in the
+    // constructor. candidateSink_ is written only with the thread stopped.
+    CandidateSink candidateSink_;
+    mutable std::mutex candidateMutex_;
+    std::vector<CandidateRecord> candidateOutbox_;
+    std::vector<CandidateRecord> candidateScratch_;
+    std::atomic<std::uint64_t> droppedCandidates_ { 0 };
+    // Detector-thread only: the one-second budget window.
+    double candidateWindowStartMs_ = -1.0e18;
+    int    candidateWindowCount_   = 0;
     std::atomic<int> failSetNotchLaneForTest_ { -1 };
     // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the
     // release freeze. Detector-thread state; written only with the thread
