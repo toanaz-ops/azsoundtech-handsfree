@@ -5,3 +5,6 @@
 	path = external/melatonin_blur
 	url = https://github.com/sudara/melatonin_blur.git
 	branch = main
+[submodule "external/RTNeural"]
+	path = external/RTNeural
+	url = https://github.com/jatinchowdhury18/RTNeural
