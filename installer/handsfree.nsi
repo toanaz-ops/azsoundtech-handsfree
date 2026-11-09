@@ -165,6 +165,8 @@ Section "Application" SEC_APP
 
   SetOutPath "$INSTDIR"
   File "${APP_EXE_SRC}"
+  ; Licence notices of bundled third-party software (decision Q22).
+  File "THIRD-PARTY-NOTICES.txt"
 
   ; Copilot sidecar: the whole PyInstaller onedir folder (exe + _internal\).
   ; No /nonfatal -- a missing source directory must fail the compile.
@@ -284,6 +286,7 @@ Section "Uninstall"
   retry_delete_app:
   ClearErrors
   Delete "$INSTDIR\${APP_EXE}"
+  Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
   IfErrors 0 app_deleted
     IfSilent app_delete_reboot
     MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Cannot remove:$\n$INSTDIR\${APP_EXE}$\n$\nIt is still running. Close ${PRODUCT_NAME} and click Retry." IDRETRY retry_delete_app
@@ -329,12 +332,42 @@ Section "Uninstall"
   ;  the profile of whoever answered the UAC prompt. When an administrator
   ;  uninstalls on behalf of a different user, that user's data is left in
   ;  place. Leaving data behind is the safe direction to be wrong in.
+  ;
+  ;  The encrypted AI API-key file (copilot-credentials.json) is asked about
+  ;  SEPARATELY and by name, with its full path. Only that one file is deleted
+  ;  on "Yes". If the user keeps it, the presets/licence cleanup below leaves it
+  ;  in place too: it is moved aside, the folder is cleared, and it is moved back.
   SetShellVarContext current
   ${IfNot} ${Silent}
+    StrCpy $R0 "$APPDATA\AZSoundtech\HandsFree\copilot-credentials.json"
+    ${If} ${FileExists} "$R0"
+      MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "Also delete your saved AI API-key file?$\n$\n$R0$\n$\nIt holds your API key, encrypted for this Windows account. Choose No to keep it for a future reinstall." IDNO skip_keyfile
+      Delete "$R0"
+      skip_keyfile:
+    ${EndIf}
+
     ${If} ${FileExists} "$APPDATA\AZSoundtech\HandsFree\*.*"
-      MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "Also delete your presets and licence?$\n$\n$APPDATA\AZSoundtech\HandsFree$\n$\nChoose No to keep them for a future reinstall." IDNO skip_userdata
-      RMDir /r "$APPDATA\AZSoundtech\HandsFree"
-      RMDir "$APPDATA\AZSoundtech"
+      MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "Also delete your presets and licence?$\n$\n$APPDATA\AZSoundtech\HandsFree$\n$\nChoose No to keep them for a future reinstall. (A saved API-key file you chose to keep stays either way.)" IDNO skip_userdata
+      ${If} ${FileExists} "$R0"
+        ; If the key cannot be moved aside (a stale .keep file, a lock), do NOT
+        ; remove the folder: the key the user chose to keep would go with it.
+        ClearErrors
+        Rename "$R0" "$APPDATA\AZSoundtech\copilot-credentials.keep"
+        ${If} ${Errors}
+          DetailPrint "Could not set the API-key file aside; your presets and licence were left in place."
+          Goto skip_userdata
+        ${EndIf}
+        RMDir /r "$APPDATA\AZSoundtech\HandsFree"
+        CreateDirectory "$APPDATA\AZSoundtech\HandsFree"
+        ClearErrors
+        Rename "$APPDATA\AZSoundtech\copilot-credentials.keep" "$R0"
+        ${If} ${Errors}
+          DetailPrint "Your API-key file is kept at $APPDATA\AZSoundtech\copilot-credentials.keep"
+        ${EndIf}
+      ${Else}
+        RMDir /r "$APPDATA\AZSoundtech\HandsFree"
+        RMDir "$APPDATA\AZSoundtech"
+      ${EndIf}
       skip_userdata:
     ${EndIf}
   ${EndIf}

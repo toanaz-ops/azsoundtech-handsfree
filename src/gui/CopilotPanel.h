@@ -101,6 +101,9 @@ public:
     [[nodiscard]] juce::String getBlockTextForTest() const;
     [[nodiscard]] juce::String getFooterTextForTest() const;
     [[nodiscard]] juce::Rectangle<int> getAskRowBoundsForTest() const { return askRowBounds_; }
+    [[nodiscard]] bool isCautionVisibleForTest() const { return ! cautionBounds_.isEmpty(); }
+    [[nodiscard]] juce::Rectangle<int> getCautionBoundsForTest() const { return cautionBounds_; }
+    [[nodiscard]] static juce::String cautionTextForTest();
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -109,6 +112,7 @@ private:
     class ListContent;
 
     void refreshStatus();
+    void layoutList();
     void submitQuestion();
     void setBlock (const juce::String& text, const juce::String& footer, juce::Colour colour);
 
@@ -121,6 +125,8 @@ private:
     juce::TextEditor askEditor_;
     juce::TextButton askButton_;
     juce::Rectangle<int> askRowBounds_;
+    juce::Rectangle<int> listArea_;        // list + caution strip, set by resized()
+    juce::Rectangle<int> cautionBounds_;   // fixed strip under an AI answer; empty otherwise
     juce::Viewport   viewport_;
     std::unique_ptr<ListContent> content_;
 

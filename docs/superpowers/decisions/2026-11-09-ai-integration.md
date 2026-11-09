@@ -306,7 +306,7 @@ Q5 ghi "lớp nạp model là thư viện dùng chung"; `CLAUDE.md` cấm tách 
 Spec C0 gọi "C1 = soát + huấn luyện + lớp nạp, C2 = chạy bóng". **Chọn:** lane này là C1, chia C1a
 (runtime + cổng Q5) và C1b (chạy bóng, tức "C2" cũ); huấn luyện trên dữ liệu thật để sau.
 
-### Q22 — File ghi công bên thứ ba trong bộ cài **CHỜ OWNER**
+### Q22 — File ghi công bên thứ ba trong bộ cài (owner 09/11/2026: chọn 1, xem Q29)
 
 Bộ cài hôm nay không kèm file ghi công nào. BSD-3 của RTNeural đòi kèm thông báo bản quyền khi mã
 nằm trong binary (từ C1a); melatonin_blur (MIT) và các gói Python trong `HandsFreeCopilot.exe` đã ở
@@ -317,7 +317,7 @@ tình trạng này từ trước.
 | 1 | **Thêm `THIRD-PARTY-NOTICES.txt` vào bộ cài trước bản phát hành kế tiếp** | đúng điều khoản giấy phép | một PR nhỏ đụng `handsfree.nsi`; phải liệt kê cả gói Python |
 | 2 | Để sau | không việc thêm | bản phát hành kế tiếp mang RTNeural mà không có thông báo |
 
-**Chọn:** chờ owner. Khuyên 1.
+**Chọn: 1** (owner 09/11/2026, xem Q29). `installer/THIRD-PARTY-NOTICES.txt` vào bộ cài từ 1.5.1.
 
 ## Lane C1c — Q23–Q25 (điều phối chốt tạm 09/11/2026, owner chưa duyệt)
 
@@ -370,3 +370,101 @@ cần owner xem lại khi có lứa log thật đầu tiên: 30 dòng/nhãn và 
 
 **Chọn: 1.** Cổng từ chối mọi báo cáo có `source` khác `real` (sửa lại Q17: model tổng hợp chỉ sống
 trong `tools/nn/`, app vẫn chạy `untrained-fixture-v1`).
+
+## Sau Fable review phase AI (L2a, L2b, C0) — Q26–Q28 (điều phối chốt tạm 09/11/2026, owner chưa duyệt)
+
+Luật owner 09/11/2026: Fable review toàn bộ diff trước khi đóng phase lớn. Review `b6321e6..5d47b9e` (đã phát
+hành trong 1.5.0) ra 2 mục High, 3 mục Medium ở L2b; C0 và phần tiến trình của L2a không có lỗi. Ghi chú
+tester trong thư mục phát hành đã được đính chính ngay trong đêm.
+
+### Q26 — Bộ lọc câu trả lời bỏ lọt 27/32 câu nguy hiểm viết tay: sửa theo hướng nào?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Mở rộng bộ lọc (tắt/gỡ bảo vệ, so sánh "to hơn", đặt giá trị, phủ định tu từ, ngôn ngữ khác, chữ giãn/đồng dạng) + một dòng cảnh báo cố định dưới MỌI câu trả lời AI + sửa lời trong tài liệu** | chặn được các lớp đã biết; người dùng luôn thấy đây là lời khuyên chưa kiểm chứng | vẫn là bộ lọc cụm từ, không phải bảo đảm; chặn nhầm nhiều hơn |
+| 2 | Chỉ thêm dòng cảnh báo, giữ bộ lọc | ít mã | lời khuyên nguy hiểm vẫn hiện nguyên văn |
+| 3 | Dùng một lượt LLM thứ hai để chấm câu trả lời | bắt được cách nói lạ | tốn thêm lượt gọi, chậm gấp đôi, và chính nó cũng không phải bảo đảm |
+| 4 | Tắt hẳn ô hỏi AI tới khi có cách chặn chắc chắn | không rủi ro | mất tính năng owner đã chọn ở Q2 |
+
+**Chọn: 1.** Giữ nguyên tắc Q13 (không chắc thì chặn). Tài liệu không được viết "bị thay bằng thông báo cố định"
+như một cam kết nữa.
+
+### Q27 — Khoá nào được gửi đi, và gửi tới đâu?
+
+Review: khoá trong biến môi trường `OPENAI_API_KEY` được gửi dù giao diện báo "Chưa có khoá"; khoá đã lưu đi
+theo bất kỳ địa chỉ nào người dùng đổi sang; proxy HTTP nhận được khoá khi địa chỉ là `http://localhost`.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **App chỉ dùng khoá đã lưu (bỏ biến môi trường khi chạy từ app); khoá đã lưu gắn với máy chủ của nó, đổi địa chỉ phải nhập lại khoá; địa chỉ nội bộ không đi qua proxy; địa chỉ có `user:pass@` bị từ chối** | thứ giao diện hiển thị khớp với thứ được gửi; khoá không tới nhầm nhà cung cấp | người đổi địa chỉ phải nhập lại khoá; file khoá của 1.5.0 cho "Tương thích OpenAI" phải lưu lại một lần |
+| 2 | Giữ biến môi trường nhưng hiện nó trong trạng thái khoá | tiện cho người đã có biến sẵn | khoá vẫn có thể tới nhầm nhà cung cấp |
+
+**Chọn: 1.** Dòng lệnh dành cho nhà phát triển (chạy `copilot.py` tay) vẫn đọc biến môi trường.
+
+### Q28 — Gỡ cài đặt và file khoá
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Lời nhắc gỡ cài nêu rõ file khoá API và hỏi có xoá không (mặc định giữ, như preset)** | người dùng biết còn một file khoá đã mã hoá | trình gỡ chạy quyền cao có thể trỏ nhầm `%APPDATA%` của người khác: lời nhắc phải nói rõ đường dẫn |
+| 2 | Luôn xoá file khoá khi gỡ | sạch | gỡ để cài lại thì mất khoá; cùng rủi ro trỏ nhầm hồ sơ |
+
+**Chọn: 1.**
+
+### Q29 — Đóng gói 1.5.1 gồm các bản sửa và file ghi công bên thứ ba khi CI xanh? (và Q22)
+
+Hỏi owner ở ô bước kế tiếp sau khi báo H1/H2/M1–M3. Điều phối khuyên: có, và Q22 phương án 1.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Đóng gói 1.5.1 ngay khi PR sửa xanh và đã merge, kèm `THIRD-PARTY-NOTICES.txt`** | tester thôi dùng bản có bộ lọc yếu và đường khoá sai; đúng điều khoản giấy phép | thêm một bản trong thư mục phát hành; bộ lọc mới chặn nhầm nhiều hơn |
+| 2 | Chờ gom thêm thay đổi | ít bản hơn | 1.5.0 với các lỗi đã biết tiếp tục là bản mới nhất |
+
+**Owner 09/11/2026 (nguyên văn):** "Cứ làm liên tục cho tới khi xong, còn hiện tại các câu hỏi kiểu này bạn tự
+chọn, tôi theo đề xuất của bạn." → **Chọn 1; Q22 chọn 1** (theo khuyến nghị đã ghi). Cách hiểu của điều phối:
+các câu hỏi cùng loại (đóng gói bản sửa, lựa chọn đã có khuyến nghị ghi sẵn) tự chốt theo khuyến nghị, ghi vào
+sổ này; thao tác phá huỷ và việc khoá API vẫn hỏi riêng.
+
+### Q30 — App dùng JUCE và ASIO SDK theo điều khoản nào? **CHỜ OWNER**
+
+Nảy ra khi soạn `installer/THIRD-PARTY-NOTICES.txt` (Q22): repo không ghi ở đâu app dùng JUCE 9 theo AGPLv3
+hay giấy phép thương mại của JUCE, và ASIO SDK theo GPLv3 hay thoả thuận riêng của Steinberg. Tình trạng này
+có từ bản đầu, không do phase AI sinh ra. File ghi công chép nguyên `LICENSE.md` hai lựa chọn của JUCE và dòng
+nhãn hiệu ASIO, không khẳng định lựa chọn nào.
+
+| # | Phương án | Được | Mất / hệ quả |
+|---|---|---|---|
+| 1 | **AGPLv3 cho JUCE + GPLv3 cho ASIO SDK; ghi giấy phép của chính app là AGPLv3 trong repo và bộ cài** | không tốn phí; repo đã công khai nên nghĩa vụ đưa mã nguồn đã đáp ứng phần lớn | toàn bộ app là AGPLv3: ai nhận bản cài có quyền lấy mã nguồn và phát hành lại; khó đảo ngược với các bản đã phát hành; phần mã license (kích hoạt trả phí) về sau phải tính lại |
+| 2 | Giấy phép thương mại JUCE (gói miễn phí nếu doanh thu dưới ngưỡng của JUCE, hoặc trả phí) + thoả thuận ASIO ký với Steinberg | giữ được quyền đóng mã, bán bản quyền sau này | phải đăng ký/ký với hai bên; có thể tốn phí; cần owner tự làm |
+| 3 | Để nguyên, chưa ghi gì | không việc | bản phát hành tiếp tục không nói rõ điều khoản — rủi ro pháp lý nằm ở owner |
+
+**Chọn:** chờ owner (quyết định pháp lý/kinh doanh, không thuộc loại điều phối tự chốt). Không chặn 1.5.1: file
+ghi công không làm tình trạng xấu hơn. Điều phối nghiêng về 1 nếu sản phẩm ở lại freeware, 2 nếu định bán.
+
+### Q26 — bổ sung 10/11/2026: ba lượt đo độc lập
+
+"Đo độc lập" = một agent chỉ-đọc viết câu **trước khi đọc mã bộ lọc**, câu không nằm trong fixture nào.
+
+| Lượt | Bộ lọc | Lọt (câu nguy hiểm) | Chặn nhầm (câu an toàn) |
+|---|---|---|---|
+| review | 1.5.0 | 27/32 (84%) | 7/18 (39%) |
+| 1 | vòng 1 (động từ + đối tượng theo mệnh đề) | 36/153 (23,5%) | 2/53 (3,8%) |
+| 2 | vòng 2 (default-deny theo danh từ, mang đối tượng, cổng ngôn ngữ) | 38/183 (20,8%) | 14/78 (17,9%) |
+| 3 | vòng 3 (từ vựng của app, "lên/to hơn" trần, nông = nguy hiểm, sửa phủ định) | 30/175 (17,1%); tự nhiên 29/145 (20,0%) | 7/74 (9,5%) |
+
+Corpus của chính người viết bộ lọc báo 0 lọt ở cả ba vòng — không phải số đo.
+
+### Q31 — Bộ lọc không qua ngưỡng đặt trước: làm gì?
+
+Ngưỡng đặt trước lượt 3 (điều phối, theo tư vấn của advisor): lọt tự nhiên ≤ 10%, chặn nhầm ≤ 12%; trượt
+cũng phát hành và không có vòng 4. Kết quả: lọt 20,0% (trượt), chặn nhầm 9,5% (đạt).
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Phát hành 1.5.1 với bộ lọc vòng 3, tài liệu dẫn bằng số đo độc lập; dòng cảnh báo cố định là hàng rào chính; dừng vá danh sách từ** | tester thôi dùng bản lọt 84% và đường khoá sai; không hứa điều không đo được | 1/5 lời khuyên nguy hiểm vẫn hiện nguyên văn (kèm dòng cảnh báo) |
+| 2 | Vòng 4, 5… tới khi qua ngưỡng | có thể giảm thêm | ba vòng cho 23,5 → 20,8 → 20,0%: không hội tụ; 1.5.0 tiếp tục là bản mới nhất |
+| 3 | Tắt ô hỏi AI tới khi có cách chặn chắc | không rủi ro từ lời văn | mất tính năng owner chọn ở Q2 |
+| 4 | Đổi kiến trúc: model tự gắn cờ "có khuyên tăng mức / gỡ bảo vệ" trong đầu ra có cấu trúc, chặn theo cờ cộng bộ lọc | bắt được ý chứ không phải chữ | không đo được khi chưa có lượt gọi nhà cung cấp thật (chưa có khoá trên máy build) |
+
+**Chọn: 1** (theo uỷ quyền owner 09/11: tự chốt theo khuyến nghị). **4 là việc kế tiếp** cho bộ lọc, làm khi
+owner đã nhập khoá và có lượt gọi thật để đo. Lane tự lái (L3) không dựa vào bộ lọc này: lệnh của LLM đi bằng
+tool call có kiểu, C++ kiểm. Bài học: `memory/answer-filter-plateau-2026-11-10.md`.

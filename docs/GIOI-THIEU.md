@@ -269,15 +269,29 @@ nhớ trong `settings.json`; **khoá thì không bao giờ nằm trong settings 
 **Cái gì được gửi đi.** Câu hỏi của bạn và dữ liệu log buổi diễn (sự kiện notch, tần số, mức,
 verdict — không có âm thanh), tới đúng nhà cung cấp bạn chọn, và chỉ khi bạn bấm `HỎI`.
 
-**Lời khuyên tăng gain bị chặn.** Mọi câu trả lời, của nhà cung cấp nào, đều đi qua một bộ lọc
-bằng mã: câu khuyên tăng gain, tăng âm lượng, tăng trần hay tắt chống hú bị thay bằng một câu
-cố định ("Câu trả lời của mô hình đã bị chặn…"). Đây là bộ lọc, không phải bảo đảm tuyệt đối;
-nghi ngờ thì chặn, nên đôi khi một câu vô hại cũng bị chặn — hỏi lại hoặc đổi model.
+**Câu trả lời AI là lời khuyên chưa kiểm chứng.** Dưới mọi câu trả lời có một dòng cố định: "AI có thể
+sai. Đừng tăng gain hay tắt chống hú theo lời này." Mọi câu trả lời, của nhà cung cấp nào, còn đi qua
+một bộ lọc bằng mã: câu có vẻ khuyên tăng gain, tăng âm lượng, mở to hơn, đặt mức, nâng trần, xoá notch,
+tắt hay bypass chống hú — và câu trả lời viết bằng chữ không phải Latin — bị thay bằng một câu cố định
+("Câu trả lời của mô hình đã bị chặn…"). Đây là bộ lọc cụm từ, **không phải bảo đảm**. Đo độc lập ngày
+10/11/2026 bằng câu mà người viết bộ lọc chưa từng thấy: **khoảng 1 trong 5 lời khuyên nguy hiểm diễn đạt tự
+nhiên vẫn lọt** (29/145; bản 1.5.0 lọt 27/32), nhiều nhất là lời khuyên làm yếu chống hú theo cách vòng
+("tạm dừng bộ khử hú", "hạ độ nhạy của detector", "nâng ngưỡng phát hiện", "chuyển sang chỉ SOUNDCHECK") và
+làm notch nông đi; và **khoảng 1 trong 10 câu an toàn bị chặn nhầm** (7/74) — hỏi lại hoặc đổi model. Ba
+vòng sửa không kéo tỉ lệ lọt xuống dưới mức đó, nên thứ bảo vệ bạn là dòng cảnh báo và chính bạn, không phải
+bộ lọc.
+
+**Khoá nào được gửi, tới đâu.** App chỉ gửi khoá bạn đã lưu trong `CÀI AI`; khoá trong biến môi trường
+không được dùng. Khoá của loại "Tương thích OpenAI" gắn với máy chủ lúc lưu (giao thức + tên máy + cổng):
+đổi địa chỉ sang máy chủ khác thì ô khoá báo "Khoá đã lưu cho địa chỉ khác. Nhập lại khoá." và khoá cũ
+không được gửi. Khoá lưu bằng bản 1.5.0 cho loại này phải lưu lại một lần. Địa chỉ `http://` (máy nội bộ)
+không đi qua proxy; địa chỉ có `user:pass@` bị từ chối. Tắt công tắc đồng ý luôn được lưu ngay.
 
 **Khoá được cất thế nào.** Khoá được mã hoá bằng DPAPI của Windows theo tài khoản Windows đang
 dùng và ghi vào `%APPDATA%\AZSoundtech\HandsFree\copilot-credentials.json`. DPAPI chặn người
 dùng Windows khác và việc đọc ổ đĩa rời; nó **không** chặn phần mềm độc hại đang chạy dưới chính
-tài khoản của bạn. Trên hệ điều hành khác Windows, ô khoá bị tắt ("Cất khoá chỉ có trên
+tài khoản của bạn. Gỡ cài đặt hỏi riêng, kèm đường dẫn đầy đủ, có xoá file khoá này không (mặc định giữ); đã chọn giữ thì
+xoá preset cũng không đụng tới nó. Trên hệ điều hành khác Windows, ô khoá bị tắt ("Cất khoá chỉ có trên
 Windows."). Chưa có lượt gọi nhà cung cấp thật nào được kiểm tra trong bản này.
 
 Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.

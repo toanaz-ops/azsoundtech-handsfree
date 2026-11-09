@@ -1040,3 +1040,184 @@ TEST (CopilotAskWiring, SettingsAreSavedThroughTheUiModePathAndNeverContainAKey)
     dir.deleteRecursively();
     credDir.deleteRecursively();
 }
+
+//==============================================================================
+// Security-review fixes: caution line, consent withdrawal, key bound to an address.
+namespace
+{
+const char* const kCaution = "AI c\xc3\xb3 th\xe1\xbb\x83 sai. \xc4\x90\xe1\xbb\xabng t\xc4\x83ng gain hay t\xe1\xba\xaft ch\xe1\xbb\x91ng h\xc3\xba theo l\xe1\xbb\x9di n\xc3\xa0y.";
+const char* const kKeyOtherOrigin = "Kho\xc3\xa1 \xc4\x91\xc3\xa3 l\xc6\xb0u cho \xc4\x91\xe1\xbb\x8b" "a ch\xe1\xbb\x89 kh\xc3\xa1" "c. Nh\xe1\xba\xadp l\xe1\xba\xa1i kho\xc3\xa1.";
+const char* const kKeyUrlInvalid = "\xc4\x90\xe1\xbb\x8b" "a ch\xe1\xbb\x89 ch\xc6\xb0" "a h\xe1\xbb\xa3p l\xe1\xbb\x87, ch\xc6\xb0" "a l\xc6\xb0u kho\xc3\xa1.";
+} // namespace
+
+TEST (CopilotAskPanel, CautionLineIsUnderEveryAnswerAndNowhereElse)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    gui::CopilotPanel panel;
+    panel.setSize (360, 300);
+    panel.resized();
+
+    EXPECT_EQ (gui::CopilotPanel::cautionTextForTest(), vi (kCaution));
+    EXPECT_FALSE (panel.isCautionVisibleForTest());
+
+    panel.setAnswer (makeAnswer ("Short."));
+    ASSERT_TRUE (panel.isCautionVisibleForTest());
+    auto c = panel.getCautionBoundsForTest();
+    EXPECT_TRUE (panel.getLocalBounds().contains (c));
+    EXPECT_GE (c.getY(), panel.getListBoundsForTest().getBottom());      // outside the scrolled list
+    EXPECT_LE (c.getBottom(), panel.getAskRowBoundsForTest().getY());     // above the ask row
+
+    // A long answer scrolls inside the list; the caution does not move out of the panel.
+    juce::String longText;
+    for (int i = 0; i < 60; ++i)
+        longText << "Sentence number " << i << " is long enough to wrap onto more lines. ";
+    panel.setAnswer (makeAnswer (longText));
+    ASSERT_TRUE (panel.isCautionVisibleForTest());
+    c = panel.getCautionBoundsForTest();
+    EXPECT_TRUE (panel.getLocalBounds().contains (c));
+    EXPECT_LE (c.getBottom(), panel.getAskRowBoundsForTest().getY());
+    EXPECT_GE (c.getY(), panel.getListBoundsForTest().getBottom());
+    EXPECT_GT (panel.getContentHeightForTest(), panel.getListBoundsForTest().getHeight());
+
+    // Narrow panel: the line wraps, still inside.
+    panel.setSize (240, 300);
+    panel.resized();
+    c = panel.getCautionBoundsForTest();
+    EXPECT_TRUE (panel.getLocalBounds().contains (c));
+    EXPECT_LE (c.getBottom(), panel.getAskRowBoundsForTest().getY());
+
+    // Not under the fixed blocked message, an error, rule findings or any bare state.
+    CopilotAnswer blocked;
+    blocked.kind = CopilotAnswer::Kind::blocked;
+    panel.setAnswer (blocked);
+    EXPECT_FALSE (panel.isCautionVisibleForTest());
+
+    panel.setAnswer (makeAnswer ("x"));
+    EXPECT_TRUE (panel.isCautionVisibleForTest());
+    CopilotAnswer error;
+    error.kind = CopilotAnswer::Kind::error;
+    error.text = "boom";
+    panel.setAnswer (error);
+    EXPECT_FALSE (panel.isCautionVisibleForTest());
+
+    panel.setAnswer (makeAnswer ("x"));
+    CopilotFinding f;
+    f.severity = "warn";
+    f.title = "t";
+    f.advice = "a";
+    panel.setFindings ({ f });
+    EXPECT_FALSE (panel.isCautionVisibleForTest());
+
+    panel.setAnswer (makeAnswer ("x"));
+    panel.setState (State::idle);
+    EXPECT_FALSE (panel.isCautionVisibleForTest());
+}
+
+TEST (CopilotAskWiring, WithdrawingConsentIsSavedEvenWhenAnotherFieldIsInvalid)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    const auto dir = freshDir ("consent");
+    const auto credDir = freshDir ("cred8");
+    const auto settingsFile = dir.getChildFile ("settings.json");
+    {
+        MainComponent app;
+        app.setCopilotCredentialDirectoryForTest (credDir);
+        app.enableSettings (settingsFile);
+        app.setUiMode (UiMode::Geek);
+
+        auto& overlay = app.getCopilotSetupPanelForTest();
+        overlay.onValuesChanged (openAiValues());
+        overlay.setValues (openAiValues());
+        ASSERT_TRUE (app.appSettingsForTest().copilotConsent);
+
+        // The address becomes invalid, then consent is switched OFF.
+        overlay.getUrlEditorForTest().setText ("nonsense", false);
+        overlay.getConsentToggleForTest().setToggleState (false, juce::dontSendNotification);
+        overlay.getConsentToggleForTest().onClick();
+
+        EXPECT_FALSE (app.appSettingsForTest().copilotConsent);
+        EXPECT_EQ (app.appSettingsForTest().copilotBaseUrl, "http://localhost:11434/v1");   // invalid value not saved
+
+        // Turning it back ON with an invalid field is still refused (existing validation).
+        overlay.getConsentToggleForTest().setToggleState (true, juce::dontSendNotification);
+        overlay.getConsentToggleForTest().onClick();
+        EXPECT_FALSE (app.appSettingsForTest().copilotConsent);
+    }
+    {
+        MainComponent again;
+        again.setCopilotCredentialDirectoryForTest (credDir);
+        again.enableSettings (settingsFile);
+        EXPECT_FALSE (again.appSettingsForTest().copilotConsent);
+    }
+    dir.deleteRecursively();
+    credDir.deleteRecursively();
+}
+
+TEST (CopilotAskWiring, SavingAnOpenAiKeyIsRefusedForAnInvalidAddress)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    const auto credDir = freshDir ("cred9");
+    {
+        MainComponent app;
+        app.setCopilotCredentialDirectoryForTest (credDir);
+        auto& overlay = app.getCopilotSetupPanelForTest();
+
+        auto v = openAiValues();
+        v.baseUrl = "https://user:pass@host/v1";   // userinfo is not a valid address
+        overlay.setValues (v);
+        overlay.onStoreKey ("openai_compatible", "test-key-not-real");
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeyUrlInvalid));
+        EXPECT_FALSE (credDir.getChildFile ("copilot-credentials.json").existsAsFile());
+
+        v.baseUrl = "";
+        overlay.setValues (v);
+        overlay.onStoreKey ("openai_compatible", "test-key-not-real");
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeyUrlInvalid));
+        EXPECT_FALSE (credDir.getChildFile ("copilot-credentials.json").existsAsFile());
+    }
+    credDir.deleteRecursively();
+}
+
+TEST (CopilotAskWiring, KeyStatusFollowsTheAddressAndAnOldFormatEntryIsNeverUsed)
+{
+    if (! CopilotCredentialStore::isSupported())
+        GTEST_SKIP() << "the key store exists only on Windows";
+
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    const auto credDir = freshDir ("cred10");
+    {
+        MainComponent app;
+        app.setCopilotCredentialDirectoryForTest (credDir);
+        auto& overlay = app.getCopilotSetupPanelForTest();
+        overlay.setValues (openAiValues());
+
+        overlay.onStoreKey ("openai_compatible", "test-key-not-real");
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeySaved));
+        EXPECT_TRUE (app.copilotCredentialStoreForTest().hasKey ("openai_compatible", "http://localhost:11434/v1"));
+
+        // Editing the address refreshes the status at once.
+        overlay.getUrlEditorForTest().setText ("https://api.example.com/v1", false);
+        overlay.getUrlEditorForTest().onTextChange();
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeyOtherOrigin));
+
+        overlay.getUrlEditorForTest().setText ("http://LOCALHOST:11434/other", false);
+        overlay.getUrlEditorForTest().onTextChange();
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeySaved));   // same origin
+
+        // A file written by release 1.5.0 (blob, no origin).
+        const auto file = credDir.getChildFile ("copilot-credentials.json");
+        juce::var parsed;
+        ASSERT_TRUE (juce::JSON::parse (file.loadFileAsString(), parsed).wasOk());
+        parsed["profiles"]["openai_compatible"].getDynamicObject()->removeProperty ("origin");
+        ASSERT_TRUE (file.replaceWithText (juce::JSON::toString (parsed, false), false, false, "\n"));
+
+        overlay.getUrlEditorForTest().onTextChange();
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeyOtherOrigin));
+        EXPECT_FALSE (app.copilotCredentialStoreForTest().hasKey ("openai_compatible", "http://localhost:11434/v1"));
+
+        // XOA KHOA still removes it.
+        overlay.onDeleteKey ("openai_compatible");
+        EXPECT_EQ (overlay.getKeyStatusTextForTest(), vi (kKeyMissing));
+    }
+    credDir.deleteRecursively();
+}

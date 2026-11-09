@@ -56,12 +56,14 @@ juce::String sanitiseCopilotQuestion (const juce::String& question);
 bool isValidCopilotModel (const juce::String& model);
 
 /** http:// or https://, at most 512 characters, no whitespace, quote or control
-    character. */
+    character, and no userinfo (user:pass@host) in the authority. */
 bool isValidCopilotBaseUrl (const juce::String& url);
 
 /** The sidecar argv (executable first). Findings mode: `<exe> <log> --json
-    --low-priority`. Ask mode: `<exe> <log> --ask <q> --json --low-priority
-    --provider <p> [--model <m>] [--base-url <u>] --timeout 100`. EMPTY when an
+    --low-priority`. Ask mode: `<exe> <log> --ask=<q> --json --low-priority
+    --credentials-only --provider=<p> [--model=<m>] [--base-url=<u>] --timeout=100`
+    (value flags are one "=" element; --credentials-only makes the sidecar ignore
+    API keys from environment variables). EMPTY when an
     ask request is invalid (empty sanitised question, unknown provider, invalid
     model, openai_compatible without a valid model and base URL, a base URL
     given for anthropic). */

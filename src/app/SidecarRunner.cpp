@@ -54,6 +54,16 @@ bool isValidCopilotBaseUrl (const juce::String& url)
 {
     if (url.length() > 512 || ! (url.startsWith ("http://") || url.startsWith ("https://")))
         return false;
+
+    // No userinfo (user:pass@host): the authority ends at the first / ? or #.
+    {
+        const auto rest = url.fromFirstOccurrenceOf ("://", false, false);
+        const auto authority = rest.upToFirstOccurrenceOf ("/", false, false)
+                                   .upToFirstOccurrenceOf ("?", false, false)
+                                   .upToFirstOccurrenceOf ("#", false, false);
+        if (authority.containsChar ('@'))
+            return false;
+    }
     for (auto p = url.getCharPointer(); ! p.isEmpty(); ++p)
     {
         const auto c = *p;
@@ -98,6 +108,7 @@ juce::StringArray buildCopilotArguments (const CopilotRequest& request)
     args.add ("--ask=" + question);
     args.add ("--json");
     args.add ("--low-priority");
+    args.add ("--credentials-only");   // the sidecar must ignore API keys from the environment
     args.add ("--provider=" + request.provider);
     if (request.model.isNotEmpty())
         args.add ("--model=" + request.model);

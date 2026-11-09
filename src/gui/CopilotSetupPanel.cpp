@@ -25,6 +25,8 @@ const char* const kStoreKey = "L\xc6\xafU KHO\xc3\x81";
 const char* const kDeleteKey = "XO\xc3\x81 KHO\xc3\x81";
 const char* const kKeySaved = "\xc4\x90\xc3\xa3 l\xc6\xb0u kho\xc3\xa1 cho nh\xc3\xa0 cung c\xe1\xba\xa5p n\xc3\xa0y.";
 const char* const kKeyMissing = "Ch\xc6\xb0" "a c\xc3\xb3 kho\xc3\xa1.";
+const char* const kKeyOtherOrigin = "Kho\xc3\xa1 \xc4\x91\xc3\xa3 l\xc6\xb0u cho \xc4\x91\xe1\xbb\x8b" "a ch\xe1\xbb\x89 kh\xc3\xa1" "c. Nh\xe1\xba\xadp l\xe1\xba\xa1i kho\xc3\xa1.";
+const char* const kKeyUrlInvalid = "\xc4\x90\xe1\xbb\x8b" "a ch\xe1\xbb\x89 ch\xc6\xb0" "a h\xe1\xbb\xa3p l\xe1\xbb\x87, ch\xc6\xb0" "a l\xc6\xb0u kho\xc3\xa1.";
 const char* const kKeyUnsupported = "C\xe1\xba\xa5t kho\xc3\xa1 ch\xe1\xbb\x89 c\xc3\xb3 tr\xc3\xaan Windows.";
 const char* const kUrlHint = "V\xc3\xad d\xe1\xbb\xa5 https://api.openai.com/v1 ho\xe1\xba\xb7" "c http://localhost:11434/v1";
 // "Chi dung cho Tuong thich OpenAI"
@@ -227,7 +229,12 @@ CopilotSetupPanel::CopilotSetupPanel()
     for (auto* e : { &modelEditor_, &urlEditor_ })
     {
         styleEditor (*e, mono);
-        e->onTextChange = [this] { refreshReasons(); };
+        e->onTextChange = [this, e]
+        {
+            refreshReasons();
+            if (e == &urlEditor_ && onBaseUrlChanged != nullptr)
+                onBaseUrlChanged();
+        };
         e->onReturnKey = [this] { emitIfValid(); };
         e->onFocusLost = [this] { emitIfValid(); };
         addAndMakeVisible (*e);
@@ -272,7 +279,14 @@ CopilotSetupPanel::CopilotSetupPanel()
 
     consentToggle_->setButtonText (utf8 (kConsent));
     consentToggle_->setWantsKeyboardFocus (false);
-    consentToggle_->onClick = [this] { emitIfValid(); };
+    consentToggle_->onClick = [this]
+    {
+        // Withdrawing consent is saved immediately, even when another field is
+        // invalid and emitIfValid() would refuse to emit.
+        if (! consentToggle_->getToggleState() && onConsentWithdrawn != nullptr)
+            onConsentWithdrawn();
+        emitIfValid();
+    };
     addAndMakeVisible (*consentToggle_);
 
     setOpaque (true);
@@ -351,6 +365,16 @@ void CopilotSetupPanel::setKeyStatus (const bool hasKey, const juce::String& mes
     keyStatusIsProblem_ = message.isNotEmpty();
     keyStatusText_ = message.isNotEmpty() ? message : utf8 (hasKey ? kKeySaved : kKeyMissing);
     repaint();
+}
+
+void CopilotSetupPanel::setKeyOtherOrigin()
+{
+    setKeyStatus (false, utf8 (kKeyOtherOrigin));
+}
+
+void CopilotSetupPanel::setKeyUrlInvalid()
+{
+    setKeyStatus (false, utf8 (kKeyUrlInvalid));
 }
 
 void CopilotSetupPanel::setKeyStoreSupported (const bool supported)
