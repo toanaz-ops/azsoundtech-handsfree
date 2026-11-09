@@ -21,7 +21,8 @@
 //     device thread and read by the GUI on the message thread. Do not reach
 //     for it from the callback.
 //
-// The per-slot post-DSP lane-0 taps (multi-slot routing, spec §3) are written
+// The per-slot, per-lane post-notch taps (multi-slot routing, spec §3; each
+// lane taps its OWN post-notch signal, HW-174.Q2) are written
 // into one SPSC lock-free ring buffer PER SLOT -- once per callback, in every
 // mode including Bypass. The audio thread is the sole producer of each ring;
 // the detector side is the sole consumer and reads 2048-sample blocks with a
@@ -45,6 +46,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <vector>
 
 inline const char* defaultDeviceTypeName()
 {
@@ -160,6 +162,12 @@ public:
     // darkened the status indicator with the reason available nowhere in the
     // UI. Cleared by a successful start().
     juce::String getLastDeviceError() const;
+
+    // HW-174.Q2: blocks (per lane) whose size exceeded the tap scratch, so
+    // the tap fell back to the shared output channel. Normally 0.
+    std::uint64_t getTapScratchFallbackCount() const
+        { return tapScratchFallbacks_.load (std::memory_order_relaxed); }
+    int getTapScratchCapacity() const { return tapScratchCapacity_; }
 
     // ---- Lane U: input peak meter for the setup wizard (spec 3.6) -------
     //
@@ -447,6 +455,18 @@ private:
         {{ LockFreeRingBuffer<float> (kTapCapacity), LockFreeRingBuffer<float> (kTapCapacity) }}
     }};
     std::array<std::array<std::atomic<std::uint64_t>, kMaxSlotLanes>, kMaxSlots> tapDropCounts_ {};
+
+    // HW-174.Q2: per-lane post-notch scratch the detector tap reads, so a lane
+    // taps ITS OWN signal and not the shared output channel. Layout:
+    // [(slot * kMaxSlotLanes + lane) * capacity + n]. Sized off the audio
+    // thread (constructor default, then audioDeviceAboutToStart from the
+    // device buffer size); the callback never allocates or resizes it. A block
+    // larger than the capacity falls back to tapping `out` and bumps
+    // tapScratchFallbacks_.
+    static constexpr int kDefaultTapScratchCapacity = 8192;
+    std::vector<float> tapScratch_;
+    int tapScratchCapacity_ = kDefaultTapScratchCapacity;
+    std::atomic<std::uint64_t> tapScratchFallbacks_ { 0 };
 
     // Per-slot detector -> audio command rings (bridge design §2). Capacity
     // 1024 gives 4x headroom over the worst legitimate burst per spec §3:
