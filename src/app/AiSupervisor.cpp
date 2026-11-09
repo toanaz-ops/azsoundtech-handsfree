@@ -391,6 +391,9 @@ void AiSupervisor::abortAndDropPending()
 {
     pendingRecurring_ = pendingManual_ = false;
     invalidate();   // cancels the child, logs `cancelled`, makes a late result stale
+    // Consent withdrawn / key deleted: nothing may stay on screen.
+    while (! proposals_.empty())
+        removeProposal (proposals_.size() - 1, AiDecision::Expired, "consent_withdrawn");
     changed();
 }
 
@@ -560,7 +563,9 @@ void AiSupervisor::tick()
     // may not be scoring (ring risk reads Na), so re-validating now would wipe
     // every shown release on an A/B tap. Freeze the book -- no re-validation and
     // no lifetime expiry -- and give the frozen time back on return to AUTO.
-    // An invalidating event (generation bump) still drops proposals as before.
+    // Proposals leave the book only through: dismiss, re-validation (expireProposals),
+    // the mode being lowered below Suggest, being superseded by a newer result for
+    // the same tool and notch, or consent withdrawn. A generation bump alone does not.
     const bool frozen = state.engineMode != AiEngineMode::Auto || state.measuring;
     if (frozen)
     {
@@ -573,7 +578,7 @@ void AiSupervisor::tick()
         {
             const auto frozenFor = nowMs - freezeStartMs_;
             for (auto& p : proposals_)
-                p.receivedMs += frozenFor;
+                p.receivedMs = std::min (p.receivedMs + frozenFor, nowMs);   // a result that arrived mid-freeze must not be dated in the future
             freezeStartMs_ = -1;
         }
         expireProposals (state, nowMs);

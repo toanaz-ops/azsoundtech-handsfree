@@ -317,7 +317,7 @@ mở app**; giới hạn theo giờ được ghi lại nên đóng mở app khô
 và tốn token của khoá bạn đã lưu (chưa đo được chi phí thật: chưa có lượt gọi nhà cung cấp thật nào được
 kiểm). Ba lượt hỏng liên tiếp thì AI tự tạm dừng, tới khi bạn đổi nấc công tắc. Không gọi khi đang BYPASS,
 đang SOUNDCHECK, chưa đồng ý gửi dữ liệu, hoặc chưa có khoá; **tắt công tắc đồng ý hay xoá khoá thì lượt đang
-chạy bị huỷ ngay**. Dòng trạng thái ở đầu bảng cho biết AI đang xét, vừa hỏng hay đang tạm dừng; AI hỏng kiểu
+chạy bị huỷ ngay và các đề xuất đang hiện bị gỡ hết**. Dòng trạng thái ở đầu bảng cho biết AI đang xét, vừa hỏng hay đang tạm dừng; AI hỏng kiểu
 gì thì detector vẫn chạy y như cũ. Các giới hạn này chưa chỉnh được trong app.
 
 **Đề xuất trông thế nào.** AI chỉ được chọn trong bốn loại, không viết lời tự do: đào sâu một notch có sẵn

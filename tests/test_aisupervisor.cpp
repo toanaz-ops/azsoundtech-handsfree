@@ -608,6 +608,31 @@ TEST (AiSupervisorConsent, WithdrawingStopsTheCallInFlightAndDropsPendingTrigger
     EXPECT_EQ (r.calls(), 1) << "no new call started from a pending trigger";
 }
 
+TEST (AiSupervisorConsent, WithdrawingClearsShownProposalsAndLogsEach)
+{
+    Rig r;
+    r.state.slots[0].notches.push_back (notchAt (6, 2000.0, -6.0, -18.0, 1));
+    r.startManual();
+    r.finishOk (deepen (5, 1000.0, -12.0) + "," + hold (6, 2000.0));
+    ASSERT_EQ (r.sup->proposals().size(), 2u);
+    r.logs.clear();
+
+    r.sup->abortAndDropPending();
+    r.state.configured = false;
+
+    EXPECT_TRUE (r.sup->proposals().empty());
+    const auto d = r.events ("ai_decision");
+    ASSERT_EQ (d.size(), 2u);
+    for (const auto& v : d)
+    {
+        EXPECT_EQ (v["decision"].toString(), "expired");
+        EXPECT_EQ (v["reason"].toString(), "consent_withdrawn");
+    }
+
+    r.step (kSec);
+    EXPECT_EQ (r.events ("ai_decision").size(), 2u) << "no further decision line on the next tick";
+}
+
 //==============================================================================
 // Blockers. None drops the pending trigger: it fires once the way is clear.
 
@@ -1199,6 +1224,29 @@ TEST (AiSupervisorBook, AShownReleaseSurvivesABypassTapAndReturnToAuto)
     const auto d = r.events ("ai_decision");
     ASSERT_EQ (d.size(), 1u);
     EXPECT_EQ (d[0]["reason"].toString(), "ring_risk_not_low");
+}
+
+TEST (AiSupervisorBook, AResultDeliveredMidFreezeIsNotDatedInTheFutureAfterUnfreeze)
+{
+    Rig r;
+    r.startManual();                                   // call in flight
+    r.state.engineMode = AiEngineMode::Bypass;         // freeze starts
+    r.step (kSec);
+    r.step (60 * kSec);
+    r.finishOk (deepen (5, 1000.0, -12.0));            // arrives DURING the freeze
+    ASSERT_EQ (r.sup->proposals().size(), 1u);
+    r.step (60 * kSec);
+
+    r.state.engineMode = AiEngineMode::Auto;           // unfreeze
+    r.step (kSec);
+    ASSERT_EQ (r.sup->proposals().size(), 1u);
+    EXPECT_LE (r.sup->proposals()[0].receivedMs, r.ms) << "never dated in the future";
+
+    // Normal lifetime counted from the unfreeze, not later.
+    r.step (AiSupervisor::kProposalLifetimeMs - 2 * kSec);
+    EXPECT_EQ (r.sup->proposals().size(), 1u);
+    r.step (3 * kSec);
+    EXPECT_TRUE (r.sup->proposals().empty());
 }
 
 TEST (AiSupervisorBook, AShownDeepenGoesWhenTheDetectorDeepensTheNotch)

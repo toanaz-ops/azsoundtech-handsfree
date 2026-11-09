@@ -993,8 +993,10 @@ mốc xa tương lai không được phép khoá AI mãi; đổi lại, chỉnh 
 động hỏng liên tiếp (`failed` / `timeout`, kể cả không ghi được file trạng thái) thì tạm dừng tới khi đổi nấc
 AI (chưa có nút gọi tay trong app). Khi engine không ở AUTO (BYPASS, SOUNDCHECK, đang đo) đề xuất đang hiện
 được **đóng băng**: không kiểm lại, không hết hạn (thời gian đóng băng không tính vào tuổi đề xuất), chỉ mất khi
-người bấm `BỎ` hoặc khi rút đồng ý / xoá khoá; về AUTO thì kiểm lại như thường; mức nguy cơ hú đưa vào
-bộ kiểm được giữ 750 ms như chip RING RISK để một frame lẻ không làm đề xuất chớp tắt. Không gọi khi BYPASS, SOUNDCHECK, đang đo lane M, chưa đồng ý, chưa có
+người bấm `BỎ` hoặc khi rút đồng ý / xoá khoá (gỡ hết, ghi `ai_decision` `expired` lý do
+`consent_withdrawn`); về AUTO thì kiểm lại như thường. Mức nguy cơ hú đưa vào bộ kiểm đi qua cùng bộ trễ
+750 ms với chip RING RISK: lên tức thì, xuống trễ — nên một frame hú lẻ **vẫn** gỡ đề xuất nhả (cố ý, nghiêng
+về an toàn); cái bộ trễ ngăn là việc mức đó rơi lại ngay sau một tick rồi đề xuất mới lại được chấp nhận. Không gọi khi BYPASS, SOUNDCHECK, đang đo lane M, chưa đồng ý, chưa có
 khoá, hoặc ô hỏi đang chạy (hoãn, không bỏ). Bộ đếm thế hệ tăng — và lượt đang chạy bị huỷ — khi restart
 thiết bị, nạp preset, CLEAR ALL, đổi mode engine, đổi nấc AI, **rút đồng ý hoặc xoá khoá** (hai đường sau còn
 xoá cả trigger đang chờ và bộ nhớ đệm 5 s của "dùng được").

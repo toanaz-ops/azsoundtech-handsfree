@@ -19,7 +19,8 @@ Thiết kế: `docs/superpowers/specs/2026-11-09-ai-drive-design.md`; quyết đ
   - Giới hạn: cách nhau ≥ 2 phút (lượt đầu chờ 2 phút sau khi mở app), ≤ 12 lượt/giờ (ghi lại, đóng mở app
     không làm đầy lại), ≤ 40 lượt mỗi lần mở app, mỗi lượt tối đa 90 giây. Chưa chỉnh được trong app.
   - Ba lượt hỏng liên tiếp: dòng trạng thái báo `AI · tạm dừng sau 3 lỗi liên tiếp`; đổi nấc công tắc để thử lại.
-  - Tắt công tắc đồng ý hoặc xoá khoá: lượt đang chạy bị huỷ ngay.
+  - Tắt công tắc đồng ý hoặc xoá khoá: lượt đang chạy bị huỷ ngay, đề xuất đang hiện bị gỡ hết.
+  - Ở BYPASS / SOUNDCHECK đề xuất đang hiện đứng yên (không hết hạn, không bị gỡ), về AUTO mới xét tiếp.
   - Đề xuất tự biến mất khi không còn đúng (notch đã đổi; đề xuất nhả khi `RING RISK` của slot lên trên mức
     thấp nhất).
 - Bảng `ACTIVE NOTCHES` có cột `BY` (`D` detector, `H` người). `N` và `A` chưa xuất hiện ở bản này. `H` gồm cả

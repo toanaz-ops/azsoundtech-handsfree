@@ -1855,8 +1855,11 @@ AiStateSnapshot MainComponent::readAiState (double riskNowMs)
         s.ringRiskScore = snap.ringRiskScore;
         // The level goes through the SAME 750 ms hold as the RING RISK chip
         // (RingRiskHysteresis, kHoldMs): a supervisor tick samples every 500 ms,
-        // and one peaky frame must not flip a shown proposal. "No score"
-        // (Unavailable) passes straight through, so Na stays Na.
+        // and the level must agree with the chip. RingRiskHysteresis steps UP
+        // immediately and only delays the step DOWN, so the hold stops a level
+        // flapping back down; a single Critical frame still expires a release
+        // (conservative, intended). "No score" (Unavailable) passes straight
+        // through, so Na stays Na.
         s.ringRisk = heldAiRingRisk (aiRiskHold_[(std::size_t) slot], snap.ringRiskValid,
                                      snap.ringRiskScore, snap.ringRiskThreshold, riskNowMs);
 
