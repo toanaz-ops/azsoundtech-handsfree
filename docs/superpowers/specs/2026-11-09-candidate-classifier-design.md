@@ -17,6 +17,7 @@ Spec C0 §6 gọi "C1 = soát + huấn luyện + lớp nạp" và "C2 = chạy b
 |---|---|---|
 | **C1a** | RTNeural vào repo, lớp `CandidateClassifier`, cổng Q5 (test đếm cấp phát, so khớp tham chiếu, đầu vào hỏng). **App không tạo bộ phân loại.** | không; log không đổi |
 | **C1b** (= "C2" của spec C0) | Nối vào luồng detector ở chế độ bóng, model `untrained-fixture-v1`, ghi `nn_score` vào log | log có thêm trường; không đổi âm thanh, không đổi quyết định notch |
+| **C1c** (§8) | đường huấn luyện offline, bộ đánh giá, cổng, tập tổng hợp khởi động. **Không đổi mã app**, model nhúng vẫn `untrained-fixture-v1` | không |
 | để sau | huấn luyện trên dữ liệu thật từ tester; đổi model giữa buổi diễn; cho mạng quyền quyết định (cần buổi nghe riêng) | |
 
 Model huấn luyện thật **không** nằm trong lane này: nó cần log `candidate_features` kèm verdict từ
@@ -185,7 +186,7 @@ Tham chiếu Python (`tools/nn/reference_forward.py`) chỉ dùng thư viện ch
 - "MSVC và clang": clang chỉ chạy ở job macOS hằng tuần; job Linux dùng GCC. Chạy `workflow_dispatch`
   trên nhánh trước khi merge nếu được.
 - Bản cài chưa kèm file ghi công bên thứ ba; BSD-3 của RTNeural đòi có khi mã vào binary (Q22, chờ owner).
-- Lệch huấn luyện / chạy thật: log làm tròn 3 chữ số, app dùng float đầy đủ. Chưa đo.
+- Lệch huấn luyện / chạy thật: log làm tròn 3 chữ số, app dùng float đầy đủ. **Đã đo ở C1c** (§8.5): tối đa 7,8e-4 trên score 0..1.
 
 ## 8. C1c — đường huấn luyện, đánh giá và cổng (thêm 09/11/2026)
 
@@ -241,3 +242,38 @@ phải hú = nốt có hài, có bao biên độ và rung. Model huấn luyện 
 nằm dưới `tools/nn/`, **không nhúng vào app**. `memory/peakiness-sweep-2048-2026-09-04.md` đã ghi nguồn
 tổng hợp không đại diện cho nhạc thật: số đo trên tập này chỉ chứng minh đường ống chạy, không nói
 gì về hiệu quả ngoài hiện trường.
+
+### 8.5 Đã hiện thực (C1c, 09/11/2026) — chỗ thực tế khác bản thiết kế
+
+Công cụ: `tools/nn/{dataset,train_mlp,evaluate,gate,check_embedded_models,slim_log}.py`, hướng dẫn chạy ở
+`tools/nn/README.md`. Test: `tests/test_nn_pipeline.py` (ctest `nn_pipeline`, 59 ca; các ca cần numpy tự bỏ
+khi thiếu), `nn_embedded_model_gate`, và `CandidateClassifierLoad.ExportedTrainedModelLoadsAndMatchesPythonReference`
+(C++ nạp file do `train_mlp.py` xuất qua `parseWeights` + RTNeural, sai số 8,9e-8 so với tham chiếu Python).
+
+- **Từ vựng verdict là `good` / `false`** (không phải TRUE/FALSE): `good` → nhãn 1, `false` → nhãn 0.
+- **`nearMags` không có trong dòng `notch_set`.** Dựng lại từ `ctx.now` (phổ cả 1025 bin) quanh bin `lround(hz / ctx.bin_hz)`,
+  ngoài phổ = 0 như app. Mọi trường khác của `RawInput` có sẵn: `hz`, `peakiness`, `p_norm`, `rise` (= rNorm), `novelty`
+  (= mNorm), `penalty` ở độ chính xác đủ; `rise_ratio`, `lr_ratio` và phổ làm tròn 3 chữ số; `hasOtherLane` = có
+  `lr_ratio`. Dòng không dựng lại được bị bỏ và đếm theo lý do, không điền bịa. Log schema 1 (không `rise_ratio`) và các
+  fixture viết tay (`ctx` 4 bin hoặc không `ctx`) vì vậy không cho hàng nào.
+- **Lệch do làm tròn (đo):** trên 576 dòng tổng hợp, so `nn_score` mà app ghi (tính từ float đầy đủ, rồi làm tròn 3 chữ số)
+  với điểm Python tính trên `RawInput` dựng lại từ log, cùng trọng số `untrained-fixture-v1`: sai lệch tuyệt đối tối đa
+  **7,8e-4**, trung bình 2,6e-4; sau khi làm tròn điểm Python về 3 chữ số, 554/576 trùng hẳn và còn lại lệch đúng một đơn vị
+  chữ số thứ ba. Mô hình chưa huấn luyện có độ nhạy thấp nên đây là cận dưới; một model đã huấn luyện dốc hơn thì lệch có thể lớn hơn
+  — đo lại khi có model thật.
+- **Chia tập:** thứ tự `sha256("hf-c1c-split-v1:" + session_id)`, 25 % đầu (ít nhất 1) là tập giữ lại; `train_mlp.py` chia tiếp tập huấn luyện
+  làm fit / kiểm định bằng cùng cách (muối `/val`). Cần ≥ 2 session.
+- **Cổng:** thêm một điều kiện chặt hơn Q24: tập giữ lại cần ≥ 10 dòng **mỗi nhãn** (không chỉ "đủ cả hai nhãn": 59 so với 1 không nói gì).
+  Cổng còn kiểm `retention_target` / `retention_achieved` ≥ 0,95, tổng số hàng khớp thành phần `source`, và (nếu có manifest) băm dataset khớp.
+  Mọi trường thiếu / NaN / không phải số là một điều kiện trượt. Ngưỡng ở một chỗ: `gate.THRESHOLDS`.
+- **Test cổng trong ctest:** `nn_embedded_model_gate` đọc mọi JSON dưới `models/`; model nhúng hôm nay (`untrained-fixture-v1`) qua
+  vì tên `untrained-*`. Test đơn vị chứng minh nó sẽ trượt với một model không-`untrained` không có báo cáo, và với báo cáo tổng hợp.
+- **Tập tổng hợp dùng detector thật**, không phải bộ sinh ở không gian đặc trưng: một test `DISABLED_` trong binary test
+  (`SyntheticBootstrap.DISABLED_GenerateSessionLogs`) chạy cảnh âm thanh qua `NotchController` thật. Detector đặt notch cho 369 / 372
+  cảnh hú và 207 / 348 cảnh nhạc nên có đủ hai nhãn không cần bộ sinh dự phòng. Nhãn là loại cảnh. Chi tiết và giới hạn: `tools/nn/README.md`.
+  Log commit ở dạng thu nhỏ (`ctx.now` ±16 bin + `ctx.first_bin`, bỏ `ctx.ref` / `other_lane_now`) để còn 0,64 MB; `dataset.py` cho cùng sha256 từ hai dạng.
+  Dòng `session_start` mang `source: "synthetic"` (trường **mới**, app không bao giờ ghi; thiếu = `real`).
+- **Số đo trên tập tổng hợp** (tập giữ lại = session s6, s7: 154 dòng, 89 nhãn 1, 65 nhãn 0): AUC model **0,972**; AUC `score` hiện tại
+  **0,288**; giữ 95,5 % hú thì bắt 93,8 % đặt oan (`score`: 4,6 %). Cổng trượt đúng vì `data is not all real` (và manifest liệt kê nguồn không-real);
+  mọi điều kiện về kích thước và AUC đều đạt, nên `real` là điều kiện duy nhất chặn. Các số này chỉ chứng minh đường ống chạy.
+- Chưa làm: chưa chạy trên log thật (chưa có nhãn thật nào); chưa kiểm numpy phiên bản khác; chưa đo lệch làm tròn với model đã huấn luyện từ log thật.
