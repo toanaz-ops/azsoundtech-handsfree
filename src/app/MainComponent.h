@@ -19,7 +19,11 @@
 // component in this app is therefore reachable from the test target.
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <map>
+#include <mutex>
+
 #include "app/AiAction.h"
+#include "app/AiSupervisor.h"
 #include "app/AppSettings.h"
 #include "app/AudioEngine.h"
 #include "app/CopilotCredentialStore.h"
@@ -435,6 +439,16 @@ public:
                                                          AiProposal::Tool tool, AiDecision decision,
                                                          std::optional<AiRefusal> refusal);
 
+    // Lane L3a: the AI mode and the headless supervisor. setAiMode stores the
+    // REQUESTED mode, saves settings, gates shadow scoring on every controller
+    // (Off = no AI runs at all) and tells the supervisor. It never touches a
+    // notch: this phase changes the audio by exactly 0 dB. The GUI task reads
+    // aiSupervisor() and calls dismiss()/dismissAll() on the non-const one.
+    void setAiMode (AiMode mode);
+    [[nodiscard]] AiMode aiMode() const noexcept { return settings_.aiMode; }
+    [[nodiscard]] AiSupervisor& aiSupervisor() noexcept { return *aiSupervisor_; }
+    [[nodiscard]] const AiSupervisor& aiSupervisor() const noexcept { return *aiSupervisor_; }
+
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is
     // slotLinked_, not the controller's own atomic, so a query never has to
@@ -742,6 +756,23 @@ private:
     void askCopilot (juce::String question);
 
     std::unique_ptr<SidecarRunner> copilotRunner_;
+
+    // Lane L3a. Declared AFTER sessionLogger_, the controllers and the engine
+    // (its environment lambdas read all three) and shut down explicitly in the
+    // destructor before any of them die. The supervisor is message-thread
+    // only: detector-thread placements wait in pendingPlacements_ until the
+    // GUI timer drains them.
+    std::unique_ptr<AiSupervisor> aiSupervisor_;
+    struct PendingPlacement { int slot, lane; double hz; std::int64_t atMs; };
+    std::mutex placementMutex_;
+    std::vector<PendingPlacement> pendingPlacements_;
+    std::int64_t aiUsableCheckedMs_ = -1;   // copilotUsable() decrypts the key: re-check at most every 5 s
+    bool aiUsableCached_ = false;
+    std::map<std::uint32_t, std::int64_t> aiNotchFirstSeenMs_;   // global nid -> first read (for age_s)
+    [[nodiscard]] AiStateSnapshot readAiState();
+    [[nodiscard]] bool copilotUsable();   // the ask flow's predicate: consent + provider + model + key / base URL
+    void applyAiMode (AiMode mode);
+    void setAiModeFromSettings();
     void analyseWithCopilot();
     void showCopilotBusy();
 

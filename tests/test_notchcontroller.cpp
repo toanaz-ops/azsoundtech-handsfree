@@ -4431,7 +4431,7 @@ struct ShadowRun
 
 // One fixed block sequence: two sustained near misses first (candidate
 // records), then a slow howl (places at -6) and a hard onset (places at -12).
-ShadowRun runShadowScenario (ShadowVariant v)
+ShadowRun runShadowScenario (ShadowVariant v, bool scoringEnabled = true)
 {
     ShadowRun run;
     CandRecorder cands;
@@ -4440,6 +4440,7 @@ ShadowRun runShadowScenario (ShadowVariant v)
     h.controller.setCandidateSink (cands.sink());
     h.controller.setEventSink (events.sink());
     h.controller.setCandidateClassifier (makeShadowClassifier (v));
+    h.controller.setShadowScoringEnabled (scoringEnabled);   // lane L3a: AI mode Off
     h.controller.setDetectionActive (true);
 
     auto pumpOne = [&] (const std::vector<float>& hop)
@@ -4527,6 +4528,31 @@ TEST (ShadowClassifier, DecisionsAreIdenticalWithAndWithoutClassifier)
                 if (v == ShadowVariant::ForcedHigh) EXPECT_GT (e.nnScore, 0.999f);
             }
         EXPECT_GT (placements, 0) << "teeth: site B ran, variant " << (int) v;
+    }
+}
+
+// Lane L3a: AI mode Off gates the classifier call and nothing else. Same block
+// sequence, classifier loaded but scoring disabled: the command sequence and
+// every placement field except the score are identical to "no classifier", the
+// classifier is never asked, and no nn_score field exists anywhere.
+TEST (ShadowClassifier, ScoringDisabledGivesIdenticalCommandsAndNoScore)
+{
+    const auto none = runShadowScenario (ShadowVariant::None);
+    ASSERT_GE (none.commands.size(), 2u) << "teeth: the scenario must place notches";
+    for (const auto v : { ShadowVariant::Embedded, ShadowVariant::ForcedHigh })
+    {
+        const auto off = runShadowScenario (v, false);
+        EXPECT_TRUE (sameCommands (none.commands, off.commands)) << "variant " << (int) v;
+        EXPECT_TRUE (sameEventsIgnoringScore (none.events, off.events)) << "variant " << (int) v;
+        EXPECT_EQ (none.candidates.size(), off.candidates.size()) << "variant " << (int) v;
+        EXPECT_EQ (off.stats.calls, 0u) << "the classifier must not be asked when scoring is disabled";
+        for (const auto& c : off.candidates)
+            EXPECT_FALSE (c.hasNnScore);
+        for (const auto& e : off.events)
+            EXPECT_FALSE (e.hasNnScore);
+        // Teeth: with scoring on, the very same variant does produce scores.
+        const auto on = runShadowScenario (v, true);
+        EXPECT_GT (on.stats.calls, 0u) << "variant " << (int) v;
     }
 }
 

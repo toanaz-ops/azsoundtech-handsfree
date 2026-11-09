@@ -391,6 +391,11 @@ public:
     // stopped, or the caller IS the thread driving runOnce().
     std::optional<float> shadowScoreForTest (const CandidateClassifier::RawInput& in)
         { return classifier_ != nullptr ? shadowScore (in) : std::nullopt; }
+    // Lane L3a: false = the shadow classifier is never asked (AI mode Off), so
+    // no nn_score is produced or logged. Thread-safe, relaxed, default true.
+    // Never read by any placement / ladder / release decision.
+    void setShadowScoringEnabled (bool enabled) noexcept { shadowScoringEnabled_.store (enabled, std::memory_order_relaxed); }
+    bool shadowScoringEnabled() const noexcept { return shadowScoringEnabled_.load (std::memory_order_relaxed); }
     bool modelMutexIsFreeForTest();                  // try_lock + unlock
     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
     // Lane L3a, TEST ONLY: places a Detector-origin notch tagged with `author`,
@@ -881,6 +886,9 @@ private:
     std::atomic<std::uint64_t> nnPubCalls_ { 0 }, nnPubMaxTicks_ { 0 };
     // Read-only: scores one candidate and times the call. nullopt = no opinion.
     std::optional<float> shadowScore (const CandidateClassifier::RawInput& in);
+    // Lane L3a: AI mode Off. Gates ONLY the two shadowScore call sites (and so
+    // the nn_* log fields). Relaxed: no decision reads it.
+    std::atomic<bool> shadowScoringEnabled_ { true };
     void publishNnStats();
     std::atomic<int> failSetNotchLaneForTest_ { -1 };
     // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the

@@ -89,6 +89,8 @@ std::optional<float> NotchController::shadowScore (const CandidateClassifier::Ra
 {
     // Detector thread. Read-only: no lock, no allocation, no logging. The
     // timing uses a fixed array, so this stays allocation-free as well.
+    if (! shadowScoringEnabled_.load (std::memory_order_relaxed))
+        return std::nullopt;   // lane L3a: AI mode Off -- no opinion asked, none logged
     const auto t0 = juce::Time::getHighResolutionTicks();
     const auto s = classifier_->score (in);
     const auto dt = (std::uint64_t) std::max<juce::int64> (0, juce::Time::getHighResolutionTicks() - t0);
@@ -243,7 +245,7 @@ void NotchController::maybeLogCandidate (int lane, const PeakinessAnalyzer::Cand
     // Lane C1b (shadow): ask the classifier AFTER every gate and budget check
     // above, so it runs at most once per second per controller. Read-only:
     // the score only rides on the record into the log.
-    if (classifier_ != nullptr)
+    if (classifier_ != nullptr && shadowScoringEnabled_.load (std::memory_order_relaxed))
     {
         CandidateClassifier::RawInput in;
         in.hz = r.hz; in.peakiness = r.peakiness; in.pNorm = r.pNorm; in.rNorm = r.rise;
@@ -1467,7 +1469,8 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     // Lane C1b (shadow): detector placements only. Read-only; no lock held
     // (modelMutex_ was released above). `scored` is a local, so the score can
     // only ever reach the session log through the event.
-    if (classifier_ != nullptr && origin == Origin::Detector
+    if (classifier_ != nullptr && shadowScoringEnabled_.load (std::memory_order_relaxed)
+        && origin == Origin::Detector
         && cand.bin >= 0 && cand.bin < Detector::kNumBins)
     {
         CandidateClassifier::RawInput in;

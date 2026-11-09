@@ -132,6 +132,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/AiAction.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AiAction.h
     ${CMAKE_SOURCE_DIR}/src/app/AiMode.h
+    ${CMAKE_SOURCE_DIR}/src/app/AiSupervisor.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/AiSupervisor.h
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
