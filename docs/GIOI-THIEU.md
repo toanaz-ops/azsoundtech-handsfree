@@ -127,6 +127,8 @@ lần đo mất khoảng **9 giây**; khi engine mở đủ kênh, 4 ngõ ra m�
 nhận in đúng con số của rig đang cắm trước khi bạn bấm. **Đừng bấm `ĐO` giữa lúc
 MC đang nói.**
 
+**Detector nghe riêng từng làn (HW-174.Q2).** Khi nhiều slot cùng ra một kênh, tiếng ra vẫn là tổng của các làn (mức đổi 0 dB), nhưng mỗi detector giờ nghe đúng tín hiệu sau notch của làn mình, nên hú ở vòng của slot 1 chỉ sinh notch ở slot 1.
+
 **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng** trong lúc đo — loa của chúng vẫn
 đang phát tiếng mic. Vì vậy app **từ chối bắt đầu** khi chip `RING RISK` đã đọc
 `RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy. App đọc chip của **mọi
