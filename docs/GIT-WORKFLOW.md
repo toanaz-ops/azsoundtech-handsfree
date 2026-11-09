@@ -107,8 +107,8 @@ còn dài — CI vẫn chạy.
 gh pr checks <n> --watch
 ```
 
-Dán output xanh vào PR hoặc vào báo cáo. **CI xanh không thay thế `ctest` local**
-(và ngược lại) — xem §6 về ASIO. Nếu lệnh in *"no checks reported"*, đừng đợi
+Dán output xanh vào PR hoặc vào báo cáo. **CI xanh không thay thế `ctest -R <suite>` hẹp local
+cho vùng vừa sửa** (CI không có ASIO, xem §6); full ctest là việc của CI và `release-alpha.ps1`. Nếu lệnh in *"no checks reported"*, đừng đợi
 tiếp: PR đang xung đột và GitHub không dựng được merge ref, xem §6 bẫy thứ hai.
 
 > Trunk-based (rule 5) becomes allowed after this PR merges: CI now runs on push main.
