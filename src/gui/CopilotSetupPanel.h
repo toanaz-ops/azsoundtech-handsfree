@@ -46,6 +46,13 @@ public:
         shown as a problem in the warn colour. */
     void setKeyStatus (bool hasKey, const juce::String& message = {});
 
+    /** An OpenAI-compatible key is saved, but for another address (or by an older
+        release that recorded none): shown as a problem; the key is not used. */
+    void setKeyOtherOrigin();
+
+    /** The shown sentence for a refused save because the address is invalid. */
+    void setKeyUrlInvalid();
+
     /** False off Windows: the key row is disabled with an explanation. */
     void setKeyStoreSupported (bool supported);
 
@@ -58,6 +65,13 @@ public:
     std::function<void (juce::String provider, juce::String key)> onStoreKey;
     std::function<void (juce::String provider)> onDeleteKey;
     std::function<void (juce::String provider)> onProviderChanged;
+
+    /** The address field changed (every edit): the key status depends on it. */
+    std::function<void()> onBaseUrlChanged;
+
+    /** The consent switch was turned OFF. Fired whatever the state of the other
+        fields: withdrawing consent must always be saved at once. */
+    std::function<void()> onConsentWithdrawn;
     std::function<void()> onClose;
 
     static constexpr const char* kDefaultAnthropicModel = "claude-opus-5-5";

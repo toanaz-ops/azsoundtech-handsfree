@@ -38,6 +38,8 @@ const char* const kBadSetup = "C\xc3\xa0i \xc4\x91\xe1\xba\xb7t AI ch\xc6\xb0" "
 // "Dang ban, thu lai sau mot giay."
 const char* const kBusy = "\xc4\x90" "ang b\xe1\xba\xad" "n, th\xe1\xbb\xad l\xe1\xba\xa1i sau m\xe1\xbb\x99t gi\xc3\xa2y.";
 const char* const kDot ="\xc2\xb7";
+// "AI co the sai. Dung tang gain hay tat chong hu theo loi nay."
+const char* const kCaution = "AI c\xc3\xb3 th\xe1\xbb\x83 sai. \xc4\x90\xe1\xbb\xabng t\xc4\x83ng gain hay t\xe1\xba\xaft ch\xe1\xbb\x91ng h\xc3\xba theo l\xe1\xbb\x9di n\xc3\xa0y.";
 
 juce::String utf8 (const char* s) { return juce::String::fromUTF8 (s); }
 
@@ -55,6 +57,8 @@ constexpr float kFooterSize   = 12.0f;
 constexpr int   kBlockPad     = 8;
 constexpr int   kFooterGap    = 6;
 constexpr int   kButtonGap    = 6;
+constexpr float kCautionSize  = 12.0f;
+constexpr int   kCautionPad   = 5;
 
 float textLeft() { return kLeftPad + kDotSize + kDotGap; }
 
@@ -319,7 +323,7 @@ void CopilotPanel::refreshStatus()
     askButton_.setButtonText (utf8 (state_ == State::asking ? kCancelButton : kAskButton));
     askButton_.setEnabled (state_ != State::running);
     askEditor_.setEnabled (! busy);
-    repaint();
+    layoutList();
 }
 
 void CopilotPanel::submitQuestion()
@@ -397,6 +401,7 @@ void CopilotPanel::setAnswer (const CopilotAnswer& a)
 
 juce::String CopilotPanel::getBlockTextForTest() const { return content_->blockText(); }
 juce::String CopilotPanel::getFooterTextForTest() const { return content_->blockFooter(); }
+juce::String CopilotPanel::cautionTextForTest() { return utf8 (kCaution); }
 
 void CopilotPanel::setFindings (std::vector<CopilotFinding> findings)
 {
@@ -441,8 +446,29 @@ void CopilotPanel::resized()
     row.removeFromRight (kButtonGap);
     askEditor_.setBounds (row.withSizeKeepingCentre (row.getWidth(), kButtonHeight));
 
+    listArea_ = area;
+    layoutList();
+}
+
+// The caution strip is OUTSIDE the scrolled content, so a long answer can
+// neither push it out of the panel nor overlap the model/token footer.
+void CopilotPanel::layoutList()
+{
+    auto area = listArea_;
+    cautionBounds_ = {};
+    if (state_ == State::answer && ! area.isEmpty())
+    {
+        juce::AttributedString as;
+        as.setWordWrap (juce::AttributedString::byWord);
+        as.append (utf8 (kCaution), az::theme::baseFont (kCautionSize), az::theme::dim);
+        juce::TextLayout layout;
+        layout.createLayout (as, (float) juce::jmax (1, area.getWidth() - (int) (kLeftPad + kRightPad)));
+        const int h = (int) std::ceil (layout.getHeight()) + 2 * kCautionPad;
+        cautionBounds_ = area.removeFromBottom (juce::jmin (h, area.getHeight()));
+    }
     viewport_.setBounds (area);
     content_->layoutForWidth (viewport_.getWidth() - viewport_.getScrollBarThickness());
+    repaint();
 }
 
 void CopilotPanel::paint (juce::Graphics& g)
@@ -464,6 +490,20 @@ void CopilotPanel::paint (juce::Graphics& g)
     g.setFont (baseFont (13.0f));
     g.drawText (statusText_, status.withTrimmedLeft ((int) kLeftPad).withTrimmedRight ((int) kRightPad),
                 juce::Justification::centredLeft, true);
+
+    if (! cautionBounds_.isEmpty())
+    {
+        g.setColour (shade);
+        g.fillRect (cautionBounds_.withHeight (1));
+        const auto r = cautionBounds_.reduced ((int) kLeftPad, kCautionPad);
+        juce::AttributedString as;
+        as.setJustification (juce::Justification::topLeft);
+        as.setWordWrap (juce::AttributedString::byWord);
+        as.append (utf8 (kCaution), baseFont (kCautionSize), dim);
+        juce::TextLayout layout;
+        layout.createLayout (as, (float) juce::jmax (1, r.getWidth()));
+        layout.draw (g, r.toFloat());
+    }
 
     if (! askRowBounds_.isEmpty())
         drawEngravedDivider (g, juce::Rectangle<int> (0, askRowBounds_.getY() - spacing, getWidth(), spacing));

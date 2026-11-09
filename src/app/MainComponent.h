@@ -720,6 +720,7 @@ private:
     juce::Rectangle<int> leftColumnBounds_;
     bool copilotSetupOpen_ = false;
     CopilotCredentialStore& credentialStore();
+    void refreshCopilotKeyStatus();
     void openCopilotSetup();
     void closeCopilotSetup();
     void layoutCopilotSetup();

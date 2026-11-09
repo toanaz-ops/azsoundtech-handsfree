@@ -1,6 +1,7 @@
 #include "app/CopilotCredentialStore.h"
 
 #include "app/AppSettings.h"
+#include "app/SidecarRunner.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -192,6 +193,68 @@ bool writeProfiles (const juce::File& file, const juce::DynamicObject::Ptr& prof
 }
 
 //==============================================================================
+juce::String copilotBaseUrlOrigin (const juce::String& rawBaseUrl)
+{
+    // The scheme is case-insensitive ("HTTP://X/"); isValidCopilotBaseUrl stays
+    // strict, so lower-case only the scheme here, before validating.
+    juce::String baseUrl = rawBaseUrl;
+    if (rawBaseUrl.startsWithIgnoreCase ("https://"))
+        baseUrl = "https://" + rawBaseUrl.substring (8);
+    else if (rawBaseUrl.startsWithIgnoreCase ("http://"))
+        baseUrl = "http://" + rawBaseUrl.substring (7);
+
+    if (! isValidCopilotBaseUrl (baseUrl))
+        return {};
+
+    const bool https = baseUrl.startsWith ("https://");
+    const auto scheme = juce::String (https ? "https" : "http");
+    const auto authority = baseUrl.fromFirstOccurrenceOf ("://", false, false)
+                                  .upToFirstOccurrenceOf ("/", false, false)
+                                  .upToFirstOccurrenceOf ("?", false, false)
+                                  .upToFirstOccurrenceOf ("#", false, false);
+
+    juce::String host, port;
+    if (authority.startsWithChar ('['))
+    {
+        const int close = authority.indexOfChar (']');
+        if (close < 0)
+            return {};
+        host = authority.substring (0, close + 1);
+        const auto rest = authority.substring (close + 1);
+        if (rest.isNotEmpty())
+        {
+            if (! rest.startsWithChar (':'))
+                return {};
+            port = rest.substring (1);
+        }
+    }
+    else
+    {
+        const int colon = authority.lastIndexOfChar (':');
+        host = colon < 0 ? authority : authority.substring (0, colon);
+        if (colon >= 0)
+            port = authority.substring (colon + 1);
+    }
+
+    // An unbracketed host never contains ':' ("http://x:80:90" is not a host).
+    if (! host.startsWithChar ('[') && host.containsChar (':'))
+        return {};
+
+    if (host.isEmpty() || (port.isNotEmpty() && ! port.containsOnly ("0123456789")))
+        return {};
+
+    auto out = scheme + "://" + host.toLowerCase();
+    if (port.isNotEmpty())
+    {
+        const auto n = port.getLargeIntValue();
+        if (n > 65535)
+            return {};
+        if (n != (https ? 443 : 80))
+            out << ":" << juce::String (n);
+    }
+    return out;
+}
+
 juce::File defaultCopilotCredentialsDirectory()
 {
     const auto fromEnv = juce::SystemStats::getEnvironmentVariable (kEnvDir, {});
@@ -219,9 +282,15 @@ bool CopilotCredentialStore::isSupported()
 
 #if JUCE_WINDOWS
 
-bool CopilotCredentialStore::storeKey (const juce::String& provider, const juce::String& rawKey)
+bool CopilotCredentialStore::storeKey (const juce::String& provider, const juce::String& rawKey,
+                                       const juce::String& baseUrl)
 {
     if (! isKnownProvider (provider))
+        return false;
+
+    const bool bound = provider == "openai_compatible";
+    const auto origin = bound ? copilotBaseUrlOrigin (baseUrl) : juce::String();
+    if (bound && origin.isEmpty())
         return false;
 
     const auto key = rawKey.trim();
@@ -252,32 +321,50 @@ bool CopilotCredentialStore::storeKey (const juce::String& provider, const juce:
 
     juce::DynamicObject::Ptr entry = new juce::DynamicObject();
     entry->setProperty ("blob", base64Encode (encrypted));
+    if (bound)
+        entry->setProperty ("origin", origin);
     profiles->setProperty (juce::Identifier (provider), juce::var (entry.get()));
     return writeProfiles (target, profiles);
 }
 
-bool CopilotCredentialStore::hasKey (const juce::String& provider) const
+CopilotCredentialStore::KeyState CopilotCredentialStore::keyState (const juce::String& provider,
+                                                                  const juce::String& baseUrl) const
 {
     if (! isKnownProvider (provider))
-        return false;
+        return KeyState::none;
 
     juce::DynamicObject::Ptr profiles;
     if (loadProfiles (file(), profiles) != LoadState::ok)
-        return false;
+        return KeyState::none;
 
     auto* entry = profiles->getProperty (juce::Identifier (provider)).getDynamicObject();
     if (entry == nullptr)
-        return false;
+        return KeyState::none;
     const auto blobText = entry->getProperty ("blob");
     if (! blobText.isString())
-        return false;
+        return KeyState::none;
 
     Bytes blob, plain;
     if (! base64Decode (blobText.toString(), blob))
-        return false;
-    const bool ok = dpapiUnprotect (blob, plain);
+        return KeyState::none;
+    const bool decrypts = dpapiUnprotect (blob, plain);
     wipe (plain);
-    return ok;
+    if (! decrypts)
+        return KeyState::none;
+
+    if (provider != "openai_compatible")
+        return KeyState::ready;
+
+    // An OpenAI-compatible key is only ever used for the origin it was saved for.
+    const auto want = copilotBaseUrlOrigin (baseUrl);
+    const auto stored = entry->getProperty ("origin");
+    return want.isNotEmpty() && stored.isString() && stored.toString() == want ? KeyState::ready
+                                                                              : KeyState::otherOrigin;
+}
+
+bool CopilotCredentialStore::hasKey (const juce::String& provider, const juce::String& baseUrl) const
+{
+    return keyState (provider, baseUrl) == KeyState::ready;
 }
 
 bool CopilotCredentialStore::deleteKey (const juce::String& provider)
@@ -299,8 +386,12 @@ bool CopilotCredentialStore::deleteKey (const juce::String& provider)
 
 #else // ! JUCE_WINDOWS
 
-bool CopilotCredentialStore::storeKey (const juce::String&, const juce::String&) { return false; }
-bool CopilotCredentialStore::hasKey (const juce::String&) const { return false; }
+bool CopilotCredentialStore::storeKey (const juce::String&, const juce::String&, const juce::String&) { return false; }
+CopilotCredentialStore::KeyState CopilotCredentialStore::keyState (const juce::String&, const juce::String&) const
+{
+    return KeyState::none;
+}
+bool CopilotCredentialStore::hasKey (const juce::String&, const juce::String&) const { return false; }
 bool CopilotCredentialStore::deleteKey (const juce::String&) { return false; }
 
 #endif

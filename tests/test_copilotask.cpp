@@ -78,6 +78,9 @@ TEST (CopilotBaseUrl, Validator)
     EXPECT_FALSE (isValidCopilotBaseUrl ("https://a\"b"));
     EXPECT_FALSE (isValidCopilotBaseUrl ("https://a'b"));
     EXPECT_FALSE (isValidCopilotBaseUrl ("https://a\nb"));
+    EXPECT_FALSE (isValidCopilotBaseUrl ("https://user:pass@host/v1"));   // userinfo
+    EXPECT_FALSE (isValidCopilotBaseUrl ("http://user@localhost:11434"));
+    EXPECT_TRUE (isValidCopilotBaseUrl ("https://host/v1?contact=a@b"));  // '@' outside the authority
     EXPECT_FALSE (isValidCopilotBaseUrl ("https://" + juce::String::repeatedString ("a", 505)));
     EXPECT_TRUE (isValidCopilotBaseUrl ("https://" + juce::String::repeatedString ("a", 504)));
 }
@@ -107,7 +110,7 @@ TEST (CopilotArguments, AnthropicAsk)
     const auto a = buildCopilotArguments (r);
     const juce::StringArray expected { r.executable.getFullPathName(), r.sessionLog.getFullPathName(),
                                        "--ask=why 'ring'?", "--json", "--low-priority",
-                                       "--provider=anthropic", "--timeout=100" };
+                                       "--credentials-only", "--provider=anthropic", "--timeout=100" };
     EXPECT_EQ (a, expected);
 
     r.model = "claude-opus-5-5";
@@ -124,7 +127,8 @@ TEST (CopilotArguments, DashLeadingQuestionsStayOneElement)
         auto r = askRequest();
         r.question = utf8 (raw);
         const auto a = buildCopilotArguments (r);
-        ASSERT_EQ (a.size(), 7) << raw;
+        ASSERT_EQ (a.size(), 8) << raw;
+        EXPECT_EQ (a[5], "--credentials-only");
         EXPECT_EQ (a[2], "--ask=" + utf8 (raw));
         for (int i = 2; i < a.size(); ++i)
             EXPECT_TRUE (a[i].startsWith ("--")) << a[i]; // no bare value element

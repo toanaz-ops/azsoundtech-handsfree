@@ -465,22 +465,38 @@ MainComponent::MainComponent()
         settings_.copilotConsent  = v.consent;
         saveSettings();   // the same path the UI mode is saved through
     };
-    copilotSetupPanel_.onProviderChanged = [this] (juce::String provider)
+    copilotSetupPanel_.onConsentWithdrawn = [this]
     {
-        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider));
+        settings_.copilotConsent = false;
+        saveSettings();
     };
+    copilotSetupPanel_.onProviderChanged = [this] (juce::String)
+    {
+        refreshCopilotKeyStatus();
+    };
+    copilotSetupPanel_.onBaseUrlChanged = [this] { refreshCopilotKeyStatus(); };
     copilotSetupPanel_.onStoreKey = [this] (juce::String provider, juce::String key)
     {
-        const bool stored = credentialStore().storeKey (provider, key);
+        // An OpenAI-compatible key is bound to the address typed in the panel now.
+        const auto baseUrl = copilotSetupPanel_.currentValues().baseUrl;
+        if (provider == "openai_compatible" && ! isValidCopilotBaseUrl (baseUrl))
+        {
+            key = {};
+            copilotSetupPanel_.setKeyUrlInvalid();
+            return;
+        }
+
+        const bool stored = credentialStore().storeKey (provider, key, baseUrl);
         key = {};
-        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider),
-                                         stored ? juce::String()
-                                                : juce::String::fromUTF8 ("Kh\xc3\xb4ng c\xe1\xba\xa5t \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c kho\xc3\xa1."));
+        if (stored)
+            refreshCopilotKeyStatus();
+        else
+            copilotSetupPanel_.setKeyStatus (false, juce::String::fromUTF8 ("Kh\xc3\xb4ng c\xe1\xba\xa5t \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c kho\xc3\xa1."));
     };
     copilotSetupPanel_.onDeleteKey = [this] (juce::String provider)
     {
         credentialStore().deleteKey (provider);
-        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider));
+        refreshCopilotKeyStatus();
     };
     addChildComponent (copilotSetupPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
@@ -1397,6 +1413,19 @@ CopilotCredentialStore& MainComponent::credentialStore()
     return *copilotCredentials_;
 }
 
+// The key status line for the provider and address now in the setup panel.
+void MainComponent::refreshCopilotKeyStatus()
+{
+    const auto v = copilotSetupPanel_.currentValues();
+    using K = CopilotCredentialStore::KeyState;
+    switch (credentialStore().keyState (v.provider, v.baseUrl))
+    {
+        case K::ready:       copilotSetupPanel_.setKeyStatus (true);  break;
+        case K::otherOrigin: copilotSetupPanel_.setKeyOtherOrigin();  break;
+        case K::none:        copilotSetupPanel_.setKeyStatus (false); break;
+    }
+}
+
 void MainComponent::openCopilotSetup()
 {
     if (uiMode_ != UiMode::Geek)
@@ -1408,7 +1437,7 @@ void MainComponent::openCopilotSetup()
     v.baseUrl  = settings_.copilotBaseUrl;
     v.consent  = settings_.copilotConsent;
     copilotSetupPanel_.setValues (v);
-    copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (v.provider));
+    refreshCopilotKeyStatus();
     if (! CopilotCredentialStore::isSupported())
         copilotSetupPanel_.setKeyStoreSupported (false);
 

@@ -15,6 +15,14 @@
     of defaultAppSettingsFile() (%APPDATA%/AZSoundtech/HandsFree). */
 juce::File defaultCopilotCredentialsDirectory();
 
+/** The ORIGIN of an http(s) base URL, the unit a stored OpenAI-compatible key is
+    bound to: lowercase scheme + "://" + lowercase host (IPv6 keeps its brackets)
+    + ":port" only when a port is given and is not the scheme default (80 / 443);
+    path, query and fragment are dropped. Empty when the URL is not a valid
+    base URL (isValidCopilotBaseUrl). The Python sidecar implements the same
+    function; both must satisfy the vectors in tests/test_copilotcredentialstore.cpp. */
+juce::String copilotBaseUrlOrigin (const juce::String& baseUrl);
+
 class CopilotCredentialStore
 {
 public:
@@ -22,11 +30,25 @@ public:
 
     /** Providers: exactly "anthropic" and "openai_compatible". The key is trimmed
         and must be a non-empty single line of at most 4096 UTF-8 bytes. False
-        (nothing written) otherwise, or when encryption/writing fails. */
-    bool storeKey (const juce::String& provider, const juce::String& key);
+        (nothing written) otherwise, or when encryption/writing fails.
+        For "openai_compatible" `baseUrl` is REQUIRED and valid: the entry records
+        copilotBaseUrlOrigin (baseUrl) next to the blob, so the key is only ever
+        sent to the origin it was saved for. `baseUrl` is ignored for "anthropic". */
+    bool storeKey (const juce::String& provider, const juce::String& key,
+                   const juce::String& baseUrl = {});
 
-    /** True only when the profile exists AND its blob decrypts. */
-    bool hasKey (const juce::String& provider) const;
+    enum class KeyState
+    {
+        none,          // no entry, unreadable, or its blob does not decrypt
+        ready,         // usable (for "openai_compatible": origin matches `baseUrl`)
+        otherOrigin    // "openai_compatible" entry without an origin (release 1.5.0)
+                       // or bound to another origin: never used
+    };
+
+    [[nodiscard]] KeyState keyState (const juce::String& provider, const juce::String& baseUrl = {}) const;
+
+    /** keyState (...) == KeyState::ready. */
+    bool hasKey (const juce::String& provider, const juce::String& baseUrl = {}) const;
 
     /** Removes that profile (the other is kept). True if a profile was removed. */
     bool deleteKey (const juce::String& provider);
