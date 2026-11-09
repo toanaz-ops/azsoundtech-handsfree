@@ -517,6 +517,16 @@ class GateFailsClosed(TempDirCase):
             fh.write(" ")
         self.assertFailsWith("sha256 mismatch", self.report)
 
+    def test_line_endings_do_not_change_the_weights_hash(self):
+        with open(self.weights, "rb") as fh:
+            lf = fh.read()
+        crlf = os.path.join(self.tmp, "w-crlf.json")
+        with open(crlf, "wb") as fh:
+            fh.write(lf.replace(b"{", b"{" + bytes([13, 10]), 1))
+        with open(self.weights, "wb") as fh:
+            fh.write(lf.replace(b"{", b"{" + bytes([10]), 1))
+        self.assertEqual(gate.sha256_file(crlf), gate.sha256_file(self.weights))
+
     def test_missing_weights_file(self):
         f = gate.check(self.report, os.path.join(self.tmp, "nope.json"))
         self.assertTrue(any("cannot read weights" in x for x in f))

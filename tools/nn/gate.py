@@ -39,11 +39,12 @@ RETENTION = THRESHOLDS["retention"]
 
 
 def sha256_file(path):
-    h = hashlib.sha256()
+    """sha256 of a TEXT file with CRLF read as LF: a Windows checkout with
+    autocrlf rewrites line endings of a committed weights file, and that must
+    not make a valid report look like it belongs to different weights."""
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        data = fh.read()
+    return hashlib.sha256(data.replace(bytes([13, 10]), bytes([10]))).hexdigest()
 
 
 def _get(d, *path):
