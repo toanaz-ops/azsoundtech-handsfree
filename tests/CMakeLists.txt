@@ -59,6 +59,7 @@ add_executable(HandsFreeTests
     test_copilotcredentialstore.cpp
     test_copilotpanel.cpp
     test_copilotsetup.cpp
+    test_candidateclassifier.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
@@ -83,6 +84,7 @@ target_link_libraries(HandsFreeTests PRIVATE
     HandsFreeFonts
     melatonin_blur
     az_host_settings
+    az_rtneural_headers
     juce::juce_audio_devices
     juce::juce_gui_basics
     juce::juce_cryptography
@@ -143,6 +145,33 @@ if(MSVC)
     target_link_options(HandsFreeTests PRIVATE "/STACK:8388608")
 endif()
 
+# Lane C1a, Q5 condition 1: score() makes zero global operator new / delete
+# calls. SEPARATE executable because it replaces every global allocation
+# function -- doing that in HandsFreeTests would override the sanitizer
+# allocators of the nightly ASan/TSan jobs. Compiles the classifier source
+# directly (no detector, no GUI): the class depends only on juce_core,
+# juce_audio_basics and RTNeural.
+add_executable(CandidateClassifierAllocTest
+    candidate_classifier_alloc_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CandidateClassifier.cpp
+)
+target_link_libraries(CandidateClassifierAllocTest PRIVATE
+    GTest::gtest_main
+    az_rtneural_headers
+    juce::juce_audio_basics
+    juce::juce_recommended_config_flags
+)
+target_include_directories(CandidateClassifierAllocTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(CandidateClassifierAllocTest PRIVATE
+    HANDSFREE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+)
+if(MSVC)
+    target_compile_definitions(CandidateClassifierAllocTest PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+add_test(NAME CandidateClassifierAllocTest COMMAND CandidateClassifierAllocTest)
+
 include(GoogleTest)
 gtest_discover_tests(HandsFreeTests)
 
@@ -172,6 +201,13 @@ if(Python3_Interpreter_FOUND)
     # covered only where the anthropic package happens to be installed.
     add_test(NAME copilot_findings
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_copilot.py)
+    # Lane C1a: the pure-Python reference of the classifier (normalise + MLP)
+    # must reproduce the expected scores stored next to the C++ parity test, so
+    # both implementations are pinned to the same numbers. -B: no __pycache__.
+    add_test(NAME classifier_reference_parity
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tools/nn/reference_forward.py
+                --weights ${CMAKE_SOURCE_DIR}/tests/fixtures/classifier-fixture-v1.json
+                --parity ${CMAKE_SOURCE_DIR}/tests/fixtures/classifier-parity-v1.json)
 else()
     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
@@ -181,4 +217,6 @@ else()
     set_tests_properties(logstats_candidates PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME copilot_findings COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(copilot_findings PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME classifier_reference_parity COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(classifier_reference_parity PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
 endif()
