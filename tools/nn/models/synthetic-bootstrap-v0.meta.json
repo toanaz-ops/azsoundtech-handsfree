@@ -1,0 +1,44 @@
+{
+ "model": "synthetic-bootstrap-v0",
+ "seed": 20261109,
+ "numpy_version": "2.5.4",
+ "python_version": "3.14.6",
+ "hyperparameters": {
+  "max_epochs": 600,
+  "patience": 40,
+  "lr": 0.01,
+  "l2": 0.0001,
+  "val_fraction": 0.25,
+  "optimizer": "adam",
+  "batch": "full",
+  "class_weighting": "balanced"
+ },
+ "split": {
+  "fit_sessions": [
+   "session-synthetic-v0-s0",
+   "session-synthetic-v0-s1",
+   "session-synthetic-v0-s2",
+   "session-synthetic-v0-s3"
+  ],
+  "validation_sessions": [
+   "session-synthetic-v0-s4",
+   "session-synthetic-v0-s5"
+  ],
+  "heldout_sessions_untouched": [
+   "session-synthetic-v0-s6",
+   "session-synthetic-v0-s7"
+  ]
+ },
+ "rows": {
+  "fit": 295,
+  "validation": 127
+ },
+ "weights_clipped": 0,
+ "epochs_run": 77,
+ "best_epoch": 37,
+ "best_val_loss": 0.20530564255088526,
+ "stopped_early": true,
+ "final_train_loss": 0.12444159506630986,
+ "dataset_sha256": "07fb752d62ab0dc6b3aba1cddf5c1e98d75adf3508959fc07e281e188ba39bbf",
+ "weights_sha256": "9c4f030f82c8d119c3c18583076502d8576a14893e0f00d53bca15489416d8d6"
+}
