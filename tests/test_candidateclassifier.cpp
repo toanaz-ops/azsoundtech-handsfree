@@ -237,6 +237,18 @@ TEST (CandidateClassifierLoad, MissingOrCorruptWeightsLeaveItInactive)
                     "non-numeric weight");
     expectRejected (mutated ([] (juce::var& v) { (*v["dense3"]["weights"].getArray())[0].getArray()->set (0, 1.0e9); }),
                     "absurd weight");
+    expectRejected (mutated ([] (juce::var& v) { v["input_offset"].getArray()->removeLast(); }),
+                    "wrong input_offset length");
+    expectRejected (mutated ([] (juce::var& v) { v["input_offset"].getArray()->set (3, 1.0e9); }),
+                    "absurd input_offset");
+    expectRejected (mutated ([] (juce::var& v) { v["dense1"]["bias"].getArray()->removeLast(); }),
+                    "wrong dense1 bias length");
+    expectRejected (mutated ([] (juce::var& v) { v["dense3"]["bias"].getArray()->add (0.0); }),
+                    "wrong dense3 bias length");
+    expectRejected (mutated ([] (juce::var& v) { v["input_scale"].getArray()->set (2, 0.0); }),
+                    "zero input_scale");
+    expectRejected (mutated ([] (juce::var& v) { v["input_scale"].getArray()->set (2, 1.0e-9); }),
+                    "near-zero input_scale");
 
     // NaN / inf cannot be written as JSON, so go through the Weights overload.
     CandidateClassifier::Weights w;
@@ -244,9 +256,10 @@ TEST (CandidateClassifierLoad, MissingOrCorruptWeightsLeaveItInactive)
     const float bad[] = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() };
     for (const float b : bad)
     {
-        for (int which = 0; which < 4; ++which)
+        for (int which = 0; which < 5; ++which)
         {
             CandidateClassifier::Weights x = w;
+            if (which == 4) x.inputOffset[6] = b;
             if (which == 0) x.dense1W[7] = b;
             if (which == 1) x.dense2B[1] = b;
             if (which == 2) x.inputScale[4] = b;
@@ -257,6 +270,13 @@ TEST (CandidateClassifierLoad, MissingOrCorruptWeightsLeaveItInactive)
             EXPECT_FALSE (c.isLoaded());
             EXPECT_FALSE (c.score (typicalInput()).has_value());
         }
+    }
+    {
+        CandidateClassifier::Weights z = w;
+        z.inputScale[0] = 0.0f;
+        juce::String err;
+        EXPECT_FALSE (c.load (z, err));
+        EXPECT_FALSE (c.isLoaded());
     }
     EXPECT_TRUE (c.loadFromJson (good, error)) << error;   // and it recovers
     EXPECT_EQ (c.modelName(), juce::String ("fixture-v1-seeded-random"));

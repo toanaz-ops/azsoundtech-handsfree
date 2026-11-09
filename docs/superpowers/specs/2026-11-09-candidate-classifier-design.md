@@ -96,6 +96,7 @@ ba bin (−5..−3, +3..+5) rồi mới đổi dB; mono thì đặc trưng 7 và
 Kiểm `isfinite` áp lên **mọi** trường thô (kể cả `lrRatio` khi mono) trước mọi phép kẹp.
 
 Không đưa vào: `score` (tích của các số trên), `asymmetry` (hằng số ở cấu hình mặc định), `thr`, `persist`.
+`input_scale` phải thoả `1e-6 <= |scale| <= 1e6` (không 0: một đặc trưng bị nhân 0 là đầu vào chết); `input_offset` hữu hạn, `|offset| <= 1e6`.
 File trọng số mang `feature_set`, `input_offset`, `input_scale`; C++ từ chối file lệch `feature_set`.
 
 ## 4. Cổng Q5 — test của C1a

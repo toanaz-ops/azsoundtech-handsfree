@@ -29,6 +29,7 @@ static_assert (CandidateClassifier::kNumFeatures == 16 && CandidateClassifier::k
 
 constexpr float kMaxAbsWeight = 1000.0f;    // anything bigger is a corrupt file, not a model
 constexpr float kMaxAbsInputXform = 1.0e6f;
+constexpr float kMinAbsInputScale = 1.0e-6f;   // a scale this small would erase the feature (0 = dead input)
 
 // Valid detector band for feature 0 (the log2 would otherwise blow up on 0).
 constexpr double kMinHz = 20.0;
@@ -170,9 +171,10 @@ bool CandidateClassifier::validate (const Weights& w, juce::String& error)
     {
         const float o = w.inputOffset[(std::size_t) i], s = w.inputScale[(std::size_t) i];
         if (! std::isfinite (o) || ! std::isfinite (s) || std::fabs (o) > kMaxAbsInputXform
-            || std::fabs (s) > kMaxAbsInputXform)
+            || std::fabs (s) > kMaxAbsInputXform
+            || std::fabs (s) < kMinAbsInputScale)
         {
-            error = "input_offset / input_scale not finite or absurd";
+            error = "input_offset / input_scale not finite, absurd, or a zero / near-zero scale";
             return false;
         }
     }

@@ -151,26 +151,36 @@ endif()
 # allocators of the nightly ASan/TSan jobs. Compiles the classifier source
 # directly (no detector, no GUI): the class depends only on juce_core,
 # juce_audio_basics and RTNeural.
-add_executable(CandidateClassifierAllocTest
-    candidate_classifier_alloc_test.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/CandidateClassifier.cpp
-)
-target_link_libraries(CandidateClassifierAllocTest PRIVATE
-    GTest::gtest_main
-    az_rtneural_headers
-    juce::juce_audio_basics
-    juce::juce_recommended_config_flags
-)
-target_include_directories(CandidateClassifierAllocTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_compile_definitions(CandidateClassifierAllocTest PRIVATE
-    HANDSFREE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-)
-if(MSVC)
-    target_compile_definitions(CandidateClassifierAllocTest PRIVATE _CRT_SECURE_NO_WARNINGS)
+# OFF in the sanitizer jobs (build.yml): the global operator new replacement must
+# never be built under ASan/TSan, and those jobs build only HandsFreeTests then run
+# an unfiltered ctest, so the test must not even be registered there. A sanitizer
+# flag in CMAKE_CXX_FLAGS turns it off by itself as a second guard.
+option(HANDSFREE_BUILD_ALLOC_TEST "Build the operator-new counting test" ON)
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize")
+    set(HANDSFREE_BUILD_ALLOC_TEST OFF)
 endif()
-add_test(NAME CandidateClassifierAllocTest COMMAND CandidateClassifierAllocTest)
+if(HANDSFREE_BUILD_ALLOC_TEST)
+    add_executable(CandidateClassifierAllocTest
+        candidate_classifier_alloc_test.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/CandidateClassifier.cpp
+    )
+    target_link_libraries(CandidateClassifierAllocTest PRIVATE
+        GTest::gtest_main
+        az_rtneural_headers
+        juce::juce_audio_basics
+        juce::juce_recommended_config_flags
+    )
+    target_include_directories(CandidateClassifierAllocTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_compile_definitions(CandidateClassifierAllocTest PRIVATE
+        HANDSFREE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+    if(MSVC)
+        target_compile_definitions(CandidateClassifierAllocTest PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME CandidateClassifierAllocTest COMMAND CandidateClassifierAllocTest)
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(HandsFreeTests)
