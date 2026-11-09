@@ -1581,6 +1581,13 @@ void NotchController::setSampleRate (double sampleRate)
     for (auto& l : lanes_)
     {
         l.detector.setSampleRate (sampleRate);
+        // Review 2026-11-09 MEDIUM-2: the analysis window still holds up to
+        // 2048 samples captured at the OLD rate; without this the first hops
+        // after a switch are transformed with the new bin->Hz map (8.8 % off
+        // for 44.1 -> 48 kHz, ~32 ms) and, with AGGRESSIVE persistence, one
+        // block can place a notch on a frequency that never rang. Thread is
+        // stopped here (setWidth() contract), so the zeroing cannot race.
+        l.detector.reset();
         // A-R4 reset boundary. The scorer itself is deliberately NOT reset
         // (that would move notches; lane D removed it), so its rise history
         // and baseline EMAs still hold old-rate magnitudes at bin indices
@@ -1595,6 +1602,21 @@ void NotchController::setSampleRate (double sampleRate)
     // called it and the detector ran at 48 kHz on every device).
     {
         const std::lock_guard<std::mutex> lock (modelMutex_);
+
+        // Review 2026-11-09 LOW-3: a notch at or above the new Nyquist cannot
+        // exist at this rate (the chain refuses it and stays Idle), yet the
+        // model would keep showing it Active. Take it out, with its own reason
+        // so the session log can tell it from an operator action.
+        if (sampleRate > 0.0)
+        {
+            const double nyquist = sampleRate * 0.5;
+            for (int c = 0; c < kChannels; ++c)
+                for (int i = 0; i < kSlots; ++i)
+                    if (model_[slotOf (c, i)].active
+                        && model_[slotOf (c, i)].frequency >= nyquist)
+                        pushClearLocked (c, i, ClearReason::RateChange);
+        }
+
         clearRoomMemoryLocked();
     }
 }

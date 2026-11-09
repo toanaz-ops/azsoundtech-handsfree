@@ -76,6 +76,7 @@ const char* reasonName (NotchController::ClearReason r)
         case NotchController::ClearReason::VerdictFalse:       return "verdict_false";
         case NotchController::ClearReason::PartialApplyUnwind: return "partial_apply_unwind";
         case NotchController::ClearReason::SoundcheckReplace:  return "soundcheck_replace";
+        case NotchController::ClearReason::RateChange:         return "rate_change";
     }
     return "unknown";
 }
