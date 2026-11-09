@@ -254,3 +254,65 @@ nghị, riêng vụ mạng neuron được tôi muốn làm luôn". Cùng lượ
 Hệ quả: khoá do owner tự nhập trong lớp phủ `CÀI AI`; điều phối không nhập, không đọc khoá. C1 vẫn
 phải thoả năm điều kiện của Q5 (`docs/research/2026-11-09-rtneural-realtime-audit.md`) và chỉ chạy
 ở chế độ bóng: không tác động vào notch, mức ra dự kiến đổi 0 dB.
+
+## Lane C1 — Q17–Q22 (điều phối chốt tạm 09/11/2026, owner chưa duyệt; trừ Q22 chờ owner)
+
+Spec: [`../specs/2026-11-09-candidate-classifier-design.md`](../specs/2026-11-09-candidate-classifier-design.md).
+Owner đã bảo làm C1 ngay (Q16); các câu dưới là ngả rẽ bên trong lane.
+
+### Q17 — Chưa có dữ liệu thật thì C1 mang model nào?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | Không trọng số: đường suy luận chỉ chạy trong test với model mẫu | không rủi ro ngoài hiện trường | không biết CPU và độ ổn định trên máy tester |
+| 2 | Model `synthetic-v0` (nhãn tổng hợp) chạy bóng trong app | chứng minh runtime trên máy tester (p99, không sập); chấm lại offline được | score không có nghĩa về nhạc thật, dễ bị đọc nhầm |
+| 3 | Trọng số đặt tay bắt chước `score` hiện tại | không | tương quan hoàn toàn với `score`, không thêm thông tin |
+
+**Chọn: 1 ở bước C1a, 2 ở bước C1b.** 2 chỉ làm kèm việc ghi score vào cả `notch_set`.
+
+### Q18 — `CandidateClassifier` nằm ở app hay thư viện dùng chung?
+
+Q5 ghi "lớp nạp model là thư viện dùng chung"; `CLAUDE.md` cấm tách khi chưa có sản phẩm thứ hai nêu tên.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Ở `src/app` bây giờ** | đúng luật "không tách phòng xa"; ít file | khi có sản phẩm thứ hai phải dời |
+| 2 | Tách `libs/` ngay | khớp câu chữ Q5 | thư viện chỉ một nơi dùng |
+
+**Chọn: 1.** Lệch câu chữ Q5 một cách có ghi lại; owner lật được.
+
+### Q19 — Tên trường log
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **`nn_score`** | vẫn đúng khi sau này mạng được quyền quyết định | khác tên spec C0 đã viết |
+| 2 | `shadow_score` (spec C0) | khớp spec cũ | phải đổi tên khi hết chạy bóng, vỡ công cụ đọc log |
+
+**Chọn: 1.**
+
+### Q20 — Đổi model khi app đang chạy?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Chỉ nạp khi mọi luồng detector đang dừng** | không model đang chạy nào bị ghi; không thêm cơ chế đồng bộ | muốn đổi model phải dừng / khởi động lại |
+| 2 | Hộp thư nguyên tử (publish / adopt / retire) | đổi giữa buổi diễn | ~80 dòng đồng bộ + test TSan; chưa ai cần |
+
+**Chọn: 1.** Thoả ý của điều kiện 4 trong bản soát RTNeural (không ghi vào model đang chạy).
+
+### Q21 — Tên bước
+
+Spec C0 gọi "C1 = soát + huấn luyện + lớp nạp, C2 = chạy bóng". **Chọn:** lane này là C1, chia C1a
+(runtime + cổng Q5) và C1b (chạy bóng, tức "C2" cũ); huấn luyện trên dữ liệu thật để sau.
+
+### Q22 — File ghi công bên thứ ba trong bộ cài **CHỜ OWNER**
+
+Bộ cài hôm nay không kèm file ghi công nào. BSD-3 của RTNeural đòi kèm thông báo bản quyền khi mã
+nằm trong binary (từ C1a); melatonin_blur (MIT) và các gói Python trong `HandsFreeCopilot.exe` đã ở
+tình trạng này từ trước.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Thêm `THIRD-PARTY-NOTICES.txt` vào bộ cài trước bản phát hành kế tiếp** | đúng điều khoản giấy phép | một PR nhỏ đụng `handsfree.nsi`; phải liệt kê cả gói Python |
+| 2 | Để sau | không việc thêm | bản phát hành kế tiếp mang RTNeural mà không có thông báo |
+
+**Chọn:** chờ owner. Khuyên 1.
