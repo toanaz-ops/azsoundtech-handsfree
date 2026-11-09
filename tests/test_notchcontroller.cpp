@@ -4514,6 +4514,18 @@ TEST (ShadowClassifier, DecisionsAreIdenticalWithAndWithoutClassifier)
             if (v == ShadowVariant::ForcedLow)  EXPECT_LT (c.nnScore, 0.001f);
             if (v == ShadowVariant::ForcedHigh) EXPECT_GT (c.nnScore, 0.999f);
         }
+        // Call site B: every detector placement event carries the forced score too.
+        int placements = 0;
+        for (const auto& e : with.events)
+            if (e.kind == NotchController::NotchEvent::Kind::Set && e.hasScore
+                && e.origin == NotchController::Origin::Detector)
+            {
+                ++placements;
+                ASSERT_TRUE (e.hasNnScore) << "variant " << (int) v;
+                if (v == ShadowVariant::ForcedLow)  EXPECT_LT (e.nnScore, 0.001f);
+                if (v == ShadowVariant::ForcedHigh) EXPECT_GT (e.nnScore, 0.999f);
+            }
+        EXPECT_GT (placements, 0) << "teeth: site B ran, variant " << (int) v;
     }
 }
 

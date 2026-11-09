@@ -331,8 +331,9 @@ Tool:
 - Release alpha `-Part patch`. Note tester: "Bấm FALSE khi app cắt oan
   nốt nhạc, GOOD khi cắt đúng hú. Log ở `%APPDATA%\AZSoundtech\HandsFree\logs`,
   gửi file khi được hỏi. Không có audio trong log."
-- Ghi vào roadmap: lane C mở khi có ≥ 300 verdict từ ≥ 3 session khác
-  nhau.
+- Ghi vào roadmap: lane C (huấn luyện model THẬT) mở khi có ≥ 300 verdict từ ≥ 3 session
+  khác nhau. Ngưỡng này chỉ dành cho việc huấn luyện; runtime chạy bóng với model chưa huấn
+  luyện đã có từ lane C1b.
 
 ## 6. Quyết định chốt
 
