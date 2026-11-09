@@ -224,6 +224,51 @@ TEST (LaneU, SameDeviceIsNotAMismatch)
     EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
 }
 
+TEST (LaneU, RememberedCardReturningGetsItsRoutingBackAndTheFileIsUnchanged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    const auto saved = routedSettings();
+    writeSettings (t.file(), saved);
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Some Other Card");
+    ASSERT_TRUE (mc.deviceMismatchForTest());
+    ASSERT_FALSE (mc.getAudioEngine().getSlotConfig (0).enabled);
+
+    // The operator picks the remembered card in the device panel.
+    mc.resolveMismatchAfterRestartForTest ("ASIO", "Saved Card", true);
+
+    EXPECT_FALSE (mc.deviceMismatchForTest());
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (1).enabled);
+
+    ASSERT_TRUE (mc.saveSettings());
+    const auto back = appSettingsFromHost (az::host::loadHostSettings (t.file()).settings);
+    EXPECT_EQ (back.device, saved.device);
+    ASSERT_TRUE (back.hasRouting);
+    EXPECT_TRUE (back.slots[0].enabled);
+    EXPECT_TRUE (back.slots[1].enabled);
+}
+
+TEST (LaneU, ADifferentCardAfterAMismatchClearsTheFlagAndLeavesRoutingOff)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Some Other Card");
+    ASSERT_TRUE (mc.deviceMismatchForTest());
+
+    mc.resolveMismatchAfterRestartForTest ("ASIO", "Third Card", true);
+
+    EXPECT_FALSE (mc.deviceMismatchForTest());
+    EXPECT_FALSE (mc.getAudioEngine().getSlotConfig (0).enabled);
+}
+
 TEST (LaneU, NoRunningDeviceNeverOverwritesTheSavedDevice)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
@@ -314,6 +359,30 @@ TEST (LaneUInputMeter, OnReportsTheAbsolutePeakAndTakeResetsIt)
     one.run (engine, 1);
     EXPECT_FLOAT_EQ (engine.takeInputPeak (0), 0.1f);
     EXPECT_EQ (engine.takeInputPeak (1), 0.0f);
+}
+
+TEST (LaneUInputMeter, SixteenInputsAreMetered)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setInputMeterEnabled (true);
+
+    constexpr int n = 64;
+    std::vector<std::vector<float>> data (16, std::vector<float> (n, 0.0f));
+    const float* ins[16] {};
+    for (int c = 0; c < 16; ++c)
+    {
+        data[(std::size_t) c][3] = 0.05f * (float) (c + 1);
+        ins[c] = data[(std::size_t) c].data();
+    }
+    std::vector<float> outL (n, 0.0f), outR (n, 0.0f);
+    float* outs[2] { outL.data(), outR.data() };
+    const juce::AudioIODeviceCallbackContext ctx {};
+    engine.audioDeviceIOCallbackWithContext (ins, 16, outs, 2, n, ctx);
+
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (8),  0.45f);   // dead before: cap was 8
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (15), 0.80f);
+    EXPECT_EQ (engine.takeInputPeak (16), 0.0f);
 }
 
 TEST (LaneUInputMeter, NullChannelPointerIsSkipped)
@@ -444,6 +513,23 @@ TEST (LaneUWizard, CancelWritesNoRouting)
     const auto after = mc.getAudioEngine().getSlotConfig (0);
     EXPECT_EQ (after.enabled, before.enabled);
     EXPECT_EQ (after.inputChannels[0], before.inputChannels[0]);
+}
+
+TEST (LaneUWizard, PublicCancelClosesAndNotifiesLikeTheButton)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.openSetupWizard();
+    ASSERT_TRUE (mc.getSetupWizardForTest().isOpen());
+
+    int cancels = 0;
+    auto& w = mc.getSetupWizardForTest();
+    const auto original = w.onCancel;
+    w.onCancel = [&] { ++cancels; if (original) original(); };
+    w.cancel();
+
+    EXPECT_FALSE (w.isOpen());
+    EXPECT_EQ (cancels, 1);
 }
 
 TEST (LaneUWizard, LeavingForGeekCancelsTheWizard)

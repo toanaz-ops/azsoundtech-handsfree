@@ -2273,3 +2273,21 @@ TEST (AudioEngineLifecycle, StopAfterADeviceErrorStillTearsTheCallbackDown)
     engine.stop();   // idempotent
     EXPECT_FALSE (engine.isCallbackRegisteredForTest());
 }
+
+// RED IF the post-restart backlog stays in the rings: a ring filled during the
+// gap between the callback resuming and the detectors relaunching would feed
+// stale audio (and false splice-drop counts) into the first analysis windows.
+TEST (AudioEngineTapBacklog, DiscardDrainsEveryRing)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    std::vector<float> samples (3000, 0.25f);
+    ASSERT_EQ (engine.getTapBuffer (0, 0).write (samples.data(), samples.size()), samples.size());
+    ASSERT_EQ (engine.getTapBuffer (3, 1).write (samples.data(), samples.size()), samples.size());
+
+    engine.discardTapBacklog();
+
+    EXPECT_EQ (engine.getTapBuffer (0, 0).getAvailableRead(), 0u);
+    EXPECT_EQ (engine.getTapBuffer (3, 1).getAvailableRead(), 0u);
+    EXPECT_EQ (engine.getTapDropCount (0, 0), 0u);
+}

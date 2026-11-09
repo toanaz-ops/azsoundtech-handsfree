@@ -160,8 +160,12 @@ public:
     // Headless runs have 0 channels (no device), so the restored-slot check is
     // driven here with counts a real device would report.
     void validateRestoredSlotsForTest (int numIn, int numOut) { validateRestoredSlots (numIn, numOut); }
+    void startWorkersIfEngineRunningForTest() { startWorkersIfEngineRunning(); }
     void checkRestoredDeviceForTest (const juce::String& type, const juce::String& name)
         { checkRestoredDevice (type, name); }
+    void resolveMismatchAfterRestartForTest (const juce::String& type, const juce::String& name,
+                                             bool running)
+        { resolveMismatchAfterRestart (type, name, running); }
 
     // Puts one line in the status bar and the masthead readout -- the SAME
     // route devicePanel_.onMessage takes. Public because main.cpp is the one
@@ -442,7 +446,15 @@ private:
     void validateRestoredSlots (int numIn, int numOut);
     // Right after the restoring start(): JUCE opens the DEFAULT device when the
     // saved one is gone, and the saved routing must not run on it (Q12).
+    void startWorkersIfEngineRunning();
     void checkRestoredDevice (const juce::String& openType, const juce::String& openName);
+    // Review 2026-11-09 MEDIUM-1. The one place that decides what a finished
+    // restart means for a held mismatch, and the helper the wizard's HUY shares.
+    [[nodiscard]] bool openDeviceIsRemembered (const juce::String& openType,
+                                               const juce::String& openName) const;
+    void restoreRememberedRouting (const juce::String& openName);
+    void resolveMismatchAfterRestart (const juce::String& openType,
+                                      const juce::String& openName, bool running);
     void applyWizardResult (const SlotConfig& slot0);
 
     // Polls the engine for display. The engine publishes its state through

@@ -3330,3 +3330,28 @@ TEST (GuiWiring, AppInitiatedRestartIsNotHandledTwice)
     for (int s = 0; s < kMaxSlots; ++s)
         app.getNotchControllerForTest (s)->stop (1000);
 }
+
+// RED IF the detectors start with no device behind them (review 2026-11-09,
+// item (a)): eight spinning threads on a machine that has nothing to analyse.
+TEST (GuiWiring, WorkersStartOnlyWhenTheEngineIsRunning)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    app.startWorkersIfEngineRunningForTest();
+    EXPECT_FALSE (anyRunning (app));
+    EXPECT_FALSE (app.getSoundcheckControllerForTest().isPollThreadRunningForTest());
+
+    app.getAudioEngine().setRunningForTest (true);
+    app.startWorkersIfEngineRunningForTest();
+    EXPECT_TRUE (anyRunning (app));
+    EXPECT_TRUE (app.getSoundcheckControllerForTest().isPollThreadRunningForTest());
+
+    // Idempotent: a second call over running controllers must not touch them.
+    app.startWorkersIfEngineRunningForTest();
+    EXPECT_TRUE (anyRunning (app));
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        app.getNotchControllerForTest (s)->stop (1000);
+    app.getAudioEngine().setRunningForTest (false);
+}

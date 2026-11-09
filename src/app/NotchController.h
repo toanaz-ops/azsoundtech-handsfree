@@ -72,7 +72,10 @@ public:
         // -- makes an automatic cleanup indistinguishable from an operator
         // pulling a notch by hand, in the one file lane D built to tell them
         // apart (spec 4.6b, F21).
-        SoundcheckReplace
+        SoundcheckReplace,
+        // Review 2026-11-09 LOW-3: the sample rate changed and the notch's
+        // frequency is at or above the new Nyquist.
+        RateChange
     };
 
     static constexpr int kChannels   = 2;
@@ -395,6 +398,23 @@ public:
 
     // TEST ACCESSOR ONLY -- like Detector::getAnalysisWindowForTest().
     double liveMsForTest() const;
+    // TEST SEAMS (review 2026-11-09 LOW-4): write one room-memory entry, count
+    // the live entries of a lane.
+    void rememberReleaseForTest (int lane, double hz, double deepestDb)
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        rememberReleaseLocked (lane, hz, deepestDb, false);
+    }
+    [[nodiscard]] int memoryEntryCountForTest (int lane) const
+    {
+        const std::lock_guard<std::mutex> lock (modelMutex_);
+        int n = 0;
+        for (const auto& e : roomMemory_[(std::size_t) lane])
+            n += e.used ? 1 : 0;
+        return n;
+    }
+    [[nodiscard]] const float* analysisWindowForTest (int lane) const
+        { return lanes_[(std::size_t) lane].detector.getAnalysisWindowForTest(); }
 
     // TEST ACCESSOR ONLY -- the detection gate is otherwise observable only
     // through a live spectrum; headless tests assert the disarm directly.

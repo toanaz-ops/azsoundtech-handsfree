@@ -172,7 +172,7 @@ public:
     // store, so a peak landing between it and the GUI's exchange(0) can be
     // lost -- acceptable for a meter a person glances at, and the price of not
     // putting a CAS loop on the audio thread.
-    static constexpr int kInputMeterChannels = 8;
+    static constexpr int kInputMeterChannels = 16;
     void  setInputMeterEnabled (bool enabled);
     float takeInputPeak (int channel);
 
@@ -213,6 +213,11 @@ public:
     // nothing downstream can distinguish a drop-induced false peak from a real
     // howl. Incremented with memory_order_relaxed: one lock-free RMW per short
     // write, no allocation, no ordering dependency on anything else.
+    // Review 2026-11-09 LOW-6. Drains every tap ring and zeroes the drop counts.
+    // The CALLER must be the only consumer (every detector thread joined) --
+    // it is an ordinary read(), so a running producer is fine. Message thread.
+    void discardTapBacklog();
+
     std::uint64_t getTapDropCount() const;
     std::uint64_t getTapDropCount (int slot) const;
     std::uint64_t getTapDropCount (int slot, int lane) const;
