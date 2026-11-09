@@ -49,6 +49,33 @@ endif()
 # Each is its own target with its own include root and no path back into src/.
 add_subdirectory(libs/host_settings)
 
+# RTNeural (BSD-3-Clause), header-only, STL backend -- lane C1, spec
+# docs/superpowers/specs/2026-11-09-candidate-classifier-design.md section 2.
+# NOT add_subdirectory: RTNeural's own CMake builds a STATIC library and picks
+# the Eigen backend, which wants aligned buffers and drags in a nested
+# submodule. The STL backend is plain loops over fixed arrays (no Eigen, no
+# xsimd, no alignment requirement) and is what the real-time audit read
+# (docs/research/2026-11-09-rtneural-realtime-audit.md). The backend is
+# whatever RTNEURAL_USE_EIGEN / RTNEURAL_USE_XSIMD are NOT: CandidateClassifier.cpp
+# #errors if either is defined.
+#
+# A missing submodule is a hard stop, not a warning that quietly builds an app
+# without it (memory/asio-sdk-silent-disable-2026-08-24.md).
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/RTNeural/RTNeural/RTNeural.h")
+    message(FATAL_ERROR
+        "RTNeural submodule is missing (external/RTNeural/RTNeural/RTNeural.h not found). "
+        "Run: git submodule update --init external/RTNeural")
+endif()
+add_library(az_rtneural_headers INTERFACE)
+target_include_directories(az_rtneural_headers SYSTEM INTERFACE
+    ${CMAKE_SOURCE_DIR}/external/RTNeural
+)
+# Without this RTNeural prints a "was not defined" pragma message in every
+# translation unit that includes it. 16 is the value it would default to.
+target_compile_definitions(az_rtneural_headers INTERFACE
+    RTNEURAL_DEFAULT_ALIGNMENT=16
+)
+
 # Create JUCE standalone GUI application
 juce_add_gui_app(HandsFree
     PRODUCT_NAME "AZ Soundtech Hands-free"
@@ -89,6 +116,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CandidateClassifier.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CandidateClassifier.h
     ${CMAKE_SOURCE_DIR}/src/app/CopilotAnswer.cpp
     ${CMAKE_SOURCE_DIR}/src/app/CopilotAnswer.h
     ${CMAKE_SOURCE_DIR}/src/app/CopilotCredentialStore.cpp
@@ -193,6 +222,7 @@ target_link_libraries(HandsFree
         HandsFreeFonts
         melatonin_blur
         az_host_settings
+        az_rtneural_headers
         juce::juce_audio_devices
         juce::juce_audio_utils
         juce::juce_cryptography
