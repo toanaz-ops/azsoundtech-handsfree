@@ -654,9 +654,8 @@ MainComponent::MainComponent()
 
         // LANE U. The operator picked a device other than the one JUCE fell
         // back to: that is a deliberate choice, and the memory may follow it.
-        if (deviceMismatch_ && engine_.isRunning()
-            && engine_.getCurrentDeviceName() != mismatchDeviceName_)
-            deviceMismatch_ = false;
+        resolveMismatchAfterRestart (engine_.getCurrentDeviceType(),
+                                     engine_.getCurrentDeviceName(), engine_.isRunning());
 
         // While the wizard is open, a device change is not yet a decision:
         // only XONG commits it (verification I-1). Saving here would let a
@@ -981,10 +980,8 @@ MainComponent::MainComponent()
 
         // Step 1 restarted the device. What matters is WHICH card is open now,
         // not that a pick happened (round 2, I-1): Y then back to X is X.
-        const auto& remembered = wizardSnapshot_.device;
-        const bool  onRemembered = remembered.type.isEmpty()
-            || (engine_.getCurrentDeviceType() == remembered.type
-                && (remembered.name.isEmpty() || engine_.getCurrentDeviceName() == remembered.name));
+        const bool onRemembered = openDeviceIsRemembered (engine_.getCurrentDeviceType(),
+                                                          engine_.getCurrentDeviceName());
 
         if (! onRemembered)
         {
@@ -1006,28 +1003,16 @@ MainComponent::MainComponent()
             // Back on the remembered card -- possibly the one a start-up
             // fallback had lost. Its own routing comes back with it, and is
             // checked against its channels at the first real count.
-            //
-            // Round 3: every changeSlotConfig runs onAfterRestart, which SAVES
-            // (the wizard is already closed). With the mismatch still set those
-            // saves write the memory back unchanged; clearing it first made the
-            // first save store slots 1-7 as off -- to disk AND into settings_,
-            // which the loop then read back. So: a local copy, the flag held
-            // until the loop is done, one save after.
             if (wizardSnapshotMismatch_ && settings_.hasRouting)
             {
-                const auto rememberedSlots = settings_.slots;
-                deviceMismatch_ = true;
-                // onAfterRestart clears the flag whenever the open card differs
-                // from mismatchDeviceName_ -- and the remembered card always
-                // does. Point it at the open card so the flag really holds
-                // (round 4): no partial routing reaches the disk mid-loop.
-                mismatchDeviceName_ = engine_.getCurrentDeviceName();
-                for (int i = 0; i < kMaxSlots; ++i)
-                    changeSlotConfig (i, rememberedSlots[(std::size_t) i]);
+                restoreRememberedRouting (engine_.getCurrentDeviceName());
             }
-            deviceMismatch_ = false;
-            restorePending_ = true;
-            saveSettings();
+            else
+            {
+                deviceMismatch_ = false;
+                restorePending_ = true;
+                saveSettings();
+            }
         }
 
         slotPanel_.refresh();
@@ -1435,6 +1420,63 @@ void MainComponent::checkRestoredDevice (const juce::String& openType, const juc
     showMessage (juce::String::fromUTF8 ("Kh\xc3\xb4ng th\xe1\xba\xa5y ")
                  + (saved.name.isNotEmpty() ? saved.name : saved.type)
                  + juce::String::fromUTF8 (". C\xe1\xba\xa7n c\xc3\xa0i \xc4\x91\xe1\xba\xb7t l\xe1\xba\xa1i."));
+}
+
+bool MainComponent::openDeviceIsRemembered (const juce::String& openType,
+                                            const juce::String& openName) const
+{
+    const auto& remembered = settings_.device;
+    return remembered.type.isEmpty()
+        || (openType == remembered.type
+            && (remembered.name.isEmpty() || openName == remembered.name));
+}
+
+void MainComponent::restoreRememberedRouting (const juce::String& openName)
+{
+    // Round 3: every changeSlotConfig runs onAfterRestart, which SAVES (the
+    // wizard is already closed). With the mismatch still set those saves write
+    // the memory back unchanged; clearing it first made the first save store
+    // slots 1-7 as off -- to disk AND into settings_, which the loop then read
+    // back. So: a local copy, the flag held until the loop is done, one save
+    // after.
+    const auto rememberedSlots = settings_.slots;
+    deviceMismatch_ = true;
+    // onAfterRestart clears the flag whenever the open card differs from
+    // mismatchDeviceName_ -- and the remembered card always does. Point it at
+    // the open card so the flag really holds (round 4): no partial routing
+    // reaches the disk mid-loop.
+    mismatchDeviceName_ = openName;
+    for (int i = 0; i < kMaxSlots; ++i)
+        changeSlotConfig (i, rememberedSlots[(std::size_t) i]);
+
+    deviceMismatch_ = false;
+    restorePending_ = true;
+    saveSettings();
+    slotPanel_.refresh();
+    refreshDumbView();
+}
+
+void MainComponent::resolveMismatchAfterRestart (const juce::String& openType,
+                                                 const juce::String& openName,
+                                                 const bool running)
+{
+    // The operator picked a device other than the one JUCE fell back to: that
+    // is a deliberate choice, and the memory may follow it -- unless the card
+    // picked is the REMEMBERED one coming back (review 2026-11-09, MEDIUM-1),
+    // in which case clearing the flag alone would let the next save write the
+    // all-off routing over the file. Its routing is re-applied instead. While
+    // the wizard is open nothing is decided: its HUY does the same on close.
+    if (! deviceMismatch_ || ! running || openName == mismatchDeviceName_)
+        return;
+
+    if (! setupWizard_.isOpen() && settings_.hasRouting
+        && openDeviceIsRemembered (openType, openName))
+    {
+        restoreRememberedRouting (openName);
+        return;
+    }
+
+    deviceMismatch_ = false;
 }
 
 void MainComponent::validateRestoredSlots (const int numIn, const int numOut)

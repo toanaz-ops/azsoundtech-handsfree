@@ -224,6 +224,51 @@ TEST (LaneU, SameDeviceIsNotAMismatch)
     EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
 }
 
+TEST (LaneU, RememberedCardReturningGetsItsRoutingBackAndTheFileIsUnchanged)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    const auto saved = routedSettings();
+    writeSettings (t.file(), saved);
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Some Other Card");
+    ASSERT_TRUE (mc.deviceMismatchForTest());
+    ASSERT_FALSE (mc.getAudioEngine().getSlotConfig (0).enabled);
+
+    // The operator picks the remembered card in the device panel.
+    mc.resolveMismatchAfterRestartForTest ("ASIO", "Saved Card", true);
+
+    EXPECT_FALSE (mc.deviceMismatchForTest());
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (0).enabled);
+    EXPECT_TRUE (mc.getAudioEngine().getSlotConfig (1).enabled);
+
+    ASSERT_TRUE (mc.saveSettings());
+    const auto back = appSettingsFromHost (az::host::loadHostSettings (t.file()).settings);
+    EXPECT_EQ (back.device, saved.device);
+    ASSERT_TRUE (back.hasRouting);
+    EXPECT_TRUE (back.slots[0].enabled);
+    EXPECT_TRUE (back.slots[1].enabled);
+}
+
+TEST (LaneU, ADifferentCardAfterAMismatchClearsTheFlagAndLeavesRoutingOff)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.checkRestoredDeviceForTest ("ASIO", "Some Other Card");
+    ASSERT_TRUE (mc.deviceMismatchForTest());
+
+    mc.resolveMismatchAfterRestartForTest ("ASIO", "Third Card", true);
+
+    EXPECT_FALSE (mc.deviceMismatchForTest());
+    EXPECT_FALSE (mc.getAudioEngine().getSlotConfig (0).enabled);
+}
+
 TEST (LaneU, NoRunningDeviceNeverOverwritesTheSavedDevice)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
