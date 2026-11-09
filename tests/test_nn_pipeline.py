@@ -44,6 +44,7 @@ SYN_DIR = os.path.join(NN, "models")
 SYN_WEIGHTS = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.json")
 SYN_REPORT = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.eval-report.json")
 SYN_MANIFEST = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.manifest.json")
+SYN_META = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.meta.json")
 SYN_LOGS = os.path.join(NN, "data", "synthetic-bootstrap-v0")
 BIN_HZ = 23.4375
 
@@ -305,6 +306,25 @@ class RebuildFromSpectrum(TempDirCase):
             x["session_id"] = y["session_id"] = "s"
         self.assertEqual(ra, rb)
 
+    def test_a_log_without_session_start_is_unknown_not_real(self):
+        raw = self.raw()
+        hz = 43 * BIN_HZ
+        raw["hz"] = hz
+        p = os.path.join(self.tmp, "session-nohead.jsonl")
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(make_full_log_line(raw, 43, hz)) + "\n")
+            fh.write(json.dumps({"ev": "verdict", "t": 2000.0, "slot": 0, "lane": 0, "index": 0,
+                                 "verdict": "good"}) + "\n")
+        m = ds.build_dataset([p], os.path.join(self.tmp, "o"))
+        self.assertEqual(m["sources"], {"unknown": 1})
+
+    def test_session_start_without_source_field_is_real(self):
+        raw = self.raw()
+        hz = 43 * BIN_HZ
+        raw["hz"] = hz
+        _, rows = self.rows_of([make_full_log_line(raw, 43, hz)])
+        self.assertEqual(rows[0]["source"], "real")
+
     def test_unknown_source_never_passes_as_real(self):
         raw = self.raw()
         hz = 43 * BIN_HZ
@@ -415,6 +435,38 @@ class AucAndOperatingPoint(unittest.TestCase):
         self.assertEqual(t, pos20[1])
         self.assertIsNone(evaluate.reject_at_retention([0.1, 0.2], [1, 1], 0.95))
 
+    def test_honest_threshold_is_picked_on_the_train_side(self):
+        # train-side positives score 0.5..0.9 -> threshold (95 % of 5 = all 5) = 0.5.
+        # Held-out positives 0.45 (lost) and 0.8; held-out negatives 0.2 (rejected) and 0.6.
+        w = read_json(SYN_WEIGHTS)
+
+        def row(session, label, value):
+            return {"session_id": session, "source": "real", "label": label, "score": 0.5, "raw": value}
+        rows = [row("a", 1, v) for v in (0.5, 0.6, 0.7, 0.8, 0.9)] + [row("a", 0, v) for v in (0.1, 0.2, 0.3)]
+        held = [row("b", 1, 0.45), row("b", 1, 0.8), row("b", 0, 0.2), row("b", 0, 0.6)]
+        orig_score, orig_split = evaluate.ref.score, evaluate.ds.split_sessions
+        try:
+            evaluate.ref.score = lambda weights, raw: raw      # the "model" returns the planted value
+            evaluate.ds.split_sessions = lambda ids: (["a"], ["b"])
+            rep = evaluate.evaluate(rows + held, w, SYN_WEIGHTS, "0" * 64)
+        finally:
+            evaluate.ref.score, evaluate.ds.split_sessions = orig_score, orig_split
+        h = rep["heldout"]
+        self.assertEqual(h["train_side_threshold"], 0.5)
+        self.assertEqual(h["retention_label1"], 0.5)           # 0.8 kept, 0.45 lost
+        self.assertEqual(h["reject_label0"], 0.5)              # 0.2 rejected, 0.6 not
+        # the optimistic number picks its threshold on the held-out positives themselves
+        self.assertEqual(h["insample_retention"], 1.0)
+        self.assertEqual(h["insample_reject_label0"], 0.5)
+
+    def test_ties_at_the_threshold_are_kept_and_not_rejected(self):
+        t, kept, rej = evaluate.reject_at_retention([0.5, 0.6, 0.7, 0.8, 0.5, 0.4], [1, 1, 1, 1, 0, 0], 1.0)
+        self.assertEqual((t, kept, rej), (0.5, 1.0, 0.5))      # a negative AT the threshold is not rejected
+        t, kept, rej = evaluate.reject_at_retention([0.5, 0.5, 0.5, 0.2], [1, 1, 1, 0], 0.95)
+        self.assertEqual((t, kept, rej), (0.5, 1.0, 1.0))      # all positives tied: all retained
+        self.assertEqual(evaluate.rates_at_threshold([0.5, 0.5, 0.4, 0.5], [1, 1, 0, 0], 0.5), (1.0, 0.5))
+        self.assertIsNone(evaluate.rates_at_threshold([0.5, 0.5], [1, 1], 0.5))
+
     def test_evaluate_reports_undefined_auc_for_a_one_label_heldout(self):
         w = read_json(SYN_WEIGHTS)
         rows = []
@@ -427,7 +479,9 @@ class AucAndOperatingPoint(unittest.TestCase):
                                      "nearMags": [0.1] * 5 + [1.0] + [0.1] * 5}})
         rep = evaluate.evaluate(rows, w, SYN_WEIGHTS, "0" * 64)
         self.assertIsNone(rep["heldout"]["auc_model"])
-        self.assertIsNone(rep["heldout"]["reject_label0_at_retention"])
+        self.assertIsNone(rep["heldout"]["insample_reject_label0"])
+        self.assertIsNone(rep["heldout"]["retention_label1"])
+        self.assertIsNone(rep["heldout"]["reject_label0"])
         json.dumps(rep, allow_nan=False)           # no NaN leaks into the report
 
 
@@ -441,11 +495,16 @@ class GateFailsClosed(TempDirCase):
             "rows_total": 400, "sessions_total": 5, "source_composition": {"real": 400},
             "dataset_sha256": "d" * 64, "weights_sha256": gate.sha256_file(self.weights),
             "heldout": {"rows": 100, "label1": 55, "label0": 45, "auc_model": 0.90,
-                        "auc_baseline": 0.70, "retention_target": 0.95, "retention_achieved": 0.96,
-                        "reject_label0_at_retention": 0.5}}
+                        "auc_baseline": 0.70, "retention_target": 0.95, "insample_retention": 0.96,
+                        "insample_reject_label0": 0.5, "train_side_threshold": 0.4,
+                        "retention_label1": 0.94, "reject_label0": 0.6}}
+        self.manifest = {"dataset_sha256": "d" * 64, "sources": {"real": 400}, "rows": 400}
+        self.meta = {"dataset_sha256": "d" * 64, "weights_sha256": self.report["weights_sha256"]}
 
-    def fails(self, report=None, manifest=None):
-        return gate.check(self.report if report is None else report, self.weights, manifest)
+    def fails(self, report=None, manifest="default", meta="default"):
+        return gate.check(self.report if report is None else report, self.weights,
+                          self.manifest if manifest == "default" else manifest,
+                          self.meta if meta == "default" else meta)
 
     def assertFailsWith(self, fragment, report):
         f = self.fails(report)
@@ -499,7 +558,7 @@ class GateFailsClosed(TempDirCase):
 
     def test_rejection_below_floor(self):
         r = copy.deepcopy(self.report)
-        r["heldout"]["reject_label0_at_retention"] = 0.29
+        r["heldout"]["insample_reject_label0"] = 0.29
         self.assertFailsWith("label-0 rows rejected", r)
 
     def test_retention_below_target(self):
@@ -507,8 +566,8 @@ class GateFailsClosed(TempDirCase):
         r["heldout"]["retention_target"] = 0.90
         self.assertFailsWith("retention", r)
         r = copy.deepcopy(self.report)
-        r["heldout"]["retention_achieved"] = 0.94
-        self.assertFailsWith("achieved retention", r)
+        r["heldout"]["insample_retention"] = 0.94
+        self.assertFailsWith("in-sample retention", r)
 
     def test_weights_hash_mismatch(self):
         r = copy.deepcopy(self.report)
@@ -533,11 +592,69 @@ class GateFailsClosed(TempDirCase):
         self.assertTrue(any("cannot read weights" in x for x in f))
 
     def test_dataset_hash_must_match_the_manifest(self):
-        self.assertEqual(self.fails(manifest={"dataset_sha256": "d" * 64, "sources": {"real": 400}}), [])
-        f = self.fails(manifest={"dataset_sha256": "e" * 64})
-        self.assertTrue(any("manifest" in x for x in f))
-        f = self.fails(manifest={"dataset_sha256": "d" * 64, "sources": {"real": 300, "synthetic": 100}})
+        f = self.fails(manifest=dict(self.manifest, dataset_sha256="e" * 64))
+        self.assertTrue(any("does not match the manifest" in x for x in f))
+        f = self.fails(manifest=dict(self.manifest, sources={"real": 300, "synthetic": 100}))
         self.assertTrue(any("non-real" in x for x in f))
+        f = self.fails(manifest=dict(self.manifest, rows=399))
+        self.assertTrue(any("manifest rows" in x for x in f))
+
+    def test_manifest_and_training_metadata_are_mandatory(self):
+        self.assertTrue(any("manifest is mandatory" in x for x in self.fails(manifest=None)))
+        self.assertTrue(any("training metadata is mandatory" in x for x in self.fails(meta=None)))
+        self.assertTrue(any("manifest is mandatory" in x for x in self.fails(manifest="not a dict")))
+        for key in ("dataset_sha256", "weights_sha256"):
+            m = dict(self.meta)
+            del m[key]
+            self.assertTrue(self.fails(meta=m), key)
+
+    def test_trained_on_one_dataset_evaluated_on_another_fails(self):
+        f = self.fails(meta=dict(self.meta, dataset_sha256="e" * 64))
+        self.assertTrue(any("trained on a different dataset" in x for x in f), f)
+
+    def test_training_metadata_must_name_the_weights_file(self):
+        f = self.fails(meta=dict(self.meta, weights_sha256="0" * 64))
+        self.assertTrue(any("training metadata weights sha256" in x for x in f), f)
+
+    def test_rates_and_aucs_outside_zero_one_fail_closed(self):
+        for key, bad in (("auc_model", 1.5), ("auc_baseline", -5), ("auc_model", -0.1),
+                         ("insample_retention", 1.01), ("insample_reject_label0", 2),
+                         ("retention_label1", 1.2), ("reject_label0", -0.2),
+                         ("retention_target", 7)):
+            r = copy.deepcopy(self.report)
+            r["heldout"][key] = bad
+            f = self.fails(r)
+            self.assertTrue(any("outside [0, 1]" in x for x in f), (key, bad, f))
+
+    def test_counts_must_be_non_negative_integers(self):
+        for path, bad in ((("rows_total",), -1), (("rows_total",), 400.5), (("sessions_total",), 5.0),
+                          (("heldout", "rows"), -100), (("heldout", "label1"), 55.5)):
+            r = copy.deepcopy(self.report)
+            cur = r
+            for k in path[:-1]:
+                cur = cur[k]
+            cur[path[-1]] = bad
+            f = self.fails(r)
+            self.assertTrue(any("non-negative integer" in x for x in f), (path, bad, f))
+
+    def test_honest_threshold_conditions(self):
+        r = copy.deepcopy(self.report)
+        r["heldout"]["retention_label1"] = 0.89
+        self.assertFailsWith("train-side threshold the held-out set keeps only", r)
+        r["heldout"]["retention_label1"] = 0.90
+        self.assertEqual(self.fails(r), [])
+        r["heldout"]["reject_label0"] = 0.29
+        self.assertFailsWith("train-side threshold the held-out set rejects only", r)
+        r = copy.deepcopy(self.report)
+        r["heldout"]["insample_reject_label0"] = 0.95      # a great optimistic number does not rescue it
+        r["heldout"]["reject_label0"] = 0.1
+        self.assertFailsWith("rejects only", r)
+
+    def test_auc_exactly_on_the_margin_fails_closed_by_binary_rounding(self):
+        self.assertGreater(0.78 + 0.05, 0.83)         # the float edge, not a bug in the gate
+        r = copy.deepcopy(self.report)
+        r["heldout"].update(auc_model=0.83, auc_baseline=0.78)
+        self.assertFailsWith("baseline score AUC", r)
 
     def test_removing_any_single_field_fails(self):
         def leaves(d, path=()):
@@ -552,16 +669,12 @@ class GateFailsClosed(TempDirCase):
             for k in path[:-1]:
                 cur = cur[k]
             del cur[path[-1]]
-            if path == ("dataset_sha256",):        # only consulted when a manifest is given
-                self.assertEqual(self.fails(r), [])
-                self.assertTrue(gate.check(r, self.weights, {"dataset_sha256": "d" * 64}))
-                continue
             self.assertTrue(self.fails(r), "gate passed without " + ".".join(path))
 
     def test_nan_inf_bool_and_string_metrics_fail(self):
         for bad in (float("nan"), float("inf"), -float("inf"), True, "0.9", None):
-            for key in ("auc_model", "auc_baseline", "reject_label0_at_retention",
-                        "retention_achieved", "rows", "label1", "label0"):
+            for key in ("auc_model", "auc_baseline", "insample_reject_label0",
+                        "insample_retention", "rows", "label1", "label0"):
                 r = copy.deepcopy(self.report)
                 r["heldout"][key] = bad
                 self.assertTrue(self.fails(r), "passed with %s=%r" % (key, bad))
@@ -574,6 +687,10 @@ class GateFailsClosed(TempDirCase):
         with open(p, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         self.assertTrue(gate.check_files(p, self.weights))
+        # a good report with an unreadable manifest / metadata still fails
+        rp = os.path.join(self.tmp, "good.json")
+        write_json(rp, self.report)
+        self.assertTrue(gate.check_files(rp, self.weights, p, None))
 
     def test_nan_token_in_a_report_file_fails(self):
         p = os.path.join(self.tmp, "rep.json")
@@ -583,14 +700,19 @@ class GateFailsClosed(TempDirCase):
 
     def test_cli_exit_codes(self):
         rp = os.path.join(self.tmp, "r.json")
+        mp = os.path.join(self.tmp, "m.json")
+        tp = os.path.join(self.tmp, "t.json")
         write_json(rp, self.report)
+        write_json(mp, self.manifest)
+        write_json(tp, self.meta)
+        args = ["--report", rp, "--weights", self.weights, "--manifest", mp, "--meta", tp]
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(gate.main(["--report", rp, "--weights", self.weights]), 0)
+            self.assertEqual(gate.main(args), 0)
         bad = copy.deepcopy(self.report)
         bad["source_composition"] = {"synthetic": 400}
         write_json(rp, bad)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(gate.main(["--report", rp, "--weights", self.weights]), 1)
+            self.assertEqual(gate.main(args), 1)
 
 
 class CommittedSyntheticBootstrap(TempDirCase):
@@ -606,18 +728,20 @@ class CommittedSyntheticBootstrap(TempDirCase):
         m = ds.build_dataset(logs, self.tmp)
         self.assertEqual(m["dataset_sha256"], report["dataset_sha256"])
         self.assertEqual(m["dataset_sha256"], read_json(SYN_MANIFEST)["dataset_sha256"])
+        self.assertEqual(m["dataset_sha256"], read_json(SYN_META)["dataset_sha256"])
+        self.assertEqual(read_json(SYN_META)["weights_sha256"], gate.sha256_file(SYN_WEIGHTS))
         self.assertGreaterEqual(m["rows"], 300)
         self.assertGreater(m["label1"], 50)
         self.assertGreater(m["label0"], 50)
         self.assertEqual(m["sources"], {"synthetic": m["rows"]})
 
     def test_the_gate_rejects_it_for_being_synthetic(self):
-        fails = gate.check_files(SYN_REPORT, SYN_WEIGHTS, SYN_MANIFEST)
+        fails = gate.check_files(SYN_REPORT, SYN_WEIGHTS, SYN_MANIFEST, SYN_META)
         self.assertTrue(any("not all real" in f for f in fails), fails)
         # even with the evidence "fixed up" so it looks real, the manifest still says synthetic
         rep = read_json(SYN_REPORT)
         rep["source_composition"] = {"real": rep["rows_total"]}
-        f = gate.check(rep, SYN_WEIGHTS, read_json(SYN_MANIFEST))
+        f = gate.check(rep, SYN_WEIGHTS, read_json(SYN_MANIFEST), read_json(SYN_META))
         self.assertTrue(any("non-real" in x for x in f), f)
 
     def test_synthetic_logs_say_so_in_session_start(self):
@@ -678,10 +802,10 @@ class EmbeddedModelGate(TempDirCase):
         shutil.copy(SYN_WEIGHTS, self.tmp)
         problems = check_embedded_models.check_models_dir(self.tmp)
         self.assertEqual(len(problems), 1)
-        self.assertIn("no synthetic-bootstrap-v0.eval-report.json", problems[0])
+        self.assertIn("lacks synthetic-bootstrap-v0.eval-report.json", problems[0])
 
     def test_the_synthetic_report_does_not_get_it_through(self):
-        for f in (SYN_WEIGHTS, SYN_REPORT, SYN_MANIFEST):
+        for f in (SYN_WEIGHTS, SYN_REPORT, SYN_MANIFEST, SYN_META):
             shutil.copy(f, self.tmp)
         problems = check_embedded_models.check_models_dir(self.tmp)
         self.assertTrue(problems)
@@ -694,15 +818,47 @@ class EmbeddedModelGate(TempDirCase):
         doc["model"] = "candidate-real-v1"
         write_json(w, doc)
         rep = {"rows_total": 400, "sessions_total": 5, "source_composition": {"real": 400},
-               "weights_sha256": "a" * 64,
+               "weights_sha256": "a" * 64, "dataset_sha256": "d" * 64,
                "heldout": {"rows": 100, "label1": 55, "label0": 45, "auc_model": 0.9,
                            "auc_baseline": 0.7, "retention_target": 0.95,
-                           "retention_achieved": 0.96, "reject_label0_at_retention": 0.5}}
-        write_json(os.path.join(self.tmp, "candidate-real-v1.eval-report.json"), rep)
+                           "insample_retention": 0.96, "insample_reject_label0": 0.5,
+                           "train_side_threshold": 0.4, "retention_label1": 0.94, "reject_label0": 0.6}}
+        man = {"dataset_sha256": "d" * 64, "sources": {"real": 400}, "rows": 400}
+        meta = {"dataset_sha256": "d" * 64, "weights_sha256": gate.sha256_file(w)}
+        rp = os.path.join(self.tmp, "candidate-real-v1.eval-report.json")
+        write_json(rp, rep)
+        write_json(os.path.join(self.tmp, "candidate-real-v1.manifest.json"), man)
+        mp = os.path.join(self.tmp, "candidate-real-v1.meta.json")
+        write_json(mp, meta)
         problems = check_embedded_models.check_models_dir(self.tmp)
         self.assertTrue(any("sha256 mismatch" in p for p in problems), problems)
         rep["weights_sha256"] = gate.sha256_file(w)          # now it belongs: and passes
-        write_json(os.path.join(self.tmp, "candidate-real-v1.eval-report.json"), rep)
+        write_json(rp, rep)
+        self.assertEqual(check_embedded_models.check_models_dir(self.tmp), [])
+        meta["dataset_sha256"] = "e" * 64                    # trained on another dataset
+        write_json(mp, meta)
+        self.assertTrue(any("different dataset" in p for p in check_embedded_models.check_models_dir(self.tmp)))
+
+    def test_untrained_name_does_not_launder_trained_weights(self):
+        doc = read_json(SYN_WEIGHTS)
+        doc["model"] = "untrained-evil"
+        write_json(os.path.join(self.tmp, "evil.json"), doc)
+        problems = check_embedded_models.check_models_dir(self.tmp)
+        self.assertTrue(any("not a known placeholder" in p for p in problems), problems)
+
+    def test_the_known_placeholder_id_with_other_weights_fails(self):
+        doc = read_json(SYN_WEIGHTS)
+        doc["model"] = "untrained-fixture-v1"
+        write_json(os.path.join(self.tmp, "fake.json"), doc)
+        problems = check_embedded_models.check_models_dir(self.tmp)
+        self.assertTrue(any("different weights than the pinned" in p for p in problems), problems)
+
+    def test_the_pinned_placeholder_passes_with_crlf_line_endings(self):
+        src = os.path.join(ROOT, "models", "candidate-classifier-untrained-v1.json")
+        with open(src, "rb") as fh:
+            data = fh.read().replace(bytes([13, 10]), bytes([10]))
+        with open(os.path.join(self.tmp, "p.json"), "wb") as fh:
+            fh.write(data.replace(bytes([10]), bytes([13, 10])))
         self.assertEqual(check_embedded_models.check_models_dir(self.tmp), [])
 
     def test_empty_or_missing_directory_fails(self):

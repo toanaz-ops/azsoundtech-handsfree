@@ -220,7 +220,11 @@ def build_session(events, session_id):
     """Returns (rows, candidate_rows, stats) for one parsed log."""
     summary = logstats.summarise(events)
     header = summary["header"]
-    source = header.get("source", "real")
+    # A log with no session_start line has no provenance at all: "unknown" (the
+    # gate rejects it). An existing session_start without a `source` field is what
+    # the app writes: real.
+    has_header = any(e.get("ev") == "session_start" for e in events)
+    source = header.get("source", "real") if has_header else "unknown"
     if source not in SOURCES:
         source = "unknown"          # never let a typo pass as "real" (the gate needs every row real)
     notch_events = [e for e in events if e.get("ev") == "notch_set"]

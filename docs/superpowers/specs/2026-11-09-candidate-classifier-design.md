@@ -228,7 +228,8 @@ và băm của tập dữ liệu.
 - **Cổng** (`tools/nn/gate.py`, đóng theo mặc định). Một model chỉ được nhúng vào app khi báo cáo đánh
   giá của nó thoả **tất cả**: dữ liệu `real`; ≥ 300 notch có verdict từ ≥ 3 session; tập giữ lại có
   ≥ 60 dòng và đủ cả hai nhãn; AUC ≥ 0,80 **và** ≥ AUC của `score` + 0,05; giữ ≥ 95 % hú thật thì bắt
-  được ≥ 30 % đặt oan. Các ngưỡng là chốt tạm (Q24).
+  được ≥ 30 % đặt oan; **và** (sửa 09/11/2026) ngưỡng chọn trên các session huấn luyện ở mức 95 % giữ ≥ 90 % hú thật và bắt ≥ 30 % đặt oan trên tập giữ lại.
+  Manifest và metadata huấn luyện bắt buộc, ba băm phải khớp. Các ngưỡng là chốt tạm (Q24).
 - Test cổng trong `ctest`: model nhúng trong app hoặc mang tên `untrained-*`, hoặc phải có báo cáo
   đánh giá đạt cổng nằm cạnh, băm trọng số khớp. Tập tổng hợp **không bao giờ** qua được cổng.
 - Qua cổng mới chỉ là "được nhúng để chạy bóng với score có nghĩa". Cho mạng quyền quyết định notch
@@ -278,3 +279,18 @@ khi thiếu), `nn_embedded_model_gate`, và `CandidateClassifierLoad.ExportedTra
   **0,288**; giữ 95,5 % hú thì bắt 93,8 % đặt oan (`score`: 4,6 %). Cổng trượt đúng vì `data is not all real` (và manifest liệt kê nguồn không-real);
   mọi điều kiện về kích thước và AUC đều đạt, nên `real` là điều kiện duy nhất chặn. Các số này chỉ chứng minh đường ống chạy.
 - Chưa làm: chưa chạy trên log thật (chưa có nhãn thật nào); chưa kiểm numpy phiên bản khác; chưa đo lệch làm tròn với model đã huấn luyện từ log thật.
+
+### 8.6 Sửa sau kiểm chứng độc lập (C1c, 09/11/2026)
+
+Người kiểm chứng độc lập tái tạo đúng số tổng hợp và không thấy rò rỉ; các lỗ hổng cổng sau đã được vá (mỗi lỗ có test):
+
+- AUC và mọi tỉ lệ phải thuộc [0, 1], bộ đếm là số nguyên không âm (trước đó `auc_model = 1.5` qua cổng).
+- Id `untrained-*` không còn tự động được phép: danh sách ghim `{id: sha256}` trong `check_embedded_models.py`; trọng số đã huấn luyện đổi tên thành `untrained-x` trượt.
+- Log không có `session_start` có `source = unknown` (cổng từ chối); `session_start` thiếu `source` vẫn là `real` (đó là điều app ghi).
+- Manifest và metadata huấn luyện (`<weights>.meta.json`) bắt buộc; `dataset_sha256` ở báo cáo, manifest và metadata phải trùng, `weights_sha256` phải trùng file.
+  Model nhúng cần đủ `.eval-report.json`, `.manifest.json`, `.meta.json` cạnh nó.
+- Ngưỡng 95 % trước đây chọn ngay trên các dòng nhãn 1 của tập giữ lại (lạc quan). Nay báo cáo có hai cặp số: `insample_*` (lạc quan, giữ để so) và
+  `retention_label1` / `reject_label0` ở ngưỡng chọn trên các session huấn luyện (trung thực, cổng dùng). Trên tập tổng hợp: ngưỡng 0,362; giữ 96,6 % nhãn 1, bắt 86,2 % nhãn 0
+  (số lạc quan: bắt 93,8 %). Cổng vẫn trượt tập này, chỉ vì lý do `source`.
+- Giới hạn cần biết: `source` là nhãn tự khai (cổng chống tai nạn, không chống giả mạo; người phải đọc manifest trước khi nhúng); AUC đúng bằng mốc + 0,05
+  có thể trượt do làm tròn nhị phân (đóng theo mặc định).

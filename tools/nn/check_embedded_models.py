@@ -4,10 +4,11 @@
 Standard library only. For every weights JSON directly under the models
 directory (default: <repo>/models, the folder juce_add_binary_data embeds):
 
-  * its "model" id starts with "untrained-"  -> allowed (a placeholder whose
-    score means nothing, and the logs say so), or
-  * a sibling <stem>.eval-report.json exists and tools/nn/gate.py passes on it
-    against THIS weights file (sha256 match) -> allowed.
+  * it is a PINNED placeholder (PLACEHOLDERS: id and weights sha256) -> allowed
+    (its score means nothing, and the logs say so); any other "untrained-*" fails, or
+  * the siblings <stem>.eval-report.json, <stem>.manifest.json and <stem>.meta.json
+    (training metadata) exist and tools/nn/gate.py passes on them against THIS
+    weights file -> allowed.
 
 Anything else fails. The synthetic bootstrap model can never be embedded: its
 report is `synthetic`, which the gate rejects (spec 8.4, decision Q25).
@@ -27,14 +28,22 @@ sys.path.insert(0, HERE)
 import gate  # noqa: E402
 
 PLACEHOLDER_PREFIX = "untrained-"
+# Known placeholders, pinned by content: {model id: sha256 of the weights file,
+# CRLF read as LF}. An "untrained-*" id that is not listed here, or whose file
+# differs, is NOT a placeholder -- trained weights renamed "untrained-evil" must
+# not slip through. Adding a placeholder is a reviewed edit of this table.
+PLACEHOLDERS = {
+    "untrained-fixture-v1": "00c016c31c12e9abefe5a3ad65876374f4ec07ad13894cd088c319c4c22d15e8",
+}
 
 
 def check_models_dir(models_dir):
     """Returns a list of problems (empty = every embedded model is allowed)."""
     problems = []
+    skip = (".eval-report.json", ".manifest.json", ".meta.json", ".parity.json")
     try:
-        names = sorted(n for n in os.listdir(models_dir) if n.endswith(".json")
-                       and not n.endswith(".eval-report.json") and not n.endswith(".manifest.json"))
+        names = sorted(n for n in os.listdir(models_dir)
+                       if n.endswith(".json") and not n.endswith(skip))
     except OSError as exc:
         return ["cannot list %s (%s)" % (models_dir, exc)]
     if not names:
@@ -52,16 +61,23 @@ def check_models_dir(models_dir):
             problems.append("%s: no model id" % n)
             continue
         if model_id.startswith(PLACEHOLDER_PREFIX):
+            pinned = PLACEHOLDERS.get(model_id)
+            if pinned is None:
+                problems.append("%s: '%s' is not a known placeholder (allowlist in check_embedded_models.py)"
+                                % (n, model_id))
+            elif gate.sha256_file(path) != pinned:
+                problems.append("%s: placeholder '%s' has different weights than the pinned file"
+                                % (n, model_id))
             continue
         stem = n[:-5]
-        report = os.path.join(models_dir, stem + ".eval-report.json")
-        if not os.path.isfile(report):
-            problems.append("%s: model '%s' is not an untrained-* placeholder and has no %s.eval-report.json"
-                            % (n, model_id, stem))
+        sibling = {k: os.path.join(models_dir, stem + suffix) for k, suffix in
+                   (("report", ".eval-report.json"), ("manifest", ".manifest.json"), ("meta", ".meta.json"))}
+        missing = [os.path.basename(v) for v in sibling.values() if not os.path.isfile(v)]
+        if missing:
+            problems.append("%s: model '%s' is not a pinned placeholder and lacks %s"
+                            % (n, model_id, ", ".join(missing)))
             continue
-        manifest = os.path.join(models_dir, stem + ".manifest.json")
-        fails = gate.check_files(report, path, manifest if os.path.isfile(manifest) else None)
-        for f in fails:
+        for f in gate.check_files(sibling["report"], path, sibling["manifest"], sibling["meta"]):
             problems.append("%s: gate: %s" % (n, f))
     return problems
 

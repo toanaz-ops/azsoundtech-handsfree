@@ -32,7 +32,7 @@ python tools/nn/train_mlp.py --dataset tools/nn/out/real/dataset.jsonl --name ca
 python tools/nn/evaluate.py --dataset tools/nn/out/real/dataset.jsonl --weights tools/nn/out/real/candidate-v1.json --out tools/nn/out/real/candidate-v1.eval-report.json
 
 # 4. cổng: exit 0 chỉ khi mọi điều kiện đạt; in từng điều kiện trượt
-python tools/nn/gate.py --report tools/nn/out/real/candidate-v1.eval-report.json --weights tools/nn/out/real/candidate-v1.json --manifest tools/nn/out/real/manifest.json
+python tools/nn/gate.py --report tools/nn/out/real/candidate-v1.eval-report.json --weights tools/nn/out/real/candidate-v1.json --manifest tools/nn/out/real/manifest.json --meta tools/nn/out/real/candidate-v1.meta.json
 ```
 
 `dataset.py` đếm mọi dòng bị bỏ theo lý do (`manifest.json` → `dropped`): `no_verdict`, `origin_*`,
@@ -40,7 +40,7 @@ python tools/nn/gate.py --report tools/nn/out/real/candidate-v1.eval-report.json
 `bin_outside_spectrum`… Đọc nó trước khi tin số hàng. Hai log không được trùng tên file (tên = `session_id`).
 
 Qua cổng **chưa** có nghĩa là app dùng nó. Muốn nhúng: (a) chép `candidate-v1.json` vào `models/`
-cùng `candidate-v1.eval-report.json` (và `candidate-v1.manifest.json`) **cạnh nó**; ctest
+cùng ba file **cạnh nó**: `candidate-v1.eval-report.json`, `candidate-v1.manifest.json` và `candidate-v1.meta.json` (metadata huấn luyện); ctest
 `nn_embedded_model_gate` sẽ chạy lại cổng trên cặp đó và bắt băm trọng số lệch; (b) sửa `CMakeLists.txt` để
 nhúng file mới — một thay đổi mã app, một PR riêng, kèm release note. Cho mạng quyền quyết định
 notch là bước khác nữa, cần buổi nghe và owner chốt.
@@ -108,3 +108,20 @@ chạy lại bằng toolchain khác có thể cho số hàng khác chút.
   **không bao giờ** được nhúng vào app (Q25).
 - Huấn luyện lại bằng numpy khác phiên bản có thể cho trọng số khác ở chữ số cuối; test chỉ ghim "cùng seed + cùng
   môi trường = trùng từng bit", không ghim băm file đã commit.
+
+## Cổng: những gì nó bảo vệ và không bảo vệ
+
+- **`source` là nhãn tự khai.** Nó nằm trong `session_start` của chính log (thiếu trường trên một `session_start` có thật = `real`, vì app
+  không bao giờ ghi trường này; log **không có** `session_start` = `unknown`, cổng từ chối). Cổng chống **tai nạn** (nhúng nhầm tập tổng hợp,
+  log không rõ nguồn, trộn file), không chống người cố tình giả log hay giả báo cáo. Trước khi nhúng một model, người phải đọc `manifest.json`
+  (số session, nguồn, lý do bỏ dòng).
+- **Ba tài liệu phải khớp nhau:** `dataset_sha256` trong báo cáo = trong manifest = trong metadata huấn luyện (tránh "huấn luyện trên A, đánh giá
+  trên B"); `weights_sha256` trong báo cáo và trong metadata = băm file trọng số. Manifest và metadata là **bắt buộc**: thiếu một là trượt.
+- **Hai con số "giữ 95 % hú thật" và cổng dùng cái nào.** `insample_*` (lạc quan): ngưỡng chọn ngay trên các dòng nhãn 1 của tập giữ lại,
+  nên giữ ≥ 95 % là đúng theo cách dựng. `retention_label1` / `reject_label0` (trung thực): ngưỡng chọn trên các session huấn luyện ở mức 95 %, rồi
+  áp **nguyên ngưỡng đó** lên tập giữ lại. Cổng đòi cả hai (điều kiện cũ trên số lạc quan, thêm: số trung thực giữ ≥ 90 % và bắt ≥ 30 %).
+- **Mép số thực:** AUC đúng bằng AUC mốc + 0,05 có thể trượt vì làm tròn nhị phân (ví dụ 0,78 + 0,05 > 0,83 trong float). Cổng đóng theo mặc
+  định nên trượt; không phải lỗi.
+- **Mọi tỉ lệ và AUC phải trong [0, 1]; mọi bộ đếm là số nguyên không âm.** Ngoài khoảng là trượt.
+- **Model `untrained-*` được ghim theo nội dung** trong `check_embedded_models.py` (`PLACEHOLDERS`: id → sha256 của file). Đổi tên trọng số đã huấn
+  luyện thành `untrained-x` không qua được.

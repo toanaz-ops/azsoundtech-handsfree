@@ -345,6 +345,12 @@ có tập giữ lại, test cổng; giữ chế độ bóng tới khi cổng đ�
 **Chọn: 1.** Các ngưỡng xem lại khi có lứa dữ liệu thật đầu tiên. Qua cổng chưa phải là được quyết
 định notch: bước đó cần buổi nghe và owner chốt.
 
+**Sửa 09/11/2026** (sau kiểm chứng độc lập của C1c; thêm điều kiện, không nới điều kiện nào): (a) tập giữ lại cần ≥ 10 dòng **mỗi nhãn**;
+(b) AUC và mọi tỉ lệ trong [0, 1], bộ đếm là số nguyên không âm; (c) ngưỡng "giữ 95 % hú thật" cũng được chọn trên các session huấn luyện rồi áp lên tập giữ lại,
+và ở đó phải giữ ≥ 90 % hú thật và bắt ≥ 30 % đặt oan (con số chọn ngay trên tập giữ lại chỉ là số lạc quan, vẫn phải ≥ 95 % / ≥ 30 %);
+(d) manifest và metadata huấn luyện bắt buộc, băm dataset (báo cáo = manifest = metadata) và băm trọng số phải khớp; (e) log không có `session_start` là nguồn
+`unknown`; (f) `untrained-*` chỉ được phép khi id và băm file nằm trong danh sách ghim. Lưu ý: `source` là nhãn tự khai, cổng chống tai nạn chứ không chống giả mạo.
+
 ### Q25 — Chưa có log thật thì khởi động bằng gì?
 
 Đo 09/11/2026: máy build có 9 file log, không notch, không verdict.
