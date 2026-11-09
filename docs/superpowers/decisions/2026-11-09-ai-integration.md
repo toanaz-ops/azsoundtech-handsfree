@@ -306,7 +306,7 @@ Q5 ghi "lớp nạp model là thư viện dùng chung"; `CLAUDE.md` cấm tách 
 Spec C0 gọi "C1 = soát + huấn luyện + lớp nạp, C2 = chạy bóng". **Chọn:** lane này là C1, chia C1a
 (runtime + cổng Q5) và C1b (chạy bóng, tức "C2" cũ); huấn luyện trên dữ liệu thật để sau.
 
-### Q22 — File ghi công bên thứ ba trong bộ cài **CHỜ OWNER**
+### Q22 — File ghi công bên thứ ba trong bộ cài (owner 09/11/2026: chọn 1, xem Q29)
 
 Bộ cài hôm nay không kèm file ghi công nào. BSD-3 của RTNeural đòi kèm thông báo bản quyền khi mã
 nằm trong binary (từ C1a); melatonin_blur (MIT) và các gói Python trong `HandsFreeCopilot.exe` đã ở
@@ -317,7 +317,7 @@ tình trạng này từ trước.
 | 1 | **Thêm `THIRD-PARTY-NOTICES.txt` vào bộ cài trước bản phát hành kế tiếp** | đúng điều khoản giấy phép | một PR nhỏ đụng `handsfree.nsi`; phải liệt kê cả gói Python |
 | 2 | Để sau | không việc thêm | bản phát hành kế tiếp mang RTNeural mà không có thông báo |
 
-**Chọn:** chờ owner. Khuyên 1.
+**Chọn: 1** (owner 09/11/2026, xem Q29). `installer/THIRD-PARTY-NOTICES.txt` vào bộ cài từ 1.5.1.
 
 ## Lane C1c — Q23–Q25 (điều phối chốt tạm 09/11/2026, owner chưa duyệt)
 
