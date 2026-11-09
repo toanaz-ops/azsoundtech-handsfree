@@ -22,7 +22,10 @@ import math
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+if not getattr(sys, "frozen", False):
+    # From source: logstats lives one level up (tools/). Frozen: PyInstaller
+    # bundles it as a module (build_copilot.ps1 passes --paths tools).
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import logstats  # noqa: E402  (reuse the lane D reader: one parser, one truth)
 
 # --- thresholds (spec §4). Each is a named constant so a test can pin it. ----
@@ -307,20 +310,45 @@ def ask(events: list[dict], question: str) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", type=Path)
-    ap.add_argument("--json", action="store_true", help="print findings as JSON")
-    ap.add_argument("--ask", metavar="QUESTION", help="ask Claude about this session (network)")
-    args = ap.parse_args(argv)
-    # A Windows console defaults to a code page that cannot print Vietnamese.
+def _force_utf8() -> None:
+    # A frozen Python writing to a pipe on Windows uses the ANSI code page,
+    # which cannot carry Vietnamese. The app reads this stdout as UTF-8.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
         except (AttributeError, ValueError):
             pass
 
-    events = logstats.load(args.file)
+
+def _lower_priority() -> None:
+    """BELOW_NORMAL priority class on Windows; any failure is ignored."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetPriorityClass(
+            ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+    except Exception:  # noqa: BLE001 -- best effort, must never change output
+        pass
+
+
+def main(argv: list[str]) -> int:
+    _force_utf8()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("file", type=Path)
+    ap.add_argument("--json", action="store_true", help="print findings as JSON")
+    ap.add_argument("--ask", metavar="QUESTION", help="ask Claude about this session (network)")
+    ap.add_argument("--low-priority", action="store_true",
+                    help="lower the process priority (Windows); output is unchanged")
+    args = ap.parse_args(argv)
+    if args.low_priority:
+        _lower_priority()
+
+    try:
+        events = logstats.load(args.file)
+    except OSError as exc:
+        print(f"empty or unreadable log: {exc}", file=sys.stderr)
+        return 2
     if not events:
         print("empty or unreadable log", file=sys.stderr)
         return 2
