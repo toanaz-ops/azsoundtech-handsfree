@@ -136,6 +136,11 @@ public:
     // the rig (spec 3.2, I-9).
     bool saveSettings();
 
+    // TEST SEAM: how many times saveSettings() actually wrote the file. Lane U
+    // batch callers (restore, mismatch, wizard) must write once per batch, not
+    // once per slot (review 2026-11-09 MEDIUM-3, owner HW-174.Q3).
+    [[nodiscard]] int settingsWriteCountForTest() const { return settingsWriteCount_; }
+
     void setUiMode (UiMode mode);
     [[nodiscard]] UiMode getUiMode() const { return uiMode_; }
 
@@ -397,6 +402,8 @@ public:
     void parentHierarchyChanged() override;
 
 private:
+    int settingsWriteCount_ = 0;
+
     // True while any slot's detector thread runs. The driver-restart hooks
     // read it to tell a restart nobody here asked for (review I1).
     bool anyDetectorRunning() const;

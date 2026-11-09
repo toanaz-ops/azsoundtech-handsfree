@@ -1571,6 +1571,7 @@ bool MainComponent::saveSettings()
         return false;
 
     settings_ = out;
+    ++settingsWriteCount_;
     return true;
 }
 

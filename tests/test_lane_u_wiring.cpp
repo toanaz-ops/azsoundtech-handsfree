@@ -627,3 +627,59 @@ TEST (LaneUInputMeter, CountsAreFreshOnlyAfterTheFirstCallbackSinceStart)
     EXPECT_FALSE (engine.hasDeliveredSinceStart());
     EXPECT_EQ (engine.getNumInputChannels(), 2);
 }
+
+//==============================================================================
+// Review 2026-11-09 MEDIUM-3: a batch of slot edits writes settings.json once.
+
+TEST (LaneUBatch, DeviceFallbackOverTwoSlotsWritesTheFileOnce)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());   // slots 0 and 1 enabled
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    const int before = mc.settingsWriteCountForTest();
+
+    mc.checkRestoredDeviceForTest ("ASIO", "Some Other Card");
+
+    EXPECT_FALSE (mc.getAudioEngine().getSlotConfig (0).enabled);
+    EXPECT_FALSE (mc.getAudioEngine().getSlotConfig (1).enabled);
+    EXPECT_EQ (mc.settingsWriteCountForTest() - before, 1);
+}
+
+TEST (LaneUBatch, WizardOverSeveralSlotsWritesTheFileOnce)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    mc.changeSlotConfig (2, monoRoute (0, 1));
+    mc.changeSlotConfig (3, monoRoute (1, 0));
+    mc.wizardConfirmHook = [] (const juce::String&, std::function<void (bool)> a) { a (true); };
+    const int before = mc.settingsWriteCountForTest();
+
+    mc.openSetupWizard();
+    mc.getSetupWizardForTest().onFinish (monoRoute (1, 1));
+
+    EXPECT_EQ (mc.settingsWriteCountForTest() - before, 1);
+}
+
+TEST (LaneUBatch, ASingleInteractiveEditWritesOnce)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    TempDir t;
+    writeSettings (t.file(), routedSettings());
+
+    MainComponent mc;
+    mc.enableSettings (t.file());
+    const int before = mc.settingsWriteCountForTest();
+
+    SlotConfig c = mc.getAudioEngine().getSlotConfig (0);
+    c.inputChannels[0] = 1;
+    mc.getSlotPanelForTest().onSlotConfigChanged (0, c);
+
+    EXPECT_EQ (mc.settingsWriteCountForTest() - before, 1);
+}
