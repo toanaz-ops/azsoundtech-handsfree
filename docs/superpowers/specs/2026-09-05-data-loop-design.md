@@ -102,16 +102,16 @@ rồi `sessionLogger_.stop()`.
 
 | `ev` | Từ đâu | Trường |
 |---|---|---|
-| `session_start` | MainComponent | `log_schema` (lane C0: 2; log không có trường này là bản 1), `app_version`, `os`, `device`, `sample_rate`, `buffer_size`, `slots[]` (`SlotConfig` + `linked` nếu lane S đã merge) |
+| `session_start` | MainComponent | `log_schema` (lane C1b: 3; C0: 2; log không có trường này là bản 1), `nn_model`, `nn_feature_set` (lane C1b, vắng khi không nạp được model), `app_version`, `os`, `device`, `sample_rate`, `buffer_size`, `slots[]` (`SlotConfig` + `linked` nếu lane S đã merge) |
 | `mode` | MainComponent | `mode`: `bypass` / `auto` / `soundcheck` |
 | `tuning` | MainComponent | `slot` (−1 = global), `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
-| `notch_set` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `score`, `peakiness`, `rise`, `novelty`, `penalty`, `persist_needed`, `thr`, `rise_ratio` (lane C0: tỉ số tăng thô, không bão hoà như `rise`), `lr_ratio` (lane C0: biên độ bin làn này / làn kia, chỉ khi làn kia có), `ctx` |
-| `candidate_features` | NotchController (detector thread), lane C0 | ứng viên suýt được xác nhận nhưng KHÔNG đặt notch: `slot`, `lane`, `bin`, `hz`, `peakiness`, `score`, `p_norm`, `rise`, `rise_ratio`, `novelty`, `penalty`, `asymmetry`, `lr_ratio` (nếu có làn kia), `persist`, `persist_needed`, `thr`, `near` (11 biên độ, bin −5…+5). Chỉ khi `score ≥ 0,35` (tích 0..1, cùng thang `kConfirmScore` 0,7), ≤ 1 dòng/giây/controller, ≤ 1 dòng/2 s/bin (±1). Hàng đợi riêng, sức chứa 16 |
+| `notch_set` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db`, `origin`, `score`, `peakiness`, `rise`, `novelty`, `penalty`, `persist_needed`, `thr`, `rise_ratio` (lane C0: tỉ số tăng thô, không bão hoà như `rise`), `lr_ratio` (lane C0: biên độ bin làn này / làn kia, chỉ khi làn kia có), `nn_score` (lane C1b: 0..1, chỉ notch detector và chỉ khi có ý kiến; vắng chứ không bao giờ 0), `ctx` |
+| `candidate_features` | NotchController (detector thread), lane C0 | ứng viên suýt được xác nhận nhưng KHÔNG đặt notch: `slot`, `lane`, `bin`, `hz`, `peakiness`, `score`, `p_norm`, `rise`, `rise_ratio`, `novelty`, `penalty`, `asymmetry`, `lr_ratio` (nếu có làn kia), `persist`, `persist_needed`, `thr`, `nn_score` (lane C1b, cùng quy tắc), `near` (11 biên độ, bin −5…+5). Chỉ khi `score ≥ 0,35` (tích 0..1, cùng thang `kConfirmScore` 0,7), ≤ 1 dòng/giây/controller, ≤ 1 dòng/2 s/bin (±1). Hàng đợi riêng, sức chứa 16 |
 | `notch_retune` | NotchController (detector thread) | `slot`, `lane`, `index`, `hz`, `q`, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` |
 | `notch_clear` | NotchController | `slot`, `lane`, `index`, `hz`, `reason`: `auto_release` / `manual` / `clear_all` / `width_change` / `verdict_false`, `age_ms` |
 | `verdict` | NotchListPanel → MainComponent | `slot`, `lane`, `index`, `hz`, `verdict`: `good` / `false`, `age_ms` |
 | `preset_load` | MainComponent (fix round 2, 1.2.0) | `file` (chỉ tên), `adopted`, `skipped`, `ceiling_applied` (bool, luôn ghi), `q`/`depth_db` (trần vừa áp, chỉ khi `ceiling_applied`) |
-| `session_end` | SessionLogger | `dropped_events`, `dropped_candidates` (lane C0: rớt ở hàng đợi `candidate_features`, đếm riêng) |
+| `session_end` | SessionLogger | `dropped_events`, `dropped_candidates` (lane C0: rớt ở hàng đợi `candidate_features`, đếm riêng), `nn_calls`, `nn_us_p99`, `nn_us_max` (lane C1b, chỉ khi có bộ phân loại) |
 
 `notch_retune` (lane G, 1.2.0) là **cập nhật**, không phải đóng/mở: một notch
 có thể retune nhiều lần giữa `notch_set` và `notch_clear` của nó.
