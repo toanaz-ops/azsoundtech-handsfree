@@ -257,6 +257,7 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+import types  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 from unittest import mock  # noqa: E402
 
@@ -1668,7 +1669,7 @@ class RecordingTools(unittest.TestCase):
         st["slots"][0]["ring_risk"] = "na"
         sup = copilot.Supervisor(st)
         self.assertEqual(sup.propose_release({"nid": 1, "expect_hz": 1000.0, "reason": "judged_false"}),
-                         "queued")
+                         "rejected: ring_risk_not_low")                         # "na" = unknown: refused too
 
     def test_no_action_arguments(self):
         self.ok(self.sup.no_action, {"reason": "insufficient_data"})
@@ -1742,8 +1743,9 @@ class RecordingTools(unittest.TestCase):
     def test_prompt_states_the_hard_rules(self):
         p = copilot.SUPERVISE_SYSTEM_PROMPT
         for must in ("propose_deepen", "propose_hold", "propose_release", "no_action",
-                     "detector", "NEVER when the slot's ring_risk", "FALSE verdict"):
+                     "detector", 'exactly "low"', '"na" (unknown)', "FALSE verdict"):
             self.assertIn(must, p)
+        self.assertIn("na (unknown)", copilot.SUPERVISE_TOOL_SPECS["propose_release"]["description"])
         self.assertRegex(p, r"(?i)never try to raise any level")
 
 
@@ -2071,6 +2073,145 @@ class SuperviseDeadline(CliHarness):
         for ok in ("10", "600"):
             rc, _, err, _, _ = self.run_loop([(0.0, answer_body("done"))], "--deadline-s", ok)
             self.assertEqual(rc, 0, err)
+
+
+class FakeAnthropicModule:
+    """Stands in for the `anthropic` module (the real SDK is not needed)."""
+
+    class APIConnectionError(Exception):
+        pass
+
+    class APITimeoutError(APIConnectionError):
+        pass
+
+    class APIStatusError(Exception):
+        pass
+
+    class AuthenticationError(APIStatusError):
+        pass
+
+    def __init__(self, script, clock):
+        """`script`: list of (seconds the call takes, response or exception)."""
+        self.script = list(script)
+        self.clock = clock
+        self.client_kwargs: list[dict] = []
+        self.request_kwargs: list[dict] = []
+        outer = self
+
+        class Anthropic:
+            def __init__(self, **kw):
+                outer.client_kwargs.append(kw)
+                self.messages = types.SimpleNamespace(create=outer.create)
+                self.beta = types.SimpleNamespace(messages=self.messages)
+
+        self.Anthropic = Anthropic
+
+    def create(self, **kw):
+        self.request_kwargs.append(kw)
+        if not self.script:
+            raise AssertionError("more requests than scripted")
+        took, item = self.script.pop(0)
+        self.clock[0] += took
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def fake_reply(name=None, args=None, call_id="c1"):
+    content = [] if name is None else [types.SimpleNamespace(type="tool_use", id=call_id, name=name,
+                                                             input=args or {})]
+    return types.SimpleNamespace(content=content, stop_reason="tool_use" if name else "end_turn",
+                                 usage=types.SimpleNamespace(input_tokens=3, output_tokens=2))
+
+
+class SuperviseAnthropicLoop(CliHarness):
+    """The manual anthropic supervise loop against a fake SDK and a fake clock."""
+    NO_ACTION = {"reason": "insufficient_data"}
+
+    def run_loop(self, script, *extra):
+        clock = [1000.0]
+        fake = FakeAnthropicModule(script, clock)
+        argv = [str(FIXTURE), "--supervise", "--state", str(STATE_FIXTURE), "--json",
+                "--provider", "anthropic", "--model", "m", *extra]
+        with mock.patch.object(copilot, "_load_anthropic", return_value=fake), \
+                mock.patch.object(copilot, "_now", side_effect=lambda: clock[0]):
+            rc, out, err = self.run_cli(argv)
+        return rc, out, err, fake
+
+    def test_per_request_timeout_shrinks_and_retries_are_off(self):
+        rc, out, err, fake = self.run_loop(
+            [(80.0, fake_reply("current_state")), (1.0, fake_reply("current_state", {}, "c2")),
+             (1.0, fake_reply())], "--timeout", "30", "--deadline-s", "100")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([k["timeout"] for k in fake.request_kwargs], [30.0, 20.0, 19.0])
+        self.assertTrue(fake.client_kwargs and all(k["max_retries"] == 0 for k in fake.client_kwargs))
+        # tool results are fed back as tool_result blocks
+        last = fake.request_kwargs[-1]["messages"][-1]
+        self.assertEqual(last["role"], "user")
+        self.assertEqual(last["content"][0]["type"], "tool_result")
+        self.assertEqual(last["content"][0]["tool_use_id"], "c2")
+
+    def test_no_request_with_less_than_5s_left_and_action_is_kept(self):
+        rc, out, err, fake = self.run_loop(
+            [(6.0, fake_reply("no_action", self.NO_ACTION)), (1.0, fake_reply())],
+            "--timeout", "30", "--deadline-s", "10")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(fake.request_kwargs), 1)
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_deadline_with_nothing_recorded_is_exit_3(self):
+        rc, out, err, fake = self.run_loop(
+            [(6.0, fake_reply("current_state")), (1.0, fake_reply())],
+            "--timeout", "30", "--deadline-s", "10")
+        self.assertEqual(rc, 3)
+        self.assertIn("deadline", json.loads(out)["error"])
+        self.assertEqual(len(fake.request_kwargs), 1)
+
+    def test_request_cap_is_6(self):
+        script = [(0.1, fake_reply("current_state", {}, f"c{i}")) for i in range(12)]
+        rc, out, err, fake = self.run_loop(script)
+        self.assertEqual((rc, len(fake.request_kwargs)), (3, 6))
+        self.assertIn("tool loop exhausted", json.loads(out)["error"])
+        rc, out, err, fake = self.run_loop([(0.1, fake_reply("no_action", self.NO_ACTION))] + script)
+        self.assertEqual((rc, len(fake.request_kwargs)), (0, 6))
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_timeout_after_an_accepted_action_still_exits_0_with_it(self):
+        for exc in (FakeAnthropicModule.APITimeoutError("t"), FakeAnthropicModule.APIConnectionError("c")):
+            rc, out, err, _ = self.run_loop([(1.0, fake_reply("no_action", self.NO_ACTION)), (1.0, exc)])
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["actions"],
+                             [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_timeout_with_nothing_recorded_is_exit_3_naming_the_deadline(self):
+        rc, out, err, _ = self.run_loop([(1.0, FakeAnthropicModule.APITimeoutError("t"))])
+        self.assertEqual(rc, 3)
+        self.assertIn("deadline", json.loads(out)["error"])
+
+    def test_openai_timeout_after_an_action_exits_0_and_without_one_exits_3(self):
+        import socket
+        clock = [1000.0]
+        steps = [tool_body("no_action", json.dumps(self.NO_ACTION)), socket.timeout("slow")]
+
+        def fake_post(url, payload, key, timeout):
+            item = steps.pop(0)
+            if isinstance(item, Exception):
+                raise copilot.ProviderUnavailable(f"Quá hạn {timeout:g} s chờ máy chủ.")
+            return item
+
+        argv = [str(FIXTURE), "--supervise", "--state", str(STATE_FIXTURE), "--json",
+                "--provider", "openai_compatible", "--base-url", "http://127.0.0.1:9/v1", "--model", "m"]
+        with mock.patch.object(copilot, "_post_json", side_effect=fake_post), \
+                mock.patch.object(copilot, "_now", side_effect=lambda: clock[0]):
+            rc, out, err = self.run_cli(argv)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+        steps[:] = [socket.timeout("slow")]
+        with mock.patch.object(copilot, "_post_json", side_effect=fake_post), \
+                mock.patch.object(copilot, "_now", side_effect=lambda: clock[0]):
+            rc, out, err = self.run_cli(argv)
+        self.assertEqual(rc, 3)
+        self.assertIn("deadline", json.loads(out)["error"])
 
 
 @unittest.skipUnless(HAVE_SDK, "anthropic not installed")

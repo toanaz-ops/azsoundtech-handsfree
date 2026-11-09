@@ -10,7 +10,9 @@
 
 #include <gtest/gtest.h>
 
+#include "app/AppSettings.h"
 #include "app/MainComponent.h"
+#include <az/host/HostSettings.h>
 #include "app/NotchController.h"
 #include "dsp/ClockSource.h"
 #include "dsp/Detector.h"
@@ -799,6 +801,7 @@ TEST (AiDriveContract, AValidSuperviseResultShowsProposalsAndChangesNoNotch)
     result.stdoutText = "{\"supervise\": true, \"generation\": " + juce::String ((int) app.aiSupervisor().generation())
                         + ", \"actions\": [" + actions + "], \"usage\": {\"input_tokens\": 10, \"output_tokens\": 5}}";
     launcher->deliver (result);   // the supervisor's real onResult path (no message loop in the headless suite)
+    publishSnapshot (app, *controller, 2);   // so the comparison below reads a FRESH snapshot (the negative control publishes too)
 
     // (a) the proposals are shown ...
     const auto& shown = app.aiSupervisor().proposals();
@@ -816,4 +819,100 @@ TEST (AiDriveContract, AValidSuperviseResultShowsProposalsAndChangesNoNotch)
     EXPECT_NE (freezeNotches (app), before) << "the comparison has no teeth: a real change went unnoticed";
 
     dir.deleteRecursively();
+}
+
+//==============================================================================
+// H1: the persisted call budget reaches the supervisor through the PRODUCTION
+// path (the constructor runs before enableSettings(), so it alone saw nothing).
+namespace
+{
+juce::File writeSettingsWithCallStarts (const juce::File& dir, int count)
+{
+    AppSettings s;
+    const auto wall = juce::Time::currentTimeMillis();
+    for (int i = 0; i < count; ++i)
+        s.aiCallStartsMs.push_back ((std::int64_t) wall - 20 * 60 * 1000 + i * 1000);   // 20 minutes ago
+    const auto file = dir.getChildFile ("settings.json");
+    EXPECT_TRUE (az::host::saveHostSettings (file, appSettingsToHost (s)));
+    return file;
+}
+
+// Builds a MainComponent whose settings file holds `count` call starts, puts it
+// in Suggest with a usable fake launcher and a trigger waiting, and ticks once.
+// Returns the number of launches; the settings file is read back by the caller.
+int launchesAfterRestart (const juce::File& settingsFile, const juce::File& dir)
+{
+    MainComponent app;
+    const auto logFile = dir.getChildFile ("session.jsonl");
+    EXPECT_TRUE (logFile.replaceWithText ("{}\n"));
+    auto owned = std::make_unique<ScriptedLauncher>();
+    auto* launcher = owned.get();
+    // The fake launcher goes in FIRST (that rebuilds the supervisor while settings_ is still empty,
+    // exactly the constructor-time state); enableSettings() must then bring the stored starts in.
+    app.setAiLauncherForTest (std::move (owned));
+    app.enableSettings (settingsFile);
+    app.setAiUsableForTest (true);
+    app.setAiLogFileForTest (logFile);
+    app.setAiMode (AiMode::Suggest);
+    app.aiSupervisor().skipStartupGapForTest();
+    app.requestMode (AudioEngine::Mode::Auto);
+
+    auto* controller = app.getNotchControllerForTest (0);
+    EXPECT_NE (controller, nullptr);
+    if (controller == nullptr)
+        return -1;
+    EXPECT_TRUE (controller->setNotch (0, 0, 1000.0, 30.0, -6.0, NotchController::Origin::Detector));
+    publishSnapshot (app, *controller);
+    app.aiSupervisor().requestManualCall();
+    app.tickAiForTest();
+    return (int) launcher->requests.size();
+}
+} // namespace
+
+TEST (AiDriveBudget, PersistedCallStartsReachTheSupervisorThroughEnableSettings)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("aidrive-budget-" + juce::String (juce::Random::getSystemRandom().nextInt64()));
+    ASSERT_TRUE (dir.createDirectory());
+
+    // 12 starts inside the hour: the cap is already spent, no call.
+    {
+        const auto file = writeSettingsWithCallStarts (dir, 12);
+        EXPECT_EQ (launchesAfterRestart (file, dir), 0) << "the stored 12/hour cap was not loaded";
+    }
+    // 11 starts: exactly one call, and the file then holds the 11 old + the new one.
+    {
+        const auto file = writeSettingsWithCallStarts (dir, 11);
+        EXPECT_EQ (launchesAfterRestart (file, dir), 1);
+        const auto back = az::host::loadHostSettings (file);
+        EXPECT_EQ (appSettingsFromHost (back.settings).aiCallStartsMs.size(), 12u)
+            << "the new start must be appended to the stored ones, not replace them";
+    }
+    dir.deleteRecursively();
+}
+
+TEST (AiDriveRingRisk, TheLevelThePolicyReadsIsHeldFor750MsLikeTheChip)
+{
+    // The function readAiState() feeds every slot through (a snapshot score
+    // cannot be injected headlessly: the published score is the real frame's).
+    gui::SpectrumView::RingRiskHysteresis hold;
+    const float threshold = 0.7f;
+    const auto read = [&] (bool valid, float score, double t)
+    {
+        return MainComponent::heldAiRingRisk (hold, valid, score, threshold, t);
+    };
+
+    EXPECT_EQ (read (true, 0.0f, 1000.0), AiRingRisk::Low);
+    EXPECT_EQ (read (true, 5.0f, 1500.0), AiRingRisk::Critical) << "one peaky frame";
+    EXPECT_EQ (read (true, 0.0f, 2000.0), AiRingRisk::Critical) << "500 ms later: still inside the hold";
+    EXPECT_EQ (read (true, 0.0f, 2300.0), AiRingRisk::Low) << "800 ms after the last Critical frame: released";
+
+    // A sustained Critical stays Critical well past the hold.
+    EXPECT_EQ (read (true, 5.0f, 3000.0), AiRingRisk::Critical);
+    EXPECT_EQ (read (true, 5.0f, 4000.0), AiRingRisk::Critical);
+
+    // No score (detection stopped / no history after a reset) is never held: fail closed.
+    EXPECT_EQ (read (false, 0.0f, 4100.0), AiRingRisk::Na);
+    EXPECT_EQ (read (true, 0.0f, 4200.0), AiRingRisk::Low);
 }

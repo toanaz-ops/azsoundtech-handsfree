@@ -20,7 +20,7 @@
 enum class UiMode { Dumb, Geek };
 
 // How many AI call-start times are persisted (matches AiSupervisor::kMaxPersistedCallStarts).
-constexpr int kAiCallStartsKept = 12;
+constexpr int kAiCallStartsKept = 12;   // AiSupervisor.h static_asserts it equals kMaxPersistedCallStarts
 
 struct AppSettings
 {

@@ -159,7 +159,7 @@ public:
         // milliseconds; all three may be empty (= nothing persisted, and then
         // nowMs is used as the wall clock). The supervisor never sees the settings object.
         std::function<std::int64_t()> wallMs;
-        std::function<std::vector<std::int64_t>()> loadCallStarts;   // read once, at construction
+        std::function<std::vector<std::int64_t>()> loadCallStarts;   // read at construction and by reloadPersistedState()
         std::function<void (const std::vector<std::int64_t>&)> saveCallStarts;   // newest kMaxPersistedCallStarts
     };
 
@@ -178,6 +178,7 @@ public:
     // process start-up and teardown: the watchdog is only the last resort.
     static_assert (kWatchdogMs >= kSuperviseDeadlineS * 1000 + 10000, "watchdog must outlast the sidecar deadline");
     static constexpr int          kMaxPersistedCallStarts = 12;
+    static constexpr std::int64_t kFutureToleranceMs   = 60 * 1000;   // a persisted start further ahead than this is dropped
     static constexpr int          kPauseAfterFailures  = 3;
     static constexpr int          kMaxSlots            = 16;
     static constexpr int          kMaxNotchesPerSlot   = 32;
@@ -249,6 +250,10 @@ public:
     [[nodiscard]] static juce::String buildStateJson (const AiStateSnapshot& state, std::uint32_t generation,
                                                       AiMode aiMode, AiTrigger trigger);
 
+    /** Merge the persisted call starts into the ones already held (never drops an in-process start).
+        MainComponent calls it after the settings file is loaded. */
+    void reloadPersistedState();
+
     // --- test seams -----------------------------------------------------------
     void setAiProposalsForTest (std::vector<ShownProposal> proposals);
     /** The first call waits kMinGapMs from app start (a restart must not reset the gap); a test that is not about that skips it. */
@@ -300,6 +305,7 @@ private:
     std::int64_t appStartMs_ = 0;                // monotonic, at construction: the first call waits kMinGapMs from here
     std::int64_t lastStartMs_ = -1;              // monotonic start of this process's latest call
     std::vector<std::int64_t> callStartsWall_;   // wall-clock epoch ms, ascending, newest kMaxPersistedCallStarts
+    std::int64_t freezeStartMs_ = -1;            // monotonic; >= 0 while BYPASS / SOUNDCHECK / measuring froze the book
     int consecutiveFailures_ = 0;                // automatic calls ending failed/timeout in a row
 
     std::map<PlacementKey, std::deque<std::int64_t>> placements_;

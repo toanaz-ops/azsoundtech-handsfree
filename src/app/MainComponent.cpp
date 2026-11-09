@@ -1654,7 +1654,7 @@ std::unique_ptr<AiSupervisor> MainComponent::makeAiSupervisor (std::unique_ptr<A
     AiSupervisor::Environment env;
     env.nowMs = [] { return (std::int64_t) juce::Time::getMillisecondCounterHiRes(); };
     env.launcher = std::move (launcher);
-    env.readState = [this] { return readAiState(); };
+    env.readState = [this] { return readAiState (juce::Time::getMillisecondCounterHiRes()); };
     env.logSink = [this] (const juce::var& v) { if (sessionLogger_.isActive()) sessionLogger_.log (v); };
     env.isAskRunning = [this] { return copilotRunner_ != nullptr && copilotRunner_->isBusy(); };
     // Spend limits survive a restart: the call-start times live in the settings
@@ -1784,7 +1784,28 @@ void MainComponent::setAiModeFromSettings()
     aiSupervisor_->setRequestedMode (settings_.aiMode);
 }
 
-AiStateSnapshot MainComponent::readAiState()
+AiRingRisk MainComponent::heldAiRingRisk (gui::SpectrumView::RingRiskHysteresis& hold, bool valid,
+                                          float score, float threshold, double nowMs)
+{
+    using View = gui::SpectrumView;
+    View::RingRisk raw = View::RingRisk::Low;
+    if (! valid)
+        raw = View::RingRisk::Unavailable;
+    else if (score >= threshold)
+        raw = View::RingRisk::Critical;
+    else if (score >= NotchController::kRiskFreezeFraction * threshold)
+        raw = View::RingRisk::Rising;
+    switch (hold.apply (raw, nowMs))
+    {
+        case View::RingRisk::Unavailable: return AiRingRisk::Na;
+        case View::RingRisk::Low:         return AiRingRisk::Low;
+        case View::RingRisk::Rising:      return AiRingRisk::Rising;
+        case View::RingRisk::Critical:    return AiRingRisk::Critical;
+    }
+    return AiRingRisk::Na;
+}
+
+AiStateSnapshot MainComponent::readAiState (double riskNowMs)
 {
     AiStateSnapshot out;
     switch (engine_.getMode())
@@ -1832,14 +1853,12 @@ AiStateSnapshot MainComponent::readAiState()
         s.slot = slot;
         s.hasRingRiskScore = snap.ringRiskValid;
         s.ringRiskScore = snap.ringRiskScore;
-        if (! snap.ringRiskValid)
-            s.ringRisk = AiRingRisk::Na;
-        else if (snap.ringRiskScore >= snap.ringRiskThreshold)
-            s.ringRisk = AiRingRisk::Critical;
-        else if (snap.ringRiskScore >= NotchController::kRiskFreezeFraction * snap.ringRiskThreshold)
-            s.ringRisk = AiRingRisk::Rising;
-        else
-            s.ringRisk = AiRingRisk::Low;
+        // The level goes through the SAME 750 ms hold as the RING RISK chip
+        // (RingRiskHysteresis, kHoldMs): a supervisor tick samples every 500 ms,
+        // and one peaky frame must not flip a shown proposal. "No score"
+        // (Unavailable) passes straight through, so Na stays Na.
+        s.ringRisk = heldAiRingRisk (aiRiskHold_[(std::size_t) slot], snap.ringRiskValid,
+                                     snap.ringRiskScore, snap.ringRiskThreshold, riskNowMs);
 
         const float sliderCeiling = (float) controller.getNotchDepthDb();
         for (std::uint32_t i = 0; i < snap.notchCount && i < snap.notches.size(); ++i)
@@ -2019,6 +2038,11 @@ void MainComponent::enableSettings (const juce::File& file)
     }
 
     setUiMode (settings_.uiMode);
+
+    // The supervisor was built (in the constructor) before settings_ held the
+    // saved call starts: merge them in now so the hourly cap survives a restart.
+    if (aiSupervisor_ != nullptr)
+        aiSupervisor_->reloadPersistedState();
 
     // Lane L3a: the saved AI mode. enableSettings() runs BEFORE
     // startSessionLog() (src/main.cpp), so session_start's `ai_mode` already

@@ -290,6 +290,11 @@ class LoopStopped(AskError):
         self.usage = usage or {"input_tokens": None, "output_tokens": None}
 
 
+class ProviderUnavailable(LoopStopped):
+    """A provider request timed out or the connection failed (not an HTTP error
+    status, not a refusal). `supervise` still prints the actions already recorded."""
+
+
 def _now() -> float:
     """The monotonic clock of the supervise deadline (tests replace it)."""
     return time.monotonic()
@@ -892,7 +897,8 @@ When next_rung_db is null the notch cannot be deepened: do not propose it.
 the notch: the notch itself may be much older.
 - propose_hold: keep a notch that is still needed from being released for hold_s seconds (30 to 600).
 - propose_release: only for a notch you have evidence is false (a FALSE verdict in the log, or long \
-silence at that frequency with no recurrence). NEVER when the slot's ring_risk is "rising" or "critical".
+silence at that frequency with no recurrence). ONLY when the slot's ring_risk is exactly "low": \
+"rising", "critical" and "na" (unknown) are all refused.
 - At most a few proposals per turn; call no_action when nothing is needed. Finish after recording."""
 
 SUPERVISE_USER_PROMPT = ("Review the current state (current_state) and the session log with the read-only "
@@ -935,7 +941,8 @@ SUPERVISE_TOOL_SPECS: dict[str, dict] = {
     "propose_release": {
         "raw": True,
         "description": "Propose releasing a detector-origin notch you have evidence is false or "
-                       "stale. Never while the slot ring_risk is rising or critical.",
+                       "stale. Only while the slot ring_risk is exactly low: rising, critical and "
+                       "na (unknown) are refused.",
         "parameters": _supervise_args_schema({
             "nid": _NID_SCHEMA, "expect_hz": _HZ_SCHEMA,
             "reason": {"type": "string", "enum": list(RELEASE_REASONS)}})},
@@ -1038,7 +1045,7 @@ class Supervisor:
             return err
         if not self._enum_ok(args["reason"], RELEASE_REASONS):
             return self._reject("bad_reason")
-        if slot["ring_risk"] in ("rising", "critical"):
+        if slot["ring_risk"] != "low":      # "na" (unknown) is refused too, like the C++ side
             return self._reject("ring_risk_not_low")
         return self._record({"tool": "propose_release", "nid": args["nid"],
                              "expect_hz": float(args["expect_hz"]), "reason": args["reason"]},
@@ -1828,10 +1835,81 @@ _ANTHROPIC_STEERING_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "AN
                            "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID")
 
 
+def _load_anthropic():
+    """The `anthropic` module. The one seam tests replace with a fake module."""
+    import anthropic
+    return anthropic
+
+
+def _anthropic_supervise_tools(ts: "ToolSet") -> list[dict]:
+    return [{"name": n, "description": sp["description"], "input_schema": sp["parameters"]}
+            for n, sp in ts.specs.items()]
+
+
+def _block_get(block: object, name: str, default: object = None) -> object:
+    if isinstance(block, dict):
+        return block.get(name, default)
+    return getattr(block, name, default)
+
+
+def _run_anthropic_supervise(anthropic, client, model: str, question: str, timeout: float,
+                             ts: "ToolSet", key: str | None) -> dict:
+    """The supervise loop on Anthropic: manual `messages.create`, one request at a
+    time, each under the time left (like the openai_compatible loop). Recording
+    stops the moment the model makes no tool call."""
+    tools = _anthropic_supervise_tools(ts)
+    messages: list[dict] = [{"role": "user", "content": question}]
+    inp: list = []
+    outp: list = []
+
+    def usage() -> dict:
+        return {"input_tokens": _sum_usage(inp), "output_tokens": _sum_usage(outp)}
+
+    for _ in range(ts.max_iterations):
+        try:
+            req_timeout = ts.request_timeout(timeout)
+        except LoopStopped as stop:
+            stop.usage = usage()
+            raise
+        kwargs: dict = {"model": model, "max_tokens": 16000, "thinking": {"type": "adaptive"},
+                        "output_config": {"effort": "medium"}, "system": ts.system,
+                        "tools": tools, "messages": messages, "timeout": req_timeout}
+        create = client.messages.create
+        if model in FALLBACK_MODELS:
+            kwargs["betas"] = ["server-side-fallback-2026-07-01"]
+            kwargs["fallbacks"] = "default"
+            create = client.beta.messages.create
+        try:
+            resp = create(**kwargs)
+        except anthropic.APITimeoutError:
+            raise ProviderUnavailable("deadline: Claude API request timed out.", usage()) from None
+        except anthropic.APIConnectionError as exc:
+            raise ProviderUnavailable(redact(f"Không kết nối được Claude API: {exc}", key),
+                                      usage()) from None
+        u = getattr(resp, "usage", None)
+        inp.append(getattr(u, "input_tokens", None))
+        outp.append(getattr(u, "output_tokens", None))
+        if getattr(resp, "stop_reason", None) == "refusal":
+            raise AskError("Claude từ chối trả lời câu này.")
+        content = list(getattr(resp, "content", None) or [])
+        calls = [b for b in content if _block_get(b, "type") == "tool_use"]
+        if not calls:
+            return {"answer": "", "usage": usage()}
+        messages.append({"role": "assistant", "content": content})
+        results = []
+        for call in calls:
+            result = run_tool(ts.funcs, _block_get(call, "name"), _block_get(call, "input"), ts.specs)
+            results.append({"type": "tool_result", "tool_use_id": _block_get(call, "id"),
+                            "content": result})
+        messages.append({"role": "user", "content": results})
+    raise LoopStopped(f"tool loop exhausted: mô hình gọi công cụ quá {ts.max_iterations} lượt "
+                      "mà chưa kết thúc.", usage())
+
+
 def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
                   credentials_only: bool = False, toolset: "ToolSet | None" = None) -> dict:
     try:
-        import anthropic
+        anthropic = _load_anthropic()
     except ImportError:
         raise AskError("--ask cần gói `anthropic` (pip install anthropic).") from None
 
@@ -1858,12 +1936,16 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
             # Raises LoopStopped when the budget is already spent. The SDK client's
             # timeout is fixed per client, so the first request gets the shrunk value.
             timeout = toolset.request_timeout(timeout)
+        extra: dict = {} if toolset is None else {"max_retries": 0}   # supervise: no stacked retries
         if credentials_only:
             client = anthropic.Anthropic(api_key=key, timeout=timeout,
-                                         base_url=ANTHROPIC_API_BASE_URL)
+                                         base_url=ANTHROPIC_API_BASE_URL, **extra)
         else:
-            client = anthropic.Anthropic(api_key=key, timeout=timeout) if key \
-                else anthropic.Anthropic(timeout=timeout)
+            client = anthropic.Anthropic(api_key=key, timeout=timeout, **extra) if key \
+                else anthropic.Anthropic(timeout=timeout, **extra)
+        if toolset is not None:
+            return _run_anthropic_supervise(anthropic, client, model, question, timeout,
+                                            toolset, key)
         if toolset is None:
             kwargs = build_anthropic_kwargs(model, make_tools(events), question)
         else:
@@ -1956,13 +2038,13 @@ def _post_json(url: str, payload: dict, key: str | None, timeout: float) -> dict
         kind = "chuyển hướng (không theo)" if 300 <= exc.code < 400 else "lỗi"
         raise AskError(f"Máy chủ trả {kind} {exc.code}: {excerpt}") from None
     except (TimeoutError, socket.timeout):
-        raise AskError(f"Quá hạn {timeout:g} s chờ máy chủ.") from None
+        raise ProviderUnavailable(f"Quá hạn {timeout:g} s chờ máy chủ.") from None
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-            raise AskError(f"Quá hạn {timeout:g} s chờ máy chủ.") from None
-        raise AskError(redact(f"Không kết nối được máy chủ: {exc.reason}", key)) from None
+            raise ProviderUnavailable(f"Quá hạn {timeout:g} s chờ máy chủ.") from None
+        raise ProviderUnavailable(redact(f"Không kết nối được máy chủ: {exc.reason}", key)) from None
     except (OSError, http.client.HTTPException) as exc:
-        raise AskError(redact(f"Lỗi kết nối: {type(exc).__name__}", key)) from None
+        raise ProviderUnavailable(redact(f"Lỗi kết nối: {type(exc).__name__}", key)) from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise AskError("Máy chủ trả dữ liệu quá lớn (hơn 4 MiB).")
     try:
@@ -2028,8 +2110,15 @@ def run_openai_compatible(events: list[dict], question: str, model: str, base_ur
             stop.usage = {"input_tokens": _sum_usage(tokens_in),
                           "output_tokens": _sum_usage(tokens_out)}
             raise
-        doc = _post_json(url, {"model": model, "messages": messages, "tools": tools,
-                               "tool_choice": "auto"}, key, req_timeout)
+        try:
+            doc = _post_json(url, {"model": model, "messages": messages, "tools": tools,
+                                   "tool_choice": "auto"}, key, req_timeout)
+        except ProviderUnavailable as exc:
+            if toolset is None:
+                raise
+            raise ProviderUnavailable(
+                f"deadline: {exc}", {"input_tokens": _sum_usage(tokens_in),
+                                     "output_tokens": _sum_usage(tokens_out)}) from None
         usage = doc.get("usage") if isinstance(doc.get("usage"), dict) else {}
         tokens_in.append(usage.get("prompt_tokens"))
         tokens_out.append(usage.get("completion_tokens"))

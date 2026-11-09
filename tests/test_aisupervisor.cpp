@@ -423,16 +423,28 @@ TEST (AiSupervisorLimits, TheMinimumGapAlsoCountsFromThePersistedLastStart)
 
 TEST (AiSupervisorLimits, FutureDatedAndMalformedPersistedEntries)
 {
-    // 12 entries dated in the FUTURE (the clock was set back): they count as "now".
+    // 12 entries dated a few seconds ahead (within the 60 s tolerance): they count as "now".
+    std::vector<std::int64_t> near;
+    for (int i = 0; i < 12; ++i)
+        near.push_back (5'000'000 + 30 * kSec + i);
+    Rig n (AiMode::Suggest, true, near);
+    n.sup->requestManualCall();
+    n.step (50 * kSec);   // wall now 5'050'000: the entries are 20 s old, still inside the hour
+    EXPECT_EQ (n.calls(), 0) << "near-future entries count as now and fill the hour";
+
+    // 12 entries days ahead cannot be real: dropped, so they neither fill the
+    // hour nor block the minimum gap forever (the old behaviour bricked the
+    // supervisor until the wall clock passed them, with status Idle).
     std::vector<std::int64_t> future;
     for (int i = 0; i < 12; ++i)
         future.push_back (5'000'000 + 7 * 24 * 3600 * kSec + i);
-    Rig f (AiMode::Suggest, true, future);
+    Rig f (AiMode::Suggest, false, future);   // keep the real 120 s startup gap
     f.sup->requestManualCall();
-    f.step (500 * kSec);
-    EXPECT_EQ (f.calls(), 0) << "future-dated entries must not free budget";
-    f.step (3601 * kSec);
-    EXPECT_EQ (f.calls(), 0) << "still counted as 'now' while the clock is behind them";
+    f.step (60 * kSec);
+    EXPECT_EQ (f.calls(), 0) << "the first call still waits the gap from app start";
+    f.step (61 * kSec);
+    EXPECT_EQ (f.calls(), 1) << "a far-future entry must not brick the supervisor";
+    ASSERT_EQ (f.persisted.size(), 1u) << "the unreal entries are not written back";
 
     // Malformed entries (zero, negative) are dropped, not counted.
     Rig m (AiMode::Suggest, true, { 0, -5, -1000000 });
@@ -814,6 +826,23 @@ TEST (AiSupervisorState, ProductionWriterReproducesTheSchemaTwoFixture)
     EXPECT_TRUE (sameJson (fixture, produced, why)) << why;
 }
 
+TEST (AiSupervisorState, AnOffGridCeilingAdvertisesATargetBothChecksAccept)
+{
+    // depth -12, ceiling -13.3333: the only legal target is the ceiling itself.
+    // depth, ceiling and next_rung are all rounded to 3 decimals, and the rung
+    // is computed from the rounded numbers, so next_rung_db >= ceiling_db holds
+    // exactly in the file (the sidecar compares against the file's ceiling).
+    Rig r;
+    r.state.slots[0].notches = { notchAt (5, 1000.0, -12.0, -13.3333) };
+    const auto doc = juce::JSON::parse (AiSupervisor::buildStateJson (r.state, 1, AiMode::Suggest, AiTrigger::Manual));
+    const auto n = (*doc["slots"].getArray())[0]["notches"][0];
+    EXPECT_DOUBLE_EQ ((double) n["ceiling_db"], -13.333);
+    ASSERT_FALSE (n["next_rung_db"].isVoid());
+    EXPECT_GE ((double) n["next_rung_db"], (double) n["ceiling_db"]);
+    EXPECT_LT ((double) n["next_rung_db"], (double) n["depth_db"]);
+    EXPECT_DOUBLE_EQ ((double) n["next_rung_db"], -13.333);
+}
+
 TEST (AiSupervisorState, NonFiniteOrOutOfRangeValuesNeverReachTheFile)
 {
     Rig r;
@@ -1134,6 +1163,41 @@ TEST (AiSupervisorBook, AShownReleaseGoesWhenTheSlotStartsToRingAndIsLogged)
     ASSERT_EQ (d.size(), 1u);
     EXPECT_EQ (d[0]["decision"].toString(), "expired");
     EXPECT_EQ (d[0]["tool"].toString(), "propose_release");
+    EXPECT_EQ (d[0]["reason"].toString(), "ring_risk_not_low");
+}
+
+TEST (AiSupervisorBook, AShownReleaseSurvivesABypassTapAndReturnToAuto)
+{
+    Rig r;
+    r.state.slots[0].ringRisk = AiRingRisk::Low;
+    r.startManual();
+    r.finishOk (release (5, 1000.0));
+    ASSERT_EQ (r.sup->proposals().size(), 1u);
+
+    // BYPASS: detection stops, ring risk reads Na. Past the proposal lifetime
+    // too: nothing supervises, so nothing is re-validated and nothing expires.
+    r.state.engineMode = AiEngineMode::Bypass;
+    r.state.slots[0].ringRisk = AiRingRisk::Na;
+    r.step (kSec);
+    r.step (AiSupervisor::kProposalLifetimeMs + 60 * kSec);
+    EXPECT_EQ (r.sup->proposals().size(), 1u) << "bypass must not wipe a shown release";
+    EXPECT_TRUE (r.events ("ai_decision").empty());
+
+    // Back to AUTO with a quiet slot: still there, and the frozen time is given back.
+    r.state.engineMode = AiEngineMode::Auto;
+    r.state.slots[0].ringRisk = AiRingRisk::Low;
+    r.step (kSec);
+    EXPECT_EQ (r.sup->proposals().size(), 1u);
+    EXPECT_TRUE (r.events ("ai_decision").empty());
+
+    // A sustained Critical still expires it, with the reason, exactly once.
+    r.state.slots[0].ringRisk = AiRingRisk::Critical;
+    r.step (kSec);
+    r.step (kSec);
+    r.step (kSec);
+    EXPECT_TRUE (r.sup->proposals().empty());
+    const auto d = r.events ("ai_decision");
+    ASSERT_EQ (d.size(), 1u);
     EXPECT_EQ (d[0]["reason"].toString(), "ring_risk_not_low");
 }
 

@@ -459,6 +459,9 @@ public:
     void setAiUsableForTest (bool usable);
     void setAiLogFileForTest (juce::File file) { aiLogFileOverrideForTest_ = std::move (file); }
     void tickAiForTest() { tickAi(); }
+    /** The band the supervisor reads for a slot: the raw band through the chip's 750 ms hold (time is a parameter). */
+    [[nodiscard]] static AiRingRisk heldAiRingRisk (gui::SpectrumView::RingRiskHysteresis& hold, bool valid,
+                                                    float score, float threshold, double nowMs);
 
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is
@@ -784,7 +787,8 @@ private:
     [[nodiscard]] std::unique_ptr<AiSupervisor> makeAiSupervisor (std::unique_ptr<AiLauncher> launcher);
     void stopAiAfterCredentialChange();
     void tickAi();
-    [[nodiscard]] AiStateSnapshot readAiState();
+    [[nodiscard]] AiStateSnapshot readAiState (double riskNowMs);
+    std::array<gui::SpectrumView::RingRiskHysteresis, kMaxSlots> aiRiskHold_;   // per slot, for readAiState()
     [[nodiscard]] bool copilotUsable();   // the ask flow's predicate: consent + provider + model + key / base URL
     void applyAiMode (AiMode mode);
     void setAiModeFromSettings();

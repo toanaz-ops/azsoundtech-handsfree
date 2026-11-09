@@ -120,7 +120,9 @@ AppSettings appSettingsFromHost (const az::host::HostSettings& host)
     if (const auto* starts = host.product["ai_call_starts_ms"].getArray())
     {
         for (const auto& v : *starts)
-            if ((v.isInt() || v.isInt64() || v.isDouble()) && std::isfinite ((double) v) && (double) v > 0.0)
+            // 0 < v <= 2^53: a double outside that range makes the int64 cast undefined.
+            if ((v.isInt() || v.isInt64() || v.isDouble()) && std::isfinite ((double) v) && (double) v > 0.0
+                && (double) v <= 9007199254740992.0)
                 s.aiCallStartsMs.push_back ((std::int64_t) (juce::int64) v);
         std::sort (s.aiCallStartsMs.begin(), s.aiCallStartsMs.end());
         if ((int) s.aiCallStartsMs.size() > kAiCallStartsKept)

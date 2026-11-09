@@ -1,9 +1,12 @@
 #include "app/AiSupervisor.h"
+#include "app/AppSettings.h"
 
 #include "app/SessionLogger.h"
 
 #include <algorithm>
 #include <cmath>
+
+static_assert (AiSupervisor::kMaxPersistedCallStarts == kAiCallStartsKept, "the settings file keeps as many call starts as the supervisor persists");
 
 namespace
 {
@@ -219,10 +222,15 @@ juce::String AiSupervisor::buildStateJson (const AiStateSnapshot& state, std::ui
             no->setProperty ("index", n.index);
             no->setProperty ("hz", hz);
             no->setProperty ("q", q);
-            no->setProperty ("depth_db", round2 (juce::jlimit (-120.0, 0.0, (double) n.depthDb)));
-            no->setProperty ("ceiling_db", round2 (juce::jlimit (-120.0, 0.0, (double) n.ceilingDb)));
+            // All three dB fields are rounded the same way, and the advertised
+            // rung is computed FROM the rounded values the file carries, so the
+            // sidecar's "beyond the ceiling" check can never disagree with it.
+            const double depthR   = round3 (juce::jlimit (-120.0, 0.0, (double) n.depthDb));
+            const double ceilingR = round3 (juce::jlimit (-120.0, 0.0, (double) n.ceilingDb));
+            no->setProperty ("depth_db", depthR);
+            no->setProperty ("ceiling_db", ceilingR);
             // The ONE legal deepen target (the validator's own function), or null.
-            const auto nextRung = aiNextRungDb ((double) n.depthDb, (double) n.ceilingDb);
+            const auto nextRung = aiNextRungDb (depthR, ceilingR);
             no->setProperty ("next_rung_db", nextRung ? juce::var (round3 (*nextRung)) : juce::var());
             no->setProperty ("origin", originText (n.origin));
             no->setProperty ("placed_by", authorName (n.placedBy));
@@ -274,16 +282,37 @@ AiSupervisor::AiSupervisor (Environment env)
 {
     jassert (env_.nowMs != nullptr && env_.launcher != nullptr && env_.readState != nullptr);
     appStartMs_ = env_.nowMs();
-    if (env_.loadCallStarts)
-    {
-        // Malformed entries (non-positive) are dropped; order is not trusted.
-        for (const auto v : env_.loadCallStarts())
-            if (v > 0)
-                callStartsWall_.push_back (v);
-        std::sort (callStartsWall_.begin(), callStartsWall_.end());
-        if ((int) callStartsWall_.size() > kMaxPersistedCallStarts)
-            callStartsWall_.erase (callStartsWall_.begin(), callStartsWall_.end() - kMaxPersistedCallStarts);
-    }
+    reloadPersistedState();
+}
+
+// Reads the persisted call starts and MERGES them with the ones this process
+// already holds (never drops an in-process start). Called at construction and
+// again whenever the stored data may have changed under us (MainComponent calls
+// it from enableSettings(): the supervisor is built before the settings file
+// is read, so the constructor alone saw an empty list).
+void AiSupervisor::reloadPersistedState()
+{
+    if (! env_.loadCallStarts)
+        return;
+    // Malformed entries (non-positive) are dropped; order is not trusted.
+    auto merged = callStartsWall_;
+    for (const auto v : env_.loadCallStarts())
+        if (v > 0)
+            merged.push_back (v);
+    // A start more than kFutureToleranceMs ahead of the wall clock cannot be
+    // real. Trade-off: if the clock was set back, those entries stop counting
+    // (budget is freed); but a clock that was set forward and back again can
+    // no longer brick the supervisor behind an entry dated days ahead. Entries
+    // within the tolerance stay and count as "now" (see spendLimitsAllow).
+    const auto wall = wallNow();
+    merged.erase (std::remove_if (merged.begin(), merged.end(),
+                                  [wall] (std::int64_t v) { return v > wall + kFutureToleranceMs; }),
+                  merged.end());
+    std::sort (merged.begin(), merged.end());
+    merged.erase (std::unique (merged.begin(), merged.end()), merged.end());
+    if ((int) merged.size() > kMaxPersistedCallStarts)
+        merged.erase (merged.begin(), merged.end() - kMaxPersistedCallStarts);
+    callStartsWall_ = std::move (merged);
 }
 
 std::int64_t AiSupervisor::wallNow() const
@@ -527,7 +556,28 @@ void AiSupervisor::tick()
         lastSignature_ = signatureOf (state);
     }
 
-    expireProposals (state, nowMs);
+    // BYPASS / SOUNDCHECK / measuring: nobody is supervising and the detectors
+    // may not be scoring (ring risk reads Na), so re-validating now would wipe
+    // every shown release on an A/B tap. Freeze the book -- no re-validation and
+    // no lifetime expiry -- and give the frozen time back on return to AUTO.
+    // An invalidating event (generation bump) still drops proposals as before.
+    const bool frozen = state.engineMode != AiEngineMode::Auto || state.measuring;
+    if (frozen)
+    {
+        if (freezeStartMs_ < 0)
+            freezeStartMs_ = nowMs;
+    }
+    else
+    {
+        if (freezeStartMs_ >= 0)
+        {
+            const auto frozenFor = nowMs - freezeStartMs_;
+            for (auto& p : proposals_)
+                p.receivedMs += frozenFor;
+            freezeStartMs_ = -1;
+        }
+        expireProposals (state, nowMs);
+    }
 
     if (effectiveLlmMode() < AiMode::Suggest)
     {
@@ -569,7 +619,9 @@ bool AiSupervisor::spendLimitsAllow (std::int64_t nowMs) const
     std::int64_t latest = 0;
     for (const auto raw : callStartsWall_)
     {
-        const auto at = std::min (raw, wall);   // future-dated = now
+        if (raw > wall + kFutureToleranceMs)
+            continue;   // cannot be real (see reloadPersistedState): never a permanent brick
+        const auto at = std::min (raw, wall);   // slightly future-dated = now
         latest = std::max (latest, at);
         if (wall - at < 3600 * 1000)
             ++inLastHour;
