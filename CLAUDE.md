@@ -175,3 +175,5 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    Trunk-based (global rule 5) becomes allowed after the CI-on-push-main PR merges: CI now runs on push main.
 5. A change to DSP constants, topology, or user-visible behavior also updates
    `docs/GIOI-THIEU.md` and `docs/KY-THUAT-CHONG-HU.md` in the same change.
+
+Real-app UI tests: launch only via `D:/DEV CAVE EP3/shared/harness/guards/test_app_launcher.ps1 -App handsfree` (DEVCAVE_TEST_PROFILE); never answer don't-save/discard on a window you did not start.

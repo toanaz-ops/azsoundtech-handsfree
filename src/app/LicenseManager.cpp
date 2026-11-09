@@ -1,4 +1,5 @@
 #include "app/LicenseManager.h"
+#include "app/DataRoot.h"
 
 bool LicenseManager::isAllowedKeyCharacter (juce::juce_wchar c)
 {
@@ -126,10 +127,7 @@ juce::String LicenseManager::activationUrl()
 
 juce::File LicenseManager::defaultStorageFile()
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-              .getChildFile ("AZSoundtech")
-              .getChildFile ("HandsFree")
-              .getChildFile ("license.key");
+    return DataRoot::roamingRoot().getChildFile ("license.key");
 }
 
 juce::String LicenseManager::machineIdHash() const
