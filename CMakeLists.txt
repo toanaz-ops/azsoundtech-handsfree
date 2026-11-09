@@ -129,6 +129,8 @@ endif()
 # src/main.cpp is NOT here -- it is the app's entry point, and the other two
 # targets bring their own.
 set(HANDSFREE_CORE_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/app/DataRoot.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/DataRoot.h
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
