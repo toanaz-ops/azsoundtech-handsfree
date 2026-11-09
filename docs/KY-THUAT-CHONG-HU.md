@@ -373,6 +373,16 @@ làn đang chạy đã commit ≥ 1 block lịch sử **kể từ lần reset g�
 đo được **không** được vẽ thành "LOW": một chỉ báo trấn an sai còn tệ hơn một
 chỉ báo thú nhận là nó không biết.
 
+**Ranh giới đặt lại (A-R4, sửa 09/11/2026, quyết định HW-174.Q3).** Đổi device,
+đổi sample rate hay driver tự restart đặt lại **cả 8** slot. Sửa routing của **một**
+slot (`changeSlotConfig`) chỉ dừng → áp config → `setSampleRate`/`setWidth` → xả
+backlog tap → chạy lại detector **của slot đó**; engine áp cấu hình slot bằng atomic
+nên không restart device, không đụng ring của slot khác. Bảy detector còn lại giữ
+nguyên luồng, bộ nhớ phòng và lịch sử RING RISK. Soundcheck đo chủ động đang chạy bị
+huỷ nếu phép đo đang trỏ vào slot bị sửa hoặc vào kênh vào/ra mới của nó; nếu không
+liên quan thì chạy tiếp. Các vòng lặp nạp/khôi phục của lane U ghi `settings.json`
+đúng một lần ở cuối.
+
 **Banding (phía GUI).** `score` là tích 0..1, nên ngưỡng là
 `CandidateScorer::kConfirmScore` (0.7) và nó được **publish trong snapshot** —
 GUI không hardcode con số nào: `!valid → N/A`; `< 0.55 × thr → LOW`;
