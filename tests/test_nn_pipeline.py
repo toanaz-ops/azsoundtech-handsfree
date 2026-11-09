@@ -14,6 +14,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -47,6 +48,9 @@ SYN_MANIFEST = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.manifest.json")
 SYN_META = os.path.join(SYN_DIR, "synthetic-bootstrap-v0.meta.json")
 SYN_LOGS = os.path.join(NN, "data", "synthetic-bootstrap-v0")
 BIN_HZ = 23.4375
+# What a genuine 1.5.x session_start carries (MainComponent::sessionHeader), reduced.
+REAL_HEADER = {"ev": "session_start", "t": 0, "log_schema": 3, "app_version": "1.5.1",
+               "os": "Windows 11", "device": "Fake ASIO", "sample_rate": 48000, "buffer_size": 512}
 
 
 def read_json(path):
@@ -190,7 +194,7 @@ class RebuildFromSpectrum(TempDirCase):
     def write_log(self, events, name="session-t.jsonl"):
         p = os.path.join(self.tmp, name)
         with open(p, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(json.dumps({"ev": "session_start", "t": 0, "log_schema": 3}) + "\n")
+            fh.write(json.dumps(REAL_HEADER) + "\n")
             for e in events:
                 fh.write(json.dumps(e) + "\n")
         return p
@@ -318,12 +322,14 @@ class RebuildFromSpectrum(TempDirCase):
         m = ds.build_dataset([p], os.path.join(self.tmp, "o"))
         self.assertEqual(m["sources"], {"unknown": 1})
 
-    def test_session_start_without_source_field_is_real(self):
+    def test_a_genuine_app_header_is_real(self):
         raw = self.raw()
         hz = 43 * BIN_HZ
         raw["hz"] = hz
         _, rows = self.rows_of([make_full_log_line(raw, 43, hz)])
         self.assertEqual(rows[0]["source"], "real")
+        events, _ = ds.load_events(os.path.join(FIX, "session-nn-dataset.jsonl"))
+        self.assertEqual(ds.classify_provenance(events), "real")
 
     def test_unknown_source_never_passes_as_real(self):
         raw = self.raw()
@@ -492,9 +498,10 @@ class GateFailsClosed(TempDirCase):
         self.weights = os.path.join(self.tmp, "w.json")
         write_json(self.weights, {"feature_set": 1, "model": "candidate-x"})
         self.report = {
-            "rows_total": 400, "sessions_total": 5, "source_composition": {"real": 400},
+            "rows_total": 400, "sessions_total": 8, "source_composition": {"real": 400},
             "dataset_sha256": "d" * 64, "weights_sha256": gate.sha256_file(self.weights),
-            "heldout": {"rows": 100, "label1": 55, "label0": 45, "auc_model": 0.90,
+            "heldout": {"rows": 100, "sessions": 2, "label1": 55, "label0": 45, "auc_model": 0.90,
+                        "auc_model_ci95_low": 0.80,
                         "auc_baseline": 0.70, "retention_target": 0.95, "insample_retention": 0.96,
                         "insample_reject_label0": 0.5, "train_side_threshold": 0.4,
                         "retention_label1": 0.94, "reject_label0": 0.6}}
@@ -531,8 +538,10 @@ class GateFailsClosed(TempDirCase):
 
     def test_too_few_sessions(self):
         r = copy.deepcopy(self.report)
-        r["sessions_total"] = 2
-        self.assertFailsWith("only 2 sessions", r)
+        r["sessions_total"] = 5
+        self.assertFailsWith("only 5 sessions", r)
+        r["sessions_total"] = 6
+        self.assertEqual(self.fails(r), [])
 
     def test_heldout_too_small_or_single_label(self):
         r = copy.deepcopy(self.report)
@@ -553,7 +562,7 @@ class GateFailsClosed(TempDirCase):
         r = copy.deepcopy(self.report)
         r["heldout"].update(auc_model=0.85, auc_baseline=0.82)
         self.assertFailsWith("baseline score AUC", r)
-        r["heldout"].update(auc_model=0.88, auc_baseline=0.83)       # exactly the margin: passes
+        r["heldout"].update(auc_model=0.88, auc_baseline=0.83, auc_model_ci95_low=0.85)   # exactly the margin: passes
         self.assertEqual(self.fails(r), [])
 
     def test_rejection_below_floor(self):
@@ -653,7 +662,7 @@ class GateFailsClosed(TempDirCase):
     def test_auc_exactly_on_the_margin_fails_closed_by_binary_rounding(self):
         self.assertGreater(0.78 + 0.05, 0.83)         # the float edge, not a bug in the gate
         r = copy.deepcopy(self.report)
-        r["heldout"].update(auc_model=0.83, auc_baseline=0.78)
+        r["heldout"].update(auc_model=0.83, auc_baseline=0.78, auc_model_ci95_low=0.8)
         self.assertFailsWith("baseline score AUC", r)
 
     def test_removing_any_single_field_fails(self):
@@ -817,9 +826,10 @@ class EmbeddedModelGate(TempDirCase):
         doc = read_json(SYN_WEIGHTS)
         doc["model"] = "candidate-real-v1"
         write_json(w, doc)
-        rep = {"rows_total": 400, "sessions_total": 5, "source_composition": {"real": 400},
+        rep = {"rows_total": 400, "sessions_total": 8, "source_composition": {"real": 400},
                "weights_sha256": "a" * 64, "dataset_sha256": "d" * 64,
-               "heldout": {"rows": 100, "label1": 55, "label0": 45, "auc_model": 0.9,
+               "heldout": {"rows": 100, "sessions": 2, "label1": 55, "label0": 45, "auc_model": 0.9,
+                           "auc_model_ci95_low": 0.8,
                            "auc_baseline": 0.7, "retention_target": 0.95,
                            "insample_retention": 0.96, "insample_reject_label0": 0.5,
                            "train_side_threshold": 0.4, "retention_label1": 0.94, "reject_label0": 0.6}}
@@ -961,6 +971,338 @@ class TrainingWithNumpy(TempDirCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(train_mlp.main(["--dataset", p, "--name", "untrained-x",
                                              "--out", os.path.join(self.tmp, "w.json")]), 2)
+
+
+# ---------------------------------------------------------------------------
+# Fix pass after the whole-phase review (M1-M6)
+def read_events(path):
+    return ds.load_events(path)[0]
+
+
+def with_header(events, **changes):
+    """Copy of `events` whose session_start gets `changes`; a None value deletes the key."""
+    out = copy.deepcopy(events)
+    for e in out:
+        if e.get("ev") == "session_start":
+            for k, v in changes.items():
+                if v is None:
+                    e.pop(k, None)
+                else:
+                    e[k] = v
+            break
+    return out
+
+
+class M1ProvenanceIsFailClosed(TempDirCase):
+    def real_events(self):
+        return read_events(os.path.join(FIX, "session-nn-dataset.jsonl"))
+
+    def test_the_committed_synthetic_set_with_source_stripped_is_not_real(self):
+        for n in sorted(os.listdir(SYN_LOGS)):
+            events = with_header(read_events(os.path.join(SYN_LOGS, n)), source=None)
+            self.assertNotEqual(ds.classify_provenance(events), "real", n)
+            self.assertEqual(ds.classify_provenance(events), "synthetic", n)
+
+    def test_stripping_every_marker_but_keeping_no_evidence_is_unknown(self):
+        events = with_header(read_events(os.path.join(SYN_LOGS, sorted(os.listdir(SYN_LOGS))[0])),
+                             source=None, generator=None, app_version=None, device=None, os=None)
+        self.assertEqual(ds.classify_provenance(events), "unknown")
+
+    def test_each_missing_piece_of_evidence_is_unknown(self):
+        base = self.real_events()
+        self.assertEqual(ds.classify_provenance(base), "real")
+        for change in ({"app_version": None}, {"app_version": "dev"}, {"app_version": "1.5"},
+                       {"app_version": "1.5.1-alpha"}, {"app_version": 151}, {"log_schema": None},
+                       {"log_schema": 1}, {"log_schema": "3"}, {"log_schema": True},
+                       {"source": "real"}, {"source": "reel"}):
+            self.assertEqual(ds.classify_provenance(with_header(base, **change)), "unknown", change)
+
+    def test_every_synthetic_marker_alone_is_enough(self):
+        base = self.real_events()
+        for change in ({"source": "synthetic"}, {"generator": "x"}, {"app_version": "synthetic"},
+                       {"device": "Synthetic Interface"}, {"os": "synthetic"}):
+            self.assertEqual(ds.classify_provenance(with_header(base, **change)), "synthetic", change)
+
+    def test_source_app_is_allowed_and_two_headers_are_not(self):
+        base = self.real_events()
+        self.assertEqual(ds.classify_provenance(with_header(base, source="app")), "real")
+        self.assertEqual(ds.classify_provenance(base[:1] + base), "unknown")
+
+    def test_the_stripped_synthetic_set_is_still_not_real_through_the_builder(self):
+        out = []
+        for n in sorted(os.listdir(SYN_LOGS)):
+            events = with_header(read_events(os.path.join(SYN_LOGS, n)), source=None)
+            p = os.path.join(self.tmp, n)
+            with open(p, "w", encoding="utf-8", newline="\n") as fh:
+                for e in events:
+                    fh.write(json.dumps(e) + "\n")
+            out.append(p)
+        m = ds.build_dataset(out, os.path.join(self.tmp, "o"))
+        self.assertEqual(set(m["sources"]), {"synthetic"})
+
+
+class M2SessionIdentityIsContent(TempDirCase):
+    def copies(self, n, names=("a.jsonl", "a (1).jsonl", "b-renamed.jsonl")):
+        src = os.path.join(FIX, "session-nn-dataset.jsonl")
+        paths = []
+        for name in names[:n]:
+            p = os.path.join(self.tmp, name)
+            shutil.copy(src, p)
+            paths.append(p)
+        return paths
+
+    def test_three_copies_of_one_log_are_one_session(self):
+        m = ds.build_dataset(self.copies(3), os.path.join(self.tmp, "o"))
+        self.assertEqual(len(m["sessions"]), 1)
+        self.assertEqual(m["duplicate_sessions"], {"identical_content": 2})
+        self.assertEqual(m["rows"], 3)
+
+    def test_line_endings_and_trailing_blank_lines_do_not_make_a_new_session(self):
+        a, b = self.copies(2)
+        with open(a, "rb") as fh:
+            data = fh.read()
+        with open(b, "wb") as fh:
+            fh.write(data.replace(bytes([10]), bytes([13, 10])) + bytes([13, 10, 13, 10]))
+        m = ds.build_dataset([a, b], os.path.join(self.tmp, "o"))
+        self.assertEqual((len(m["sessions"]), m["duplicate_sessions"]), (1, {"identical_content": 1}))
+
+    def test_renaming_a_file_keeps_its_session_id(self):
+        ids = []
+        for name in ("one.jsonl", "completely-different-name.jsonl"):
+            p = os.path.join(self.tmp, name)
+            shutil.copy(os.path.join(FIX, "session-nn-dataset.jsonl"), p)
+            ids.append(ds.content_session_id(p))
+        self.assertEqual(ids[0], ids[1])
+        self.assertTrue(ids[0].startswith("s") and len(ids[0]) == 17)
+
+    def test_different_content_is_a_different_session(self):
+        a = os.path.join(FIX, "session-nn-dataset.jsonl")
+        b = os.path.join(FIX, "session-nn-linked.jsonl")
+        self.assertNotEqual(ds.content_session_id(a), ds.content_session_id(b))
+
+    def test_a_copy_never_lands_on_both_sides_of_the_split(self):
+        paths = []
+        for i in range(6):
+            p = os.path.join(self.tmp, "orig-%d.jsonl" % i)
+            with open(p, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(json.dumps(dict(REAL_HEADER, device="dev-%d" % i)) + "\n")
+                fh.write(json.dumps({"ev": "note", "t": i}) + "\n")
+            paths.append(p)
+            q = os.path.join(self.tmp, "orig-%d (1).jsonl" % i)
+            shutil.copy(p, q)
+            paths.append(q)
+        m = ds.build_dataset(paths, os.path.join(self.tmp, "o"))
+        self.assertEqual(len(m["sessions"]), 6)
+        self.assertEqual(m["duplicate_sessions"], {"identical_content": 6})
+        tr, he = ds.split_sessions([s["session_id"] for s in m["sessions"]])
+        self.assertFalse(set(tr) & set(he))
+
+
+class M5LinkedStereoPlacementIsOneRow(TempDirCase):
+    PATH = os.path.join(FIX, "session-nn-linked.jsonl")
+
+    def build(self):
+        m = ds.build_dataset([self.PATH], self.tmp)
+        return m, ds.read_rows(os.path.join(self.tmp, "dataset.jsonl"))
+
+    def test_one_row_per_placement_not_per_lane(self):
+        m, rows = self.build()
+        self.assertEqual(sorted((round(r["raw"]["hz"], 1), r["label"]) for r in rows),
+                         [(1007.8, 1), (1500.0, 1), (2437.5, 0)])
+        self.assertEqual(m["sessions"][0]["notch_sets"], 9)
+        self.assertEqual(m["sessions"][0]["placements"], 5)
+
+    def test_lanes_with_conflicting_verdicts_drop_the_placement(self):
+        m, rows = self.build()
+        self.assertEqual(m["dropped"].get("conflicting_verdicts"), 1)
+        self.assertNotIn(500.0, [round(r["raw"]["hz"], 1) for r in rows])
+
+    def test_a_single_verdict_on_either_lane_is_used_and_none_is_no_verdict(self):
+        m, rows = self.build()
+        # placement 2: only lane 1 was judged (FALSE) -> label 0 ; placement 4: nobody judged
+        self.assertIn((2437.5, 0), [(round(r["raw"]["hz"], 1), r["label"]) for r in rows])
+        self.assertEqual(m["dropped"], {"conflicting_verdicts": 1, "no_verdict": 1})
+
+    def test_both_lanes_agreeing_gives_one_row_with_that_label(self):
+        _, rows = self.build()
+        self.assertEqual([r["label"] for r in rows if round(r["raw"]["hz"], 1) == 1007.8], [1])
+
+    def test_the_row_carries_the_stereo_feature(self):
+        _, rows = self.build()
+        r = [r for r in rows if round(r["raw"]["hz"], 1) == 1007.8][0]
+        self.assertTrue(r["raw"]["hasOtherLane"])
+
+    def test_two_notches_on_the_same_lane_are_never_merged(self):
+        events = read_events(self.PATH)
+        first = [e for e in events if e["ev"] == "notch_set" and e["index"] == 0 and e["lane"] == 0][0]
+        twice = copy.deepcopy(first)
+        twice["t"] = 1500.0           # the same lane placing the same thing twice
+        self.assertEqual(len(ds._placements([first, twice], [{}, {}])), 2)
+
+
+class M6StatisticalFloor(TempDirCase):
+    def test_hanley_mcneil_standard_error_hand_computed(self):
+        # A = 0.8, n1 = n0 = 10: Q1 = A/(2-A), Q2 = 2A^2/(1+A)
+        q1, q2 = 0.8 / 1.2, 2 * 0.64 / 1.8
+        expect = math.sqrt((0.8 * 0.2 + 9 * (q1 - 0.64) + 9 * (q2 - 0.64)) / 100.0)
+        self.assertAlmostEqual(evaluate.hanley_mcneil_se(0.8, 10, 10), expect, places=12)
+        self.assertAlmostEqual(expect, 0.1, delta=0.012)     # the ~0.09-0.10 the floor addresses
+        self.assertIsNone(evaluate.hanley_mcneil_se(None, 10, 10))
+        self.assertIsNone(evaluate.hanley_mcneil_se(0.8, 1, 10))
+        self.assertLess(evaluate.hanley_mcneil_se(0.8, 100, 100), evaluate.hanley_mcneil_se(0.8, 10, 10))
+
+    def test_the_report_carries_se_interval_and_heldout_sessions(self):
+        w = read_json(SYN_WEIGHTS)
+        rows = []
+        for s in range(8):
+            for i in range(8):
+                rows.append({"session_id": "s%d" % s, "source": "real", "label": i % 2,
+                             "score": 0.3 + 0.07 * i, "raw": {
+                                 "hz": 1000.0, "peakiness": 10.0 + 2 * i, "pNorm": 0.5, "rNorm": 0.5,
+                                 "riseRatio": 1.5, "mNorm": 0.5, "penalty": 1.0, "hasOtherLane": False,
+                                 "lrRatio": 0.0, "nearMags": [0.1] * 5 + [1.0] + [0.1] * 5}})
+        h = evaluate.evaluate(rows, w, SYN_WEIGHTS, "0" * 64)["heldout"]
+        self.assertEqual(h["sessions"], 2)
+        auc, se = h["auc_model"], h["auc_model_se"]
+        self.assertIsNotNone(se)
+        self.assertAlmostEqual(h["auc_model_ci95_low"], max(0.0, auc - 1.96 * se), places=12)
+        self.assertAlmostEqual(h["auc_model_ci95_high"], min(1.0, auc + 1.96 * se), places=12)
+        json.dumps(h, allow_nan=False)
+
+    def test_undefined_auc_gives_undefined_interval(self):
+        side = evaluate._side([{"label": 1, "session_id": "a"}], [0.5], [0.5], 0.95)
+        self.assertIsNone(side["auc_model_se"])
+        self.assertIsNone(side["auc_model_ci95_low"])
+
+    def gate_case(self):
+        case = GateFailsClosed("test_a_good_report_passes")
+        case.setUp()
+        self.addCleanup(case.tearDown)
+        return case
+
+    def test_the_new_floors_are_in_the_single_thresholds_dict(self):
+        t = gate.THRESHOLDS
+        self.assertGreaterEqual(t["min_heldout_per_label"], 30)
+        self.assertGreaterEqual(t["min_heldout_sessions"], 2)
+        self.assertGreaterEqual(t["min_sessions"], 6)
+        self.assertEqual(t["ci_lower_over_baseline"], 0.0)
+        for k in ("min_rows", "min_heldout_rows", "min_auc", "auc_margin_over_baseline", "retention",
+                  "min_reject_label0", "min_heldout_retention_at_train_threshold",
+                  "min_heldout_reject_at_train_threshold"):
+            self.assertIn(k, t)
+
+    def test_heldout_rows_per_label_below_30_fail(self):
+        case = self.gate_case()
+        r = copy.deepcopy(case.report)
+        r["heldout"].update(rows=70, label1=41, label0=29)
+        case.assertFailsWith("held-out has 29 rows with label0", r)
+        r["heldout"].update(rows=60, label1=30, label0=30)
+        self.assertEqual(case.fails(r), [])
+
+    def test_fewer_than_two_heldout_sessions_fail(self):
+        case = self.gate_case()
+        r = copy.deepcopy(case.report)
+        r["heldout"]["sessions"] = 1
+        case.assertFailsWith("held-out covers only 1 session", r)
+
+    def test_fewer_than_six_sessions_fail(self):
+        case = self.gate_case()
+        r = copy.deepcopy(case.report)
+        r["sessions_total"] = 5
+        case.assertFailsWith("only 5 sessions (need >= 6)", r)
+
+    def test_interval_lower_bound_must_reach_the_baseline(self):
+        case = self.gate_case()
+        r = copy.deepcopy(case.report)
+        # the point estimate clears 0.80 and baseline + 0.05, but the interval reaches below the baseline
+        r["heldout"].update(auc_model=0.84, auc_baseline=0.75, auc_model_ci95_low=0.74)
+        case.assertFailsWith("lower end of the model's 95% AUC interval", r)
+        r["heldout"]["auc_model_ci95_low"] = 0.75
+        self.assertEqual(case.fails(r), [])
+
+    def test_missing_interval_or_session_count_fails_closed(self):
+        case = self.gate_case()
+        for key in ("auc_model_ci95_low", "sessions"):
+            r = copy.deepcopy(case.report)
+            del r["heldout"][key]
+            case.assertFailsWith("missing field heldout." + key, r)
+
+
+class M3M4CMakeWiring(TempDirCase):
+    """The registration is checked in the CMake text: no C++ build is needed."""
+
+    def cmake(self, *rel):
+        with open(os.path.join(ROOT, *rel), "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_without_python_the_embedded_model_gate_fails_instead_of_skipping(self):
+        text = self.cmake("tests", "CMakeLists.txt")
+        else_part = text[text.index("else()", text.index("nn_embedded_model_gate")):]
+        m = re.search(r'add_test\(NAME nn_embedded_model_gate\s+COMMAND (.*?)\)\s*'
+                      r'set_tests_properties\(nn_embedded_model_gate PROPERTIES (\w+) "([^"]+)"\)', else_part)
+        self.assertIsNotNone(m, "the else-branch must register nn_embedded_model_gate with a property")
+        self.assertEqual(m.group(2), "FAIL_REGULAR_EXPRESSION")
+        self.assertIn("python3 not found", m.group(1))
+        self.assertIn(m.group(3), m.group(1))          # the printed message matches the failing pattern
+        # the other Python tests keep their skip behaviour
+        self.assertIn("set_tests_properties(nn_pipeline PROPERTIES SKIP_REGULAR_EXPRESSION", else_part)
+
+    def embedded_list(self):
+        text = self.cmake("CMakeLists.txt")
+        m = re.search(r"set\(HANDSFREE_EMBEDDED_MODELS\s+([^)]*)\)", text)
+        self.assertIsNotNone(m, "root CMakeLists.txt must define HANDSFREE_EMBEDDED_MODELS")
+        return text, [x.replace("${CMAKE_SOURCE_DIR}", ROOT) for x in m.group(1).split()]
+
+    def test_one_list_feeds_the_binary_data_target_and_the_gate(self):
+        text, files = self.embedded_list()
+        self.assertTrue(files)
+        block = text[text.index("juce_add_binary_data(HandsFreeModels"):]
+        block = block[:block.index("\n)")]
+        self.assertIn("SOURCES ${HANDSFREE_EMBEDDED_MODELS}", block)
+        self.assertNotIn(".json", block)       # no second, hand-written path beside the list
+        t = self.cmake("tests", "CMakeLists.txt")
+        self.assertIn("HANDSFREE_EMBEDDED_MODELS", t)
+        self.assertIn("--model-file", t)
+
+    def test_the_real_list_passes_and_covers_the_models_folder(self):
+        _, files = self.embedded_list()
+        self.assertEqual(check_embedded_models.check_models_dir(os.path.join(ROOT, "models"), files), [])
+
+    def test_a_json_in_models_that_cmake_does_not_embed_fails(self):
+        _, files = self.embedded_list()
+        d = os.path.join(self.tmp, "models")
+        os.makedirs(d)
+        shutil.copy(files[0], d)
+        shutil.copy(SYN_WEIGHTS, d)
+        problems = check_embedded_models.check_models_dir(d, [os.path.join(d, os.path.basename(files[0]))])
+        self.assertTrue(any("synthetic-bootstrap-v0.json" in p and "not in the list" in p for p in problems),
+                        problems)
+
+    def test_a_listed_file_from_elsewhere_is_checked_not_ignored(self):
+        _, files = self.embedded_list()
+        elsewhere = os.path.join(self.tmp, "tools-nn-models")
+        os.makedirs(elsewhere)
+        for f in (SYN_WEIGHTS, SYN_REPORT, SYN_MANIFEST, SYN_META):
+            shutil.copy(f, elsewhere)
+        listed = files + [os.path.join(elsewhere, "synthetic-bootstrap-v0.json")]
+        problems = check_embedded_models.check_models_dir(os.path.join(ROOT, "models"), listed)
+        self.assertTrue(any("not all real" in p for p in problems), problems)
+
+    def test_a_listed_file_that_does_not_exist_fails(self):
+        problems = check_embedded_models.check_models_dir(os.path.join(ROOT, "models"),
+                                                          [os.path.join(self.tmp, "ghost.json")])
+        self.assertTrue(any("does not exist" in p for p in problems), problems)
+
+    def test_cli_accepts_model_file_arguments(self):
+        _, files = self.embedded_list()
+        args = ["--models-dir", os.path.join(ROOT, "models")]
+        for f in files:
+            args += ["--model-file", f]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(check_embedded_models.main(args), 0)
+        self.assertIn("OK", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(check_embedded_models.main(args + ["--model-file", SYN_WEIGHTS]), 1)
 
 
 if __name__ == "__main__":

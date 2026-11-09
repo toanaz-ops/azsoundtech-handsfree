@@ -18,6 +18,12 @@ Metrics on the held-out rows (higher score = more likely a real howl, label 1):
     rows at 95 % retention and applied unchanged to the held-out rows. The gate
     uses the honest pair.
 AUC with only one class present is "undefined" (None in the JSON), never a number.
+
+Statistical floor (decision Q24, second amendment): the model AUC is reported with
+its Hanley-McNeil (1982) standard error and a 95 % interval (AUC +- 1.96 SE,
+clipped to [0, 1]), and the held-out side reports how many SESSIONS it holds. With
+10 held-out rows per label the SE is about 0.09, i.e. "baseline + 0.05" is inside
+the noise; gate.py reads these fields.
 """
 from __future__ import annotations
 
@@ -60,6 +66,18 @@ def roc_auc(scores, labels):
     return (rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
 
 
+def hanley_mcneil_se(auc, n_pos, n_neg):
+    """Hanley & McNeil (1982) standard error of an ROC-AUC estimate, or None when
+    undefined (no AUC, or a class with fewer than 2 rows)."""
+    if auc is None or n_pos < 2 or n_neg < 2:
+        return None
+    q1 = auc / (2.0 - auc)
+    q2 = 2.0 * auc * auc / (1.0 + auc)
+    var = (auc * (1.0 - auc) + (n_pos - 1) * (q1 - auc * auc)
+           + (n_neg - 1) * (q2 - auc * auc)) / (n_pos * n_neg)
+    return math.sqrt(max(var, 0.0))
+
+
 def reject_at_retention(scores, labels, retention):
     """Threshold t = the k-th largest label-1 score, k = ceil(retention * P), so
     at least `retention` of label-1 rows have score >= t. Returns
@@ -97,7 +115,12 @@ def _side(rows, scores_model, scores_base, retention, honest=False, fixed_thresh
            "label1": sum(1 for y in labels if y == 1),
            "label0": sum(1 for y in labels if y == 0),
            "retention_target": retention}
+    out["sessions"] = len({r["session_id"] for r in rows})
     out["auc_model"] = roc_auc(scores_model, labels)
+    se = hanley_mcneil_se(out["auc_model"], out["label1"], out["label0"])
+    out["auc_model_se"] = se
+    out["auc_model_ci95_low"] = None if se is None else max(0.0, out["auc_model"] - 1.96 * se)
+    out["auc_model_ci95_high"] = None if se is None else min(1.0, out["auc_model"] + 1.96 * se)
     out["auc_baseline"] = roc_auc(scores_base, labels)
     for tag, sc in (("", scores_model), ("baseline_", scores_base)):
         res = reject_at_retention(sc, labels, retention) if all(
@@ -175,7 +198,9 @@ def main(argv):
     fmt = lambda v: "undefined" if v is None else "%.4f" % v
     print("held-out: %d rows (label1 %d, label0 %d) from sessions %s" % (
         h["rows"], h["label1"], h["label0"], report["split"]["heldout_sessions"]))
-    print("AUC model %s  baseline score %s" % (fmt(h["auc_model"]), fmt(h["auc_baseline"])))
+    print("AUC model %s (SE %s, 95%% interval %s..%s)  baseline score %s  held-out sessions %d" % (
+        fmt(h["auc_model"]), fmt(h["auc_model_se"]), fmt(h["auc_model_ci95_low"]),
+        fmt(h["auc_model_ci95_high"]), fmt(h["auc_baseline"]), h["sessions"]))
     print("optimistic (threshold picked on the held-out rows): at >= %.0f%% retention, label-0 rejected "
           "model %s  baseline %s" % (h["retention_target"] * 100, fmt(h["insample_reject_label0"]),
                                      fmt(h["baseline_insample_reject_label0"])))

@@ -351,6 +351,14 @@ và ở đó phải giữ ≥ 90 % hú thật và bắt ≥ 30 % đặt oan (con
 (d) manifest và metadata huấn luyện bắt buộc, băm dataset (báo cáo = manifest = metadata) và băm trọng số phải khớp; (e) log không có `session_start` là nguồn
 `unknown`; (f) `untrained-*` chỉ được phép khi id và băm file nằm trong danh sách ghim. Lưu ý: `source` là nhãn tự khai, cổng chống tai nạn chứ không chống giả mạo.
 
+**Sửa 09/11/2026 (sau Fable review)** — **chốt tạm, owner chưa duyệt**; thêm sàn thống kê, không nới điều kiện nào. Lý do: với 10 dòng mỗi nhãn ở tập giữ lại, sai số chuẩn của AUC
+(Hanley–McNeil) khoảng 0,09 nên "mốc + 0,05" nằm trong nhiễu, và với 3 session phép chia là fit 1 / kiểm định 1 / giữ lại 1. Các sàn mới, ở `gate.THRESHOLDS`:
+(a) tập giữ lại ≥ **30** dòng mỗi nhãn (thay 10); (b) tập giữ lại phủ ≥ **2 session**; (c) tổng ≥ **6 session** (thay 3); (d) cận dưới của khoảng tin cậy 95 % của AUC model
+(`AUC ± 1,96·SE`) ≥ AUC của `score` hiện tại. Còn nguyên: ≥ 300 hàng thật, ≥ 60 dòng giữ lại, AUC ≥ 0,80, AUC ≥ mốc + 0,05, và hai cặp ngưỡng 95 % (lạc quan và trung thực).
+Cùng lượt: (e) `real` cần bằng chứng dương từ `session_start` (không còn "thiếu `source` = `real`"); (f) danh tính session theo nội dung, bản trùng bị bỏ;
+(g) một lần đặt LINK là một hàng; (h) test cổng kiểm đúng các file CMake nhúng và **trượt** khi máy không có Python. Các con số (a)–(d) là ước đoán trước khi có dữ liệu thật,
+cần owner xem lại khi có lứa log thật đầu tiên: 30 dòng/nhãn và 6 session có thể đòi nhiều hơn số tester hiện có.
+
 ### Q25 — Chưa có log thật thì khởi động bằng gì?
 
 Đo 09/11/2026: máy build có 9 file log, không notch, không verdict.
