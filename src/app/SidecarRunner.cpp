@@ -21,13 +21,50 @@ juce::File defaultCopilotExecutable()
 }
 
 //==============================================================================
-CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request)
+void CopilotCancelToken::cancel()
+{
+    {
+        std::lock_guard<std::mutex> lock (mutex_);
+        cancelled_ = true;
+    }
+    cv_.notify_all();
+}
+
+bool CopilotCancelToken::isCancelled() const
+{
+    std::lock_guard<std::mutex> lock (mutex_);
+    return cancelled_;
+}
+
+bool CopilotCancelToken::waitFor (int timeoutMs, const std::function<bool()>& stopEarly)
+{
+    std::unique_lock<std::mutex> lock (mutex_);
+    cv_.wait_for (lock, std::chrono::milliseconds (juce::jmax (0, timeoutMs)),
+                  [&] { return cancelled_ || (stopEarly && stopEarly()); });
+    return cancelled_;
+}
+
+void CopilotCancelToken::notify()
+{
+    { std::lock_guard<std::mutex> lock (mutex_); } // orders against a waiter's predicate check
+    cv_.notify_all();
+}
+
+//==============================================================================
+CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request, CopilotCancelToken& cancel)
 {
     CopilotRunResult result;
 
     if (! request.executable.existsAsFile())
     {
         result.status = CopilotRunResult::Status::sidecarMissing;
+        return result;
+    }
+
+    // Cancelled before the child even exists: do not spawn it.
+    if (cancel.isCancelled())
+    {
+        result.status = CopilotRunResult::Status::failed;
         return result;
     }
 
@@ -50,24 +87,17 @@ CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request)
     // that kills the child from outside; the read then sees it gone and returns.
     std::atomic<bool> timedOut { false };
     std::atomic<bool> cancelled { false };
-    bool finished = false;
-    {
-        std::lock_guard<std::mutex> lock (mutex_);
-        // A cancel() issued before this point is intentionally not honoured:
-        // the runner checks its own generation before calling run().
-        cancelRequested_ = false;
-    }
+    std::atomic<bool> finished { false };
 
     std::thread watchdog ([&]
     {
-        std::unique_lock<std::mutex> lock (mutex_);
-        cv_.wait_for (lock, std::chrono::milliseconds (juce::jmax (1, request.timeoutMs)),
-                      [&] { return finished || cancelRequested_; });
-
+        // A token cancelled before this point is seen at once: it is sticky.
+        const bool wasCancelled = cancel.waitFor (juce::jmax (1, request.timeoutMs),
+                                                  [&] { return finished.load(); });
         if (! finished)
         {
-            cancelled = cancelRequested_;
-            timedOut = ! cancelRequested_;
+            cancelled = wasCancelled;
+            timedOut = ! wasCancelled;
             child.kill();
         }
     });
@@ -89,11 +119,8 @@ CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request)
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock (mutex_);
-        finished = true;
-    }
-    cv_.notify_all();
+    finished = true;
+    cancel.notify();
     watchdog.join();
 
     child.waitForProcessToFinish (2000);
@@ -112,15 +139,6 @@ CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request)
     return result;
 }
 
-void ChildProcessBackend::cancel()
-{
-    {
-        std::lock_guard<std::mutex> lock (mutex_);
-        cancelRequested_ = true;
-    }
-    cv_.notify_all();
-}
-
 //==============================================================================
 class SidecarRunner::Worker : public juce::Thread
 {
@@ -133,13 +151,14 @@ public:
     }
 
     void submit (CopilotRequest request, std::function<void (CopilotRunResult)> onDone,
-                 juce::uint64 generation)
+                 juce::uint64 generation, std::shared_ptr<CopilotCancelToken> token)
     {
         {
             const juce::ScopedLock lock (lock_);
             request_ = std::move (request);
             onDone_ = std::move (onDone);
             generation_ = generation;
+            token_ = std::move (token);
             pending_ = true;
         }
         notify();
@@ -155,6 +174,7 @@ private:
             CopilotRequest request;
             std::function<void (CopilotRunResult)> onDone;
             juce::uint64 generation = 0;
+            std::shared_ptr<CopilotCancelToken> token;
             {
                 const juce::ScopedLock lock (lock_);
                 if (! pending_)
@@ -163,6 +183,7 @@ private:
                 request = std::move (request_);
                 onDone = std::move (onDone_);
                 generation = generation_;
+                token = std::move (token_);
             }
 
             if (threadShouldExit() || shared_->generation.load() != generation)
@@ -171,7 +192,7 @@ private:
                 continue;
             }
 
-            auto result = backend_.run (request);
+            auto result = backend_.run (request, *token);
             shared_->busy = false;
 
             if (threadShouldExit())
@@ -194,6 +215,7 @@ private:
     CopilotRequest request_;
     std::function<void (CopilotRunResult)> onDone_;
     juce::uint64 generation_ = 0;
+    std::shared_ptr<CopilotCancelToken> token_;
     bool pending_ = false;
 };
 
@@ -211,11 +233,11 @@ SidecarRunner::SidecarRunner (std::unique_ptr<CopilotBackend> backend, Poster po
 
 SidecarRunner::~SidecarRunner()
 {
-    // Order matters: mark dead first so any queued delivery is dropped, ask the
-    // backend to stop the child, then stop the thread with a bounded wait.
+    // Order matters: mark dead first so any queued delivery is dropped, cancel
+    // the run in flight (sticky, so even a run() not yet entered sees it), then
+    // stop the thread with a bounded wait.
     shared_->dead = true;
-    ++shared_->generation;
-    backend_->cancel();
+    cancelCurrent();
     worker_->signalThreadShouldExit();
     worker_->notify();
     worker_->stopThread (kStopThreadTimeoutMs);
@@ -227,15 +249,32 @@ bool SidecarRunner::request (CopilotRequest req, std::function<void (CopilotRunR
     if (! shared_->busy.compare_exchange_strong (expected, true))
         return false;
 
-    const auto generation = ++shared_->generation;
-    worker_->submit (std::move (req), std::move (onDone), generation);
+    auto token = std::make_shared<CopilotCancelToken>();
+    juce::uint64 generation = 0;
+    {
+        std::lock_guard<std::mutex> lock (shared_->tokenMutex);
+        generation = ++shared_->generation;
+        shared_->token = token;
+    }
+    worker_->submit (std::move (req), std::move (onDone), generation, std::move (token));
     return true;
 }
 
 void SidecarRunner::cancel()
 {
-    ++shared_->generation;
-    backend_->cancel();
+    cancelCurrent();
+}
+
+void SidecarRunner::cancelCurrent()
+{
+    std::shared_ptr<CopilotCancelToken> token;
+    {
+        std::lock_guard<std::mutex> lock (shared_->tokenMutex);
+        ++shared_->generation;
+        token = shared_->token;
+    }
+    if (token != nullptr)
+        token->cancel();
 }
 
 bool SidecarRunner::isBusy() const noexcept

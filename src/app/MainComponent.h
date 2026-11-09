@@ -21,11 +21,14 @@
 
 #include "app/AppSettings.h"
 #include "app/AudioEngine.h"
+#include "app/CopilotFindings.h"
 #include "app/NotchController.h"
 #include "app/SessionLogger.h"
+#include "app/SidecarRunner.h"
 #include "app/SlotConfig.h"
 #include "app/SoundcheckController.h"
 #include "dsp/ClockSource.h"
+#include "gui/CopilotPanel.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
 #include "gui/DumbView.h"
@@ -289,6 +292,14 @@ public:
     // the only way a GUI change gets reported (CLAUDE.md, 2026-08-25).
     [[nodiscard]] gui::SoundcheckPanel& getSoundcheckPanelForTest() { return soundcheckPanel_; }
     [[nodiscard]] gui::NotchListPanel& getNotchListPanelForTest() { return notchListPanel_; }
+
+    // Lane L2a. The panel, and a seam so no test or snapshot ever launches the
+    // real sidecar: a fake backend (and a hand-drained poster, because the
+    // headless suite does not pump the message loop) replaces the runner.
+    [[nodiscard]] gui::CopilotPanel& getCopilotPanelForTest() { return copilotPanel_; }
+    [[nodiscard]] juce::Rectangle<int> copilotPanelBoundsForTest() const { return copilotPanel_.getBounds(); }
+    void setCopilotBackendForTest (std::unique_ptr<CopilotBackend> backend,
+                                   SidecarRunner::Poster poster = {});
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
@@ -634,6 +645,15 @@ private:
     // declared after it). Always visible: a fixed bottom strip.
     gui::NotchListPanel notchListPanel_;
 
+    // Lane L2a: the copilot panel under the notch list, and the runner behind
+    // its button. The runner is created on first use (a thread per MainComponent
+    // in every test would be waste) and is declared AFTER the panel, so it is
+    // destroyed -- cancelling and joining its worker -- before the panel its
+    // callback targets. The callback holds only a SafePointer to this component.
+    gui::CopilotPanel copilotPanel_;
+    std::unique_ptr<SidecarRunner> copilotRunner_;
+    void analyseWithCopilot();
+
     //==========================================================================
     // LANE M Task 10 state. All of it is declared BEFORE soundcheck_ below,
     // which is the last member in this class -- see the comment there.
@@ -741,6 +761,7 @@ private:
     // notches, so extra WIDTH there buys nothing. The width goes where the
     // controls are. See docs/spec-ui-mockup.md section 5.
     static constexpr float kNotchColumnFraction = 0.44f;
+    static constexpr float kCopilotColumnFraction = 0.50f;   // lower share of that column
 
     //==========================================================================
     // THE LAST MEMBER IN THIS CLASS, and that is the whole safety argument.

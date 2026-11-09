@@ -11,7 +11,7 @@ TEST (CopilotFindings, ParsesRealSidecarSample)
 {
     // Shape copied from `copilot.py tests/fixtures/session-sample.jsonl --json`.
     const juce::String json (R"json([
-  {"code":"ceiling","severity":"alert","title":"1008 Hz ch\u1EA1m tr\u1EA7n -18 dB (slot 0 l\u00E0n R)",
+  {"code":"ceiling","severity":"alert","title":"1008 Hz ch\u1EA1m tr\u1EA7n -18 dB (slot 01 l\u00E0n R)",
    "advice":"H\u1EA1 gain monitor; \u0111\u1EEBng t\u0103ng tr\u1EA7n.",
    "evidence":{"hz":1007.8,"slot":0,"lane":"R","deepest_db":-18,"ceiling_db":-18.0}},
   {"code":"false_rate","severity":"warn","title":"1/3 notch b\u1ECB \u0111\u00E1nh d\u1EA5u oan","advice":"Th\u1EED preset Safe.",

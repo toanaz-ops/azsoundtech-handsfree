@@ -47,7 +47,10 @@ def _lane(n: dict) -> str:
 
 
 def _where(n: dict) -> str:
-    return f"slot {n.get('slot')} làn {_lane(n)}"
+    # The log stores a zero-based slot index; the console labels slots 01, 02, ...
+    slot = n.get("slot")
+    label = f"{slot + 1:02d}" if isinstance(slot, int) else "?"
+    return f"slot {label} làn {_lane(n)}"
 
 
 def _ceilings(events: list[dict]) -> dict[int, float]:
