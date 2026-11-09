@@ -1629,7 +1629,7 @@ TEST (GuiWiring, CandidateFeaturesReachTheLogWithSchemaAndDropCount)
     app.stopSessionLog();
     const auto events = parsedLines (file);
     ASSERT_GE (events.size(), 3u);
-    EXPECT_EQ ((int) events.front()["log_schema"], 2);
+    EXPECT_EQ ((int) events.front()["log_schema"], 3);
     EXPECT_EQ (events.back()["ev"].toString(), "session_end");
     EXPECT_EQ ((int) events.back()["dropped_candidates"], 3);
 
@@ -3628,4 +3628,98 @@ TEST (SlotEdit, AnEditTearsDownAStaleSoundcheckStrip)
     app.changeSlotConfig (1, slotEditMono (1, 1));
 
     EXPECT_EQ (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+}
+
+// Lane C1b. Red if session_start loses log_schema 3 / nn_model / nn_feature_set,
+// a candidate_features or notch_set line drops nn_score (or invents one when
+// there is no opinion), or the score is not rounded to 3 significant digits.
+TEST (GuiWiring, NnScoreReachesBothLogLinesWithModelIdAndSchema3)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("nn-score");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    ASSERT_TRUE (c0->hasCandidateClassifier());
+    NotchController::CandidateRecord withScore, noScore;
+    for (auto* r : { &withScore, &noScore })
+    {
+        r->bin = 43; r->hz = 1007.8f; r->peakiness = 22.0f; r->score = 0.56f; r->pNorm = 0.9f;
+        r->rise = 0.7f; r->riseRatio = 1.4f; r->novelty = 0.88f; r->thr = 10.0f;
+        r->nearMags.fill (0.5f);
+    }
+    withScore.lane = 0; withScore.hasNnScore = true; withScore.nnScore = 0.4271234f;
+    noScore.lane = 1;   // hasNnScore stays false and nnScore 0: the field must be ABSENT
+    c0->pushCandidateForTest (withScore);
+    c0->pushCandidateForTest (noScore);
+    c0->runOnce();   // flushes through the real sink into the real log
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    ASSERT_GE (events.size(), 3u);
+    EXPECT_EQ ((int) events.front()["log_schema"], 3);
+    EXPECT_EQ (events.front()["nn_model"].toString(), "untrained-fixture-v1");
+    EXPECT_EQ ((int) events.front()["nn_feature_set"], 1);
+
+    int withField = 0, withoutField = 0;
+    for (const auto& e : events)
+    {
+        if (e["ev"].toString() != "candidate_features")
+            continue;
+        if (e.hasProperty ("nn_score"))
+        {
+            ++withField;
+            EXPECT_NEAR ((double) e["nn_score"], 0.427, 1e-9) << "3 significant digits";
+        }
+        else
+            ++withoutField;
+    }
+    EXPECT_EQ (withField, 1);
+    EXPECT_EQ (withoutField, 1);
+
+    // notch_set: same rules, through the serialiser the event sink uses.
+    NotchController::NotchEvent placed;
+    placed.kind = NotchController::NotchEvent::Kind::Set;
+    placed.hasScore = true; placed.score = 0.9f;
+    EXPECT_FALSE (MainComponent::notchEventToVarForTest (placed).hasProperty ("nn_score"));
+    placed.hasNnScore = true; placed.nnScore = 0.8765432f;
+    EXPECT_NEAR ((double) MainComponent::notchEventToVarForTest (placed)["nn_score"], 0.877, 1e-9);
+}
+
+// Lane C1b. Red if session_end stops carrying the shadow timing, or the numbers
+// are not finite and non-negative. The calls go through the same timed path the
+// two detector call sites use (ShadowClassifier.* proves those sites call it).
+TEST (GuiWiring, SessionEndCarriesNnCallCountAndTiming)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    const auto dir = freshLogDir ("nn-end");
+    ASSERT_TRUE (app.startSessionLog (dir));
+    const auto file = app.sessionLogFileForTest();
+
+    auto* c0 = app.getNotchControllerForTest (0);
+    ASSERT_NE (c0, nullptr);
+    CandidateClassifier::RawInput in;
+    in.hz = 1000.0f; in.peakiness = 12.0f; in.nearMags.fill (0.1f);
+    constexpr int kCalls = 50;
+    for (int i = 0; i < kCalls; ++i)
+        ASSERT_TRUE (c0->shadowScoreForTest (in).has_value());
+    c0->runOnce();   // publishes the counters, as the detector thread does
+
+    app.stopSessionLog();
+    const auto events = parsedLines (file);
+    ASSERT_FALSE (events.empty());
+    const auto& end = events.back();
+    ASSERT_EQ (end["ev"].toString(), "session_end");
+    ASSERT_TRUE (end.hasProperty ("nn_calls"));
+    EXPECT_EQ ((int) end["nn_calls"], kCalls);
+    const double p99 = (double) end["nn_us_p99"], mx = (double) end["nn_us_max"];
+    EXPECT_TRUE (std::isfinite (p99));
+    EXPECT_TRUE (std::isfinite (mx));
+    EXPECT_GE (p99, 0.0);
+    EXPECT_GE (mx, p99);
+    std::printf ("[C1b] session_end nn_calls=%d nn_us_p99=%.3f nn_us_max=%.3f\n", (int) end["nn_calls"], p99, mx);
 }

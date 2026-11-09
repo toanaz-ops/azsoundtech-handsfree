@@ -151,6 +151,16 @@ void SessionLogger::stop()
     // session_end line's own write is obviously not covered by its own field.
     end.getDynamicObject()->setProperty ("write_failed",
                                          writeFailed_.load (std::memory_order_relaxed));
+    if (sessionEndExtra_)
+    {
+        // Extras go on a scratch object and are copied across only when the
+        // name is not already taken: a provider cannot overwrite a standard field.
+        juce::DynamicObject extra;
+        sessionEndExtra_ (extra);
+        for (const auto& prop : extra.getProperties())
+            if (! end.getDynamicObject()->hasProperty (prop.name))
+                end.getDynamicObject()->setProperty (prop.name, prop.value);
+    }
     writeLineNow (juce::JSON::toString (end, true));
 
     if (stream_ != nullptr)

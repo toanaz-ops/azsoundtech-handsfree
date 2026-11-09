@@ -62,6 +62,7 @@ void NotchController::stop (int timeoutMs)
     // actually empty; capped so a sink that never stops re-entering cannot
     // hang shutdown forever (review round 1).
     for (int i = 0; i < 8 && flushEventOutbox(); ++i) {}
+    publishNnStats();   // the thread is joined (or never ran): safe to read the plain counters
 }
 
 void NotchController::setEventSink (EventSink sink)
@@ -76,6 +77,71 @@ void NotchController::setCandidateSink (CandidateSink sink)
 {
     // Precondition: thread STOPPED, same contract as setEventSink().
     candidateSink_ = std::move (sink);
+}
+
+void NotchController::setCandidateClassifier (std::unique_ptr<CandidateClassifier> classifier)
+{
+    // Precondition: thread STOPPED, same contract as setCandidateSink().
+    classifier_ = std::move (classifier);
+}
+
+std::optional<float> NotchController::shadowScore (const CandidateClassifier::RawInput& in)
+{
+    // Detector thread. Read-only: no lock, no allocation, no logging. The
+    // timing uses a fixed array, so this stays allocation-free as well.
+    const auto t0 = juce::Time::getHighResolutionTicks();
+    const auto s = classifier_->score (in);
+    const auto dt = (std::uint64_t) std::max<juce::int64> (0, juce::Time::getHighResolutionTicks() - t0);
+
+    int bucket = 0;
+    for (std::uint64_t v = dt; v > 1 && bucket < kNnBuckets - 1; v >>= 1)
+        ++bucket;
+    ++nnHist_[(std::size_t) bucket];
+    ++nnCalls_;
+    nnMaxTicks_ = std::max (nnMaxTicks_, dt);
+    return s;
+}
+
+void NotchController::publishNnStats()
+{
+    // Writer side only: the detector thread (end of runOnce) or the caller of
+    // stop() after the join. Readers use relaxed loads in nnStats().
+    if (nnCalls_ == nnPublishedCalls_)
+        return;
+    for (int b = 0; b < kNnBuckets; ++b)
+        nnPubHist_[(std::size_t) b].store (nnHist_[(std::size_t) b], std::memory_order_relaxed);
+    nnPubMaxTicks_.store (nnMaxTicks_, std::memory_order_relaxed);
+    nnPubCalls_.store (nnCalls_, std::memory_order_relaxed);
+    nnPublishedCalls_ = nnCalls_;
+}
+
+NotchController::NnStats NotchController::nnStats() const
+{
+    NnStats out;
+    out.calls = nnPubCalls_.load (std::memory_order_relaxed);
+    if (out.calls == 0)
+        return out;
+    const double usPerTick = 1.0e6 / (double) juce::Time::getHighResolutionTicksPerSecond();
+    const auto maxTicks = nnPubMaxTicks_.load (std::memory_order_relaxed);
+    out.usMax = (double) maxTicks * usPerTick;
+
+    std::uint64_t total = 0;
+    std::array<std::uint64_t, kNnBuckets> h {};
+    for (int b = 0; b < kNnBuckets; ++b)
+        total += (h[(std::size_t) b] = nnPubHist_[(std::size_t) b].load (std::memory_order_relaxed));
+    const std::uint64_t need = std::max<std::uint64_t> (1, (total * 99 + 99) / 100);
+    std::uint64_t cum = 0;
+    for (int b = 0; b < kNnBuckets; ++b)
+    {
+        cum += h[(std::size_t) b];
+        if (cum >= need)
+        {
+            const auto upper = (std::uint64_t) 1 << (b + 1);   // bucket b holds [2^b, 2^(b+1))
+            out.usP99 = (double) std::min (upper, maxTicks) * usPerTick;
+            break;
+        }
+    }
+    return out;
 }
 
 std::uint64_t NotchController::droppedCandidateEvents() const
@@ -173,6 +239,24 @@ void NotchController::maybeLogCandidate (int lane, const PeakinessAnalyzer::Cand
     }
     if (! candidateFeaturesFinite (r))
         return;   // never log a NaN/inf; costs no budget
+
+    // Lane C1b (shadow): ask the classifier AFTER every gate and budget check
+    // above, so it runs at most once per second per controller. Read-only:
+    // the score only rides on the record into the log.
+    if (classifier_ != nullptr)
+    {
+        CandidateClassifier::RawInput in;
+        in.hz = r.hz; in.peakiness = r.peakiness; in.pNorm = r.pNorm; in.rNorm = r.rise;
+        in.riseRatio = r.riseRatio; in.mNorm = r.novelty; in.penalty = r.penalty;
+        in.hasOtherLane = r.hasLrRatio;
+        in.lrRatio = r.hasLrRatio ? r.lrRatio : 0.0f;
+        in.nearMags = r.nearMags;
+        if (const auto s = shadowScore (in))
+        {
+            r.hasNnScore = true;
+            r.nnScore = *s;
+        }
+    }
 
     if (windowOpen)
     {
@@ -987,6 +1071,7 @@ void NotchController::runOnce()
     // 4. Flush whatever the steps above queued.
     flushOutbox();
     flushEventOutbox();
+    publishNnStats();   // detector thread: its own counters, cheap no-op when unchanged
 }
 
 double NotchController::liveMsForTest() const
@@ -1347,6 +1432,29 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
         // 1e-12 floor the scorer uses for its reference division.
         scored.hasLrRatio = true;
         scored.lrRatio = pc.now[cand.bin] / std::max (pc.other[cand.bin], 1.0e-12f);
+    }
+    // Lane C1b (shadow): detector placements only. Read-only; no lock held
+    // (modelMutex_ was released above). `scored` is a local, so the score can
+    // only ever reach the session log through the event.
+    if (classifier_ != nullptr && origin == Origin::Detector
+        && cand.bin >= 0 && cand.bin < Detector::kNumBins)
+    {
+        CandidateClassifier::RawInput in;
+        in.hz = (float) cand.frequencyHz; in.peakiness = scored.peakiness; in.pNorm = scored.pNorm;
+        in.rNorm = scored.rise; in.riseRatio = scored.riseRatio; in.mNorm = scored.novelty;
+        in.penalty = scored.penalty;
+        in.hasOtherLane = scored.hasLrRatio;
+        in.lrRatio = scored.hasLrRatio ? scored.lrRatio : 0.0f;
+        for (int k = 0; k < kCandidateNearBins; ++k)
+        {
+            const int b = cand.bin + k - kCandidateNearBins / 2;
+            in.nearMags[(std::size_t) k] = (b >= 0 && b < Detector::kNumBins) ? pc.now[b] : 0.0f;
+        }
+        if (const auto s = shadowScore (in))
+        {
+            scored.hasNnScore = true;
+            scored.nnScore = *s;
+        }
     }
     scored.ctx = ctx;
 

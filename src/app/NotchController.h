@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "app/CandidateClassifier.h"
 #include "app/PresetManager.h"
 #include "app/SlotConfig.h"
 #include "dsp/CandidateScorer.h"
@@ -301,6 +302,12 @@ public:
         // other lane produced a block in the same drain iteration.
         bool  hasLrRatio = false;
         float lrRatio = 0.0f;
+        // Lane C1b (shadow): the candidate classifier's opinion on this
+        // placement. Detector-origin placements only, and only when a
+        // classifier is loaded AND had an opinion. NOTHING reads it for a
+        // decision -- it exists to be written to the session log.
+        bool  hasNnScore = false;
+        float nnScore = 0.0f;
         std::shared_ptr<const SpectralContext> ctx;   // null unless hasScore
     };
     using EventSink = std::function<void (const NotchEvent&)>;
@@ -321,6 +328,10 @@ public:
         float lrRatio = 0.0f;
         int   persist = 0, persistNeeded = 0;
         std::array<float, kCandidateNearBins> nearMags {};
+        // Lane C1b (shadow): the classifier's opinion, absent (not 0) when
+        // there is no classifier or it declined. Never read for a decision.
+        bool  hasNnScore = false;
+        float nnScore = 0.0f;
     };
     using CandidateSink = std::function<void (const CandidateRecord&)>;
 
@@ -346,11 +357,34 @@ public:
     // Lane C0. Same lifetime/threading contract as setEventSink(): detector
     // thread STOPPED. Without a candidate sink nothing is ever queued.
     void setCandidateSink (CandidateSink sink);
+    // Lane C1b (shadow mode). Same contract as setCandidateSink(): detector
+    // thread STOPPED, message thread. One instance per controller, NEVER
+    // shared (CandidateClassifier::score() writes scratch state). nullptr =
+    // no classifier. The classifier changes NOTHING but the score carried on
+    // CandidateRecord / NotchEvent.
+    void setCandidateClassifier (std::unique_ptr<CandidateClassifier> classifier);
+    bool hasCandidateClassifier() const { return classifier_ != nullptr; }
+
+    // Timing of score() on the detector thread: log2 buckets of
+    // juce::Time::getHighResolutionTicks() deltas. Published to atomics when
+    // the thread stops (and at the end of a runOnce() that added calls), so
+    // any thread may read it. p99 is the upper edge of its bucket (capped at
+    // the exact max), in microseconds.
+    struct NnStats
+    {
+        std::uint64_t calls = 0;
+        double usP99 = 0.0, usMax = 0.0;
+    };
+    NnStats nnStats() const;
     std::uint64_t droppedCandidateEvents() const;
     // TEST ACCESSORS ONLY
     int  pendingEventsForTest() const;
     int  pendingCandidatesForTest() const;
     void pushCandidateForTest (const CandidateRecord& r);   // saturation seam
+    // Runs the same timed path call sites A and B use. Detector thread
+    // stopped, or the caller IS the thread driving runOnce().
+    std::optional<float> shadowScoreForTest (const CandidateClassifier::RawInput& in)
+        { return classifier_ != nullptr ? shadowScore (in) : std::nullopt; }
     bool modelMutexIsFreeForTest();                  // try_lock + unlock
     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
 
@@ -800,6 +834,19 @@ private:
     // Detector-thread only: the one-second budget window.
     double candidateWindowStartMs_ = -1.0e18;
     int    candidateWindowCount_   = 0;
+    // Lane C1b: the shadow classifier and its call timing. classifier_ is
+    // written only with the thread stopped. The nn* fields below are
+    // detector-thread-only (or the caller of runOnce() in headless tests);
+    // nnPub* are their published copy.
+    static constexpr int kNnBuckets = 32;
+    std::unique_ptr<CandidateClassifier> classifier_;
+    std::array<std::uint64_t, kNnBuckets> nnHist_ {};
+    std::uint64_t nnCalls_ = 0, nnMaxTicks_ = 0, nnPublishedCalls_ = 0;
+    std::array<std::atomic<std::uint64_t>, kNnBuckets> nnPubHist_ {};
+    std::atomic<std::uint64_t> nnPubCalls_ { 0 }, nnPubMaxTicks_ { 0 };
+    // Read-only: scores one candidate and times the call. nullopt = no opinion.
+    std::optional<float> shadowScore (const CandidateClassifier::RawInput& in);
+    void publishNnStats();
     std::atomic<int> failSetNotchLaneForTest_ { -1 };
     // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the
     // release freeze. Detector-thread state; written only with the thread

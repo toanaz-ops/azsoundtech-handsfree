@@ -1,5 +1,6 @@
 #include "app/MainComponent.h"
 
+#include "app/EmbeddedClassifier.h"
 #include "app/PresetFirstRun.h"
 #include "app/PresetManager.h"
 #include "gui/DeviceViewModel.h"
@@ -296,6 +297,47 @@ MainComponent::MainComponent()
                 sessionLogger_.log (candidateToVar (r));
         });
     sessionLogger_.setDroppedCandidatesProvider ([this] { return droppedCandidatesTotal(); });
+
+    // Lane C1b (shadow): the candidate classifier. Loaded HERE and nowhere
+    // else, with every detector thread still stopped -- the same precondition
+    // as setCandidateSink(). One instance per controller (score() writes
+    // scratch state). The model is the embedded UNTRAINED fixture: its score
+    // means nothing about feedback and nothing reads it for a decision; it only
+    // reaches the session log. If it does not load, no controller gets a
+    // classifier and the app runs exactly as before.
+    for (auto& controller : notchControllers_)
+    {
+        juce::String error;
+        auto classifier = makeEmbeddedCandidateClassifier (error);
+        if (classifier == nullptr)
+        {
+            nnModelName_ = juce::String();
+            for (auto& c : notchControllers_)
+                c->setCandidateClassifier (nullptr);
+            break;
+        }
+        nnModelName_ = classifier->modelName();
+        controller->setCandidateClassifier (std::move (classifier));
+    }
+    sessionLogger_.setSessionEndExtraFields ([this] (juce::DynamicObject& o)
+    {
+        if (nnModelName_.isEmpty())
+            return;
+        // Pooled over the slots: calls add up; p99 is the WORST slot's p99 (an
+        // upper bound for the pool), max is the worst call of any slot.
+        std::uint64_t calls = 0;
+        double p99 = 0.0, mx = 0.0;
+        for (const auto& c : notchControllers_)
+        {
+            const auto s = c->nnStats();
+            calls += s.calls;
+            p99 = std::max (p99, s.usP99);
+            mx = std::max (mx, s.usMax);
+        }
+        o.setProperty ("nn_calls", (juce::int64) calls);
+        o.setProperty ("nn_us_p99", roundSig3 (p99));
+        o.setProperty ("nn_us_max", roundSig3 (mx));
+    });
 
     //==========================================================================
     // LANE M (Task 10). THE THREE CALLBACKS ARE ASSIGNED HERE, ONCE, AND NEVER
@@ -1200,6 +1242,9 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("rise_ratio", roundSig3 ((double) e.riseRatio));
     if (e.hasLrRatio)
         o->setProperty ("lr_ratio", roundSig3 ((double) e.lrRatio));
+    // Lane C1b: absent, never 0, when the classifier had no opinion.
+    if (e.hasNnScore)
+        o->setProperty ("nn_score", roundSig3 ((double) e.nnScore));
 
     if (e.ctx != nullptr)
     {
@@ -1245,6 +1290,8 @@ juce::var MainComponent::candidateToVar (const NotchController::CandidateRecord&
     o->setProperty ("persist", r.persist);
     o->setProperty ("persist_needed", r.persistNeeded);
     o->setProperty ("thr", roundSig3 ((double) r.thr));
+    if (r.hasNnScore)   // lane C1b: absent, never 0, when there is no opinion
+        o->setProperty ("nn_score", roundSig3 ((double) r.nnScore));
     juce::Array<juce::var> nearMags;
     for (const float m : r.nearMags)
         nearMags.add (roundSig3 ((double) m));
@@ -1266,7 +1313,13 @@ juce::var MainComponent::sessionHeader() const
     auto v = SessionLogger::makeEvent ("session_start");
     auto* o = v.getDynamicObject();
     // Lane C0: log format version. A log without this field is schema 1.
-    o->setProperty ("log_schema", 2);
+    // Schema 3 (lane C1b) adds nn_score and the nn_* header/footer fields.
+    o->setProperty ("log_schema", 3);
+    if (nnModelName_.isNotEmpty())
+    {
+        o->setProperty ("nn_model", nnModelName_);
+        o->setProperty ("nn_feature_set", CandidateClassifier::kFeatureSet);
+    }
     o->setProperty ("app_version", appVersion_);
     o->setProperty ("os", juce::SystemStats::getOperatingSystemName());
     o->setProperty ("device", engine_.getCurrentDeviceName());
