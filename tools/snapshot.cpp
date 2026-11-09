@@ -369,6 +369,47 @@ int main (int argc, char** argv)
     if (! shoot (app, outDir.getChildFile ("console-live.png")))
         return 1;
 
+    // LANE L2a: the copilot panel, STAGED through its public state API (the
+    // real sidecar is never launched from this tool). console-live.png above
+    // shows it idle; these two show the outcomes. The text is what
+    // `python tools/copilot/copilot.py tests/fixtures/session-sample.jsonl --json`
+    // prints for the sample session, plus one deliberately long advice so the
+    // wrapping and the row measuring are on the picture.
+    {
+        auto& copilot = app.getCopilotPanelForTest();
+        const auto u = [] (const char* bytes) { return juce::String::fromUTF8 (bytes); };
+
+        std::vector<CopilotFinding> shown;
+        shown.push_back ({ "ceiling", "alert",
+            u ("1008 Hz ch\xe1\xba\xa1m tr\xe1\xba\xa7n -18 dB (slot 01 l\xc3\xa0n R)"),
+            u ("Notch \xc4\x91\xc3\xa3 s\xc3\xa2u t\xe1\xbb\x9bi m\xe1\xbb\xa9" "c t\xe1\xbb\x91i \xc4\x91" "a cho ph\xc3\xa9p: \xc4\x91\xe1\xbb\x99 l\xe1\xbb\xa3i v\xc3\xb2ng \xe1\xbb\x9f t\xe1\xba\xa7n s\xe1\xbb\x91 n\xc3\xa0y cao. H\xe1\xba\xa1 gain monitor ho\xe1\xba\xb7" "c k\xc3\xaanh \xc4\x91\xc3\xb3 v\xc3\xa0i dB; \xc4\x91\xe1\xbb\xabng t\xc4\x83ng tr\xe1\xba\xa7n.") });
+        shown.push_back ({ "false_rate", "warn",
+            u ("1/3 notch b\xe1\xbb\x8b \xc4\x91\xc3\xa1nh d\xe1\xba\xa5u oan"),
+            u ("Ch\xe1\xbb\x91ng h\xc3\xba \xc4\x91" "ang c\xe1\xba\xaft nh\xe1\xba\xa7m nh\xe1\xba\xa1" "c kh\xc3\xa1 nhi\xe1\xbb\x81u: th\xe1\xbb\xad preset Safe ho\xe1\xba\xb7" "c Music, v\xc3\xa0 g\xe1\xbb\xadi log n\xc3\xa0y cho nh\xc3\xb3m ph\xc3\xa1t tri\xe1\xbb\x83n.") });
+        shown.push_back ({ "recurrence", "info",
+            u ("1008 Hz h\xc3\xba l\xe1\xba\xa1i 2 l\xe1\xba\xa7n"),
+            u ("C\xc3\xb9ng m\xe1\xbb\x99t t\xe1\xba\xa7n s\xe1\xbb\x91 b\xe1\xbb\x8b \xc4\x91\xe1\xba\xb7t notch nhi\xe1\xbb\x81u l\xe1\xba\xa7n ngh\xc4\xa9" "a l\xc3\xa0 nguy\xc3\xaan nh\xc3\xa2n v\xe1\xba\xabn c\xc3\xb2n: ki\xe1\xbb\x83m tra h\xc6\xb0\xe1\xbb\x9bng mic so v\xe1\xbb\x9bi loa monitor, ho\xe1\xba\xb7" "c gi\xe1\xba\xa3m d\xe1\xba\xa3i n\xc3\xa0y tr\xc3\xaan EQ monitor. N\xe1\xba\xbfu ph\xc3\xb2ng lu\xc3\xb4n h\xc3\xba \xe1\xbb\x9f \xc4\x91\xc3\xa2y, l\xc6\xb0u n\xc3\xb3 v\xc3\xa0o preset.") });
+
+        copilot.setFindings (std::move (shown));
+        app.resized();
+        std::cout << "console-copilot-findings: panel STAGED with the sample-session findings "
+                     "(the sidecar is not launched from this tool)" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-findings.png")))
+            return 1;
+
+        copilot.setFindings ({});
+        std::cout << "console-copilot-clean: panel STAGED to the clean state" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-clean.png")))
+            return 1;
+
+        copilot.setState (gui::CopilotPanel::State::running);
+        std::cout << "console-copilot-running: panel STAGED to running (ellipsis glyph check)" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-running.png")))
+            return 1;
+
+        copilot.setState (gui::CopilotPanel::State::idle);
+    }
+
     //--------------------------------------------------------------------
     // LANE M (Task 9): the two soundcheck states.
     //

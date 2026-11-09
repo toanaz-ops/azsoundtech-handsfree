@@ -46,11 +46,15 @@ add_executable(HandsFreeTests
     test_soundcheck_candidates.cpp
     test_soundcheckcontroller.cpp
     test_hostsettings.cpp
+    test_windowfit.cpp
     test_appsettings.cpp
     test_dumbstatus.cpp
     test_lane_u_wiring.cpp
     test_setupwizardmodel.cpp
     test_afc.cpp
+    test_copilotfindings.cpp
+    test_sidecarrunner.cpp
+    test_copilotpanel.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
@@ -93,6 +97,7 @@ target_include_directories(HandsFreeTests PRIVATE
 # need the repo-relative location of presets/, which only CMake knows.
 target_compile_definitions(HandsFreeTests PRIVATE
     HANDSFREE_PRESET_SOURCE_DIR="${CMAKE_SOURCE_DIR}/presets"
+    HANDSFREE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 # The theme grep-test reads src/gui as text at run time (spec section 6: no
@@ -101,15 +106,6 @@ target_compile_definitions(HandsFreeTests PRIVATE
 target_compile_definitions(HandsFreeTests PRIVATE
     HANDSFREE_GUI_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/gui"
     HANDSFREE_DSP_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/dsp"
-)
-
-# Same two switches as the app target (CMakeLists.txt): nothing here fetches a
-# URL or embeds a browser, and on Linux JUCE_USE_CURL=1 makes juce_core link
-# against libcurl, so a machine without it failed to link this target while the
-# app linked fine (review 2026-10-20, M10).
-target_compile_definitions(HandsFreeTests PRIVATE
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
 )
 
 # Same two switches as the app target (CMakeLists.txt): nothing here fetches a

@@ -39,7 +39,7 @@ số đó — chỉ khoét đúng chỗ hú, gần như không ảnh hưởng ch
 |---|---|
 | **Phát hiện tự động** | FFT 2048 điểm, chấm điểm "độ nhọn" của đỉnh phổ — phân biệt tiếng hú (một gai duy nhất nhô lên) với nhạc (nhiều đỉnh tự nhiên). Thời gian khóa mục tiêu trong ~1 giây kể từ khi hú đạt ngưỡng |
 | **Notch siêu hẹp** | 16 notch/làn, mỗi slot mono (1 làn) hoặc stereo (2 làn), 8 slot — tối đa 256 chuỗi notch. Q chỉnh được 8–50 (mặc định 30). Độ sâu −6 đến −24 dB (mặc định −18) nay là **TRẦN**: notch đặt ở −6 dB (hoặc −12 nếu đỉnh lên dốc) rồi chỉ đào sâu thêm 6 dB mỗi 300 ms chừng nào bin đó còn hú, không bao giờ quá trần. Chỉ mất đúng vài Hz quanh tần số hú |
-| **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật. **Giới hạn hiện tại: engine chỉ mở 2 kênh vào / 2 kênh ra của interface**, nên mọi slot dùng chung kênh 1–2; slot trỏ kênh 3 trở lên bị tắt (không tự chuyển sang kênh khác). Mở đủ số kênh của interface là một thay đổi đường audio riêng, chưa làm |
+| **Routing 8 slot** | 8 slot xử lý độc lập, mỗi slot tự chọn kênh vào/ra — không còn cố định stereo in/out. Mặc định chỉ slot 01 bật. **Giới hạn hiện tại: engine chỉ mở 2 kênh vào / 2 kênh ra của interface**, nên mọi slot dùng chung kênh 1–2; slot trỏ kênh 3 trở lên bị tắt (không tự chuyển sang kênh khác). Mở đủ số kênh của interface là một thay đổi đường audio riêng, chưa làm. **Sửa routing một slot chỉ đặt lại đúng slot đó** (detector, bộ nhớ phòng, chip RING RISK của nó đọc N/A một lúc); bảy slot còn lại chạy tiếp không gián đoạn. Đổi device hoặc sample rate vẫn đặt lại cả 8 slot |
 | **Stereo độc lập** | Mic hú qua loa trái thì chỉ cắt cánh trái; nút LINK mỗi slot để cắt cả hai bên như trước |
 | **Chấm notch để app học** | Mỗi dòng ACTIVE NOTCHES có nút **GOOD** / **FALSE**. FALSE xóa notch ngay và ghi nhãn "cắt oan"; GOOD ghi nhãn "cắt đúng". Nhãn + phổ lúc quyết định vào log session trên máy (không audio) — dữ liệu cho bộ phân loại ở bản sau |
 | **Nhả dần theo bậc** | Hết hú 30 giây → nông đi 6 dB; mỗi 10 giây yên tiếp theo nông thêm một bậc; tới trần thì nhả hẳn (**30–60 giây** tùy trần đang đứng: trần −6 là 30 s vì đã ở đáy, −12/−10 là 40 s, −18 là 50 s, −24 là 60 s). Hú quay lại là kẹp ngay về bậc sâu nhất đã từng đứng. Phòng đang căng (chip RING RISK ≥ RISING) thì đồng hồ **đứng yên** — mọi notch của slot đó giữ nguyên bậc chừng nào phòng còn căng |
@@ -127,6 +127,8 @@ lần đo mất khoảng **9 giây**; khi engine mở đủ kênh, 4 ngõ ra m�
 nhận in đúng con số của rig đang cắm trước khi bạn bấm. **Đừng bấm `ĐO` giữa lúc
 MC đang nói.**
 
+**Detector nghe riêng từng làn (HW-174.Q2).** Khi nhiều slot cùng ra một kênh, tiếng ra vẫn là tổng của các làn (mức đổi 0 dB), nhưng mỗi detector giờ nghe đúng tín hiệu sau notch của làn mình, nên hú ở vòng của slot 1 chỉ sinh notch ở slot 1.
+
 **Vòng hú qua các kênh ngõ ra KHÁC vẫn đóng** trong lúc đo — loa của chúng vẫn
 đang phát tiếng mic. Vì vậy app **từ chối bắt đầu** khi chip `RING RISK` đã đọc
 `RISING` trở lên, và vẫn giữ đủ bộ tự hủy trong lúc chạy. App đọc chip của **mọi
@@ -213,6 +215,32 @@ sau mở là đúng như lần trước. Nếu sound card đã lưu **không cò
 mở ở chế độ Đơn giản; máy đã có preset từ bản trước mở ở Geek.
 
 Không đổi gì ở phần xử lý âm thanh: cùng một cấu hình thì mức ra y như 1.3.0.
+
+## Bảng COPILOT — nhận xét về buổi diễn (bản kế tiếp, lane L2a)
+
+Ở chế độ Geek, góc dưới bên trái, ngay dưới ACTIVE NOTCHES có bảng `COPILOT` với
+nút `PHÂN TÍCH`. Bấm nút, app đọc log của buổi đang chạy và liệt kê nhận xét bằng
+câu người, mỗi nhận xét kèm một lời khuyên:
+
+- một tần số hú đi hú lại;
+- notch đã chạm trần độ sâu;
+- nhiều notch chồng sát nhau;
+- notch dồn dập trong một phút;
+- tỉ lệ notch bị chấm FALSE cao;
+- nhiều notch chưa ai chấm;
+- log bị mất sự kiện.
+
+Bảng chỉ chạy khi bạn bấm, và không tự làm mới. Lời khuyên **không bao giờ** bảo
+tăng gain, tăng trần hay tắt chống hú. Bước này không dùng mạng, không cần khoá
+API và chưa có AI nào tham gia: nhận xét do luật cố định tính ra.
+
+Phần phân tích là một chương trình riêng (`copilot\HandsFreeCopilot\`, khoảng
+19 MB) do trình cài đặt chép vào cùng app. App gọi nó ở độ ưu tiên thấp và chờ
+tối đa 30 giây. Nếu nó thiếu, chậm hoặc bị phần mềm diệt virus chặn, bảng chỉ hiện
+một dòng trạng thái; âm thanh không liên quan. Cửa sổ quá thấp thì bảng tự ẩn và
+ACTIVE NOTCHES giữ nguyên như trước.
+
+Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.
 
 ## Freeware
 

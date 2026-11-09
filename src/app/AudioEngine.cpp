@@ -21,6 +21,8 @@ constexpr float kMaxOutputLevel = 1.0f;
 }
 
 AudioEngine::AudioEngine()
+    : tapScratch_ ((std::size_t) kMaxSlots * kMaxSlotLanes * (std::size_t) kDefaultTapScratchCapacity, 0.0f)
+    , tapScratchCapacity_ (kDefaultTapScratchCapacity)
 {
     // Legacy default mapping: slot 0 enabled stereo {0,1} -> {0,1}, slots 1..7
     // empty. This is exactly the pre-multi-slot behaviour, so nothing that
@@ -337,22 +339,27 @@ LockFreeRingBuffer<float>& AudioEngine::getTapBuffer (int slot, int lane)
 
 void AudioEngine::discardTapBacklog()
 {
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        discardTapBacklog (slot);
+}
+
+void AudioEngine::discardTapBacklog (int slot)
+{
+    if (slot < 0 || slot >= kMaxSlots)
+        return;
+
     std::array<float, 512> scratch {};
-    for (auto& slotTaps : tapBuffers_)
+    for (auto& tap : tapBuffers_[(std::size_t) slot])
     {
-        for (auto& tap : slotTaps)
+        // Bounded: a live producer must not be able to keep us here.
+        for (std::size_t n = tap.getCapacity() / scratch.size() + 1;
+             n > 0 && tap.read (scratch.data(), scratch.size()) > 0; --n)
         {
-            // Bounded: a live producer must not be able to keep us here.
-            for (std::size_t n = tap.getCapacity() / scratch.size() + 1;
-                 n > 0 && tap.read (scratch.data(), scratch.size()) > 0; --n)
-            {
-            }
         }
     }
 
-    for (auto& slotCounts : tapDropCounts_)
-        for (auto& count : slotCounts)
-            count.store (0, std::memory_order_relaxed);
+    for (auto& count : tapDropCounts_[(std::size_t) slot])
+        count.store (0, std::memory_order_relaxed);
 }
 
 std::uint64_t AudioEngine::getTapDropCount() const
@@ -787,7 +794,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // callback's numInputChannels (invariant 3).
     const float* capSource = (scInCh >= 0) ? inputChannelData[scInCh] : nullptr;
 
-    struct LaneRef { const float* in; float* out; NotchChain* chain; };
+    // `tap` is this lane's private post-notch scratch (HW-174.Q2), or nullptr
+    // when the block exceeds the scratch capacity (fallback: tap `out`).
+    struct LaneRef { const float* in; float* out; NotchChain* chain; float* tap; };
 
     // Stack-resident lane table -- no heap, no lock. Upper bound: every slot
     // stereo = 8 x 2 lanes.
@@ -798,6 +807,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // when that lane exists and is valid. Null means "do not tap this lane" --
     // disabled slot, invalid width, or no valid channel pair for that lane.
     const float* tapSource[kMaxSlots][kMaxSlotLanes] {};
+    // True when tapSource points at this lane's private scratch (needs the
+    // finite + clamp pass before it is written to the ring).
+    bool tapIsScratch[kMaxSlots][kMaxSlotLanes] {};
+    const bool scratchFits = (numSamples <= tapScratchCapacity_);
 
     for (int slot = 0; slot < kMaxSlots; ++slot)
     {
@@ -867,10 +880,27 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (in == nullptr || out == nullptr)
                 continue;
 
-            lanes[numLanes++] = { in, out,
-                                  &notchChains_[(std::size_t) slot][(std::size_t) lane] };
+            // HW-174.Q2: each lane taps ITS OWN post-notch signal, not the
+            // shared output channel other lanes also sum into. The scratch is
+            // pre-allocated (audioDeviceAboutToStart / ctor); a block larger
+            // than it falls back to tapping `out` (the pre-fix behaviour for
+            // that block) and is counted -- never a write past the scratch.
+            float* tap = nullptr;
+            if (scratchFits)
+            {
+                tap = tapScratch_.data()
+                      + ((std::size_t) slot * kMaxSlotLanes + (std::size_t) lane)
+                            * (std::size_t) tapScratchCapacity_;
+                tapIsScratch[slot][lane] = true;
+            }
+            else
+                tapScratchFallbacks_.fetch_add (1, std::memory_order_relaxed);
 
-            tapSource[slot][lane] = out;
+            lanes[numLanes++] = { in, out,
+                                  &notchChains_[(std::size_t) slot][(std::size_t) lane],
+                                  tap };
+
+            tapSource[slot][lane] = tap != nullptr ? tap : out;
         }
     }
 
@@ -898,8 +928,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // that channel vanished from the PA the moment the operator hit the
         // emergency BYPASS control -- and, because the tap reads `out`, the
         // earlier lane's detector tap then carried the later lane's samples.
+        // The tap sees a scratch COPY of the lane's input (clamped later, at
+        // tap time -- `in` is not clamped); the output sum adds the same
+        // samples, so it is bit-identical to adding `in` directly.
         for (int i = 0; i < numLanes; ++i)
-            juce::FloatVectorOperations::add (lanes[i].out, lanes[i].in, numSamples);
+        {
+            const float* src = lanes[i].in;
+            if (lanes[i].tap != nullptr)
+            {
+                juce::FloatVectorOperations::copy (lanes[i].tap, lanes[i].in, numSamples);
+                src = lanes[i].tap;
+            }
+            juce::FloatVectorOperations::add (lanes[i].out, src, numSamples);
+        }
     }
     else
     {
@@ -912,6 +953,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             NotchChain&   chain = *lanes[i].chain;
             const float*  in    = lanes[i].in;
             float*        out   = lanes[i].out;
+            float*        tap   = lanes[i].tap;
 
             for (int n = 0; n < numSamples; ++n)
             {
@@ -939,7 +981,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     v = 0.0;
                 }
 
-                out[n] += static_cast<float> (v);
+                const float fv = static_cast<float> (v);
+                if (tap != nullptr)
+                    tap[n] = fv;
+                out[n] += fv;
             }
         }
     }
@@ -1079,6 +1124,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (src == nullptr)
                 continue;
 
+            // Same guard the output gets above, applied to THIS lane's
+            // signal: finite, and bounded by +-kMaxOutputLevel, so the
+            // detector never sees anything the output guard would not pass.
+            if (tapIsScratch[slot][lane])
+            {
+                float* s = const_cast<float*> (src);
+                for (int n = 0; n < numSamples; ++n)
+                    s[n] = std::isfinite (s[n])
+                               ? juce::jlimit (-kMaxOutputLevel, kMaxOutputLevel, s[n])
+                               : 0.0f;
+            }
+
             const size_t requested = static_cast<size_t> (numSamples);
             const size_t written   =
                 tapBuffers_[(std::size_t) slot][(std::size_t) lane].write (src, requested);
@@ -1113,6 +1170,21 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         const double sampleRate = device->getCurrentSampleRate();
         currentSampleRate_.store (sampleRate, std::memory_order_release);
         currentBufferSize_.store (device->getCurrentBufferSizeSamples(), std::memory_order_release);
+
+        // HW-174.Q2: size the per-lane tap scratch OFF the audio thread. JUCE
+        // calls this before the callback is in its dispatch list (same
+        // guarantee the chain retarget below relies on), so the audio thread
+        // cannot be reading tapScratch_ while it is resized. Never shrinks
+        // below the default, so a smaller later device keeps the capacity.
+        {
+            const int wanted = std::max (kDefaultTapScratchCapacity,
+                                         device->getCurrentBufferSizeSamples());
+            if (wanted != tapScratchCapacity_)
+            {
+                tapScratch_.assign ((std::size_t) kMaxSlots * kMaxSlotLanes * (std::size_t) wanted, 0.0f);
+                tapScratchCapacity_ = wanted;
+            }
+        }
 
         // Retarget ALL notch chains (8 slots x 2 lanes) to the device's actual
         // rate. JUCE calls audioDeviceAboutToStart BEFORE inserting the
