@@ -1,9 +1,12 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.4.0
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.4.1
 
-Ngày build: 2026-11-09 18:02 (`main` `2628cdf`) · gate ctest 833/833 · installer
-`AZSoundtech-Handsfree-Setup-1.4.0.exe` · đóng gói không chờ nghe thử trên rig (quyết định owner).
+Ngày build: 2026-11-09 (`main` `7408f73`) · gate ctest 847/847 · installer
+`AZSoundtech-Handsfree-Setup-1.4.1.exe`.
 
-SHA-256 của Setup 1.4.0: **4A627B878A5E84866094F30B3AB5DFC51329811F08A238DBE0038976F95E8D6F** · dung lượng: **26 917 930 B (25,7 MB)**
+SHA-256 của Setup 1.4.1: **616C62E85FD963CD84E331745770ED85719ABEA6EAAF898928CB552FBD4391BB** · dung lượng: **26 919 339 B (25,7 MB)**
+
+Bản 1.4.0 (build 2026-11-09 18:02, `main` `2628cdf`, gate 833/833, 26 917 930 B / 25,7 MB) SHA-256
+`4A627B878A5E84866094F30B3AB5DFC51329811F08A238DBE0038976F95E8D6F`
 
 Bản 1.3.0 (build 2026-09-16, suite 712/712 tại `17f5225`, gate 714/714 ngày 2026-09-17,
 26 884 355 B / 25,6 MB) SHA-256
@@ -13,9 +16,11 @@ Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
-Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.4.0** (1.4.0 đóng gói không dọn bản cũ) —
+Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.4.1** (đóng gói không dọn bản cũ) —
 cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
+> **1.4.1: 0 dB ở mọi ngõ ra.** Detector nghe riêng từng làn, và sửa routing một slot không còn đặt lại 7 slot kia — xem mục "Mới trong 1.4.1".
+>
 > **1.4.0 không đổi DSP/gain/buffer so với 1.3.0**, nhưng **routing lần trước được
 > khôi phục tự động lúc mở app → hạ master trước** (xem mục "Mới trong 1.4.0").
 >
@@ -48,6 +53,17 @@ cài bản số cao nhất trừ khi được nhờ test bản cũ.
    nguyên ở mức đọc cuối** thay vì về N/A: khoảng trống đã biết của bản này,
    đừng tin chip lúc máy không chạy. Báo lại nếu: chip **đỏ mà không hú**, hoặc
    **hú mà chip vẫn LOW**.
+
+## Mới trong 1.4.1 (so với 1.4.0) — 0 dB ở mọi ngõ ra
+
+Chi tiết: `docs/release-notes/1.4.1-alpha.md`.
+
+1. **Detector nghe riêng từng làn.** Hai mic vào CÙNG một kênh ra, cho hú ở một vòng: chỉ slot
+   của vòng đó đặt notch, slot kia không. Báo lại nếu hai slot cùng cắt một tần số.
+2. **Sửa routing một slot không đặt lại các slot khác.** Chạy 2 slot, để slot 0 giữ một notch, sửa
+   routing slot 1: notch và chip RING RISK của slot 0 phải còn nguyên.
+3. **Đổi buffer trong control panel ASIO lúc đang chạy**: sau khi driver chạy lại, mọi chip RING
+   RISK phải quay về đọc số (không kẹt N/A) và notch vẫn đặt được.
 
 ## Mới trong 1.4.0 (so với 1.3.0) — giao diện, không đổi âm thanh
 
