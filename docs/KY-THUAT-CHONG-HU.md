@@ -909,7 +909,9 @@ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepF
 
 ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
 
-**1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**), CHƯA merge, CHƯA đóng gói.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).
+**1.4.0 (lane U + sửa lỗi review/audit 20/10–09/11/2026): đã đóng gói alpha 2026-11-09 từ `main` `2628cdf`, gate ctest 833/833; chưa nghe thử trên rig (owner quyết định đóng gói trước). Chi tiết: `docs/release-notes/1.4.0-alpha.md`.**
+
+**1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**); đã merge và đóng gói alpha 2026-09-17 (`AZSoundtech-Handsfree-Setup-1.3.0.exe`, gate 714/714). Đoạn dưới là trạng thái lúc viết, trước khi phát hành.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).
 
 Bản **1.2.0** hạ cánh lane G (gain-aware notch): thang độ sâu theo nhu cầu,
 nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RISK, ramp độ sâu
@@ -917,8 +919,8 @@ nhả dần từng bậc, nhớ phòng 5 phút, đóng băng nhả theo RING RIS
 
 - Suite: **547/547 test pass** (ctest Release, MSVC) sau fix wave final review
   của lane G (`63c1759`) — +93 so với 1.1.3 (454). Bốn bậc thang đo được đúng
-  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Chưa đóng gói —
-  `installer\release-alpha.ps1 -Part minor` sẽ chạy sau final review.
+  `−6 / −12 / −18 / −24 dB` tại f0 (sai số ±0,5 dB). Đã đóng gói alpha 2026-09-07
+  (`AZSoundtech-Handsfree-Setup-1.2.0.exe`, gate 547/547).
 - Bản 1.1.3 trước đó nối dữ liệu thật cho chip RING RISK (lane R, 454/454).
 
 Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL,

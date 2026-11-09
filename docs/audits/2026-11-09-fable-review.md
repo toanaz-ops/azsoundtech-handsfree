@@ -79,5 +79,5 @@ Still open: (a) eight detector threads start unconditionally after `engine_.star
 | Item (a) detectors gated on `engine_.isRunning()` | fixed | PR #35 (`startWorkersIfEngineRunning`); idle CPU with no card ~9 % → ~3–4 % of a core |
 | LOW-8 TSan CI job + duplicate block in `tests/CMakeLists.txt` | fixed | PR #41 (`linux-tsan`, nightly + dispatch); first run 833/833 green, no race reported (run 42589473992) |
 | Default window larger than small screens (UI test) | fixed | PR #36 (`fc94dc9`) |
-| UI-test #3 version string 1.3.0 | open — owner decision | 1.3.0 IS the newest packaged build; 1.4.0 needs `release-alpha.ps1 -Part minor` (Q11), card HW-188 |
+| UI-test #3 version string 1.3.0 | fixed | owner chose HW-188 A ("không chờ nghe thử"); 1.4.0 packaged from main 2628cdf with `release-alpha.ps1 -Part minor -Keep 0` (833/833 gate, exe reports 1.4.0); bump in PR `release/1.4.0` |
 | MEDIUM-3, LOW-5, LOW-9, item (b), UI-test #2/#4 | not touched — owner decisions (HW-174.Q3) / needs an ASIO driver |
