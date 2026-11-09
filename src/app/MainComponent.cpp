@@ -390,6 +390,8 @@ MainComponent::MainComponent()
     addAndMakeVisible (slotScroller_);
     // The notch list is a FIXED bottom strip -- always visible.
     addAndMakeVisible (notchListPanel_);
+    copilotPanel_.onAnalyse = [this] { analyseWithCopilot(); };
+    addChildComponent (copilotPanel_);   // shown by resized() when the column has room
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
 
     // Lane D: a FALSE verdict is written to the log BEFORE the clear it
@@ -1023,6 +1025,8 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    if (copilotRunner_ != nullptr)
+        copilotRunner_->cancel();   // end a child process now; the member dtor joins the worker
 
     // engine_.stop() below fires audioDeviceStopped(): the hooks must not
     // reach a component that is half torn down.
@@ -1227,7 +1231,45 @@ void MainComponent::stopSessionLog()
     sessionLogger_.stop();
 }
 
+void MainComponent::setCopilotBackendForTest (std::unique_ptr<CopilotBackend> backend,
+                                              SidecarRunner::Poster poster)
+{
+    copilotRunner_ = std::make_unique<SidecarRunner> (std::move (backend), std::move (poster));
+}
+
+void MainComponent::analyseWithCopilot()
+{
+    const auto logFile = currentSessionLogFile();
+    if (logFile == juce::File() || ! logFile.existsAsFile())
+    {
+        copilotPanel_.setState (gui::CopilotPanel::State::noLog);
+        return;
+    }
+
+    if (copilotRunner_ == nullptr)
+        copilotRunner_ = std::make_unique<SidecarRunner>();
+
+    juce::Component::SafePointer<MainComponent> self (this);
+    CopilotRequest request;
+    request.executable = defaultCopilotExecutable();
+    request.sessionLog = logFile;
+    request.timeoutMs  = 30000;
+
+    // False means a run is already in flight: leave the panel as it is.
+    if (copilotRunner_->request (std::move (request), [self] (CopilotRunResult result)
+        {
+            if (self != nullptr)
+                gui::applyCopilotResult (self->copilotPanel_, result);
+        }))
+        copilotPanel_.setState (gui::CopilotPanel::State::running);
+}
+
 juce::File MainComponent::sessionLogFileForTest() const
+{
+    return sessionLogger_.currentFile();
+}
+
+juce::File MainComponent::currentSessionLogFile() const
 {
     return sessionLogger_.currentFile();
 }
@@ -3362,7 +3404,33 @@ void MainComponent::resized()
     auto inner = floor.reduced (kEdgePad, gap);
 
     const int notchWidth = juce::roundToInt ((float) inner.getWidth() * kNotchColumnFraction);
-    notchListPanel_.setBounds (inner.removeFromLeft (notchWidth));
+    auto leftColumn = inner.removeFromLeft (notchWidth);
+
+    // The copilot panel takes the lower 50% of the left column. The notch list
+    // is the answer the floor exists for and keeps at least its caption, header
+    // and six rows; when the column cannot give both their minimum the copilot
+    // panel is hidden and the notch list has the whole column, as before.
+    {
+        const int minNotch = gui::NotchListPanel::kCaptionHeight + gui::NotchListPanel::kHeaderHeight
+                           + 6 * gui::NotchListPanel::kRowHeight;
+        const int minCopilot = gui::CopilotPanel::kMinHeight;
+
+        if (leftColumn.getHeight() >= minNotch + gap + minCopilot)
+        {
+            const int wanted = juce::roundToInt ((float) leftColumn.getHeight() * kCopilotColumnFraction);
+            const int copilotH = juce::jlimit (minCopilot, leftColumn.getHeight() - minNotch - gap, wanted);
+            copilotPanel_.setVisible (true);
+            copilotPanel_.setBounds (leftColumn.removeFromBottom (copilotH));
+            copilotPanel_.resized();
+            leftColumn.removeFromBottom (gap);
+        }
+        else
+        {
+            copilotPanel_.setVisible (false);
+        }
+    }
+
+    notchListPanel_.setBounds (leftColumn);
     notchListPanel_.resized();   // re-place the hosted selector at the new width
     inner.removeFromLeft (2 * gap + 2);   // the painted groove lives in here
 

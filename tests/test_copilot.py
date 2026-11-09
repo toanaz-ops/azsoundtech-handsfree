@@ -189,6 +189,35 @@ class Contract(unittest.TestCase):
         self.assertEqual(len(json.loads(buf.getvalue())), 3)
 
 
+class SidecarCli(unittest.TestCase):
+    """The frozen sidecar is read by the app as UTF-8 JSON on a pipe."""
+
+    SCRIPT = ROOT / "tools" / "copilot" / "copilot.py"
+
+    def run_cli(self, *extra: str) -> bytes:
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        r = subprocess.run([sys.executable, str(self.SCRIPT), str(FIXTURE), "--json", *extra],
+                           capture_output=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace"))
+        return r.stdout
+
+    def test_piped_stdout_is_utf8_and_matches_findings(self):
+        out = self.run_cli()
+        parsed = json.loads(out.decode("utf-8"))
+        self.assertEqual(parsed, copilot.findings(logstats.load(FIXTURE)))
+        # Vietnamese must arrive as real UTF-8 text, not escaped or code-paged.
+        self.assertTrue(any(ord(c) > 127 for c in out.decode("utf-8")))
+
+    def test_missing_file_exits_2(self):
+        self.assertEqual(copilot.main([str(ROOT / "no-such-session.jsonl")]), 2)
+
+    def test_low_priority_does_not_change_output(self):
+        self.assertEqual(self.run_cli("--low-priority"), self.run_cli())
+
+
 try:
     import anthropic  # noqa: F401
     HAVE_SDK = True

@@ -52,6 +52,9 @@ add_executable(HandsFreeTests
     test_lane_u_wiring.cpp
     test_setupwizardmodel.cpp
     test_afc.cpp
+    test_copilotfindings.cpp
+    test_sidecarrunner.cpp
+    test_copilotpanel.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
@@ -94,6 +97,7 @@ target_include_directories(HandsFreeTests PRIVATE
 # need the repo-relative location of presets/, which only CMake knows.
 target_compile_definitions(HandsFreeTests PRIVATE
     HANDSFREE_PRESET_SOURCE_DIR="${CMAKE_SOURCE_DIR}/presets"
+    HANDSFREE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 # The theme grep-test reads src/gui as text at run time (spec section 6: no
