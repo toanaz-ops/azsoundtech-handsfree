@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise a Hands-free session log (lane D, data-loop design §3.5).
+"""Summarise a Hands-free session log (lane D, data-loop design §3.5; reads log schema 1-4).
 
     python tools/logstats.py <session-*.jsonl>
     python tools/logstats.py <file> --expect-notches 4 --expect-verdicts 3 --expect-false 1 --expect-recurrence-max 2 --expect-retunes 2
@@ -28,6 +28,22 @@ def load(path: Path) -> list[dict]:
     return events
 
 
+AUTHORS = ("detector", "human", "network", "llm")          # log schema 4 `author` values
+AI_EVENTS = ("ai_mode", "ai_call", "ai_proposal", "ai_decision")   # log schema 4 event kinds
+
+
+def effective_author(e: dict, origin) -> str:
+    """Who did this notch line. Log schema 4 writes `author` on every notch_set /
+    notch_retune / notch_clear line. A line WITHOUT one (schema 1-3) reads as
+    `detector` when the notch's origin is `detector` and as `human` otherwise
+    (preset / manual / soundcheck): that is what those logs meant, and it keeps
+    every old log reading exactly as it did before schema 4."""
+    a = e.get("author")
+    if isinstance(a, str) and a:
+        return a
+    return "detector" if origin == "detector" else "human"
+
+
 def fmt_ms(ms: float) -> str:
     s = ms / 1000.0
     return f"{s:.1f}s" if s < 60 else f"{int(s // 60)}m{int(s % 60):02d}s"
@@ -53,7 +69,16 @@ def summarise(events: list[dict]) -> dict:
                  # lane G: the depth a notch is RUNNING at, and how many times
                  # it moved. Both start at the placement values.
                  "depth_db": e.get("depth_db"), "deepest_db": e.get("depth_db"),
-                 "retunes": 0}
+                 "retunes": 0,
+                 # log schema 4: who placed it (effective author, see above) and,
+                 # when the line carries one, its notch id.
+                 "author": effective_author(e, e.get("origin", "?")),
+                 # deepest depth reached by the detector itself (the placement
+                 # and any detector-authored retune): what the copilot's ceiling
+                 # rule reads. Equals deepest_db on every schema 1-3 log.
+                 "detector_deepest_db": e.get("depth_db")}
+            if "nid" in e:
+                n["nid"] = e["nid"]
             # A Set onto a key whose previous record never saw its Clear (a
             # lost Clear, a log cut short) closes that record here: left open
             # it reads "still active" for the whole session (review
@@ -83,6 +108,10 @@ def summarise(events: list[dict]) -> dict:
                     n["depth_db"] = d
                     if n["deepest_db"] is None or float(d) < float(n["deepest_db"]):
                         n["deepest_db"] = d
+                    if (effective_author(e, n["origin"]) == "detector"
+                            and (n["detector_deepest_db"] is None
+                                 or float(d) < float(n["detector_deepest_db"]))):
+                        n["detector_deepest_db"] = d
                 n["retunes"] += 1
         elif ev == "verdict":
             n = open_by_key.get(key(e))
@@ -124,6 +153,13 @@ def summarise(events: list[dict]) -> dict:
         if "nn_score" in e:
             nn_by_ev[e.get("ev", "?")] = nn_by_ev.get(e.get("ev", "?"), 0) + 1
 
+    # Log schema 4: placements per author (effective author of each notch_set
+    # line) and the four AI event kinds. Both are zero / empty on schema 1-3.
+    author_placements: dict[str, int] = {}
+    for n in notches:
+        author_placements[n["author"]] = author_placements.get(n["author"], 0) + 1
+    ai_events = {k: sum(1 for e in events if e.get("ev") == k) for k in AI_EVENTS}
+
     judged = [n for n in notches if n["verdict"] in ("good", "false")]
     false_count = sum(1 for n in judged if n["verdict"] == "false")
     return {
@@ -150,6 +186,10 @@ def summarise(events: list[dict]) -> dict:
         "nn_calls": end.get("nn_calls"),
         "nn_us_p99": end.get("nn_us_p99"),
         "nn_us_max": end.get("nn_us_max"),
+        "log_schema": header.get("log_schema"),
+        "ai_mode": header.get("ai_mode"),
+        "author_placements": dict(sorted(author_placements.items())),
+        "ai_events": ai_events,
     }
 
 
@@ -207,6 +247,20 @@ def print_report(s: dict) -> None:
             print(f"nn calls {s['nn_calls']}  p99 {s['nn_us_p99']} us  max {s['nn_us_max']} us")
 
 
+    # Log schema 4: printed only for a log that has it (or any AI event), so a
+    # schema 1-3 log reads exactly as it always did.
+    schema = s["log_schema"]
+    ai_total = sum(s["ai_events"].values())
+    if (isinstance(schema, int) and not isinstance(schema, bool) and schema >= 4) or ai_total:
+        by_author = "  ".join(f"{a}: {s['author_placements'].get(a, 0)}"
+                              for a in AUTHORS)
+        other = {a: c for a, c in s["author_placements"].items() if a not in AUTHORS}
+        if other:
+            by_author += "  " + "  ".join(f"{a}: {c}" for a, c in other.items())
+        print(f"ai_mode {s['ai_mode'] or '?'}  placements by author  {by_author}")
+        print("ai events  " + "  ".join(f"{k}: {v}" for k, v in s["ai_events"].items()))
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", type=Path)
@@ -220,6 +274,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-candidates", type=int)
     ap.add_argument("--expect-nn-scored", type=int)
     ap.add_argument("--expect-nn-model", type=str)
+    ap.add_argument("--expect-ai-events", type=int, help="total ai_mode/ai_call/ai_proposal/ai_decision lines")
+    ap.add_argument("--expect-authors", type=str, metavar="A=N,...",
+                    help="notch placements per author, e.g. detector=2,human=1 (listed authors only)")
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -250,6 +307,13 @@ def main(argv: list[str]) -> int:
         failures.append(f"nn-scored {s['nn_scored']} != {args.expect_nn_scored}")
     if args.expect_nn_model is not None and s["nn_model"] != args.expect_nn_model:
         failures.append(f"nn-model {s['nn_model']} != {args.expect_nn_model}")
+    if args.expect_ai_events is not None and sum(s["ai_events"].values()) != args.expect_ai_events:
+        failures.append(f"ai-events {sum(s['ai_events'].values())} != {args.expect_ai_events}")
+    if args.expect_authors is not None:
+        for pair in args.expect_authors.split(","):
+            name, _, want = pair.partition("=")
+            if not want.isdigit() or s["author_placements"].get(name, 0) != int(want):
+                failures.append(f"author {name} {s['author_placements'].get(name, 0)} != {want}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

@@ -1,0 +1,16 @@
+{"ev":"session_start","t":0,"log_schema":4,"ai_mode":"suggest","source":"synthetic","generator":"hand-written synthetic schema-4 fixture (an llm-authored notch_set is not something the app emits today)","app_version":"0.0.0-synthetic","os":"Windows 11","device":"Fake ASIO","sample_rate":48000,"buffer_size":512}
+{"ev":"ai_mode","t":500,"mode":"suggest","previous":"off","reason":"user"}
+{"ev":"notch_set","t":1000,"slot":0,"lane":0,"index":0,"nid":1,"author":"detector","hz":1007.8125,"q":30,"depth_db":-6,"origin":"detector","confirmed_lane":0,"score":0.9,"peakiness":22.1,"p_norm":0.9,"rise":1.0,"novelty":0.8,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"rise_ratio":1.75,"ctx":{"bins":1025,"bin_hz":23.4375,"first_bin":27,"now":[0.004,0.004,0.004,0.0041,0.0042,0.0044,0.0049,0.0064,0.0099,0.0187,0.0409,0.0962,0.2344,0.58,1.444,3.604,9.0,3.604,1.444,0.58,0.2344,0.0962,0.0409,0.0187,0.0099,0.0064,0.0049,0.0044,0.0042,0.0041,0.004,0.004,0.004]}}
+{"ev":"verdict","t":2000,"slot":0,"lane":0,"index":0,"hz":1007.8125,"verdict":"good","age_ms":1000.0}
+{"ev":"notch_set","t":3000,"slot":0,"lane":0,"index":1,"nid":2,"author":"network","nn_assist":"depth","hz":937.5,"q":30,"depth_db":-12,"origin":"detector","confirmed_lane":0,"score":0.85,"peakiness":18.0,"p_norm":0.8,"rise":0.9,"novelty":0.7,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"rise_ratio":1.5,"ctx":{"bins":1025,"bin_hz":23.4375,"first_bin":27,"now":[0.004,0.004,0.004,0.0041,0.0042,0.0044,0.0049,0.0064,0.0099,0.0187,0.0409,0.0962,0.2344,0.58,1.444,3.604,9.0,3.604,1.444,0.58,0.2344,0.0962,0.0409,0.0187,0.0099,0.0064,0.0049,0.0044,0.0042,0.0041,0.004,0.004,0.004]}}
+{"ev":"verdict","t":4000,"slot":0,"lane":0,"index":1,"hz":937.5,"verdict":"good","age_ms":1000.0}
+{"ev":"ai_call","t":8000,"trigger":"recurring_bin","gen":3,"ms":4200,"status":"ok","usage":{"input_tokens":1200,"output_tokens":90}}
+{"ev":"ai_proposal","t":8100,"tool":"propose_deepen","nid":1,"expect_hz":1007.8,"target_db":-12,"reason":"recurring_at_frequency"}
+{"ev":"ai_decision","t":9000,"nid":1,"decision":"applied","by":"human"}
+{"ev":"notch_retune","t":9100,"slot":0,"lane":0,"index":0,"nid":1,"author":"llm","hz":1007.8125,"depth_db":-12}
+{"ev":"notch_set","t":10000,"slot":0,"lane":0,"index":2,"nid":3,"author":"llm","hz":1054.6875,"q":30,"depth_db":-6,"origin":"detector","confirmed_lane":0,"score":0.8,"peakiness":15.0,"p_norm":0.6,"rise":0.7,"novelty":0.6,"penalty":1,"asymmetry":1,"persist_needed":3,"thr":10,"rise_ratio":1.3,"ctx":{"bins":1025,"bin_hz":23.4375,"first_bin":27,"now":[0.004,0.004,0.004,0.0041,0.0042,0.0044,0.0049,0.0064,0.0099,0.0187,0.0409,0.0962,0.2344,0.58,1.444,3.604,9.0,3.604,1.444,0.58,0.2344,0.0962,0.0409,0.0187,0.0099,0.0064,0.0049,0.0044,0.0042,0.0041,0.004,0.004,0.004]}}
+{"ev":"verdict","t":11000,"slot":0,"lane":0,"index":2,"hz":1054.6875,"verdict":"false","age_ms":1000.0}
+{"ev":"notch_set","t":12000,"slot":0,"lane":1,"index":0,"nid":4,"author":"human","hz":1148.4375,"q":30,"depth_db":-9,"origin":"manual"}
+{"ev":"notch_clear","t":13000,"slot":0,"lane":1,"index":0,"nid":4,"author":"human","reason":"user_clear"}
+{"ev":"ai_mode","t":14000,"mode":"act","previous":"suggest","reason":"user"}
+{"ev":"session_end","t":15000,"dropped_events":0}

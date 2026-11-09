@@ -12,6 +12,8 @@
     python tools/copilot/copilot.py --has-key|--delete-key --provider anthropic
     python tools/copilot/copilot.py --has-key --provider openai_compatible --base-url URL
     ... --ask Q --credentials-only   # only the stored key; never an environment key
+    python tools/copilot/copilot.py <file> --supervise --state=<state.json> --json \
+        [--provider P --model M --base-url U --timeout S --credentials-only --low-priority]
 
 The findings are computed here, deterministically, from the log; they need no
 network and no LLM. `--ask` hands the SAME data to a model through read-only
@@ -20,11 +22,23 @@ what these tools return -- it cannot touch the app, the mixer, or the log.
 Two adapters, never mixed: `anthropic` (official SDK + Tool Runner) and
 `openai_compatible` (Chat Completions over urllib, stdlib only).
 
+`--supervise` (lane L3a) is the machine-to-machine mode: the app writes a state
+file (schema 1, validated strictly) and the model may only call recording tools
+(propose_deepen / propose_hold / propose_release / no_action); those calls ARE
+the output. stdout is exactly one JSON object
+    {"supervise": true, "generation": N, "actions": [...], "provider": P,
+     "model": M, "usage": {"input_tokens": n|null, "output_tokens": n|null}}
+and every word the model writes is discarded: no free text reaches stdout and
+the safety filter plays no part. The C++ app re-checks every action; this side
+is only the first line of defence. Failures print {"error": "..."} on stdout.
+
 Exit codes (one scheme; argparse's own usage errors use 5 too, never its 2):
-    0 ok | 1 --has-key: no stored key | 2 empty/unreadable log
-    3 --ask failed (SDK/credentials/connection/HTTP/refusal/no reply/tool loop),
-      a key-store operation failed, or any unexpected exception (type name only)
-    4 answer blocked by the safety filter (the fixed sentence goes to stdout)
+    0 ok | 1 --has-key: no stored key | 2 empty/unreadable log (--supervise:
+      also a missing or invalid state file)
+    3 --ask/--supervise failed (SDK/credentials/connection/HTTP/refusal/no reply/
+      tool loop), a key-store operation failed, or any unexpected exception
+      (type name only)
+    4 answer blocked by the safety filter (--ask only; the fixed sentence goes to stdout)
     5 bad arguments (unknown flag, missing --model/--base-url, bad URL, ...)
 
 Never runs inside the app and never on the audio path: the app is a live-sound
@@ -73,6 +87,13 @@ MAX_TOOL_RESULT_BYTES = 64 * 1024      # cap on one tool result handed to the mo
 EXIT_OK, EXIT_BAD_LOG, EXIT_ASK_FAILED, EXIT_BLOCKED, EXIT_BAD_ARGS = 0, 2, 3, 4, 5
 
 SEVERITY_ORDER = {"alert": 0, "warn": 1, "info": 2}
+
+
+def _by_detector(n: dict) -> bool:
+    """A notch the detector placed by itself. Log schema 4 adds `author`; a record
+    without one (schema 1-3) is detector-authored when its origin is `detector`,
+    exactly as before (logstats fills the effective author in)."""
+    return n["origin"] == "detector" and n.get("author", "detector") == "detector"
 
 
 def _lane(n: dict) -> str:
@@ -129,17 +150,21 @@ def findings(events: list[dict], summary: dict | None = None) -> list[dict]:
     for n in notches:
         # A notch the soundman called false is not a loop-gain problem, however
         # deep it went.
-        if n["origin"] != "detector" or n["deepest_db"] is None or n["verdict"] == "false":
+        # Log schema 4: only depth the detector reached by itself counts; a
+        # notch another author placed, or a depth another author retuned to, is
+        # not the loop-gain evidence this rule is about.
+        deepest = n.get("detector_deepest_db", n["deepest_db"])
+        if not _by_detector(n) or deepest is None or n["verdict"] == "false":
             continue
         ceil = ceilings.get(int(n["slot"] or 0), ceilings.get(-1))
-        if ceil is not None and float(n["deepest_db"]) <= ceil + CEILING_SLACK_DB:
+        if ceil is not None and float(deepest) <= ceil + CEILING_SLACK_DB:
             out.append({
                 "code": "ceiling", "severity": "alert",
                 "title": f"{n['hz']:.0f} Hz chạm trần {ceil:.0f} dB ({_where(n)})",
                 "advice": ("Notch đã sâu tới mức tối đa cho phép: độ lợi vòng ở tần số này cao. "
                            "Hạ gain monitor hoặc kênh đó vài dB; đừng tăng trần."),
                 "evidence": {"hz": round(n["hz"], 1), "slot": n["slot"], "lane": _lane(n),
-                             "deepest_db": n["deepest_db"], "ceiling_db": ceil},
+                             "deepest_db": deepest, "ceiling_db": ceil},
             })
 
     # 3. Stacked: two notches alive at once, very close, on the same lane.
@@ -163,7 +188,7 @@ def findings(events: list[dict], summary: dict | None = None) -> list[dict]:
         open_now.append(n)
 
     # 4. Burst: many detector placements in a short window.
-    det_t = sorted(n["set_t"] for n in notches if n["origin"] == "detector")
+    det_t = sorted(n["set_t"] for n in notches if _by_detector(n))
     best = (0, 0.0)
     j = 0
     for i, t in enumerate(det_t):
@@ -542,18 +567,18 @@ def _cap_result(result: str) -> str:
     return wrap(doc[:lo])
 
 
-def run_tool(funcs: dict, name: object, raw_args: object) -> str:
+def run_tool(funcs: dict, name: object, raw_args: object, specs: dict | None = None) -> str:
     """Run one tool call from a model. Never raises: a bad name, bad arguments
     or any failure while running comes back as an error JSON string the model
-    can read."""
+    can read. `specs` is the tool table of the mode (default: the --ask table)."""
     try:
-        return _cap_result(_run_tool(funcs, name, raw_args))
+        return _cap_result(_run_tool(funcs, name, raw_args, TOOL_SPECS if specs is None else specs))
     except Exception as exc:  # noqa: BLE001 -- model input must never abort the ask
         return json.dumps({"error": f"tool failed: {type(exc).__name__}"})
 
 
-def _run_tool(funcs: dict, name: object, raw_args: object) -> str:
-    if not isinstance(name, str) or name not in funcs:
+def _run_tool(funcs: dict, name: object, raw_args: object, specs: dict) -> str:
+    if not isinstance(name, str) or name not in funcs or name not in specs:
         return json.dumps({"error": f"unknown tool {name!r}"}, ensure_ascii=False)
     if isinstance(raw_args, str):
         try:
@@ -568,7 +593,11 @@ def _run_tool(funcs: dict, name: object, raw_args: object) -> str:
         return json.dumps({"error": "arguments must be a JSON object"})
     if not isinstance(args, dict):
         return json.dumps({"error": "arguments must be a JSON object"})
-    allowed = TOOL_SPECS[name]["parameters"]["properties"]
+    if specs[name].get("raw"):
+        # A recording tool validates its own arguments strictly (no coercion:
+        # "3" is not an integer here); it gets the dict exactly as sent.
+        return funcs[name](args)
+    allowed = specs[name]["parameters"]["properties"]
     clean = {}
     for k, v in args.items():
         if k not in allowed:
@@ -618,6 +647,377 @@ def make_tools(events: list[dict]):
         return _cap_result(f["notch_context"](number))
 
     return [session_summary, get_findings, list_notches, notch_context]
+
+
+# --- tool sets and the --supervise mode (lane L3a) ---------------------------
+
+class ToolSet:
+    """The tools, their schemas and the system prompt of one mode. `--ask` uses
+    the module-level read-only table; `--supervise` builds its own (below).
+    `allow_empty_reply`: the model may finish with no text (supervise: its
+    recorded calls are the whole output, any text is discarded anyway)."""
+
+    def __init__(self, system: str, specs: dict, funcs: dict, allow_empty_reply: bool = False,
+                 supervisor: "Supervisor | None" = None):
+        self.system = system
+        self.specs = specs
+        self.funcs = funcs
+        self.allow_empty_reply = allow_empty_reply
+        self.supervisor = supervisor
+
+
+def make_toolset_tools(ts: ToolSet) -> list:
+    """Any ToolSet wrapped for the Anthropic Tool Runner. The schema is the one
+    in `ts.specs` verbatim (no inference from a signature) and every call goes
+    through `run_tool`, so the validation is the same code on both adapters."""
+    from anthropic import beta_tool
+
+    def wrap(name: str):
+        def call(**kwargs: object) -> str:
+            return run_tool(ts.funcs, name, kwargs, ts.specs)
+        call.__name__ = name
+        return call
+
+    return [beta_tool(wrap(n), name=n, description=sp["description"], input_schema=sp["parameters"])
+            for n, sp in ts.specs.items()]
+
+
+EXIT_BAD_STATE = EXIT_BAD_LOG   # an unreadable or invalid state file is bad input, like a bad log
+
+SUPERVISE_MAX_ACTIONS = 8
+SUPERVISE_MAX_SLOTS = 16
+SUPERVISE_MAX_NOTCHES = 32
+MAX_STATE_BYTES = 1024 * 1024
+STATE_SCHEMA = 1
+HOLD_S_MIN, HOLD_S_MAX = 30, 600
+
+AI_MODES = ("suggest", "act")
+ENGINE_MODES = ("auto", "soundcheck", "bypass")
+TRIGGERS = ("recurring_bin", "at_ceiling", "heartbeat", "manual")
+RING_RISKS = ("na", "low", "rising", "critical")
+ORIGINS = ("detector", "preset", "manual", "soundcheck")
+VERDICTS = ("none", "good", "false")
+DEEPEN_REASONS = ("recurring_at_frequency", "still_ringing_at_depth")
+HOLD_REASONS = ("recurring_at_frequency", "show_in_progress")
+RELEASE_REASONS = ("judged_false", "stale_no_recurrence")
+NO_ACTION_REASONS = ("nothing_to_do", "insufficient_data", "outside_scope")
+_AUTHOR_RE = re.compile(r"[A-Za-z0-9_]{1,32}\Z")
+
+# Fixed strings handed back to the model by a recording tool. Never built from
+# model input, so nothing the model wrote can echo anywhere.
+RESULT_QUEUED = "queued"
+RESULT_LIMIT = "limit reached"
+RESULT_DUPLICATE = "duplicate ignored"
+
+
+class StateError(Exception):
+    """The state file is missing or invalid (exit 2). The message is fixed text."""
+
+
+def _is_int(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_num(v: object) -> bool:
+    """A finite real number: not a bool, not NaN / Infinity, not an int too big for a float."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
+
+def _reject_json_constant(_name: str):
+    raise ValueError("bare non-finite constant")
+
+
+def _state_keys(doc: object, keys: tuple, what: str) -> dict:
+    if not isinstance(doc, dict):
+        raise StateError(f"state: {what} must be an object")
+    if set(doc) != set(keys):
+        extra, missing = sorted(set(doc) - set(keys)), sorted(set(keys) - set(doc))
+        raise StateError(f"state: {what} has "
+                         + (f"unknown keys {extra}" if extra else f"missing keys {missing}"))
+    return doc
+
+
+def _state_int(d: dict, key: str, lo: int, hi: int, what: str) -> int:
+    v = d[key]
+    if not _is_int(v) or not lo <= v <= hi:
+        raise StateError(f"state: {what}.{key} must be an integer in {lo}..{hi}")
+    return v
+
+
+def _state_num(d: dict, key: str, lo: float, hi: float, what: str) -> float:
+    v = d[key]
+    if not _is_num(v) or not lo <= v <= hi:
+        raise StateError(f"state: {what}.{key} must be a finite number in {lo:g}..{hi:g}")
+    return v
+
+
+def _state_enum(d: dict, key: str, allowed: tuple, what: str) -> str:
+    v = d[key]
+    if not isinstance(v, str) or v not in allowed:
+        raise StateError(f"state: {what}.{key} must be one of {list(allowed)}")
+    return v
+
+
+def validate_state(doc: object) -> dict:
+    """Strict check of the app's state file; returns it. Anything unexpected is
+    a StateError: unknown or missing keys, a wrong type (a bool is not a number),
+    NaN / Infinity, a value out of range, more than 16 slots or 32 notches per
+    slot, a repeated slot or notch id."""
+    top = _state_keys(doc, ("schema", "generation", "ai_mode", "engine_mode", "sample_rate",
+                            "bin_hz", "trigger", "slots"), "top level")
+    if not _is_int(top["schema"]) or top["schema"] != STATE_SCHEMA:
+        raise StateError(f"state: schema must be {STATE_SCHEMA}")
+    _state_int(top, "generation", 0, 2 ** 53, "top level")
+    _state_enum(top, "ai_mode", AI_MODES, "top level")
+    _state_enum(top, "engine_mode", ENGINE_MODES, "top level")
+    _state_num(top, "sample_rate", 1.0, 1e6, "top level")
+    _state_num(top, "bin_hz", 1e-3, 1e5, "top level")
+    _state_enum(top, "trigger", TRIGGERS, "top level")
+    slots = top["slots"]
+    if not isinstance(slots, list) or len(slots) > SUPERVISE_MAX_SLOTS:
+        raise StateError(f"state: slots must be a list of at most {SUPERVISE_MAX_SLOTS}")
+    seen_slots: set[int] = set()
+    seen_nids: set[int] = set()
+    for s in slots:
+        s = _state_keys(s, ("slot", "ring_risk", "ring_risk_score", "notches"), "a slot")
+        idx = _state_int(s, "slot", 0, SUPERVISE_MAX_SLOTS - 1, "slot")
+        if idx in seen_slots:
+            raise StateError("state: a slot index is repeated")
+        seen_slots.add(idx)
+        _state_enum(s, "ring_risk", RING_RISKS, "slot")
+        if s["ring_risk_score"] is not None:
+            _state_num(s, "ring_risk_score", 0.0, 1e6, "slot")
+        notches = s["notches"]
+        if not isinstance(notches, list) or len(notches) > SUPERVISE_MAX_NOTCHES:
+            raise StateError(f"state: notches must be a list of at most {SUPERVISE_MAX_NOTCHES}")
+        for n in notches:
+            n = _state_keys(n, ("nid", "lane", "index", "hz", "q", "depth_db", "ceiling_db",
+                                "origin", "placed_by", "last_changed_by", "age_s", "hold_s",
+                                "verdict"), "a notch")
+            nid = _state_int(n, "nid", 0, 2 ** 32 - 1, "notch")
+            if nid in seen_nids:
+                raise StateError("state: a notch id is repeated")
+            seen_nids.add(nid)
+            _state_int(n, "lane", 0, 1, "notch")
+            _state_int(n, "index", 0, 63, "notch")
+            _state_num(n, "hz", 1e-3, top["sample_rate"] / 2.0, "notch")
+            _state_num(n, "q", 1e-3, 1e4, "notch")
+            _state_num(n, "depth_db", -120.0, 0.0, "notch")
+            _state_num(n, "ceiling_db", -120.0, 0.0, "notch")
+            _state_enum(n, "origin", ORIGINS, "notch")
+            for k in ("placed_by", "last_changed_by"):
+                if not isinstance(n[k], str) or not _AUTHOR_RE.match(n[k]):
+                    raise StateError(f"state: notch.{k} must be a short identifier string")
+            _state_num(n, "age_s", 0.0, 1e8, "notch")
+            _state_num(n, "hold_s", 0.0, 1e8, "notch")
+            _state_enum(n, "verdict", VERDICTS, "notch")
+    return doc
+
+
+def load_state(path: Path) -> dict:
+    """Read and validate the state file (UTF-8 JSON). Raises StateError."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_STATE_BYTES + 1)
+    except OSError as exc:
+        raise StateError(f"state file unreadable: {type(exc).__name__}") from None
+    if len(raw) > MAX_STATE_BYTES:
+        raise StateError("state file is larger than 1 MiB")
+    try:
+        doc = json.loads(raw.decode("utf-8-sig"), parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError):
+        raise StateError("state file is not valid UTF-8 JSON") from None
+    return validate_state(doc)
+
+
+SUPERVISE_SYSTEM_PROMPT = """You supervise a feedback suppressor during a live show. The suppressor \
+(the detector) already places notch filters by itself within 100-500 ms; you are slow (seconds) and \
+you are NOT the safety net. You read the session log and the current state with the read-only tools \
+and you may only propose changes by calling the recording tools: propose_deepen, propose_hold, \
+propose_release, no_action. Nothing else exists: any text you write is discarded unread.
+
+Rules:
+- Never try to raise any level, gain, volume or the notch depth ceiling, never remove protection \
+wholesale, never write advice or explanations: only tool calls count.
+- When unsure, or when the data is thin, call no_action. Doing nothing is always safe.
+- Address a notch by its nid and its expect_hz (its frequency in Hz, from current_state). Only notches \
+whose origin is "detector" can be proposed on.
+- propose_deepen: only for a frequency that keeps coming back (see the log) or a notch whose slot still \
+shows rising or critical ring risk at its depth. target_db must be deeper than its depth_db and not \
+deeper than its ceiling_db.
+- propose_hold: keep a notch that is still needed from being released for hold_s seconds (30 to 600).
+- propose_release: only for a notch you have evidence is false (a FALSE verdict in the log, or long \
+silence at that frequency with no recurrence). NEVER when the slot's ring_risk is "rising" or "critical".
+- At most a few proposals per turn; call no_action when nothing is needed. Finish after recording."""
+
+SUPERVISE_USER_PROMPT = ("Review the current state (current_state) and the session log with the read-only "
+                         "tools, then record your proposals with the recording tools, or call no_action.")
+
+
+def _supervise_args_schema(props: dict) -> dict:
+    return {"type": "object", "properties": props, "required": list(props),
+            "additionalProperties": False}
+
+
+_NID_SCHEMA = {"type": "integer", "minimum": 0, "description": "notch id from current_state"}
+_HZ_SCHEMA = {"type": "number", "description": "the notch frequency in Hz from current_state "
+                                               "(must be within one bin_hz of it)"}
+
+SUPERVISE_TOOL_SPECS: dict[str, dict] = {
+    **TOOL_SPECS,
+    "current_state": {
+        "description": "The app's state right now: modes, bin width, and per slot the ring risk and "
+                       "every notch (nid, hz, q, depth, ceiling, origin, who placed / changed it, "
+                       "age, hold, verdict).",
+        "parameters": _NO_ARGS},
+    "propose_deepen": {
+        "raw": True,
+        "description": "Propose making a detector-origin notch deeper. target_db must be deeper than "
+                       "its depth_db and not deeper than its ceiling_db.",
+        "parameters": _supervise_args_schema({
+            "nid": _NID_SCHEMA, "expect_hz": _HZ_SCHEMA,
+            "target_db": {"type": "number", "description": "target depth in dB (negative)"},
+            "reason": {"type": "string", "enum": list(DEEPEN_REASONS)}})},
+    "propose_hold": {
+        "raw": True,
+        "description": "Propose holding a detector-origin notch (no auto-release) for hold_s seconds.",
+        "parameters": _supervise_args_schema({
+            "nid": _NID_SCHEMA, "expect_hz": _HZ_SCHEMA,
+            "hold_s": {"type": "integer", "minimum": HOLD_S_MIN, "maximum": HOLD_S_MAX},
+            "reason": {"type": "string", "enum": list(HOLD_REASONS)}})},
+    "propose_release": {
+        "raw": True,
+        "description": "Propose releasing a detector-origin notch you have evidence is false or "
+                       "stale. Never while the slot ring_risk is rising or critical.",
+        "parameters": _supervise_args_schema({
+            "nid": _NID_SCHEMA, "expect_hz": _HZ_SCHEMA,
+            "reason": {"type": "string", "enum": list(RELEASE_REASONS)}})},
+    "no_action": {
+        "raw": True,
+        "description": "Record that nothing should change.",
+        "parameters": _supervise_args_schema({
+            "reason": {"type": "string", "enum": list(NO_ACTION_REASONS)}})},
+}
+
+
+class Supervisor:
+    """Holds the validated state and the recorded actions of one --supervise
+    run. The recording tools are the FIRST line of defence only: the C++ app
+    re-checks every action and is the trust boundary."""
+
+    def __init__(self, state: dict):
+        self.state = state
+        self.actions: list[dict] = []
+        self._seen: set[tuple] = set()
+        self._notches: dict[int, tuple[dict, dict]] = {
+            n["nid"]: (s, n) for s in state["slots"] for n in s["notches"]}
+
+    # -- read --
+    def current_state(self) -> str:
+        return json.dumps(self.state, ensure_ascii=False)
+
+    # -- recording --
+    @staticmethod
+    def _reject(code: str) -> str:
+        return f"rejected: {code}"
+
+    def _target(self, args: dict, keys: tuple):
+        """(slot, notch, None) when `args` names a valid detector-origin notch, else (None, None, error)."""
+        if set(args) != set(keys):
+            return None, None, self._reject("bad_arguments")
+        nid = args["nid"]
+        if not _is_int(nid) or nid not in self._notches:
+            return None, None, self._reject("unknown_nid")
+        slot, notch = self._notches[nid]
+        if notch["origin"] != "detector":
+            return None, None, self._reject("not_detector_origin")
+        hz = args["expect_hz"]
+        if not _is_num(hz) or abs(float(hz) - float(notch["hz"])) > float(self.state["bin_hz"]):
+            return None, None, self._reject("frequency_mismatch")
+        return slot, notch, None
+
+    @staticmethod
+    def _enum_ok(v: object, allowed: tuple) -> bool:
+        return isinstance(v, str) and v in allowed
+
+    def _record(self, action: dict, nid: int | None) -> str:
+        key = (action["tool"], nid)
+        if key in self._seen:
+            return RESULT_DUPLICATE
+        if len(self.actions) >= SUPERVISE_MAX_ACTIONS:
+            return RESULT_LIMIT
+        self._seen.add(key)
+        self.actions.append(action)
+        return RESULT_QUEUED
+
+    def propose_deepen(self, args: dict) -> str:
+        _, notch, err = self._target(args, ("nid", "expect_hz", "target_db", "reason"))
+        if err:
+            return err
+        if not self._enum_ok(args["reason"], DEEPEN_REASONS):
+            return self._reject("bad_reason")
+        target = args["target_db"]
+        if not _is_num(target):
+            return self._reject("bad_target_db")
+        if not float(target) < float(notch["depth_db"]):
+            return self._reject("target_not_deeper")
+        if float(target) < float(notch["ceiling_db"]):
+            return self._reject("target_beyond_ceiling")
+        return self._record({"tool": "propose_deepen", "nid": args["nid"],
+                             "expect_hz": float(args["expect_hz"]), "target_db": float(target),
+                             "reason": args["reason"]}, args["nid"])
+
+    def propose_hold(self, args: dict) -> str:
+        _, _, err = self._target(args, ("nid", "expect_hz", "hold_s", "reason"))
+        if err:
+            return err
+        if not self._enum_ok(args["reason"], HOLD_REASONS):
+            return self._reject("bad_reason")
+        hold = args["hold_s"]
+        if not _is_int(hold) or not HOLD_S_MIN <= hold <= HOLD_S_MAX:
+            return self._reject("bad_hold_s")
+        return self._record({"tool": "propose_hold", "nid": args["nid"],
+                             "expect_hz": float(args["expect_hz"]), "hold_s": hold,
+                             "reason": args["reason"]}, args["nid"])
+
+    def propose_release(self, args: dict) -> str:
+        slot, _, err = self._target(args, ("nid", "expect_hz", "reason"))
+        if err:
+            return err
+        if not self._enum_ok(args["reason"], RELEASE_REASONS):
+            return self._reject("bad_reason")
+        if slot["ring_risk"] in ("rising", "critical"):
+            return self._reject("ring_risk_not_low")
+        return self._record({"tool": "propose_release", "nid": args["nid"],
+                             "expect_hz": float(args["expect_hz"]), "reason": args["reason"]},
+                            args["nid"])
+
+    def no_action(self, args: dict) -> str:
+        if set(args) != {"reason"}:
+            return self._reject("bad_arguments")
+        if not self._enum_ok(args["reason"], NO_ACTION_REASONS):
+            return self._reject("bad_reason")
+        return self._record({"tool": "no_action", "reason": args["reason"]}, None)
+
+    def result_actions(self) -> list[dict]:
+        """What goes to stdout. A run that recorded nothing says so explicitly."""
+        return list(self.actions) or [{"tool": "no_action", "reason": "nothing_to_do"}]
+
+
+def build_supervise_toolset(events: list[dict], state: dict) -> ToolSet:
+    """The read-only log tools, `current_state` and the four recording tools."""
+    sup = Supervisor(state)
+    funcs = make_tool_functions(events)
+    funcs.update({"current_state": sup.current_state, "propose_deepen": sup.propose_deepen,
+                  "propose_hold": sup.propose_hold, "propose_release": sup.propose_release,
+                  "no_action": sup.no_action})
+    return ToolSet(SUPERVISE_SYSTEM_PROMPT, SUPERVISE_TOOL_SPECS, funcs,
+                   allow_empty_reply=True, supervisor=sup)
 
 
 # --- safety filter -----------------------------------------------------------
@@ -1341,14 +1741,15 @@ def violates_safety(text: str) -> bool:
 
 # --- anthropic adapter -------------------------------------------------------
 
-def build_anthropic_kwargs(model: str, tools: list, question: str) -> dict:
+def build_anthropic_kwargs(model: str, tools: list, question: str,
+                           system: str = SYSTEM_PROMPT) -> dict:
     """The exact keyword arguments handed to `tool_runner` (pure; sends nothing)."""
     kwargs: dict = {
         "model": model,
         "max_tokens": 16000,
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "medium"},
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "tools": tools,
         "max_iterations": MAX_ITERATIONS,
         "messages": [{"role": "user", "content": question}],
@@ -1379,7 +1780,7 @@ _ANTHROPIC_STEERING_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "AN
 
 
 def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
-                  credentials_only: bool = False) -> dict:
+                  credentials_only: bool = False, toolset: "ToolSet | None" = None) -> dict:
     try:
         import anthropic
     except ImportError:
@@ -1406,8 +1807,12 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
         else:
             client = anthropic.Anthropic(api_key=key, timeout=timeout) if key \
                 else anthropic.Anthropic(timeout=timeout)
-        runner = client.beta.messages.tool_runner(
-            **build_anthropic_kwargs(model, make_tools(events), question))
+        if toolset is None:
+            kwargs = build_anthropic_kwargs(model, make_tools(events), question)
+        else:
+            kwargs = build_anthropic_kwargs(model, make_toolset_tools(toolset), question,
+                                            toolset.system)
+        runner = client.beta.messages.tool_runner(**kwargs)
         last = None
         inp: list = []
         outp: list = []
@@ -1429,8 +1834,13 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
         raise AskError("Claude không trả lời.")
     if last.stop_reason == "refusal":
         raise AskError("Claude từ chối trả lời câu này.")
+    allow_empty = toolset is not None and toolset.allow_empty_reply
+    if allow_empty and last.stop_reason == "tool_use":
+        # The runner stopped at its iteration cap with a tool call still pending.
+        raise AskError(f"tool loop exhausted: mô hình gọi công cụ quá {MAX_ITERATIONS} lượt "
+                       "mà chưa kết thúc.")
     answer = "".join(b.text for b in last.content if b.type == "text")
-    if not answer.strip():
+    if not answer.strip() and not allow_empty:
         raise AskError("Claude không trả lời.")
     return {"answer": answer, "usage": {"input_tokens": _sum_usage(inp),
                                         "output_tokens": _sum_usage(outp)}}
@@ -1446,10 +1856,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _openai_tools() -> list[dict]:
+def _openai_tools(specs: dict | None = None) -> list[dict]:
     return [{"type": "function",
              "function": {"name": n, "description": sp["description"], "parameters": sp["parameters"]}}
-            for n, sp in TOOL_SPECS.items()]
+            for n, sp in (TOOL_SPECS if specs is None else specs).items()]
 
 
 def _build_opener(url: str):
@@ -1533,12 +1943,17 @@ def _refuse_plaintext_key(base_url: str, key: str | None) -> None:
 
 
 def run_openai_compatible(events: list[dict], question: str, model: str, base_url: str,
-                          key: str | None, timeout: float) -> dict:
+                          key: str | None, timeout: float,
+                          toolset: "ToolSet | None" = None) -> dict:
     _refuse_plaintext_key(base_url, key)
     url = base_url.rstrip("/") + "/chat/completions"
-    funcs = make_tool_functions(events)
-    tools = _openai_tools()
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT},
+    if toolset is None:
+        funcs, specs, system, allow_empty = make_tool_functions(events), TOOL_SPECS, SYSTEM_PROMPT, False
+    else:
+        funcs, specs, system, allow_empty = (toolset.funcs, toolset.specs, toolset.system,
+                                             toolset.allow_empty_reply)
+    tools = _openai_tools(specs)
+    messages: list[dict] = [{"role": "system", "content": system},
                             {"role": "user", "content": question}]
     tokens_in: list = []
     tokens_out: list = []
@@ -1564,12 +1979,12 @@ def run_openai_compatible(events: list[dict], question: str, model: str, base_ur
             for i, call in enumerate(calls):
                 call = call if isinstance(call, dict) else {}
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
-                result = run_tool(funcs, fn.get("name"), fn.get("arguments"))
+                result = run_tool(funcs, fn.get("name"), fn.get("arguments"), specs)
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", f"call_{i}")),
                                  "content": result})
             continue
         answer = _message_text(msg.get("content"))
-        if not answer.strip():
+        if not answer.strip() and not allow_empty:
             raise AskError("Mô hình không trả lời.")
         return {"answer": answer, "usage": {"input_tokens": _sum_usage(tokens_in),
                                             "output_tokens": _sum_usage(tokens_out)}}
@@ -1619,6 +2034,22 @@ def ask(events: list[dict], question: str, provider: str, model: str,
     return run_openai_compatible(events, question, model, base_url or "",
                                  resolve_key("openai_compatible", base_url, credentials_only),
                                  timeout)
+
+
+def supervise(events: list[dict], state: dict, provider: str, model: str,
+              base_url: str | None, timeout: float, credentials_only: bool = False) -> dict:
+    """One supervisor turn. Returns the stdout object; raises AskError. The
+    model's own text is dropped here: only what the recording tools queued leaves."""
+    ts = build_supervise_toolset(events, state)
+    if provider == "anthropic":
+        res = run_anthropic(events, SUPERVISE_USER_PROMPT, model, timeout, credentials_only, ts)
+    else:
+        res = run_openai_compatible(events, SUPERVISE_USER_PROMPT, model, base_url or "",
+                                    resolve_key("openai_compatible", base_url, credentials_only),
+                                    timeout, ts)
+    return {"supervise": True, "generation": state["generation"],
+            "actions": ts.supervisor.result_actions(), "provider": provider, "model": model,
+            "usage": res["usage"]}
 
 
 def _force_utf8() -> None:
@@ -1682,14 +2113,14 @@ def _key_operation(args) -> int:
         return EXIT_ASK_FAILED
 
 
-def _emit_error(args, message: str) -> int:
-    """An --ask failure: the redacted reason on stderr, and with --json the
-    same reason as the one JSON object on stdout."""
+def _emit_error(args, message: str, code: int = EXIT_ASK_FAILED) -> int:
+    """An --ask / --supervise failure: the redacted reason on stderr, and with
+    --json the same reason as the one JSON object on stdout."""
     message = redact(message)
     print(message, file=sys.stderr)
     if args.json:
         print(json.dumps({"error": message}, ensure_ascii=False))
-    return EXIT_ASK_FAILED
+    return code
 
 
 def main(argv: list[str]) -> int:
@@ -1699,7 +2130,8 @@ def main(argv: list[str]) -> int:
     except Exception as exc:  # noqa: BLE001 -- SystemExit/KeyboardInterrupt are not Exceptions
         name = type(exc).__name__   # the type only: str(exc) could carry a key or a path
         print(f"Lỗi không lường trước: {name}", file=sys.stderr)
-        if "--json" in argv and any(a == "--ask" or a.startswith("--ask=") for a in argv):
+        if "--json" in argv and any(a in ("--ask", "--supervise") or a.startswith("--ask=")
+                                    for a in argv):
             print(json.dumps({"error": f"Lỗi không lường trước trong trợ lý ({name})"},
                              ensure_ascii=False))
         return EXIT_ASK_FAILED
@@ -1714,6 +2146,11 @@ def _main(argv: list[str]) -> int:
     ap.add_argument("--provider", choices=PROVIDERS, default="anthropic")
     ap.add_argument("--model", metavar="ID")
     ap.add_argument("--base-url", metavar="URL")
+    ap.add_argument("--supervise", action="store_true",
+                    help="machine mode: the model may only call recording tools over --state "
+                         "(needs --json); stdout is one JSON object")
+    ap.add_argument("--state", type=Path, metavar="PATH",
+                    help="with --supervise: the app's state file (UTF-8 JSON, schema 1)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, metavar="SECONDS")
     ap.add_argument("--store-key", action="store_true",
                     help="read an API key from stdin and store it (DPAPI)")
@@ -1731,10 +2168,13 @@ def _main(argv: list[str]) -> int:
 
     key_ops = sum((args.store_key, args.delete_key, args.has_key))
     if key_ops:
-        if key_ops > 1 or args.ask is not None:
-            ap.error("--store-key, --delete-key, --has-key and --ask are mutually exclusive")
+        if key_ops > 1 or args.ask is not None or args.supervise:
+            ap.error("--store-key, --delete-key, --has-key, --ask and --supervise "
+                     "are mutually exclusive")
         if args.credentials_only:
-            ap.error("--credentials-only only applies with --ask")
+            ap.error("--credentials-only only applies with --ask or --supervise")
+        if args.state is not None:
+            ap.error("--state only applies with --supervise")
         if (args.store_key or args.has_key) and args.provider == "openai_compatible":
             if not args.base_url:
                 ap.error("--base-url is required to store or check an openai_compatible key")
@@ -1746,14 +2186,30 @@ def _main(argv: list[str]) -> int:
         ap.error("the log file is required")
 
     model = args.model
-    if args.ask is not None:
+    if args.supervise:
+        if args.ask is not None:
+            ap.error("--ask and --supervise are mutually exclusive")
+        if args.state is None:
+            ap.error("--supervise needs --state=<path>")
+        if not args.json:
+            ap.error("--supervise needs --json")
+    elif args.state is not None:
+        ap.error("--state only applies with --supervise")
+    if args.ask is not None or args.supervise:
         if args.provider == "anthropic" and not model:
             model = DEFAULT_ANTHROPIC_MODEL
         problem = validate_ask_args(args.provider, model, args.base_url, args.timeout)
         if problem:
             ap.error(problem)
     elif args.model or args.base_url or args.credentials_only:
-        ap.error("--model, --base-url and --credentials-only only apply with --ask")
+        ap.error("--model, --base-url and --credentials-only only apply with --ask or --supervise")
+
+    def bad_input(message: str) -> int:
+        # --supervise is machine-read: stdout is always one JSON object, even here.
+        if args.supervise:
+            return _emit_error(args, message, EXIT_BAD_LOG)
+        print(message, file=sys.stderr)
+        return EXIT_BAD_LOG
 
     try:
         events = logstats.load(args.file)
@@ -1761,14 +2217,26 @@ def _main(argv: list[str]) -> int:
             raise ValueError("a log line is not a JSON object")
         fs = findings(events) if events else []
     except OSError as exc:
-        print(f"empty or unreadable log: {exc}", file=sys.stderr)
-        return EXIT_BAD_LOG
+        return bad_input(f"empty or unreadable log: {exc}")
     except Exception as exc:  # noqa: BLE001 -- undecodable / malformed log: exit 2, type only
-        print(f"unreadable log: {type(exc).__name__}", file=sys.stderr)
-        return EXIT_BAD_LOG
+        return bad_input(f"unreadable log: {type(exc).__name__}")
     if not events:
-        print("empty or unreadable log", file=sys.stderr)
-        return EXIT_BAD_LOG
+        return bad_input("empty or unreadable log")
+
+    if args.supervise:
+        try:
+            state = load_state(args.state)
+        except StateError as exc:
+            return _emit_error(args, str(exc), EXIT_BAD_STATE)
+        try:
+            result = supervise(events, state, args.provider, model, args.base_url, args.timeout,
+                               args.credentials_only)
+        except AskError as exc:
+            return _emit_error(args, str(exc))
+        except Exception as exc:  # noqa: BLE001 -- last resort; type name only, never the message
+            return _emit_error(args, f"Lỗi không lường trước trong trợ lý ({type(exc).__name__})")
+        print(json.dumps(result, ensure_ascii=False))
+        return EXIT_OK
 
     if args.ask is None:
         if args.json:

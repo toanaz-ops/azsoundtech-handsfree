@@ -1312,5 +1312,627 @@ class KeyBoundToOrigin(CliHarness):
         self.assertEqual(srv.requests[0]["auth"], "Bearer test-key-not-real")
 
 
+# --- L3a: log schema 4 ------------------------------------------------------
+
+SCHEMA4 = ROOT / "tests" / "fixtures" / "session-schema4-authors.jsonl"
+
+
+class Schema4Logstats(unittest.TestCase):
+    def test_fixture_counts_authors_and_ai_events(self):
+        s = logstats.summarise(logstats.load(SCHEMA4))
+        self.assertEqual(s["author_placements"],
+                         {"detector": 1, "human": 1, "llm": 1, "network": 1})
+        self.assertEqual(s["ai_events"],
+                         {"ai_mode": 2, "ai_call": 1, "ai_proposal": 1, "ai_decision": 1})
+        self.assertEqual((s["log_schema"], s["ai_mode"]), (4, "suggest"))
+        self.assertEqual(len(s["notches"]), 4)
+        self.assertEqual([n["nid"] for n in s["notches"]], [1, 2, 3, 4])
+
+    def test_report_has_no_warnings_and_names_the_authors(self):
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            logstats.print_report(logstats.summarise(logstats.load(SCHEMA4)))
+        self.assertEqual(err.getvalue(), "")
+        self.assertNotIn("WARNING", out.getvalue())
+        self.assertIn("placements by author", out.getvalue())
+        self.assertIn("detector: 1  human: 1  network: 1  llm: 1", out.getvalue())
+        self.assertIn("ai_proposal: 1", out.getvalue())
+
+    def test_retune_by_llm_updates_depth_but_not_detector_depth(self):
+        n = logstats.summarise(logstats.load(SCHEMA4))["notches"][0]
+        self.assertEqual((n["depth_db"], n["deepest_db"], n["detector_deepest_db"]), (-12, -12, -6))
+        self.assertEqual(n["retunes"], 1)
+
+    def test_schema_1_to_3_logs_read_as_before(self):
+        # No `author` on any line: detector-origin = detector, everything else = human
+        # (preset / manual / soundcheck). Nothing about the schema-4 summary prints.
+        for name in ("session-sample", "session-superseded", "session-candidates", "session-nn-shadow"):
+            path = ROOT / "tests" / "fixtures" / f"{name}.jsonl"
+            s = logstats.summarise(logstats.load(path))
+            for n in s["notches"]:
+                self.assertEqual(n["author"], "detector" if n["origin"] == "detector" else "human")
+                self.assertEqual(n["detector_deepest_db"], n["deepest_db"], name)
+            self.assertEqual(sum(s["ai_events"].values()), 0)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                logstats.print_report(s)
+            self.assertNotIn("placements by author", out.getvalue(), name)
+            self.assertNotIn("ai events", out.getvalue(), name)
+
+    def test_cli_expect_flags(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(logstats.main([str(SCHEMA4), "--expect-notches", "4", "--expect-ai-events", "5",
+                                            "--expect-authors", "detector=1,human=1,network=1,llm=1"]), 0)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(logstats.main([str(SCHEMA4), "--expect-authors", "llm=2"]), 1)
+            self.assertEqual(logstats.main([str(SCHEMA4), "--expect-ai-events", "4"]), 1)
+
+
+class Schema4FindingRules(unittest.TestCase):
+    """Rules that count what the detector did BY ITSELF skip other authors."""
+
+    def with_author(self, ev, author):
+        return dict(ev, author=author)
+
+    def test_burst_ignores_notches_another_author_placed(self):
+        base = [nset(1000 + i * 10_000, 500.0 + 300 * i, index=i) for i in range(4)]
+        self.assertIn("burst", codes([start()] + base))
+        mixed = base[:3] + [self.with_author(base[3], "llm")]
+        self.assertNotIn("burst", codes([start()] + mixed))
+        explicit = [self.with_author(b, "detector") for b in base]
+        self.assertIn("burst", codes([start()] + explicit))     # explicit detector = same as absent
+
+    def test_ceiling_ignores_depth_another_author_reached(self):
+        tuning = {"ev": "tuning", "t": 1, "slot": -1, "depth_db": -18}
+
+        def retune(t, depth, **kw):
+            return {"ev": "notch_retune", "t": t, "slot": 0, "lane": 0, "index": 0,
+                    "depth_db": depth, **kw}
+        # by the detector: alert (as before)
+        ev = [start(), tuning, nset(1000, 800.0, depth=-6), retune(1300, -18)]
+        self.assertIn("ceiling", codes(ev))
+        # the same retune authored by llm: not the detector's loop-gain evidence
+        ev = [start(), tuning, nset(1000, 800.0, depth=-6), retune(1300, -18, author="llm")]
+        self.assertNotIn("ceiling", codes(ev))
+        # a notch another author placed at the ceiling
+        ev = [start(), tuning, self.with_author(nset(1000, 800.0, depth=-18), "network")]
+        self.assertNotIn("ceiling", codes(ev))
+        # the detector got there itself, a later llm retune does not hide it
+        ev = [start(), tuning, nset(1000, 800.0, depth=-6), retune(1300, -18),
+              retune(1600, -18, author="llm")]
+        f = [x for x in copilot.findings(ev) if x["code"] == "ceiling"]
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0]["evidence"]["deepest_db"], -18)
+
+    def test_fixture_schema4_has_no_burst_or_ceiling_from_other_authors(self):
+        self.assertNotIn("burst", codes(logstats.load(SCHEMA4)))
+        self.assertNotIn("ceiling", codes(logstats.load(SCHEMA4)))
+
+    def test_existing_fixture_findings_unchanged(self):
+        self.assertEqual(sorted(codes(logstats.load(FIXTURE))), ["ceiling", "false_rate", "recurrence"])
+
+
+# --- L3a: --supervise ---------------------------------------------------------
+
+def snotch(nid, hz=1000.0, depth=-6.0, ceiling=-18.0, origin="detector", **kw) -> dict:
+    n = {"nid": nid, "lane": 0, "index": nid, "hz": hz, "q": 30.0, "depth_db": depth,
+         "ceiling_db": ceiling, "origin": origin, "placed_by": "detector",
+         "last_changed_by": "detector", "age_s": 42.0, "hold_s": 0.0, "verdict": "none"}
+    n.update(kw)
+    return n
+
+
+def make_state(**over) -> dict:
+    st = {"schema": 1, "generation": 7, "ai_mode": "suggest", "engine_mode": "auto",
+          "sample_rate": 48000.0, "bin_hz": 23.4375, "trigger": "recurring_bin",
+          "slots": [
+              {"slot": 0, "ring_risk": "low", "ring_risk_score": 0.2,
+               "notches": [snotch(1, 1000.0), snotch(2, 2000.0, origin="preset"),
+                           snotch(5, 500.0, depth=-18.0)]},
+              {"slot": 1, "ring_risk": "rising", "ring_risk_score": None,
+               "notches": [snotch(3, 3000.0)]}]}
+    st.update(over)
+    return st
+
+
+def deepen(nid=1, hz=1000.0, target=-12.0, reason="recurring_at_frequency") -> dict:
+    return {"nid": nid, "expect_hz": hz, "target_db": target, "reason": reason}
+
+
+class StateValidation(unittest.TestCase):
+    def bad(self, mutate, needle=None):
+        st = make_state()
+        mutate(st)
+        with self.assertRaises(copilot.StateError) as cm:
+            copilot.validate_state(st)
+        if needle:
+            self.assertIn(needle, str(cm.exception))
+
+    def test_valid_state_passes(self):
+        st = make_state()
+        self.assertIs(copilot.validate_state(st), st)
+        self.assertEqual(copilot.validate_state(make_state(slots=[]))["slots"], [])
+
+    def test_top_level_rejections(self):
+        self.bad(lambda s: s.update(extra=1), "unknown keys")
+        self.bad(lambda s: s.pop("trigger"), "missing keys")
+        self.bad(lambda s: s.update(schema=2), "schema")
+        self.bad(lambda s: s.update(schema=True), "schema")
+        self.bad(lambda s: s.update(generation=-1), "generation")
+        self.bad(lambda s: s.update(generation=1.5), "generation")
+        self.bad(lambda s: s.update(generation=True), "generation")
+        self.bad(lambda s: s.update(ai_mode="off"), "ai_mode")
+        self.bad(lambda s: s.update(engine_mode="manual"), "engine_mode")
+        self.bad(lambda s: s.update(trigger="whenever"), "trigger")
+        for bad in (0, -1.0, float("nan"), float("inf"), "48000", True, None, 10 ** 400):
+            self.bad(lambda s, b=bad: s.update(sample_rate=b), "sample_rate")
+            self.bad(lambda s, b=bad: s.update(bin_hz=b), "bin_hz")
+        self.bad(lambda s: s.update(slots={}), "slots")
+
+    def test_slot_rejections(self):
+        self.bad(lambda s: s["slots"][0].update(extra=1), "unknown keys")
+        self.bad(lambda s: s["slots"][0].pop("notches"), "missing keys")
+        self.bad(lambda s: s["slots"][0].update(slot=16), "slot.slot")
+        self.bad(lambda s: s["slots"][0].update(slot=-1), "slot.slot")
+        self.bad(lambda s: s["slots"][1].update(slot=0), "repeated")
+        self.bad(lambda s: s["slots"][0].update(ring_risk="high"), "ring_risk")
+        self.bad(lambda s: s["slots"][0].update(ring_risk_score=float("nan")), "ring_risk_score")
+        self.bad(lambda s: s["slots"][0].update(ring_risk_score="0.2"), "ring_risk_score")
+        self.bad(lambda s: s["slots"][0].update(ring_risk_score=-0.1), "ring_risk_score")
+        self.bad(lambda s: s.update(slots=[{"slot": i, "ring_risk": "na", "ring_risk_score": None,
+                                            "notches": []} for i in range(17)]), "at most 16")
+        self.bad(lambda s: s["slots"].append("x"), "must be an object")
+
+    def test_notch_rejections(self):
+        n = lambda s: s["slots"][0]["notches"][0]          # noqa: E731
+        self.bad(lambda s: n(s).update(extra=1), "unknown keys")
+        self.bad(lambda s: n(s).pop("verdict"), "missing keys")
+        self.bad(lambda s: n(s).update(nid=-1), "nid")
+        self.bad(lambda s: n(s).update(nid=2 ** 32), "nid")
+        self.bad(lambda s: n(s).update(nid=True), "nid")
+        self.bad(lambda s: n(s).update(nid=3), "repeated")        # nid 3 is in slot 1
+        self.bad(lambda s: n(s).update(lane=2), "lane")
+        self.bad(lambda s: n(s).update(index=64), "index")
+        for key, values in (("hz", (0, -5.0, float("nan"), 24001.0, "1000", True, None)),
+                            ("q", (0, float("inf"), "30")),
+                            ("depth_db", (1.0, -121.0, float("nan"), None, "-6")),
+                            ("ceiling_db", (1.0, -121.0, float("-inf"))),
+                            ("age_s", (-1.0, float("nan"), "1")),
+                            ("hold_s", (-0.1, float("inf"), None))):
+            for v in values:
+                self.bad(lambda s, k=key, v=v: n(s).update({k: v}), key)
+        self.bad(lambda s: n(s).update(origin="ai"), "origin")
+        self.bad(lambda s: n(s).update(verdict="maybe"), "verdict")
+        self.bad(lambda s: n(s).update(placed_by="has space"), "placed_by")
+        self.bad(lambda s: n(s).update(last_changed_by=""), "last_changed_by")
+        self.bad(lambda s: n(s).update(placed_by=5), "placed_by")
+        self.bad(lambda s: s["slots"][0].update(notches=[snotch(100 + i) for i in range(33)]),
+                 "at most 32")
+
+    def test_limits_are_inclusive(self):
+        slots = [{"slot": i, "ring_risk": "na", "ring_risk_score": None,
+                  "notches": [snotch(i * 100 + j, index=j) for j in range(32)]} for i in range(16)]
+        copilot.validate_state(make_state(slots=slots))
+
+    def write(self, raw: bytes) -> Path:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "state.json"
+        p.write_bytes(raw)
+        return p
+
+    def test_load_state_file_failures(self):
+        good = json.dumps(make_state()).encode("utf-8")
+        self.assertEqual(copilot.load_state(self.write(good))["generation"], 7)
+        self.assertEqual(copilot.load_state(self.write(b"\xef\xbb\xbf" + good))["generation"], 7)  # BOM
+        for raw in (b"", b"{not json", b"[]", b"\xff\xfe\x00", b'{"schema": NaN}',
+                    json.dumps(make_state()).replace("48000.0", "Infinity").encode("utf-8"),
+                    b"[" * 100000, b" " * (copilot.MAX_STATE_BYTES + 1)):
+            with self.assertRaises(copilot.StateError, msg=raw[:30]):
+                copilot.load_state(self.write(raw))
+        with self.assertRaises(copilot.StateError):
+            copilot.load_state(Path(self.write(b"{}").parent / "missing.json"))
+
+
+class RecordingTools(unittest.TestCase):
+    def setUp(self):
+        self.sup = copilot.Supervisor(make_state())
+
+    def ok(self, fn, args):
+        self.assertEqual(fn(args), "queued")
+
+    def rej(self, fn, args, code):
+        before = list(self.sup.actions)
+        self.assertEqual(fn(args), "rejected: " + code, args)
+        self.assertEqual(self.sup.actions, before)
+
+    def test_deepen_accepts_and_records_normalised_numbers(self):
+        self.ok(self.sup.propose_deepen, deepen(target=-12))
+        self.assertEqual(self.sup.actions, [{"tool": "propose_deepen", "nid": 1, "expect_hz": 1000.0,
+                                             "target_db": -12.0, "reason": "recurring_at_frequency"}])
+
+    def test_deepen_boundaries(self):
+        self.ok(self.sup.propose_deepen, deepen(nid=1, target=-18.0))          # exactly the ceiling
+        self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-18.5), "target_beyond_ceiling")
+        self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-6.0), "target_not_deeper")
+        self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-3.0), "target_not_deeper")
+        self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=0), "target_not_deeper")
+        self.rej(self.sup.propose_deepen, deepen(nid=5, hz=500, target=-20.0), "target_beyond_ceiling")
+        self.rej(self.sup.propose_deepen, deepen(nid=5, hz=500, target=-18.0), "target_not_deeper")
+
+    def test_deepen_rejects_every_bad_number(self):
+        for bad in (float("inf"), float("-inf"), float("nan"), True, False, "-12", None, [-12], 10 ** 400):
+            self.rej(self.sup.propose_deepen, deepen(target=bad), "bad_target_db")
+        for bad in (float("inf"), float("nan"), True, "1000", None, 10 ** 400):
+            self.rej(self.sup.propose_deepen, deepen(hz=bad), "frequency_mismatch")
+
+    def test_target_notch_rules_for_every_tool(self):
+        for fn, extra in ((self.sup.propose_deepen, {"target_db": -12.0, "reason": "recurring_at_frequency"}),
+                          (self.sup.propose_hold, {"hold_s": 60, "reason": "show_in_progress"}),
+                          (self.sup.propose_release, {"reason": "judged_false"})):
+            self.rej(fn, {"nid": 99, "expect_hz": 1000.0, **extra}, "unknown_nid")
+            self.rej(fn, {"nid": "1", "expect_hz": 1000.0, **extra}, "unknown_nid")
+            self.rej(fn, {"nid": 1.0, "expect_hz": 1000.0, **extra}, "unknown_nid")
+            self.rej(fn, {"nid": True, "expect_hz": 1000.0, **extra}, "unknown_nid")
+            self.rej(fn, {"nid": 2, "expect_hz": 2000.0, **extra}, "not_detector_origin")   # preset
+            self.rej(fn, {"nid": 1, "expect_hz": 1000.0 + 24.0, **extra}, "frequency_mismatch")
+            self.rej(fn, {"nid": 1, "expect_hz": 1000.0, "surprise": 1, **extra}, "bad_arguments")
+            self.rej(fn, {"expect_hz": 1000.0, **extra}, "bad_arguments")
+
+    def test_frequency_tolerance_is_one_bin_inclusive(self):
+        self.ok(self.sup.propose_hold, {"nid": 1, "expect_hz": 1000.0 + 23.4375, "hold_s": 30,
+                                        "reason": "show_in_progress"})
+        self.rej(self.sup.propose_hold, {"nid": 3, "expect_hz": 3000.0 - 23.44, "hold_s": 30,
+                                         "reason": "show_in_progress"}, "frequency_mismatch")
+
+    def test_reasons_are_enums_per_tool(self):
+        self.rej(self.sup.propose_deepen, deepen(reason="because"), "bad_reason")
+        self.rej(self.sup.propose_deepen, deepen(reason="judged_false"), "bad_reason")   # another tool's enum
+        self.rej(self.sup.propose_deepen, deepen(reason=None), "bad_reason")
+        self.rej(self.sup.propose_hold, {"nid": 1, "expect_hz": 1000.0, "hold_s": 60,
+                                         "reason": "judged_false"}, "bad_reason")
+        self.rej(self.sup.propose_release, {"nid": 1, "expect_hz": 1000.0,
+                                            "reason": "recurring_at_frequency"}, "bad_reason")
+        self.rej(self.sup.no_action, {"reason": "recurring_at_frequency"}, "bad_reason")
+        self.rej(self.sup.no_action, {"reason": ["nothing_to_do"]}, "bad_reason")
+
+    def test_hold_bounds_and_integer(self):
+        ok = {"nid": 1, "expect_hz": 1000.0, "reason": "recurring_at_frequency"}
+        for bad in (29, 601, 0, -30, 60.0, 60.5, True, "60", None, float("inf"), float("nan")):
+            self.rej(self.sup.propose_hold, {**ok, "hold_s": bad}, "bad_hold_s")
+        self.ok(self.sup.propose_hold, {**ok, "hold_s": 30})
+        self.sup.actions.clear(); self.sup._seen.clear()                      # noqa: E702
+        self.ok(self.sup.propose_hold, {**ok, "hold_s": 600})
+
+    def test_release_refused_while_ring_risk_is_rising_or_critical(self):
+        self.rej(self.sup.propose_release, {"nid": 3, "expect_hz": 3000.0, "reason": "judged_false"},
+                 "ring_risk_not_low")                                           # slot 1 is "rising"
+        self.ok(self.sup.propose_release, {"nid": 1, "expect_hz": 1000.0, "reason": "stale_no_recurrence"})
+        st = make_state()
+        st["slots"][0]["ring_risk"] = "critical"
+        sup = copilot.Supervisor(st)
+        self.assertEqual(sup.propose_release({"nid": 1, "expect_hz": 1000.0, "reason": "judged_false"}),
+                         "rejected: ring_risk_not_low")
+        st["slots"][0]["ring_risk"] = "na"
+        sup = copilot.Supervisor(st)
+        self.assertEqual(sup.propose_release({"nid": 1, "expect_hz": 1000.0, "reason": "judged_false"}),
+                         "queued")
+
+    def test_no_action_arguments(self):
+        self.ok(self.sup.no_action, {"reason": "insufficient_data"})
+        self.rej(self.sup.no_action, {}, "bad_arguments")
+        self.rej(self.sup.no_action, {"reason": "outside_scope", "nid": 1}, "bad_arguments")
+
+    def test_duplicate_tool_and_nid_keeps_the_first(self):
+        self.ok(self.sup.propose_deepen, deepen(target=-12.0))
+        self.assertEqual(self.sup.propose_deepen(deepen(target=-15.0)), "duplicate ignored")
+        self.assertEqual([a["target_db"] for a in self.sup.actions], [-12.0])
+        self.ok(self.sup.propose_hold, {"nid": 1, "expect_hz": 1000.0, "hold_s": 60,
+                                        "reason": "show_in_progress"})           # other tool, same nid: kept
+        self.ok(self.sup.no_action, {"reason": "nothing_to_do"})
+        self.assertEqual(self.sup.no_action({"reason": "outside_scope"}), "duplicate ignored")
+        self.assertEqual(len(self.sup.actions), 3)
+
+    def test_at_most_eight_actions(self):
+        st = make_state(slots=[{"slot": 0, "ring_risk": "low", "ring_risk_score": None,
+                                "notches": [snotch(i, 1000.0 + 100 * i) for i in range(1, 12)]}])
+        sup = copilot.Supervisor(st)
+        results = [sup.propose_hold({"nid": i, "expect_hz": 1000.0 + 100 * i, "hold_s": 60,
+                                     "reason": "show_in_progress"}) for i in range(1, 12)]
+        self.assertEqual(results, ["queued"] * 8 + ["limit reached"] * 3)
+        self.assertEqual([a["nid"] for a in sup.actions], list(range(1, 9)))
+        self.assertEqual(sup.result_actions(), sup.actions)
+
+    def test_nothing_recorded_reads_as_no_action(self):
+        self.assertEqual(self.sup.result_actions(), [{"tool": "no_action", "reason": "nothing_to_do"}])
+
+    def test_run_tool_path_never_coerces_and_survives_infinity(self):
+        funcs = copilot.make_tool_functions(logstats.load(FIXTURE))
+        funcs.update({"propose_deepen": self.sup.propose_deepen, "current_state": self.sup.current_state})
+        specs = copilot.SUPERVISE_TOOL_SPECS
+
+        def call(name, raw):
+            return copilot.run_tool(funcs, name, raw, specs)
+        for target in ("-Infinity", "Infinity", "NaN", "1e999", "-1e999", '"-12"', "true"):
+            raw = ('{"nid": 1, "expect_hz": 1000, "target_db": %s, "reason": "recurring_at_frequency"}'
+                   % target)
+            self.assertTrue(call("propose_deepen", raw).startswith("rejected: "), target)
+        self.assertTrue(call("propose_deepen", '{"nid": 1e999, "expect_hz": 1000, "target_db": -12, '
+                                               '"reason": "recurring_at_frequency"}').startswith("rejected: "))
+        self.assertTrue(call("propose_deepen", '{"nid": "1", "expect_hz": 1000, "target_db": -12, '
+                                               '"reason": "recurring_at_frequency"}').startswith("rejected: "))
+        self.assertEqual(self.sup.actions, [])
+        self.assertEqual(call("propose_deepen", '{"nid": 1, "expect_hz": 1000, "target_db": -12, '
+                                                '"reason": "recurring_at_frequency"}'), "queued")
+        self.assertIn("error", json.loads(call("propose_deepen", "{not json")))
+        self.assertIn("error", json.loads(call("propose_deepen", "[1]")))
+        self.assertEqual(json.loads(call("current_state", "{}"))["generation"], 7)
+
+    def test_schema_table_matches_functions_and_is_strict(self):
+        ts = copilot.build_supervise_toolset(logstats.load(FIXTURE), make_state())
+        self.assertEqual(sorted(ts.funcs), sorted(copilot.SUPERVISE_TOOL_SPECS))
+        self.assertEqual(sorted(copilot.SUPERVISE_TOOL_SPECS),
+                         sorted([*copilot.TOOL_SPECS, "current_state", "propose_deepen", "propose_hold",
+                                 "propose_release", "no_action"]))
+        for name in ("propose_deepen", "propose_hold", "propose_release", "no_action"):
+            p = copilot.SUPERVISE_TOOL_SPECS[name]["parameters"]
+            self.assertIs(p["additionalProperties"], False, name)
+            self.assertEqual(sorted(p["required"]), sorted(p["properties"]), name)
+            self.assertEqual(p["properties"]["reason"]["type"], "string")
+            self.assertIn("enum", p["properties"]["reason"])
+        deepen_p = copilot.SUPERVISE_TOOL_SPECS["propose_deepen"]["parameters"]["properties"]
+        self.assertEqual(deepen_p["nid"]["type"], "integer")
+        self.assertEqual(copilot.SUPERVISE_TOOL_SPECS["propose_hold"]["parameters"]["properties"]["hold_s"],
+                         {"type": "integer", "minimum": 30, "maximum": 600})
+        self.assertEqual(copilot.SUPERVISE_TOOL_SPECS["propose_release"]["parameters"]["properties"]
+                         ["reason"]["enum"], ["judged_false", "stale_no_recurrence"])
+
+    def test_prompt_states_the_hard_rules(self):
+        p = copilot.SUPERVISE_SYSTEM_PROMPT
+        for must in ("propose_deepen", "propose_hold", "propose_release", "no_action",
+                     "detector", "NEVER when the slot's ring_risk", "FALSE verdict"):
+            self.assertIn(must, p)
+        self.assertRegex(p, r"(?i)never try to raise any level")
+
+
+class SuperviseCli(CliHarness):
+    STATE_ARGS_NEEDED = ("--supervise", "--json")
+
+    def state_file(self, state=None, raw=None) -> str:
+        p = Path(self.tmp.name) / "state.json"
+        if raw is not None:
+            p.write_bytes(raw)
+        else:
+            p.write_text(json.dumps(make_state() if state is None else state), encoding="utf-8")
+        return str(p)
+
+    def sup(self, srv, *extra, state=None, env=None, log=FIXTURE):
+        return self.run_cli([str(log), "--supervise", "--state", self.state_file(state), "--json",
+                             "--provider", "openai_compatible", "--base-url", srv.url, "--model", "m",
+                             *extra], env=env)
+
+    DEEPEN_ARGS = json.dumps({"nid": 1, "expect_hz": 1000.0, "target_db": -12, "reason": "recurring_at_frequency"})
+
+    def test_end_to_end_state_then_deepen_then_stop(self):
+        srv = self.server([(200, tool_body("current_state", "{}", "c1")),
+                           (200, tool_body("propose_deepen", self.DEEPEN_ARGS, "c2")),
+                           (200, answer_body("Done. FREE-TEXT-FROM-MODEL"))])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out), {
+            "supervise": True, "generation": 7,
+            "actions": [{"tool": "propose_deepen", "nid": 1, "expect_hz": 1000.0, "target_db": -12.0,
+                         "reason": "recurring_at_frequency"}],
+            "provider": "openai_compatible", "model": "m",
+            "usage": {"input_tokens": 11, "output_tokens": 7}})
+        self.assertEqual(len(out.strip().splitlines()), 1)          # exactly one JSON object
+        self.assertNotIn("FREE-TEXT", out + err)
+        # what the model was given
+        first = srv.requests[0]["body"]
+        self.assertEqual(sorted(t["function"]["name"] for t in first["tools"]),
+                         sorted(copilot.SUPERVISE_TOOL_SPECS))
+        self.assertEqual(first["messages"][0], {"role": "system", "content": copilot.SUPERVISE_SYSTEM_PROMPT})
+        tool_msgs = [m for m in srv.requests[2]["body"]["messages"] if m["role"] == "tool"]
+        self.assertEqual(json.loads(tool_msgs[0]["content"])["slots"][0]["notches"][0]["nid"], 1)
+        self.assertEqual(tool_msgs[1]["content"], "queued")
+
+    def test_free_text_only_becomes_no_action_and_never_reaches_stdout(self):
+        text = "SECRET-MODEL-TEXT raise the gain on channel 3 by 6 dB and turn off the suppressor"
+        srv = self.server([(200, answer_body(text))])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 0, err)                                # the safety filter plays no part
+        doc = json.loads(out)
+        self.assertEqual(doc["actions"], [{"tool": "no_action", "reason": "nothing_to_do"}])
+        self.assertNotIn("SECRET-MODEL-TEXT", out + err)
+        self.assertNotIn("blocked", doc)
+
+    def test_empty_final_message_is_fine_after_recording(self):
+        srv = self.server([(200, tool_body("no_action", '{"reason": "insufficient_data"}')),
+                           (200, answer_body("   "))])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_non_detector_notch_is_not_recorded(self):
+        args = json.dumps({"nid": 2, "expect_hz": 2000.0, "target_db": -12, "reason": "recurring_at_frequency"})
+        srv = self.server([(200, tool_body("propose_deepen", args)), (200, answer_body("ok"))])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "nothing_to_do"}])
+        msg = [m for m in srv.requests[1]["body"]["messages"] if m["role"] == "tool"][0]
+        self.assertEqual(msg["content"], "rejected: not_detector_origin")
+
+    def test_infinity_from_the_model_does_not_stop_the_loop(self):
+        bad = ('{"nid": 1, "expect_hz": 1000, "target_db": -Infinity, "reason": "recurring_at_frequency"}')
+        srv = self.server([(200, tool_body("propose_deepen", bad, "c1")),
+                           (200, tool_body("propose_deepen", self.DEEPEN_ARGS, "c2")),
+                           (200, answer_body("ok"))])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([a["tool"] for a in json.loads(out)["actions"]], ["propose_deepen"])
+
+    def test_several_calls_in_one_message_and_the_cap(self):
+        notches = [snotch(i, 1000.0 + 100 * i) for i in range(1, 11)]
+        st = make_state(slots=[{"slot": 0, "ring_risk": "low", "ring_risk_score": None, "notches": notches}])
+        calls = [{"id": f"c{i}", "type": "function", "function": {
+            "name": "propose_hold", "arguments": json.dumps(
+                {"nid": i, "expect_hz": 1000.0 + 100 * i, "hold_s": 60, "reason": "show_in_progress"})}}
+            for i in range(1, 11)]
+        body = {"choices": [{"finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None, "tool_calls": calls}}]}
+        srv = self.server([(200, body), (200, answer_body("ok"))])
+        rc, out, err = self.sup(srv, state=st)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([a["nid"] for a in json.loads(out)["actions"]], list(range(1, 9)))
+        results = [m["content"] for m in srv.requests[1]["body"]["messages"] if m["role"] == "tool"]
+        self.assertEqual(results, ["queued"] * 8 + ["limit reached"] * 2)
+
+    def test_credentials_only_behaves_as_in_ask_mode(self):
+        srv = self.server([(200, answer_body("a")), (200, answer_body("a"))])
+        self.assertEqual(self.sup(srv, "--credentials-only", env={"OPENAI_API_KEY": "from-env"})[0], 0)
+        self.assertIsNone(srv.requests[0]["auth"])
+        self.assertEqual(self.sup(srv, env={"OPENAI_API_KEY": "from-env"})[0], 0)
+        self.assertEqual(srv.requests[1]["auth"], "Bearer from-env")
+
+    def test_key_is_never_printed(self):
+        def echo(headers):
+            return {"error": "bad key " + headers.get("Authorization", "")}
+        srv = self.server([(401, echo)])
+        rc, out, err = self.sup(srv, env={"OPENAI_API_KEY": SECRET})
+        self.assertEqual(rc, 3)
+        self.assertNotIn(SECRET, out + err)
+
+    def test_failures_use_ask_exit_codes_and_json_error(self):
+        srv = self.server([(500, {"error": "x"})])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 3)
+        doc = json.loads(out)
+        self.assertEqual(list(doc), ["error"])
+        self.assertIn("500", doc["error"])
+        self.assertEqual(err.strip(), doc["error"])
+        srv = self.server([(200, tool_body("current_state", "{}", f"c{i}")) for i in range(13)])
+        rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 3)
+        self.assertIn("tool loop exhausted", json.loads(out)["error"])
+        srv = self.server([("hang", 3)])
+        rc, out, _ = self.sup(srv, "--timeout", "0.5")
+        self.assertEqual(rc, 3)
+        self.assertIn("Quá hạn", json.loads(out)["error"])
+        srv = self.server([(200, answer_body("x") | {"choices": [{"finish_reason": "content_filter",
+                                                                  "message": {"content": "x"}}]})])
+        rc, out, _ = self.sup(srv)
+        self.assertEqual(rc, 3)
+        self.assertEqual(list(json.loads(out)), ["error"])
+
+    def test_unexpected_exception_is_exit_3_with_type_name_only(self):
+        srv = self.server([])
+        with mock.patch.object(copilot, "supervise", side_effect=ValueError("PRIVATE-detail")):
+            rc, out, err = self.sup(srv)
+        self.assertEqual(rc, 3)
+        self.assertIn("ValueError", json.loads(out)["error"])
+        self.assertNotIn("PRIVATE", out + err)
+
+    def test_bad_state_is_exit_2_with_error_json(self):
+        srv = self.server([])
+        bad = make_state(schema=9)
+        for state, raw in ((bad, None), (None, b"{nope"), (None, b'{"schema": NaN}'), (None, b"")):
+            rc, out, err = self.run_cli([str(FIXTURE), "--supervise", "--state", self.state_file(state, raw),
+                                         "--json", "--provider", "openai_compatible",
+                                         "--base-url", srv.url, "--model", "m"])
+            self.assertEqual(rc, copilot.EXIT_BAD_LOG, err)
+            self.assertEqual(list(json.loads(out)), ["error"])
+            self.assertNotIn("Traceback", err)
+        rc, out, _ = self.run_cli([str(FIXTURE), "--supervise", "--state", str(Path(self.tmp.name) / "none.json"),
+                                   "--json", "--provider", "openai_compatible", "--base-url", srv.url,
+                                   "--model", "m"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(list(json.loads(out)), ["error"])
+        self.assertEqual(srv.requests, [])                           # no model call on bad input
+
+    def test_unreadable_log_is_exit_2_with_error_json(self):
+        srv = self.server([])
+        rc, out, _ = self.sup(srv, log=ROOT / "no-such.jsonl")
+        self.assertEqual(rc, 2)
+        self.assertEqual(list(json.loads(out)), ["error"])
+
+    def argv_bad(self, *argv):
+        rc, out, err = self.run_cli(list(argv))
+        self.assertEqual((rc, out), (copilot.EXIT_BAD_ARGS, ""), err)
+
+    def test_argument_validation(self):
+        st = self.state_file()
+        oai = ["--provider", "openai_compatible", "--base-url", "http://127.0.0.1:9/v1", "--model", "m"]
+        self.argv_bad(str(FIXTURE), "--supervise", "--json", *oai)                       # no --state
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, *oai)                  # no --json
+        self.argv_bad("--supervise", "--state", st, "--json", *oai)                      # no log file
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--ask", "q", *oai)
+        for flag in ("--store-key", "--delete-key", "--has-key"):
+            self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", flag, *oai)
+        self.argv_bad(str(FIXTURE), "--state", st, "--json", *oai)                       # --state alone
+        self.argv_bad("--has-key", "--provider", "anthropic", "--state", st)
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--provider", "openai_compatible",
+                      "--base-url", "http://127.0.0.1:9/v1")                             # no --model
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--provider", "openai_compatible",
+                      "--model", "m")                                                    # no --base-url
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--provider", "openai_compatible",
+                      "--model", "m", "--base-url", "ftp://x")
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--base-url", "http://x/v1")
+        self.argv_bad(str(FIXTURE), "--supervise", "--state", st, "--json", "--timeout", "0", *oai)
+        self.argv_bad(str(FIXTURE), "--credentials-only", "--json")                       # needs ask or supervise
+
+    def test_low_priority_is_accepted_and_changes_nothing(self):
+        srv = self.server([(200, answer_body("a")), (200, answer_body("a"))])
+        a = self.sup(srv)
+        b = self.sup(srv, "--low-priority")
+        self.assertEqual(a, b)
+
+    @unittest.skipUnless(HAVE_SDK, "anthropic not installed")
+    def test_anthropic_without_stored_key_fails_like_ask(self):
+        env = {"ANTHROPIC_API_KEY": "env-not-real", "ANTHROPIC_AUTH_TOKEN": "tok-not-real"}
+        rc, out, err = self.run_cli([str(FIXTURE), "--supervise", "--state", self.state_file(), "--json",
+                                     "--credentials-only"], env=env)
+        self.assertEqual(rc, 3)
+        self.assertIn("Không có thông tin đăng nhập Claude API", err)
+        self.assertNotIn("env-not-real", out + err)
+        self.assertEqual(json.loads(out)["error"], err.strip())
+
+
+@unittest.skipUnless(HAVE_SDK, "anthropic not installed")
+class SuperviseAnthropicKwargs(unittest.TestCase):
+    def test_kwargs_carry_the_supervise_tools_and_prompt(self):
+        ts = copilot.build_supervise_toolset(logstats.load(FIXTURE), make_state())
+        tools = copilot.make_toolset_tools(ts)
+        kw = copilot.build_anthropic_kwargs("claude-opus-5-5", tools, copilot.SUPERVISE_USER_PROMPT, ts.system)
+        self.assertEqual(sorted(t.name for t in kw["tools"]), sorted(copilot.SUPERVISE_TOOL_SPECS))
+        self.assertEqual(kw["system"], copilot.SUPERVISE_SYSTEM_PROMPT)
+        self.assertNotEqual(kw["system"], copilot.SYSTEM_PROMPT)
+        self.assertEqual(kw["messages"], [{"role": "user", "content": copilot.SUPERVISE_USER_PROMPT}])
+        self.assertEqual((kw["max_iterations"], kw["max_tokens"]), (12, 16000))
+        self.assertEqual(kw["betas"], ["server-side-fallback-2026-07-01"])
+        by_name = {t.name: t for t in kw["tools"]}
+        for name in ("propose_deepen", "propose_hold", "propose_release", "no_action"):
+            schema = by_name[name].to_dict()["input_schema"]
+            self.assertIs(schema["additionalProperties"], False, name)
+            self.assertEqual(schema, copilot.SUPERVISE_TOOL_SPECS[name]["parameters"])
+        json.dumps([t.to_dict() for t in kw["tools"]])               # serialisable as sent
+
+    def test_ask_kwargs_are_unchanged(self):
+        kw = copilot.build_anthropic_kwargs("claude-opus-5-5", [], "q")
+        self.assertEqual(kw["system"], copilot.SYSTEM_PROMPT)
+
+    def test_tools_run_through_the_same_validation(self):
+        ts = copilot.build_supervise_toolset(logstats.load(FIXTURE), make_state())
+        tools = {t.name: t for t in copilot.make_toolset_tools(ts)}
+        self.assertEqual(tools["propose_deepen"].call(deepen(target=float("-inf"))), "rejected: bad_target_db")
+        self.assertEqual(tools["propose_deepen"].call(deepen(nid=2, hz=2000.0)), "rejected: not_detector_origin")
+        self.assertEqual(ts.supervisor.actions, [])
+        self.assertEqual(tools["propose_deepen"].call(deepen()), "queued")
+        self.assertEqual(tools["no_action"].call({"reason": "outside_scope"}), "queued")
+        self.assertEqual(json.loads(tools["current_state"].call({}))["generation"], 7)
+        self.assertEqual(len(json.loads(tools["get_findings"].call({}))), 3)
+        self.assertEqual(json.loads(tools["list_notches"].call({"slot": 0}))[0]["number"], 1)
+        self.assertEqual(len(ts.supervisor.actions), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
