@@ -83,14 +83,16 @@ SetupWizard::SetupWizard()
         showStep();
     };
     backButton_.onClick = [this] { model_.back(); showStep(); };
-    cancelButton_.onClick = [this]
-    {
-        close();
-        if (onCancel)
-            onCancel();
-    };
+    cancelButton_.onClick = [this] { cancel(); };
 
     setVisible (false);
+}
+
+void SetupWizard::cancel()
+{
+    close();
+    if (onCancel)
+        onCancel();
 }
 
 SetupWizard::~SetupWizard()

@@ -3951,3 +3951,62 @@ TEST (NotchControllerSoundcheck, APreventiveNotchNeitherWritesNorConsumesRoomMem
         << "the preventive notch left a memory entry behind at a bin the room "
            "never howled at";
 }
+
+// === Review 2026-11-09 MEDIUM-2 / LOW-3: a sample-rate change ===============
+
+// RED IF setSampleRate stops flushing the detector window: audio captured at
+// the old rate would be transformed with the new bin->Hz map.
+TEST (NotchControllerRateChange, DetectorWindowIsFlushedWhenTheRateChanges)
+{
+    Harness h;
+    h.controller.setDetectionActive (true);
+    SineSource tone;
+    for (int i = 0; i < 8; ++i)
+        pump (h, tone.hop());
+
+    const float* window = h.controller.analysisWindowForTest (0);
+    float energy = 0.0f;
+    for (int i = 0; i < Detector::kFftSize; ++i)
+        energy += std::abs (window[i]);
+    ASSERT_GT (energy, 1.0f) << "the tone never reached the analysis window";
+
+    h.controller.setSampleRate (44100.0);
+
+    for (int i = 0; i < Detector::kFftSize; ++i)
+        ASSERT_EQ (window[i], 0.0f) << "old-rate sample survived at " << i;
+}
+
+// RED IF a notch at or above the new Nyquist stays in the model: the GUI would
+// show it Active while the chain (which refuses it) is Idle.
+TEST (NotchControllerRateChange, NotchesAtOrAboveTheNewNyquistAreCleared)
+{
+    Harness h;
+    h.controller.setSampleRate (96000.0);
+    ASSERT_EQ (h.controller.adoptPreset (onePresetNotch (0, 23000.0)), 1);
+    ASSERT_TRUE (h.controller.activeForTest (0, 0));
+
+    // A notch below the new Nyquist must survive.
+    ASSERT_EQ (h.controller.adoptPreset (onePresetNotch (1, 1000.0)), 1);
+
+    h.controller.setSampleRate (44100.0);
+
+    EXPECT_FALSE (h.controller.activeForTest (0, 0));
+    EXPECT_FALSE (h.controller.activeForTest (1, 0));
+    EXPECT_TRUE  (h.controller.activeForTest (0, 1));
+}
+
+// RED IF the room-memory merge goes back to an exact-Hz compare: sub-bin
+// estimates differ per episode, so one howl would fill the ring with duplicates.
+TEST (NotchControllerRateChange, RoomMemoryMergesByBinNotByExactHz)
+{
+    Harness h;
+    // 48 kHz / 2048 = 23.44 Hz per bin: 1000.0, 1003.3 and 1008.0 are bin 43.
+    h.controller.rememberReleaseForTest (0, 1000.0, -12.0);
+    h.controller.rememberReleaseForTest (0, 1003.3, -24.0);
+    h.controller.rememberReleaseForTest (0, 1008.0, -18.0);
+    EXPECT_EQ (h.controller.memoryEntryCountForTest (0), 1);
+
+    // One bin away is a different howl.
+    h.controller.rememberReleaseForTest (0, 1031.0, -12.0);
+    EXPECT_EQ (h.controller.memoryEntryCountForTest (0), 2);
+}
