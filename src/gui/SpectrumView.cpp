@@ -36,7 +36,7 @@ constexpr float kFlagDigitWidth    = 6.0f;   // one mono digit at 10 px
 constexpr float kPipSize           = 6.0f;   // lane L3a: authored-notch pip at the wedge apex
 constexpr float kPipKeyline        = 1.5f;
 constexpr float kGhostStroke       = 1.25f;  // lane L3a: a proposal is an outline, never a fill
-constexpr float kGhostRingRadius   = 4.5f;
+constexpr float kGhostRingRadius   = 4.5f;   // >= the apex pip (6 px square)
 constexpr float kStemAlphaSettled  = 0.22f;  // an old stem is nearly a whisper
 constexpr float kStemAlphaFresh    = 0.60f;
 constexpr float kGlowRadius        = 16.0f;
@@ -1647,15 +1647,22 @@ void SpectrumView::paintProposalGhosts (juce::Graphics& g, const juce::Rectangle
             // Hold / release: a hollow ring just under the notch's apex.
             const float cy = currentApex + kGhostRingRadius + 3.0f;
             g.drawEllipse (x - kGhostRingRadius, cy - kGhostRingRadius,
-                           2.0f * kGhostRingRadius, 2.0f * kGhostRingRadius, kGhostStroke);
+                           2.0f * kGhostRingRadius, 2.0f * kGhostRingRadius, 1.5f);
             bottom = cy + kGhostRingRadius;
         }
 
-        // The hollow flag, under the ghost so it never lands on the real flag.
+        // The hollow flag: same 10 px mono face and 13 px box as the real numbered
+        // flags, BESIDE the marker (right of it; left when that would leave the
+        // plot), centred on the ghost's lowest point so it covers neither the real
+        // wedge tip nor its own marker.
         const auto label = ghostFlagLabel();
         const float flagW = (float) label.length() * kFlagDigitWidth + 2.0f * kFlagPad;
-        const juce::Rectangle<float> flag (x - flagW * 0.5f,
-                                           juce::jmin (plot.getBottom() - kFlagHeight, bottom + 3.0f),
+        float fx = x + kMarkerHalfWidth + kGhostRingRadius + 4.0f;
+        if (fx + flagW > plot.getRight())
+            fx = x - kMarkerHalfWidth - kGhostRingRadius - 4.0f - flagW;
+        const juce::Rectangle<float> flag (fx,
+                                           juce::jlimit (plot.getY(), plot.getBottom() - kFlagHeight,
+                                                         bottom - kFlagHeight * 0.5f),
                                            flagW, kFlagHeight);
         g.setColour (background.withAlpha (0.85f));
         g.fillRect (flag);

@@ -121,7 +121,14 @@ TEST (AiDriveSwitch, ReflectsAndSetsTheModeAndActCannotBeSelected)
     // TU LAI: disabled, says why, and clicking it changes nothing.
     auto& act = sw.getSegmentForTest (3);
     EXPECT_FALSE (act.isEnabled());
-    EXPECT_EQ (act.getTooltip(), u ("Ch\xc6\xb0" "a c\xc3\xb3 \xe1\xbb\x9f b\xe1\xba\xa3n n\xc3\xa0y."));
+    // The reason is always visible (no tooltip): a dim label beside the switch.
+    app.setSize (1440, 920);
+    app.resized();
+    EXPECT_EQ (gui::CopilotPanel::actNoteText(), u ("T\xe1\xbb\xb0 L\xc3\x81I: b\xe1\xba\xa3n sau"));
+    EXPECT_FALSE (panel.getActNoteBoundsForTest().isEmpty());
+    EXPECT_FALSE (panel.getActNoteBoundsForTest().intersects (sw.getBounds()));
+    EXPECT_FALSE (panel.getActNoteBoundsForTest().intersects (panel.getAnalyseButtonForTest().getBounds()));
+    EXPECT_FALSE (panel.getActNoteBoundsForTest().intersects (panel.getSetupButtonForTest().getBounds()));
     clickSegment (act);
     EXPECT_EQ (app.aiMode(), AiMode::Suggest) << "TU LAI must not change the mode";
     EXPECT_EQ (sw.getSelectedIndex(), 2) << "and the lit segment goes back to the real mode";
@@ -185,6 +192,13 @@ TEST (AiDriveSwitch, HeaderFitsWithoutClippingAndNeverSqueezesTheTitleButtons)
         EXPECT_TRUE (panel.getLocalBounds().contains (panel.getExplainerBoundsForTest())) << width;
         EXPECT_GE (panel.getExplainerBoundsForTest().getY(), gui::CopilotPanel::kCaptionHeight) << width;
         EXPECT_TRUE (panel.getLocalBounds().contains (panel.getChipBoundsForTest())) << width;
+        // The "why TU LAI is off" label never overlaps the switch or the title buttons.
+        const auto note = panel.getActNoteBoundsForTest();
+        EXPECT_FALSE (note.isEmpty()) << width;
+        EXPECT_TRUE (panel.getLocalBounds().contains (note)) << width;
+        EXPECT_FALSE (note.intersects (sw.getBounds())) << width;
+        EXPECT_FALSE (note.intersects (panel.getAnalyseButtonForTest().getBounds())) << width;
+        EXPECT_FALSE (note.intersects (panel.getSetupButtonForTest().getBounds())) << width;
         EXPECT_FALSE (panel.getChipBoundsForTest().isEmpty()) << width;
     }
 }
@@ -203,9 +217,16 @@ TEST (AiDriveChip, FollowsTheSupervisorStatusAndHidesWhenEmpty)
     EXPECT_TRUE (panel.isChipVisibleForTest());
     EXPECT_EQ (panel.getChipTextForTest(), app.aiSupervisor().statusText());
 
-    app.setAiMode (AiMode::Off);
-    EXPECT_EQ (panel.getChipTextForTest(), app.aiSupervisor().statusText());
-    EXPECT_NE (panel.getChipTextForTest(), u ("AI \xc2\xb7 ch\xc6\xb0" "a c\xe1\xba\xa5u h\xc3\xacnh"));
+    // Below GOI Y the supervisor is Disabled and the chip is hidden: the explainer
+    // already says what runs, and "AI tat" must not contradict it.
+    for (const auto mode : { AiMode::Off, AiMode::Shadow })
+    {
+        app.setAiMode (mode);
+        EXPECT_EQ (app.aiSupervisor().status().kind, AiSupervisor::StatusKind::Disabled);
+        EXPECT_FALSE (panel.isChipVisibleForTest());
+    }
+    app.setAiMode (AiMode::Suggest);
+    EXPECT_TRUE (panel.isChipVisibleForTest());
 
     // Empty text hides it.
     panel.setSupervisorStatus ({});
@@ -324,7 +345,7 @@ TEST (AiDriveProposals, RowsShowSentencesButtonsAndTheDismissAllControl)
         EXPECT_EQ (panel.getApplyButtonForTest (row)->getButtonText(), u ("\xc3\x81P D\xe1\xbb\xa4NG"));
         EXPECT_EQ (panel.getDismissButtonForTest (row)->getButtonText(), u ("B\xe1\xbb\x8e"));
         EXPECT_FALSE (panel.getApplyButtonForTest (row)->isEnabled());
-        EXPECT_EQ (panel.getApplyButtonForTest (row)->getTooltip(), gui::CopilotPanel::applyTooltipText());
+        EXPECT_EQ (gui::CopilotPanel::proposalsSuffixText(), u ("ch\xe1\xbb\x89 xem \xe1\xbb\x9f b\xe1\xba\xa3n n\xc3\xa0y"));
         EXPECT_TRUE (panel.getDismissButtonForTest (row)->isEnabled());
     }
     EXPECT_EQ (panel.getApplyButtonForTest (2), nullptr);

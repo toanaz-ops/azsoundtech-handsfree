@@ -403,6 +403,10 @@ public:
     // them) and prove that no decision depends on the tag.
     bool setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
                                   double depthDB, Author author);
+    // Same seam with the two attributions apart (a notch the detector placed and
+    // someone else last changed, e.g. D>A). Emits exactly what the one above emits.
+    bool setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
+                                  double depthDB, Author placedBy, Author lastChangedBy);
 
     // TEST ACCESSORS ONLY (lane G). The ladder lives entirely under
     // modelMutex_ and is otherwise observable only through emitted commands,

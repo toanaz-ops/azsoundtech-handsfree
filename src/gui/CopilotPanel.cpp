@@ -47,7 +47,8 @@ const char* const kModeOff = "T\xe1\xba\xaeT";
 const char* const kModeShadow = "B\xc3\x93NG";
 const char* const kModeSuggest = "G\xe1\xbb\xa2I \xc3\x9d";
 const char* const kModeAct = "T\xe1\xbb\xb0 L\xc3\x81I";
-const char* const kActTooltip = "Ch\xc6\xb0" "a c\xc3\xb3 \xe1\xbb\x9f b\xe1\xba\xa3n n\xc3\xa0y.";
+const char* const kActNote = "T\xe1\xbb\xb0 L\xc3\x81I: b\xe1\xba\xa3n sau";
+const char* const kViewOnly = "ch\xe1\xbb\x89 xem \xe1\xbb\x9f b\xe1\xba\xa3n n\xc3\xa0y";
 const char* const kExplainOff = "AI kh\xc3\xb4ng ch\xe1\xba\xa1y. Detector l\xc3\xa0m vi\xe1\xbb\x87" "c nh\xc6\xb0 th\xc6\xb0\xe1\xbb\x9dng.";
 const char* const kExplainShadow = "M\xe1\xba\xa1ng n\xc6\xa1-ron ch\xe1\xba\xa5m \xc4\x91i\xe1\xbb\x83m v\xc3\xa0 ghi log. Kh\xc3\xb4ng \xc4\x91\xe1\xbb\x95i g\xc3\xac tr\xc3\xaan notch.";
 const char* const kExplainSuggest = "AI t\xe1\xbb\xb1 xem bu\xe1\xbb\x95i di\xe1\xbb\x85n khi c\xc3\xb3 s\xe1\xbb\xb1 ki\xe1\xbb\x87n, t\xe1\xbb\x91i \xc4\x91" "a 12 l\xc6\xb0\xe1\xbb\xa3t/gi\xe1\xbb\x9d, d\xc3\xb9ng kho\xc3\xa1 c\xe1\xbb\xa7" "a b\xe1\xba\xa1n. Ch\xe1\xbb\x89 \xc4\x91\xe1\xbb\x81 xu\xe1\xba\xa5t.";
@@ -372,7 +373,6 @@ public:
 
             r.apply = std::make_unique<juce::TextButton>();   // no tooltip argument: JUCE 9 trap
             r.apply->setButtonText (utf8 (kApply));
-            r.apply->setTooltip (CopilotPanel::applyTooltipText());
             r.apply->setEnabled (false);                      // L3a: the control exists, it does nothing
             r.dismiss = std::make_unique<juce::TextButton>();
             r.dismiss->setButtonText (utf8 (kDismiss));
@@ -520,10 +520,9 @@ CopilotPanel::CopilotPanel()
     addAndMakeVisible (viewport_);
 
     // Lane L3a. The Act segment is shown but disabled: dimmed by the theme, no
-    // hover or press, and the tooltip says why. Its click path can still be
+    // hover or press, and a label beside the switch says why. Its click path can still be
     // driven programmatically, so the handler refuses it too.
     modeSwitch_.getSegmentForTest (kActSegment).setEnabled (false);
-    modeSwitch_.getSegmentForTest (kActSegment).setTooltip (applyTooltipText());
     modeSwitch_.onSelected = [this] (int index)
     {
         if (index == kActSegment || ! juce::isPositiveAndBelow (index, kActSegment))
@@ -563,7 +562,8 @@ CopilotPanel::~CopilotPanel()
 
 //==============================================================================
 // Lane L3a
-juce::String CopilotPanel::applyTooltipText() { return utf8 (kActTooltip); }
+juce::String CopilotPanel::actNoteText() { return utf8 (kActNote); }
+juce::String CopilotPanel::proposalsSuffixText() { return utf8 (kViewOnly); }
 
 juce::String CopilotPanel::modeLabel (const AiMode mode)
 {
@@ -822,21 +822,53 @@ void CopilotPanel::resized()
                            "COPILOT")) + 1;
     const int switchW = modeSwitch_.getPreferredWidth();
     const int roomForSwitch = caption.getWidth() - (int) kLeftPad - titleW - 2 * kChipGap;
+
+    // Why TU LAI is disabled, always visible: a dim label right after the switch
+    // on the same row; when that row is too narrow it drops to the explainer band.
+    const bool actDisabled = ! modeSwitch_.getSegmentForTest (kActSegment).isEnabled();
+    const int noteW = actDisabled
+                          ? juce::roundToInt (az::theme::stringWidth (az::theme::baseFont (kExplainerSize), actNoteText())) + 4
+                          : 0;
+    actNoteBounds_ = {};
+    bool noteDropped = false;
+
     if (roomForSwitch >= switchW)
     {
         const int x = caption.getX() + (int) kLeftPad + titleW + kChipGap;
         modeSwitch_.setBounds (juce::Rectangle<int> (x, caption.getY(), switchW, caption.getHeight())
                                    .withSizeKeepingCentre (switchW, kSwitchHeight));
+        if (noteW > 0)
+        {
+            if (roomForSwitch - switchW >= noteW + kChipGap)
+                actNoteBounds_ = { x + switchW + kChipGap, caption.getY(), noteW, caption.getHeight() };
+            else
+                noteDropped = true;
+        }
     }
     else
     {
         auto modeRow = area.removeFromTop (kModeRowHeight).withTrimmedLeft ((int) kLeftPad)
                                                           .withTrimmedRight ((int) kRightPad);
         const int w = juce::jmin (switchW, modeRow.getWidth());
-        modeSwitch_.setBounds (modeRow.removeFromLeft (w).withSizeKeepingCentre (w, kSwitchHeight));
+        const auto sw = modeRow.removeFromLeft (w).withSizeKeepingCentre (w, kSwitchHeight);
+        modeSwitch_.setBounds (sw);
+        modeRow.removeFromLeft (kChipGap);
+        if (noteW > 0)
+        {
+            if (modeRow.getWidth() >= noteW)
+                actNoteBounds_ = modeRow.withWidth (noteW);
+            else
+                noteDropped = true;
+        }
     }
 
     explainerBounds_ = area.removeFromTop (explainerHeightFor (getWidth()));
+    if (noteDropped)
+    {
+        // Too narrow for the label beside the switch: one extra dim line in the explainer band.
+        const auto extra = area.removeFromTop (kExplainerMinHeight);
+        actNoteBounds_ = extra.withTrimmedLeft ((int) kLeftPad).withWidth (noteW);
+    }
     statusBounds_ = area.removeFromTop (kStatusHeight);
     askRowBounds_ = area.removeFromBottom (kAskHeight);
 
@@ -937,6 +969,13 @@ void CopilotPanel::paint (juce::Graphics& g)
     drawCaption (g, "COPILOT", captionBounds_.withTrimmedLeft ((int) kLeftPad), dim);
     drawEngravedDivider (g, captionBounds_.withTrimmedBottom (spacing));
 
+    if (! actNoteBounds_.isEmpty())
+    {
+        g.setColour (dim);
+        g.setFont (baseFont (kExplainerSize));
+        g.drawText (actNoteText(), actNoteBounds_, juce::Justification::centredLeft, false);
+    }
+
     // Lane L3a: the one-line explainer under the title, in the secondary colour:
     // quiet, not a control.
     {
@@ -972,8 +1011,15 @@ void CopilotPanel::paint (juce::Graphics& g)
         // locale's tables, which is not safe for Vietnamese letters.
         g.setColour (dim);
         g.setFont (legendFont (captionFontSize, true, trackingCaption));
-        g.drawText (utf8 (kProposalsCaption), proposalsHeadingBounds_.withTrimmedLeft ((int) kLeftPad),
-                    juce::Justification::centredLeft, false);
+        const auto headingFont = legendFont (captionFontSize, true, trackingCaption);
+        const auto headingArea = proposalsHeadingBounds_.withTrimmedLeft ((int) kLeftPad);
+        g.drawText (utf8 (kProposalsCaption), headingArea, juce::Justification::centredLeft, false);
+
+        // Why the APPLY buttons are disabled, without a tooltip.
+        const int captionW = juce::roundToInt (stringWidth (headingFont, utf8 (kProposalsCaption))) + 10;
+        g.setFont (baseFont (kExplainerSize));
+        g.drawText (proposalsSuffixText(), headingArea.withTrimmedLeft (captionW).withTrimmedRight (110),
+                    juce::Justification::centredLeft, true);
         g.setColour (shade);
         g.fillRect (proposalsArea_.getX(), proposalsArea_.getBottom() - 1, proposalsArea_.getWidth(), 1);
     }

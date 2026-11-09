@@ -399,10 +399,11 @@ int main (int argc, char** argv)
         // staged here: no seam sets lastChangedBy on a live notch.
         controller->setNotchAuthoredForTest (0, 3, 2800.0, 30.0, -12.0, Author::Llm);
         controller->setNotchAuthoredForTest (1, 4, 5200.0, 30.0,  -9.0, Author::Network);
-        controller->setNotchAuthoredForTest (0, 5,  780.0, 30.0, -15.0, Author::Detector);
+        // D>A: placed by the detector, last changed by the LLM.
+        controller->setNotchAuthoredForTest (0, 5,  780.0, 30.0, -15.0, Author::Detector, Author::Llm);
         settle();
-        std::cout << "console-ai-marks: notches STAGED with author Llm / Network / Detector "
-                     "(the three above are human); D>A is not stageable" << std::endl;
+        std::cout << "console-ai-marks: notches STAGED as Llm (A) / Network (N) / Detector>Llm (D>A); "
+                     "the three above are human" << std::endl;
         if (! shoot (app, outDir.getChildFile ("console-ai-marks.png")))
             return 1;
 
@@ -415,9 +416,13 @@ int main (int argc, char** argv)
         // hold) with their ghosts on the chart and their rows in the panel.
         app.setAiMode (AiMode::Suggest);
 
-        // The 1.9 kHz notch above was verdicted FALSE (cleared), so the release
-        // proposal needs a notch of its own: a temporary manual one at 3.15 kHz.
-        controller->setNotch (0, 6, 3150.0, 30.0, -9.0, NotchController::Origin::Manual);
+        // The proposals are about DETECTOR-origin notches (the manual ones above
+        // are not the model's to touch) and are ones the validator would accept:
+        // the deepen goes to the controller's own next rung under the live
+        // ceiling, the release and hold address live detector notches.
+        controller->setNotchAuthoredForTest (0, 6, 3150.0, 30.0,  -9.0, Author::Detector);
+        controller->setNotchAuthoredForTest (0, 7,  780.0, 30.0, -12.0, Author::Detector);
+        controller->setNotchAuthoredForTest (1, 8, 5200.0, 30.0, -12.0, Author::Detector);
         settle();
 
         const auto makeProposal = [&] (std::uint32_t id, int lane, int index, double hz,
@@ -438,11 +443,13 @@ int main (int argc, char** argv)
             return sp;
         };
         std::vector<ShownProposal> proposals;
-        proposals.push_back (makeProposal (1, 0, 0,  247.0, AiProposal::Tool::Deepen,
-                                           AiProposal::Reason::RecurringAtFrequency, -24.0f, 0));
-        proposals.push_back (makeProposal (2, 0, 6, 3150.0, AiProposal::Tool::Release,
+        const auto ceilingDb = controller->getNotchDepthDb();
+        const auto nextRung = (float) NotchController::nextDeeperRungDb (-9.0, ceilingDb);
+        proposals.push_back (makeProposal (1, 0, 6, 3150.0, AiProposal::Tool::Deepen,
+                                           AiProposal::Reason::RecurringAtFrequency, nextRung, 0));
+        proposals.push_back (makeProposal (2, 0, 7,  780.0, AiProposal::Tool::Release,
                                            AiProposal::Reason::JudgedFalse, 0.0f, 0));
-        proposals.push_back (makeProposal (3, 1, 1, 1240.0, AiProposal::Tool::Hold,
+        proposals.push_back (makeProposal (3, 1, 8, 5200.0, AiProposal::Tool::Hold,
                                            AiProposal::Reason::ShowInProgress, 0.0f, 120));
         app.aiSupervisor().setAiProposalsForTest (std::move (proposals));
         app.resized();
@@ -455,6 +462,8 @@ int main (int argc, char** argv)
         app.aiSupervisor().setAiProposalsForTest ({});
         app.setAiMode (AiMode::Shadow);
         controller->clearNotch (0, 6);
+        controller->clearNotch (0, 7);
+        controller->clearNotch (1, 8);
         settle();
     }
 

@@ -410,6 +410,18 @@ bool NotchController::setNotchAuthoredForTest (int channel, int index, double fr
     return setNotchImpl (channel, index, frequency, Q, depthDB, Origin::Detector, author, nullptr);
 }
 
+bool NotchController::setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
+                                               double depthDB, Author placedBy, Author lastChangedBy)
+{
+    // TEST ONLY. Same placement as the single-author seam, then the
+    // last-changed attribution is overwritten in place (no event, no command).
+    if (! setNotchImpl (channel, index, frequency, Q, depthDB, Origin::Detector, placedBy, nullptr))
+        return false;
+    const std::lock_guard<std::mutex> lock (modelMutex_);
+    model_[slotOf (channel, index)].lastChangedBy = lastChangedBy;
+    return true;
+}
+
 bool NotchController::setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
                                     Origin origin, Author author, const NotchEvent* scored)
 {

@@ -1677,8 +1677,12 @@ void MainComponent::refreshAiViews()
     const auto& proposals = supervisor.proposals();
 
     copilotPanel_.setAiMode (settings_.aiMode);
-    // Nothing to say while idle with no proposals: the chip is hidden.
-    copilotPanel_.setSupervisorStatus (supervisor.status().kind == AiSupervisor::StatusKind::Idle && proposals.empty()
+    // Nothing to say while idle with no proposals, and nothing while the
+    // supervisor is Disabled (mode below GOI Y): the explainer already says what
+    // runs, and "AI tat" under "the network scores" would contradict it.
+    const auto kind = supervisor.status().kind;
+    copilotPanel_.setSupervisorStatus ((kind == AiSupervisor::StatusKind::Idle && proposals.empty())
+                                               || kind == AiSupervisor::StatusKind::Disabled
                                            ? juce::String()
                                            : supervisor.statusText());
     copilotPanel_.setProposals (proposals);

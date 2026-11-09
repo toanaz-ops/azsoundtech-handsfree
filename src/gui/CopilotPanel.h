@@ -106,7 +106,8 @@ public:
     static juce::String explainerFor (AiMode mode);
     static juce::String reasonText (AiProposal::Reason reason);    // empty for the no_action reasons
     static juce::String proposalSentence (const ShownProposal& proposal);
-    static juce::String applyTooltipText();
+    static juce::String actNoteText();        // "TU LAI: ban sau", beside the switch
+    static juce::String proposalsSuffixText();   // "chi xem o ban nay", after the DE XUAT caption
 
     // Geometry shared with MainComponent's layout and the tests.
     static constexpr int kCaptionHeight = 26;
@@ -157,6 +158,7 @@ public:
     [[nodiscard]] juce::Rectangle<int> getListAreaBoundsForTest() const { return listArea_; }
     [[nodiscard]] juce::Rectangle<int> getExplainerBoundsForTest() const { return explainerBounds_; }
     [[nodiscard]] juce::Rectangle<int> getChipBoundsForTest() const { return chipBounds_; }
+    [[nodiscard]] juce::Rectangle<int> getActNoteBoundsForTest() const { return actNoteBounds_; }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -191,7 +193,7 @@ private:
     SegmentedControl modeSwitch_;   // built in the constructor with the four Vietnamese legends
     AiMode aiMode_ = AiMode::Shadow;
     juce::String explainerText_, chipText_;
-    juce::Rectangle<int> explainerBounds_, chipBounds_;
+    juce::Rectangle<int> explainerBounds_, chipBounds_, actNoteBounds_;
     juce::Rectangle<int> proposalsArea_;   // heading + list; empty when there are no proposals
     juce::Rectangle<int> proposalsHeadingBounds_;
     juce::TextButton dismissAllButton_;
