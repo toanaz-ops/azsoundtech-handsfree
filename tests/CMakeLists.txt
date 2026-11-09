@@ -63,6 +63,7 @@ add_executable(HandsFreeTests
     test_candidateclassifier.cpp
     test_aiaction.cpp
     test_aisupervisor.cpp
+    test_aidrive_gui.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp

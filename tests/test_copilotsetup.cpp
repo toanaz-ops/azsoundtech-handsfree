@@ -337,10 +337,13 @@ TEST (CopilotAskPanel, SetupButtonCallsOnOpenSetupAndLayoutKeepsRowsApart)
     panel.getSetupButtonForTest().onClick();
     EXPECT_EQ (opened, 1);
 
-    EXPECT_EQ (gui::CopilotPanel::kMinHeight, gui::CopilotPanel::kCaptionHeight + gui::CopilotPanel::kStatusHeight
+    // Lane L3a: the one-line explainer joined the header (the mode switch sits in
+    // the caption row at a width that holds it; below that it takes its own row).
+    EXPECT_EQ (gui::CopilotPanel::kMinHeight, gui::CopilotPanel::kCaptionHeight + gui::CopilotPanel::kExplainerMinHeight
+                                                  + gui::CopilotPanel::kStatusHeight
                                                   + gui::CopilotPanel::kMinListHeight + gui::CopilotPanel::kAskHeight);
 
-    panel.setSize (360, gui::CopilotPanel::kMinHeight);
+    panel.setSize (700, gui::CopilotPanel::kMinHeight);
     panel.resized();
     const auto list = panel.getListBoundsForTest();
     const auto ask = panel.getAskRowBoundsForTest();

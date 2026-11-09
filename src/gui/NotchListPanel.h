@@ -106,6 +106,9 @@ public:
     static juce::String formatDepthDb (float depthDb);
     static juce::String formatQ (float q);
     static juce::String formatAgeMs (double ageMs);
+    // Lane L3a: "D" detector, "H" human, "N" network, "A" LLM; "<placed>><changed>"
+    // ("D>A") when the last change came from someone else than the placer.
+    static juce::String formatAuthor (Author placedBy, Author lastChangedBy);
 
     // How long an UNSEEN notch identity stays tracked (see header comment).
     static constexpr double kTrackingTimeoutMs = 60000.0;
@@ -151,6 +154,10 @@ public:
     static constexpr float kColFreqW   = 74.0f;   // dot + gap + "23.9 kHz" + inset
     static constexpr float kColDepthW  = 66.0f;   // "-150.0 dB" + inset
     static constexpr float kColQW      = 40.0f;
+    // Lane L3a: who placed / last changed the notch. Mono, widest cell "D>A"
+    // (three glyphs) + 4 px inset; the column is sized in the test against the
+    // real font so it can never ellipsise "BY" or a pair.
+    static constexpr float kColByW     = 30.0f;
 
     // The age dot: the same hot-to-ice ramp the analyser's notch stems use, so
     // a row and its stem always read as the same object.
@@ -164,7 +171,7 @@ public:
     // TEST ACCESSORS -- the model behind the painted table.
     struct RowText
     {
-        juce::String id, lane, freq, depth, q, status;
+        juce::String id, lane, freq, depth, q, by, status;
 
         // How long this notch has been held, in milliseconds. Carried on the
         // row (not recomputed in paint) because the age drives the row's

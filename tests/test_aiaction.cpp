@@ -592,3 +592,23 @@ TEST (AiLog, DecisionEventShape)
         EXPECT_FALSE (v.hasProperty ("refusal"));
     }
 }
+
+// The proposal and decision lines say `slot` + the controller-LOCAL nid, so a
+// log reader can join them with notch_set lines (which carry the local nid).
+// The in-memory proposal and the state file keep the global id.
+TEST (AiLog, ProposalAndDecisionLinesCarrySlotAndTheLocalNid)
+{
+    AiProposal d = deepenTo (AiSupervisor::globalNid (3, 5), 1000.0f, -12.0f);
+    const auto vp = MainComponent::aiProposalEventToVar (7, d);
+    EXPECT_EQ ((int) vp["slot"], 3);
+    EXPECT_EQ ((int) vp["nid"], 5);
+    EXPECT_EQ ((juce::int64) d.nid, (juce::int64) ((3 << 24) | 5)) << "the proposal itself keeps the global id";
+
+    const auto vd = MainComponent::aiDecisionEventToVar (7, AiSupervisor::globalNid (2, 9), Tool::Hold,
+                                                         AiDecision::Dismissed, std::nullopt);
+    EXPECT_EQ ((int) vd["slot"], 2);
+    EXPECT_EQ ((int) vd["nid"], 9);
+
+    AiProposal none;   // no_action addresses no notch: no slot either
+    EXPECT_FALSE (MainComponent::aiProposalEventToVar (7, none).hasProperty ("slot"));
+}

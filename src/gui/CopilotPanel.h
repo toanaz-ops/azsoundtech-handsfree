@@ -18,9 +18,12 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "app/AiMode.h"
+#include "app/AiSupervisor.h"
 #include "app/CopilotAnswer.h"
 #include "app/CopilotFindings.h"
 #include "app/SidecarRunner.h"
+#include "gui/SegmentedControl.h"
 
 #include <functional>
 #include <vector>
@@ -78,12 +81,47 @@ public:
     std::function<void (juce::String)> onAsk;   // trimmed, non-empty question
     std::function<void()> onCancelAsk;
 
+    // --- Lane L3a: the AI mode switch, the supervisor chip and the proposals ---
+    // The panel only DISPLAYS these. MainComponent owns the mode and the
+    // supervisor and pushes their state in; nothing here sets, retunes, holds or
+    // clears a notch. In L3a the TU LAI segment and every APPLY button are disabled.
+
+    /** Which segment is lit. Act is not selectable in this phase, so it shows as Suggest. */
+    void setAiMode (AiMode mode);
+    [[nodiscard]] AiMode aiMode() const noexcept { return aiMode_; }
+
+    /** The chip text under the mode switch; empty hides the chip. */
+    void setSupervisorStatus (const juce::String& text);
+
+    /** Rebuilds the proposal rows. An empty list hides the section. */
+    void setProposals (const std::vector<ShownProposal>& proposals);
+
+    /** User picked a selectable segment (Off / Shadow / Suggest). */
+    std::function<void (AiMode)> onAiModeSelected;
+    std::function<void (std::uint32_t)> onDismissProposal;   // one row's BO
+    std::function<void()> onDismissAllProposals;             // BO HET
+
+    // Fixed texts and sentences: ONE definition the panel paints and the tests assert.
+    static juce::String modeLabel (AiMode mode);
+    static juce::String explainerFor (AiMode mode);
+    static juce::String reasonText (AiProposal::Reason reason);    // empty for the no_action reasons
+    static juce::String proposalSentence (const ShownProposal& proposal);
+    static juce::String applyTooltipText();
+
     // Geometry shared with MainComponent's layout and the tests.
     static constexpr int kCaptionHeight = 26;
+    static constexpr int kModeRowHeight = 28;   // the switch's own row, ONLY when the caption row is too narrow for it
+    static constexpr int kExplainerMinHeight = 18;   // one line; the real height is measured
     static constexpr int kStatusHeight  = 22;
-    static constexpr int kMinListHeight = 96;   // room for about three short rows
+    static constexpr int kMinListHeight = 78;   // room for about two short rows (it scrolls)
     static constexpr int kAskHeight     = 34;   // ask row: 22 px controls + padding
-    static constexpr int kMinHeight     = kCaptionHeight + kStatusHeight + kMinListHeight + kAskHeight;
+    static constexpr int kProposalHeadingHeight = 22;
+    // The WIDE header keeps the switch in the caption row, so the minimum height
+    // is the one the panel had before lane L3a plus its one-line explainer, taken
+    // out of the list (which scrolls). The panel is not hidden on a window that
+    // used to show it.
+    static constexpr int kMinHeight     = kCaptionHeight + kExplainerMinHeight + kStatusHeight
+                                        + kMinListHeight + kAskHeight;
 
     /** The one sentence a state shows. `count` is used by `findings` only. */
     static juce::String statusTextFor (State s, int count = 0);
@@ -105,14 +143,32 @@ public:
     [[nodiscard]] juce::Rectangle<int> getCautionBoundsForTest() const { return cautionBounds_; }
     [[nodiscard]] static juce::String cautionTextForTest();
 
+    // Lane L3a test accessors.
+    [[nodiscard]] SegmentedControl& getModeSwitchForTest() { return modeSwitch_; }
+    [[nodiscard]] juce::String getExplainerTextForTest() const { return explainerText_; }
+    [[nodiscard]] juce::String getChipTextForTest() const { return chipText_; }
+    [[nodiscard]] bool isChipVisibleForTest() const { return chipText_.isNotEmpty(); }
+    [[nodiscard]] int getProposalRowCountForTest() const;
+    [[nodiscard]] juce::String getProposalSentenceForTest (int row) const;
+    [[nodiscard]] juce::TextButton* getApplyButtonForTest (int row);
+    [[nodiscard]] juce::TextButton* getDismissButtonForTest (int row);
+    [[nodiscard]] juce::TextButton& getDismissAllButtonForTest() { return dismissAllButton_; }
+    [[nodiscard]] juce::Rectangle<int> getProposalsBoundsForTest() const { return proposalsArea_; }
+    [[nodiscard]] juce::Rectangle<int> getListAreaBoundsForTest() const { return listArea_; }
+    [[nodiscard]] juce::Rectangle<int> getExplainerBoundsForTest() const { return explainerBounds_; }
+    [[nodiscard]] juce::Rectangle<int> getChipBoundsForTest() const { return chipBounds_; }
+
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     class ListContent;
+    class ProposalsContent;
 
     void refreshStatus();
     void layoutList();
+    void reflectAiMode();
+    void layoutChip();
     void submitQuestion();
     void setBlock (const juce::String& text, const juce::String& footer, juce::Colour colour);
 
@@ -125,10 +181,22 @@ private:
     juce::TextEditor askEditor_;
     juce::TextButton askButton_;
     juce::Rectangle<int> askRowBounds_;
+    juce::Rectangle<int> captionBounds_, statusBounds_, statusTextBounds_;
     juce::Rectangle<int> listArea_;        // list + caution strip, set by resized()
     juce::Rectangle<int> cautionBounds_;   // fixed strip under an AI answer; empty otherwise
     juce::Viewport   viewport_;
     std::unique_ptr<ListContent> content_;
+
+    // Lane L3a.
+    SegmentedControl modeSwitch_;   // built in the constructor with the four Vietnamese legends
+    AiMode aiMode_ = AiMode::Shadow;
+    juce::String explainerText_, chipText_;
+    juce::Rectangle<int> explainerBounds_, chipBounds_;
+    juce::Rectangle<int> proposalsArea_;   // heading + list; empty when there are no proposals
+    juce::Rectangle<int> proposalsHeadingBounds_;
+    juce::TextButton dismissAllButton_;
+    juce::Viewport proposalsViewport_;
+    std::unique_ptr<ProposalsContent> proposalsContent_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CopilotPanel)
 };

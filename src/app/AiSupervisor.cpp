@@ -102,7 +102,10 @@ juce::var aiProposalEventToVar (std::uint32_t generation, const AiProposal& p)
     o->setProperty ("tool", juce::String (aiToolName (p.tool)));
     if (p.tool != AiProposal::Tool::NoAction)   // no_action addresses no notch
     {
-        o->setProperty ("nid", (juce::int64) p.nid);
+        // `p.nid` is the GLOBAL id; a log reader joins on notch_set lines, which
+        // carry the controller-local nid, so the line says slot + local nid.
+        o->setProperty ("slot", AiSupervisor::slotOfGlobalNid (p.nid));
+        o->setProperty ("nid", (juce::int64) AiSupervisor::localNidOf (p.nid));
         o->setProperty ("hz", roundSig3 ((double) p.expectHz));
     }
     if (p.tool == AiProposal::Tool::Deepen)
@@ -120,7 +123,8 @@ juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
     auto v = SessionLogger::makeEvent ("ai_decision");
     auto* o = v.getDynamicObject();
     o->setProperty ("gen", (juce::int64) generation);
-    o->setProperty ("nid", (juce::int64) nid);
+    o->setProperty ("slot", AiSupervisor::slotOfGlobalNid (nid));   // `nid` is GLOBAL: log slot + local nid
+    o->setProperty ("nid", (juce::int64) AiSupervisor::localNidOf (nid));
     o->setProperty ("tool", juce::String (aiToolName (tool)));
     o->setProperty ("decision", juce::String (aiDecisionName (decision)));
     if (refusal)

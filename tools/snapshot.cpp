@@ -369,6 +369,95 @@ int main (int argc, char** argv)
     if (! shoot (app, outDir.getChildFile ("console-live.png")))
         return 1;
 
+    // LANE L3a: the AI drive's two new pictures. Staged through the seams
+    // (setNotchAuthoredForTest on the controller, setAiProposalsForTest on the
+    // supervisor); no model is asked, no sidecar launched, no settings file
+    // written (a headless MainComponent has none). Both shots are taken on
+    // console-live's frame and every staged thing is removed afterwards, so the
+    // shots that follow are exactly what they were.
+    {
+        const auto localNidAt = [&] (int lane, int index) -> std::uint32_t
+        {
+            auto snap = std::make_unique<NotchController::SnapshotBuffer>();
+            controller->copySnapshot (*snap);
+            for (std::uint32_t i = 0; i < snap->notchCount; ++i)
+                if (snap->notches[i].channel == lane && snap->notches[i].index == index)
+                    return snap->notches[i].nid;
+            return 0;
+        };
+        const auto settle = [&]
+        {
+            pump (tapL, tapR, *controller, 2, hop);
+            app.getSpectrumViewForTest().refreshFromSnapshot();
+            app.getNotchListPanelForTest().refreshFromSnapshot();
+            app.resized();
+        };
+
+        // --- console-ai-marks: the authorship column, flag letters and pips.
+        // Placed by the detector (D), a human (H, the three above), the network
+        // (N) and the LLM (A). A notch the LLM CHANGED later (D>A) cannot be
+        // staged here: no seam sets lastChangedBy on a live notch.
+        controller->setNotchAuthoredForTest (0, 3, 2800.0, 30.0, -12.0, Author::Llm);
+        controller->setNotchAuthoredForTest (1, 4, 5200.0, 30.0,  -9.0, Author::Network);
+        controller->setNotchAuthoredForTest (0, 5,  780.0, 30.0, -15.0, Author::Detector);
+        settle();
+        std::cout << "console-ai-marks: notches STAGED with author Llm / Network / Detector "
+                     "(the three above are human); D>A is not stageable" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-ai-marks.png")))
+            return 1;
+
+        controller->clearNotch (0, 3);
+        controller->clearNotch (1, 4);
+        controller->clearNotch (0, 5);
+        settle();
+
+        // --- console-ai-suggest: mode GOI Y, three proposals (deepen, release,
+        // hold) with their ghosts on the chart and their rows in the panel.
+        app.setAiMode (AiMode::Suggest);
+
+        // The 1.9 kHz notch above was verdicted FALSE (cleared), so the release
+        // proposal needs a notch of its own: a temporary manual one at 3.15 kHz.
+        controller->setNotch (0, 6, 3150.0, 30.0, -9.0, NotchController::Origin::Manual);
+        settle();
+
+        const auto makeProposal = [&] (std::uint32_t id, int lane, int index, double hz,
+                                       AiProposal::Tool tool, AiProposal::Reason reason,
+                                       float targetDb, int holdSeconds)
+        {
+            ShownProposal sp;
+            sp.id = id;
+            sp.generation = 1;
+            sp.slot = 0; sp.lane = lane; sp.index = index;
+            sp.hz = (float) hz;
+            sp.proposal.tool = tool;
+            sp.proposal.nid = AiSupervisor::globalNid (0, localNidAt (lane, index));
+            sp.proposal.expectHz = (float) hz;
+            sp.proposal.targetDb = targetDb;
+            sp.proposal.holdSeconds = holdSeconds;
+            sp.proposal.reason = reason;
+            return sp;
+        };
+        std::vector<ShownProposal> proposals;
+        proposals.push_back (makeProposal (1, 0, 0,  247.0, AiProposal::Tool::Deepen,
+                                           AiProposal::Reason::RecurringAtFrequency, -24.0f, 0));
+        proposals.push_back (makeProposal (2, 0, 6, 3150.0, AiProposal::Tool::Release,
+                                           AiProposal::Reason::JudgedFalse, 0.0f, 0));
+        proposals.push_back (makeProposal (3, 1, 1, 1240.0, AiProposal::Tool::Hold,
+                                           AiProposal::Reason::ShowInProgress, 0.0f, 120));
+        app.aiSupervisor().setAiProposalsForTest (std::move (proposals));
+        app.resized();
+        std::cout << "console-ai-suggest: mode GOI Y, three proposals STAGED "
+                     "(no model was asked)" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-ai-suggest.png")))
+            return 1;
+
+        // Back to console-live's frame for everything below.
+        app.aiSupervisor().setAiProposalsForTest ({});
+        app.setAiMode (AiMode::Shadow);
+        controller->clearNotch (0, 6);
+        settle();
+    }
+
     // LANE L2a: the copilot panel, STAGED through its public state API (the
     // real sidecar is never launched from this tool). console-live.png above
     // shows it idle; these two show the outcomes. The text is what

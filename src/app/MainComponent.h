@@ -679,6 +679,10 @@ private:
     // SpectrumView reads notchControllers_[0], DeviceDrawer re-parents
     // devicePanel_ -- both are declared above, so they outlive these.
     gui::SpectrumView spectrumView_;
+    // The app never had one, so no tooltip (SlotPanel's, the AI mode switch's
+    // "not in this version") could ever show. A desktop-level window: it adds
+    // no child to this component and only appears while a tooltip is due.
+    juce::TooltipWindow tooltipWindow_ { nullptr, 600 };
     // Lane M Task 9. An OVERLAY over the analyser, so it is declared AFTER the
     // view it covers: JUCE paints children in the order they were added, and
     // a strip that has to be opaque over a live trace must be added second.
@@ -773,6 +777,10 @@ private:
     [[nodiscard]] bool copilotUsable();   // the ask flow's predicate: consent + provider + model + key / base URL
     void applyAiMode (AiMode mode);
     void setAiModeFromSettings();
+    // Lane L3a: pushes the mode, the supervisor chip, the proposal rows and the
+    // chart ghosts for the displayed slot into the GUI. Display only: it reads
+    // the supervisor and a snapshot and changes no notch.
+    void refreshAiViews();
     void analyseWithCopilot();
     void showCopilotBusy();
 

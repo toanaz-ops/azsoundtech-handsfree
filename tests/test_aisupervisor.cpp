@@ -625,6 +625,8 @@ TEST (AiSupervisorResult, RefusedProposalsAreLoggedAndNotShown)
     const auto d = r.events ("ai_decision");
     ASSERT_EQ (d.size(), 2u);
     EXPECT_EQ (d[0]["decision"].toString(), "refused");
+    EXPECT_EQ ((int) d[0]["slot"], 0) << "log lines carry slot + LOCAL nid";
+    EXPECT_EQ ((int) d[0]["nid"], 5);
     EXPECT_EQ (d[0]["refusal"].toString(), "frequency_mismatch");
     EXPECT_EQ (d[1]["refusal"].toString(), "unknown_nid");
 

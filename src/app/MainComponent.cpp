@@ -477,6 +477,14 @@ MainComponent::MainComponent()
             copilotRunner_->cancel();
         copilotPanel_.setState (gui::CopilotPanel::State::cancelled);
     };
+    // Lane L3a: the AI mode switch, the supervisor chip and the proposals. The
+    // panel only displays; every action lands on the mode setting or on the
+    // supervisor's dismiss() -- none of them touches a notch.
+    copilotPanel_.onAiModeSelected = [this] (AiMode mode) { setAiMode (mode); };
+    copilotPanel_.onDismissProposal = [this] (std::uint32_t id) { aiSupervisor_->dismiss (id); };
+    copilotPanel_.onDismissAllProposals = [this] { aiSupervisor_->dismissAll(); };
+    aiSupervisor_->onChanged = [this] { refreshAiViews(); };
+    refreshAiViews();
     addChildComponent (copilotPanel_);   // shown by resized() when the column has room
 
     // Lane L2b: the setup overlay. Hidden until CAI AI is pressed; it covers the
@@ -1162,7 +1170,10 @@ MainComponent::~MainComponent()
 {
     stopTimer();
     if (aiSupervisor_ != nullptr)
+    {
+        aiSupervisor_->onChanged = nullptr;   // the views it refreshes are about to go
         aiSupervisor_->shutdown();   // cancels a supervision call; its runner joins with the member
+    }
     if (copilotRunner_ != nullptr)
         copilotRunner_->cancel();   // end a child process now; the member dtor joins the worker
 
@@ -1654,6 +1665,67 @@ void MainComponent::setAiMode (AiMode mode)
     applyAiMode (mode);
     aiSupervisor_->setRequestedMode (mode);   // logs ai_mode, invalidates an in-flight call
     saveSettings();
+    refreshAiViews();
+}
+
+void MainComponent::refreshAiViews()
+{
+    if (aiSupervisor_ == nullptr)
+        return;
+
+    const auto& supervisor = *aiSupervisor_;
+    const auto& proposals = supervisor.proposals();
+
+    copilotPanel_.setAiMode (settings_.aiMode);
+    // Nothing to say while idle with no proposals: the chip is hidden.
+    copilotPanel_.setSupervisorStatus (supervisor.status().kind == AiSupervisor::StatusKind::Idle && proposals.empty()
+                                           ? juce::String()
+                                           : supervisor.statusText());
+    copilotPanel_.setProposals (proposals);
+
+    // Ghosts on the chart: the proposals of the DISPLAYED slot, at the depth the
+    // notch stands at now (read from the controller's snapshot, as the chart does).
+    std::vector<gui::SpectrumView::ProposalGhost> ghosts;
+    bool any = false;
+    for (const auto& p : proposals)
+        any = any || p.slot == displayedSlot_;
+
+    if (any && juce::isPositiveAndBelow (displayedSlot_, (int) notchControllers_.size()))
+    {
+        auto snap = std::make_unique<NotchController::SnapshotBuffer>();
+        notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (*snap);
+
+        for (const auto& p : proposals)
+        {
+            if (p.slot != displayedSlot_)
+                continue;
+
+            for (std::uint32_t i = 0; i < snap->notchCount && i < snap->notches.size(); ++i)
+            {
+                const auto& n = snap->notches[i];
+                if (n.nid == 0 || n.nid != AiSupervisor::localNidOf (p.proposal.nid))
+                    continue;
+
+                gui::SpectrumView::ProposalGhost g;
+                g.hz = n.frequency;
+                g.lane = n.channel;
+                g.currentDb = n.depthDB;
+                switch (p.proposal.tool)
+                {
+                    case AiProposal::Tool::Deepen:
+                        g.kind = gui::SpectrumView::ProposalGhost::Kind::Deepen;
+                        g.targetDb = p.proposal.targetDb;
+                        break;
+                    case AiProposal::Tool::Hold:    g.kind = gui::SpectrumView::ProposalGhost::Kind::Hold; break;
+                    case AiProposal::Tool::Release: g.kind = gui::SpectrumView::ProposalGhost::Kind::Release; break;
+                    case AiProposal::Tool::NoAction: continue;
+                }
+                ghosts.push_back (g);
+                break;
+            }
+        }
+    }
+    spectrumView_.setProposalGhosts (std::move (ghosts));
 }
 
 void MainComponent::setAiModeFromSettings()
@@ -3449,6 +3521,7 @@ void MainComponent::setDisplayedSlot (const int slotIndex)
     spectrumView_.setController (controller);
     notchListPanel_.setController (controller);
     notchListPanel_.setDisplayedSlot (slotIndex);
+    refreshAiViews();   // lane L3a: the ghosts belong to the slot on display
 
     slotTabs_.setSelected (slotIndex);
 
@@ -3520,6 +3593,7 @@ void MainComponent::timerCallback()
         for (const auto& p : placements)
             aiSupervisor_->notePlacement (p.slot, p.lane, p.hz, p.atMs);
         aiSupervisor_->tick();
+        refreshAiViews();   // the pending line counts seconds; ghosts follow the live depth
     }
 
     // LANE U (spec 3.2 step 6): the restored routing is checked against the
