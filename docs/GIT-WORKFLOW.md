@@ -111,6 +111,8 @@ Dán output xanh vào PR hoặc vào báo cáo. **CI xanh không thay thế `cte
 (và ngược lại) — xem §6 về ASIO. Nếu lệnh in *"no checks reported"*, đừng đợi
 tiếp: PR đang xung đột và GitHub không dựng được merge ref, xem §6 bẫy thứ hai.
 
+> Trunk-based (rule 5) becomes allowed after this PR merges: CI now runs on push main.
+
 ### Bước 7 — Review
 
 Verifier độc lập **đọc file thật**, không đọc báo cáo của agent đã làm. Cùng một

@@ -24,8 +24,10 @@ trace — it produces a loud noise through a speaker at a live event.
 ```bash
 cmake -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
-cd build && ctest -C Release
+ctest -C Release -R <suite> --test-dir build
 ```
+
+Locally run only the narrow `ctest` for the area you touched. The full `ctest` runs in CI and inside `installer/release-alpha.ps1` (release gate).
 
 The generator is **2026, not 2022** — this machine has only Visual Studio
 Build Tools 2026 (`vswhere` reports one install, `...\Microsoft Visual
@@ -46,7 +48,7 @@ GitHub runner’s cmake defaults to the newest Visual Studio — see
 | docs, `memory/`, `*.md` | none |
 | one `.cpp` body, no header touched | incremental, Release |
 | any header, or `CMakeLists.txt` | full reconfigure + build |
-| DSP path, ASIO callback, buffer size | full build **and** `ctest`; the listen happens in alpha (see below) |
+| DSP path, ASIO callback, buffer size | build + narrow `ctest -R <suite>` for the touched area; full `ctest` = CI (and `installer/release-alpha.ps1` gate); the listen happens in alpha (see below) |
 
 **Use `build/`.** Do not create `build-*` variants; do not commit any build
 directory.
@@ -158,7 +160,7 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
 
 ## Definition of done
 
-1. Build command and `ctest` output pasted.
+1. Build command + narrow `ctest` tally (pass/fail counts) pasted; full suite = CI result link.
 2. Audio-path changes ship to the alpha testers once the suite is green —
    owner decision 2026-08-27 dropped the listen-before-release gate; the
    listen happens in alpha. Still: state the expected level change up front,
@@ -170,5 +172,6 @@ Full technique and its traps: `.claude/skills/juce-component-snapshot/SKILL.md`.
    its output pasted — and only if the user said "merge". Never merge locally
    into `main`: local `main` moves only by `git pull --ff-only`. The full
    convention, including the worktree-teardown traps, is `docs/GIT-WORKFLOW.md`.
+   Trunk-based (global rule 5) becomes allowed after the CI-on-push-main PR merges: CI now runs on push main.
 5. A change to DSP constants, topology, or user-visible behavior also updates
    `docs/GIOI-THIEU.md` and `docs/KY-THUAT-CHONG-HU.md` in the same change.

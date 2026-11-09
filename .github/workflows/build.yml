@@ -13,6 +13,14 @@ on:
       - 'memory/**'
       - 'LICENSE'
       - '.gitignore'
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'memory/**'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
   schedule:
     # macOS là cross-build smoke check (hệ số 10x phút) -> chạy 1 lần/tuần,
@@ -26,7 +34,8 @@ on:
 # matrix builds racing; the stale ones told nobody anything.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Main pushes are never cancelled; only superseded PR runs are.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -37,7 +46,7 @@ permissions:
 #     gh variable set CI_HEAVY -R toanaz-ops/azsoundtech-handsfree -b off
 #   -> PR-Windows và macOS-weekly đều DỪNG; chỉ còn workflow_dispatch (bấm tay).
 # Bật lại B:  gh variable set CI_HEAVY -b on   (hoặc xoá biến -- unset = B).
-# Gate cứng thật nằm ở máy dev (.githooks); CI ở đây là ĐÈN BÁO.
+# Local gate: shared secret-scan pre-commit only; full build+ctest = this workflow.
 
 jobs:
   # Bản Windows LÀ sản phẩm thật (JUCE_ASIO chỉ compile trên Windows) -> mọi PR,
@@ -45,7 +54,7 @@ jobs:
   windows:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && vars.CI_HEAVY != 'off')
+      ((github.event_name == 'pull_request' || github.event_name == 'push') && vars.CI_HEAVY != 'off')
     runs-on: windows-latest
     steps:
       - name: Checkout code with submodules
