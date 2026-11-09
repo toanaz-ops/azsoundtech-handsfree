@@ -172,7 +172,7 @@ public:
     // store, so a peak landing between it and the GUI's exchange(0) can be
     // lost -- acceptable for a meter a person glances at, and the price of not
     // putting a CAS loop on the audio thread.
-    static constexpr int kInputMeterChannels = 8;
+    static constexpr int kInputMeterChannels = 16;
     void  setInputMeterEnabled (bool enabled);
     float takeInputPeak (int channel);
 

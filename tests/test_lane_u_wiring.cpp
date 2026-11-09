@@ -361,6 +361,30 @@ TEST (LaneUInputMeter, OnReportsTheAbsolutePeakAndTakeResetsIt)
     EXPECT_EQ (engine.takeInputPeak (1), 0.0f);
 }
 
+TEST (LaneUInputMeter, SixteenInputsAreMetered)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    AudioEngine engine;
+    engine.setInputMeterEnabled (true);
+
+    constexpr int n = 64;
+    std::vector<std::vector<float>> data (16, std::vector<float> (n, 0.0f));
+    const float* ins[16] {};
+    for (int c = 0; c < 16; ++c)
+    {
+        data[(std::size_t) c][3] = 0.05f * (float) (c + 1);
+        ins[c] = data[(std::size_t) c].data();
+    }
+    std::vector<float> outL (n, 0.0f), outR (n, 0.0f);
+    float* outs[2] { outL.data(), outR.data() };
+    const juce::AudioIODeviceCallbackContext ctx {};
+    engine.audioDeviceIOCallbackWithContext (ins, 16, outs, 2, n, ctx);
+
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (8),  0.45f);   // dead before: cap was 8
+    EXPECT_FLOAT_EQ (engine.takeInputPeak (15), 0.80f);
+    EXPECT_EQ (engine.takeInputPeak (16), 0.0f);
+}
+
 TEST (LaneUInputMeter, NullChannelPointerIsSkipped)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;
