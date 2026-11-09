@@ -1,9 +1,12 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.4.1
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.5.0
 
-Ngày build: 2026-11-09 (`main` `7408f73`) · gate ctest 847/847 · installer
-`AZSoundtech-Handsfree-Setup-1.4.1.exe`.
+Ngày build: 2026-11-09 (`main` `5d47b9e`) · gate ctest 951/951 · installer
+`AZSoundtech-Handsfree-Setup-1.5.0.exe`.
 
-SHA-256 của Setup 1.4.1: **616C62E85FD963CD84E331745770ED85719ABEA6EAAF898928CB552FBD4391BB** · dung lượng: **26 919 339 B (25,7 MB)**
+SHA-256 của Setup 1.5.0: **BA205503520E3890FC24B737E7A01334DF8C67511DABF348D9590A65CB0C16BE** · dung lượng: **42 137 569 B (40,2 MB)** — lớn hơn 1.4.1 khoảng 14,5 MB vì lần đầu kèm `HandsFreeCopilot.exe`.
+
+Bản 1.4.1 (build 2026-11-09 19:23, `main` `7408f73`, gate 847/847, 26 919 339 B / 25,7 MB) SHA-256
+`616C62E85FD963CD84E331745770ED85719ABEA6EAAF898928CB552FBD4391BB`
 
 Bản 1.4.0 (build 2026-11-09 18:02, `main` `2628cdf`, gate 833/833, 26 917 930 B / 25,7 MB) SHA-256
 `4A627B878A5E84866094F30B3AB5DFC51329811F08A238DBE0038976F95E8D6F`
@@ -16,9 +19,11 @@ Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
-Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.4.1** (đóng gói không dọn bản cũ) —
+Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.5.0** (đóng gói không dọn bản cũ) —
 cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
+> **1.5.0: 0 dB ở mọi ngõ ra.** Không đổi hệ số lọc, gain, buffer, clamp hay quyết định đặt notch. Thêm bảng `COPILOT` (Geek mode), ô hỏi AI bằng khoá của chính bạn, và log ghi thêm ứng viên suýt thành notch — xem mục "Mới trong 1.5.0". **File cài lần đầu kèm một chương trình phụ (`HandsFreeCopilot.exe`): antivirus có thể hỏi.**
+>
 > **1.4.1: 0 dB ở mọi ngõ ra.** Detector nghe riêng từng làn, và sửa routing một slot không còn đặt lại 7 slot kia — xem mục "Mới trong 1.4.1".
 >
 > **1.4.0 không đổi DSP/gain/buffer so với 1.3.0**, nhưng **routing lần trước được
@@ -32,13 +37,31 @@ cài bản số cao nhất trừ khi được nhờ test bản cũ.
 > **1.2.0 cũng CÓ đụng đường audio**: độ sâu của một notch thay đổi theo thời
 > gian — xem mục "Mới trong 1.2.0".
 
-## Chưa đóng gói: COPILOT "hỏi AI" (lane L2b)
+## Mới trong 1.5.0 (so với 1.4.1) — 0 dB ở mọi ngõ ra
 
-Không đụng đường audio. Ghi chú đầy đủ: `docs/release-notes/unreleased/copilot-ask-ai.md`.
-Hai điều cần biết trước khi test: (1) **chưa có lượt gọi nhà cung cấp thật nào được kiểm**
-(chưa có khoá) — độ trễ, số token và lỗi riêng của từng nhà cung cấp là chưa biết; (2) khoá API
-được cất bằng DPAPI của Windows: chặn người dùng Windows khác và việc đọc ổ đĩa rời, **không**
-chặn phần mềm độc hại chạy dưới chính tài khoản của bạn — đừng dùng khoá có hạn mức lớn để thử. Giới hạn đã biết: vùng nhớ do app sở hữu được xoá sau khi mã hoá DPAPI, nhưng các bản sao khoá nằm thoáng qua trong `juce::String` / ô nhập `juce::TextEditor` được giải phóng mà không bị ghi đè số 0.
+Chi tiết: `docs/release-notes/1.5.0-alpha.md`. Không đụng đường audio.
+
+1. **Bảng `COPILOT`** (Geek mode, góc dưới trái, dưới ACTIVE NOTCHES). Chạy một buổi tới khi có
+   ít nhất ba notch, chấm một cái FALSE, bấm `PHÂN TÍCH`: các nhận xét có khớp với việc vừa xảy
+   ra không? Bước này không dùng mạng, không dùng khoá, không có model AI.
+2. **Lần bấm đầu sau khi cài mất bao lâu?** Chương trình phụ khởi động nguội 1,5–7,5 giây trên
+   máy build; antivirus quét có thể làm chậm hơn. **Antivirus có cảnh báo `HandsFreeCopilot.exe`
+   không?** Nếu chương trình phụ bị chặn, bảng chỉ hiện một dòng trạng thái, phần chống hú vẫn chạy.
+3. **`CÀI AI` + ô hỏi** (tuỳ chọn, cần khoá API của chính bạn). Lớp phủ che cột trái tới khi bấm
+   `ĐÓNG`; nút BYPASS bên phải vẫn bấm được. `HỎI` gửi câu hỏi và log buổi diễn (không có audio)
+   tới nhà cung cấp bạn chọn. **Chưa có lượt gọi nhà cung cấp thật nào được kiểm** — độ trễ, số
+   token và lỗi riêng của từng nhà cung cấp là chưa biết.
+4. **Khoá API** được cất bằng DPAPI của Windows: chặn người dùng Windows khác và việc đọc ổ đĩa
+   rời, **không** chặn phần mềm độc hại chạy dưới chính tài khoản của bạn — đừng dùng khoá có hạn
+   mức lớn để thử. Giới hạn đã biết: các bản sao khoá nằm thoáng qua trong ô nhập được giải phóng
+   mà không bị ghi đè số 0.
+5. **Câu trả lời khuyên tăng gain, tăng âm lượng, nâng trần độ sâu hay tắt chống hú bị thay bằng
+   một thông báo cố định.** Đây là bộ lọc cụm từ, không phải bảo đảm: báo lại nếu thấy một lời
+   khuyên như vậy lọt qua.
+6. **Log buổi diễn có thêm dòng `candidate_features`** (ứng viên suýt thành notch). Bạn không cần
+   làm gì khác: cứ chấm TRUE/FALSE như cũ và **gửi lại file `session-*.jsonl`** — đây là dữ liệu
+   để huấn luyện bộ phân loại hú / nốt nhạc ở bước sau. Tệ nhất khoảng 1,4 MB mỗi giờ mỗi slot.
+7. Thu nhỏ cửa sổ theo chiều cao: bảng `COPILOT` phải biến mất và ACTIVE NOTCHES trông y như cũ.
 
 ## Biết trước để không tưởng app hỏng
 
