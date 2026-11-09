@@ -231,7 +231,7 @@ câu người, mỗi nhận xét kèm một lời khuyên:
 - log bị mất sự kiện.
 
 Bảng chỉ chạy khi bạn bấm, và không tự làm mới. Lời khuyên **không bao giờ** bảo
-tăng gain, tăng trần hay tắt chống hú. Bước này không dùng mạng, không cần khoá
+tăng gain, tăng trần hay tắt chống hú. Nút `PHÂN TÍCH` không dùng mạng, không cần khoá
 API và chưa có AI nào tham gia: nhận xét do luật cố định tính ra.
 
 Phần phân tích là một chương trình riêng (`copilot\HandsFreeCopilot\`, khoảng
@@ -239,6 +239,38 @@ Phần phân tích là một chương trình riêng (`copilot\HandsFreeCopilot\`
 tối đa 30 giây. Nếu nó thiếu, chậm hoặc bị phần mềm diệt virus chặn, bảng chỉ hiện
 một dòng trạng thái; âm thanh không liên quan. Cửa sổ quá thấp thì bảng tự ẩn và
 ACTIVE NOTCHES giữ nguyên như trước.
+
+Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.
+
+### Hỏi AI (bản kế tiếp, lane L2b)
+
+Dưới đáy bảng COPILOT có một ô `Hỏi về buổi diễn này…` và nút `HỎI`. Gõ câu hỏi rồi bấm
+`HỎI` (hoặc Enter): app gửi câu hỏi cùng dữ liệu log của buổi đang chạy tới nhà cung cấp AI
+bạn chọn, rồi hiện câu trả lời ngay trong bảng (cuộn được nếu dài). Dòng chân dưới câu trả
+lời ghi model và số token đã dùng. Chờ tối đa 2 phút; trong lúc chờ nút thành `HUỶ` để dừng.
+Bảng chỉ hỏi khi bạn bấm, không tự hỏi.
+
+**Cài đặt lần đầu.** Bấm `CÀI AI` ở dòng tiêu đề: một lớp phủ che cột trái (danh sách notch và
+bảng COPILOT) cho tới khi bấm `ĐÓNG`; cột phải và nút BYPASS không bị che, âm thanh vẫn chạy
+bên dưới. Ở đó chọn nhà cung cấp (`Claude (Anthropic)` hoặc `Tương thích OpenAI` — phủ OpenAI,
+OpenRouter, Gemini và Ollama tại máy), model, địa chỉ (chỉ cho loại tương thích OpenAI), dán
+khoá API rồi `LƯU KHOÁ`, và tích ô đồng ý. Chưa tích đồng ý, hoặc Claude mà chưa có khoá, thì
+bấm `HỎI` chỉ hiện "Chưa cài AI. Bấm CÀI AI.". Nhà cung cấp, model, địa chỉ và việc đồng ý được
+nhớ trong `settings.json`; **khoá thì không bao giờ nằm trong settings hay log**.
+
+**Cái gì được gửi đi.** Câu hỏi của bạn và dữ liệu log buổi diễn (sự kiện notch, tần số, mức,
+verdict — không có âm thanh), tới đúng nhà cung cấp bạn chọn, và chỉ khi bạn bấm `HỎI`.
+
+**Lời khuyên tăng gain bị chặn.** Mọi câu trả lời, của nhà cung cấp nào, đều đi qua một bộ lọc
+bằng mã: câu khuyên tăng gain, tăng âm lượng, tăng trần hay tắt chống hú bị thay bằng một câu
+cố định ("Câu trả lời của mô hình đã bị chặn…"). Đây là bộ lọc, không phải bảo đảm tuyệt đối;
+nghi ngờ thì chặn, nên đôi khi một câu vô hại cũng bị chặn — hỏi lại hoặc đổi model.
+
+**Khoá được cất thế nào.** Khoá được mã hoá bằng DPAPI của Windows theo tài khoản Windows đang
+dùng và ghi vào `%APPDATA%\AZSoundtech\HandsFree\copilot-credentials.json`. DPAPI chặn người
+dùng Windows khác và việc đọc ổ đĩa rời; nó **không** chặn phần mềm độc hại đang chạy dưới chính
+tài khoản của bạn. Trên hệ điều hành khác Windows, ô khoá bị tắt ("Cất khoá chỉ có trên
+Windows."). Chưa có lượt gọi nhà cung cấp thật nào được kiểm tra trong bản này.
 
 Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.
 

@@ -21,6 +21,7 @@
 
 #include "app/AppSettings.h"
 #include "app/AudioEngine.h"
+#include "app/CopilotCredentialStore.h"
 #include "app/CopilotFindings.h"
 #include "app/NotchController.h"
 #include "app/SessionLogger.h"
@@ -29,6 +30,7 @@
 #include "app/SoundcheckController.h"
 #include "dsp/ClockSource.h"
 #include "gui/CopilotPanel.h"
+#include "gui/CopilotSetupPanel.h"
 #include "gui/DeviceDrawer.h"
 #include "gui/DevicePanel.h"
 #include "gui/DumbView.h"
@@ -310,6 +312,25 @@ public:
     [[nodiscard]] juce::Rectangle<int> copilotPanelBoundsForTest() const { return copilotPanel_.getBounds(); }
     void setCopilotBackendForTest (std::unique_ptr<CopilotBackend> backend,
                                    SidecarRunner::Poster poster = {});
+
+    // Lane L2b. Tests must point the key store at a temp directory BEFORE the
+    // overlay opens or a question is asked, so nothing touches the real
+    // %APPDATA% credentials file; settings stay off unless a test calls
+    // enableSettings() with a temp file.
+    void setCopilotCredentialDirectoryForTest (juce::File directory)
+    {
+        copilotCredentialDirectory_ = std::move (directory);
+        copilotCredentials_.reset();
+    }
+    [[nodiscard]] gui::CopilotSetupPanel& getCopilotSetupPanelForTest() { return copilotSetupPanel_; }
+    [[nodiscard]] juce::Rectangle<int> copilotSetupBoundsForTest() const { return copilotSetupPanel_.getBounds(); }
+    [[nodiscard]] juce::Rectangle<int> leftColumnBoundsForTest() const { return leftColumnBounds_; }
+    [[nodiscard]] bool copilotSetupOpenForTest() const { return copilotSetupOpen_; }
+    // Shows the overlay as it is, WITHOUT seeding it from settings or reading the
+    // key store (the snapshot tool stages the panel by hand).
+    void showCopilotSetupForTest() { copilotSetupOpen_ = true; layoutCopilotSetup(); }
+    [[nodiscard]] const AppSettings& appSettingsForTest() const { return settings_; }
+    [[nodiscard]] CopilotCredentialStore& copilotCredentialStoreForTest() { return credentialStore(); }
 
     // TEST ACCESSOR ONLY -- lets a headless test reach ONE slot's detector
     // (pump runOnce(), read the soundcheck timer). Null for an out-of-range
@@ -688,8 +709,23 @@ private:
     // destroyed -- cancelling and joining its worker -- before the panel its
     // callback targets. The callback holds only a SafePointer to this component.
     gui::CopilotPanel copilotPanel_;
+
+    // Lane L2b: the setup overlay (covers the left column while open), the
+    // lazily created DPAPI key store and the column it covers.
+    gui::CopilotSetupPanel copilotSetupPanel_;
+    std::unique_ptr<CopilotCredentialStore> copilotCredentials_;
+    juce::File copilotCredentialDirectory_;      // empty = the default directory
+    juce::Rectangle<int> leftColumnBounds_;
+    bool copilotSetupOpen_ = false;
+    CopilotCredentialStore& credentialStore();
+    void openCopilotSetup();
+    void closeCopilotSetup();
+    void layoutCopilotSetup();
+    void askCopilot (juce::String question);
+
     std::unique_ptr<SidecarRunner> copilotRunner_;
     void analyseWithCopilot();
+    void showCopilotBusy();
 
     //==========================================================================
     // LANE M Task 10 state. All of it is declared BEFORE soundcheck_ below,

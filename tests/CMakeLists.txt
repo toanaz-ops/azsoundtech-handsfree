@@ -54,7 +54,11 @@ add_executable(HandsFreeTests
     test_afc.cpp
     test_copilotfindings.cpp
     test_sidecarrunner.cpp
+    test_copilotask.cpp
+    test_copilotanswer.cpp
+    test_copilotcredentialstore.cpp
     test_copilotpanel.cpp
+    test_copilotsetup.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
@@ -85,6 +89,11 @@ target_link_libraries(HandsFreeTests PRIVATE
     juce::juce_dsp
     juce::juce_recommended_config_flags
 )
+
+# CopilotCredentialStore calls CryptProtectData / CryptUnprotectData.
+if(WIN32)
+    target_link_libraries(HandsFreeTests PRIVATE crypt32)
+endif()
 
 target_include_directories(HandsFreeTests PRIVATE
     ${CMAKE_SOURCE_DIR}/src

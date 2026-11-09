@@ -29,6 +29,14 @@ struct AppSettings
     // as it is: "absent" must never read as "eight disabled slots".
     bool hasRouting = false;
     std::array<SlotConfig, kMaxSlots> slots {};
+
+    // Lane L2b "ask the AI": which provider/model to use and whether the owner
+    // agreed to send the question + session log to it. NEVER an API key (that
+    // lives only in the DPAPI store, CopilotCredentialStore).
+    juce::String copilotProvider = "anthropic"; // "anthropic" | "openai_compatible"
+    juce::String copilotModel = "claude-opus-5-5";
+    juce::String copilotBaseUrl;                // only meaningful for openai_compatible
+    bool copilotConsent = false;
 };
 
 // Lenient by design, unlike PresetManager: settings are the app's own scratch

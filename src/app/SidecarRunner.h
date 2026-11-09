@@ -34,7 +34,38 @@ struct CopilotRequest
     juce::File executable;
     juce::File sessionLog;
     int timeoutMs = 10000;
+
+    // "Ask the AI" mode (lane L2b). An empty `question` means findings mode and
+    // the other three fields are ignored.
+    juce::String question;
+    juce::String provider; // "anthropic" | "openai_compatible"
+    juce::String model;
+    juce::String baseUrl;  // openai_compatible only
 };
+
+/** Exit code of a run that was refused before any process started because the
+    ask request was invalid (same meaning as the sidecar's bad-arguments code). */
+constexpr int kCopilotInvalidRequestExitCode = 5;
+
+/** Control characters and line breaks -> space, `"` -> `'`, whitespace runs
+    collapsed, trimmed, trailing backslashes stripped (a trailing `\` before the
+    closing quote breaks Windows argv quoting), capped at 2000 characters. */
+juce::String sanitiseCopilotQuestion (const juce::String& question);
+
+/** 1..128 characters from [A-Za-z0-9._:/-]. */
+bool isValidCopilotModel (const juce::String& model);
+
+/** http:// or https://, at most 512 characters, no whitespace, quote or control
+    character. */
+bool isValidCopilotBaseUrl (const juce::String& url);
+
+/** The sidecar argv (executable first). Findings mode: `<exe> <log> --json
+    --low-priority`. Ask mode: `<exe> <log> --ask <q> --json --low-priority
+    --provider <p> [--model <m>] [--base-url <u>] --timeout 100`. EMPTY when an
+    ask request is invalid (empty sanitised question, unknown provider, invalid
+    model, openai_compatible without a valid model and base URL, a base URL
+    given for anthropic). */
+juce::StringArray buildCopilotArguments (const CopilotRequest& request);
 
 struct CopilotRunResult
 {

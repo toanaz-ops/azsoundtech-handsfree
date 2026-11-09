@@ -43,9 +43,9 @@ std::vector<CopilotFinding> threeFindings()
 
 // A JSON array exactly as the sidecar prints it (ASCII; \u escapes for Vietnamese).
 const char* kFixtureJson = R"([
-  {"code":"ceiling","severity":"alert","title":"1008 Hz chạm trần -18 dB","advice":"Hạ gain monitor.","evidence":{}},
-  {"code":"false_rate","severity":"warn","title":"1/3 notch bị đánh dấu oan","advice":"Thử preset Safe.","evidence":{}},
-  {"code":"recurrence","severity":"info","title":"1008 Hz hú lại 2 lần","advice":"Kiểm tra hướng mic.","evidence":{}}
+  {"code":"ceiling","severity":"alert","title":"1008 Hz ch\u1ea1m tr\u1ea7n -18 dB","advice":"H\u1ea1 gain monitor.","evidence":{}},
+  {"code":"false_rate","severity":"warn","title":"1/3 notch b\u1ecb \u0111\u00e1nh d\u1ea5u oan","advice":"Th\u1eed preset Safe.","evidence":{}},
+  {"code":"recurrence","severity":"info","title":"1008 Hz h\u00fa l\u1ea1i 2 l\u1ea7n","advice":"Ki\u1ec3m tra h\u01b0\u1edbng mic.","evidence":{}}
 ])";
 
 struct PostQueue

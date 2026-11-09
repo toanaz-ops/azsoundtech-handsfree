@@ -77,3 +77,55 @@ TEST (AppSettings, BadSlotEntryComesBackDisabledAndTheRestStillLoad)
     EXPECT_EQ    (s.slots[3].outputChannels[1], 5);
     EXPECT_FALSE (s.slots[4].enabled);   // absent entries: disabled default
 }
+
+// --- lane L2b: copilot ask settings -----------------------------------------
+
+TEST (AppSettings, CopilotDefaultsWhenKeysAreAbsent)
+{
+    // A file written by an older build has none of the copilot_* keys.
+    const auto s = appSettingsFromHost (hostFromJson (R"({"uiMode":"geek"})"));
+    EXPECT_EQ (s.uiMode, UiMode::Geek);
+    EXPECT_EQ (s.copilotProvider, "anthropic");
+    EXPECT_EQ (s.copilotModel, "claude-opus-5-5");
+    EXPECT_TRUE (s.copilotBaseUrl.isEmpty());
+    EXPECT_FALSE (s.copilotConsent);
+    EXPECT_FALSE (s.hasRouting);
+}
+
+TEST (AppSettings, CopilotRoundTrip)
+{
+    AppSettings in;
+    in.copilotProvider = "openai_compatible";
+    in.copilotModel = "llama3:8b";
+    in.copilotBaseUrl = "http://localhost:11434/v1";
+    in.copilotConsent = true;
+
+    const auto out = appSettingsFromHost (appSettingsToHost (in));
+    EXPECT_EQ (out.copilotProvider, "openai_compatible");
+    EXPECT_EQ (out.copilotModel, "llama3:8b");
+    EXPECT_EQ (out.copilotBaseUrl, "http://localhost:11434/v1");
+    EXPECT_TRUE (out.copilotConsent);
+}
+
+TEST (AppSettings, CopilotInvalidValuesFallBackToDefaults)
+{
+    const auto s = appSettingsFromHost (hostFromJson (
+        R"({"copilot_provider":"mystery","copilot_model":"bad model!","copilot_base_url":"ftp://x","copilot_consent":"yes"})"));
+    EXPECT_EQ (s.copilotProvider, "anthropic");
+    EXPECT_EQ (s.copilotModel, "claude-opus-5-5");
+    EXPECT_TRUE (s.copilotBaseUrl.isEmpty());
+    EXPECT_FALSE (s.copilotConsent);
+}
+
+TEST (AppSettings, CopilotDashLeadingModelFallsBackToDefault)
+{
+    const auto s = appSettingsFromHost (hostFromJson (R"({"copilot_model":"-abc"})"));
+    EXPECT_EQ (s.copilotModel, "claude-opus-5-5");
+}
+
+TEST (AppSettings, CopilotSettingsNeverCarryAKeyField)
+{
+    const auto host = appSettingsToHost ({});
+    EXPECT_FALSE (host.product.hasProperty ("copilot_key"));
+    EXPECT_FALSE (host.product.hasProperty ("copilot_api_key"));
+}

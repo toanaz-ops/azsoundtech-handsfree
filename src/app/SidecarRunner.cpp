@@ -11,6 +11,102 @@ constexpr size_t kMaxOutputBytes = 8u * 1024u * 1024u;
 constexpr int kStopThreadTimeoutMs = 5000;
 }
 
+juce::String sanitiseCopilotQuestion (const juce::String& question)
+{
+    juce::String spaced;
+    for (auto p = question.getCharPointer(); ! p.isEmpty(); ++p)
+    {
+        const auto c = *p;
+        if (c == '"')
+            spaced += '\'';
+        else if (c < 32 || c == 127 || (c >= 0x80 && c < 0xA0) || c == 0x2028 || c == 0x2029)
+            spaced += ' ';
+        else
+            spaced += juce::String::charToString (c);
+    }
+
+    // Collapse every whitespace run (tabs and line breaks are already spaces).
+    juce::StringArray words;
+    words.addTokens (spaced, " ", "");
+    words.removeEmptyStrings();
+    auto out = words.joinIntoString (" ").trim();
+
+    while (out.endsWithChar ('\\'))
+        out = out.dropLastCharacters (1).trimEnd();
+
+    if (out.length() > 2000)
+        out = out.substring (0, 2000).trimEnd();
+    while (out.endsWithChar ('\\'))
+        out = out.dropLastCharacters (1).trimEnd();
+    return out;
+}
+
+bool isValidCopilotModel (const juce::String& model)
+{
+    if (model.isEmpty() || model.length() > 128)
+        return false;
+    if (! juce::CharacterFunctions::isLetterOrDigit (model[0]) || model[0] >= 0x80)
+        return false;
+    return model.containsOnly ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/-");
+}
+
+bool isValidCopilotBaseUrl (const juce::String& url)
+{
+    if (url.length() > 512 || ! (url.startsWith ("http://") || url.startsWith ("https://")))
+        return false;
+    for (auto p = url.getCharPointer(); ! p.isEmpty(); ++p)
+    {
+        const auto c = *p;
+        if (c <= 32 || c == 127 || (c >= 0x80 && c < 0xA0) || c == '"' || c == '\'' || c == '`'
+            || c == 0x2028 || c == 0x2029 || juce::CharacterFunctions::isWhitespace (c))
+            return false;
+    }
+    return true;
+}
+
+juce::StringArray buildCopilotArguments (const CopilotRequest& request)
+{
+    juce::StringArray args;
+    args.add (request.executable.getFullPathName());
+    args.add (request.sessionLog.getFullPathName());
+
+    if (request.question.isEmpty())
+    {
+        args.add ("--json");
+        args.add ("--low-priority");
+        return args;
+    }
+
+    const auto question = sanitiseCopilotQuestion (request.question);
+    const bool openai = request.provider == "openai_compatible";
+    if (question.isEmpty() || ! (openai || request.provider == "anthropic"))
+        return {};
+
+    if (request.model.isNotEmpty() && ! isValidCopilotModel (request.model))
+        return {};
+
+    if (openai)
+    {
+        if (request.model.isEmpty() || ! isValidCopilotBaseUrl (request.baseUrl))
+            return {};
+    }
+    else if (request.baseUrl.isNotEmpty())
+        return {};
+
+    // Value-carrying flags are ONE argv element in "=" form: a question that
+    // starts with "-" (e.g. "-3 dB ...") must never be read as a flag.
+    args.add ("--ask=" + question);
+    args.add ("--json");
+    args.add ("--low-priority");
+    args.add ("--provider=" + request.provider);
+    if (request.model.isNotEmpty())
+        args.add ("--model=" + request.model);
+    if (openai)
+        args.add ("--base-url=" + request.baseUrl);
+    args.add ("--timeout=100");
+    return args;
+}
+
 juce::File defaultCopilotExecutable()
 {
     return juce::File::getSpecialLocation (juce::File::currentExecutableFile)
@@ -70,11 +166,14 @@ CopilotRunResult ChildProcessBackend::run (const CopilotRequest& request, Copilo
 
     // One StringArray element per argument: the paths contain spaces, and
     // ChildProcess quotes each element itself.
-    juce::StringArray args;
-    args.add (request.executable.getFullPathName());
-    args.add (request.sessionLog.getFullPathName());
-    args.add ("--json");
-    args.add ("--low-priority");
+    const auto args = buildCopilotArguments (request);
+    if (args.isEmpty())
+    {
+        // An invalid ask request is refused without starting a process.
+        result.status = CopilotRunResult::Status::failed;
+        result.exitCode = kCopilotInvalidRequestExitCode;
+        return result;
+    }
 
     juce::ChildProcess child;
     if (! child.start (args, juce::ChildProcess::wantStdOut))
