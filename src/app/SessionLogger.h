@@ -81,6 +81,15 @@ public:
     void setDroppedCandidatesProvider (std::function<std::uint64_t()> provider)
         { droppedCandidatesProvider_ = std::move (provider); }
 
+    // Lane C1b: a generic hook for fields the owner wants on session_end that
+    // this logger knows nothing about. Called from stop() on the message
+    // thread, once, with the session_end object before it is written; the
+    // provider may only add properties (never remove or rename the standard
+    // ones: they are applied first and a provider cannot overwrite them).
+    // Set once at construction time of the owner.
+    void setSessionEndExtraFields (std::function<void (juce::DynamicObject&)> provider)
+        { sessionEndExtra_ = std::move (provider); }
+
 private:
     void run() override;
     void drainToFile();
@@ -111,6 +120,7 @@ private:
     bool accepting_ { false };
     std::atomic<std::uint64_t> dropped_ { 0 };
     std::function<std::uint64_t()> droppedCandidatesProvider_;
+    std::function<void (juce::DynamicObject&)> sessionEndExtra_;
     // M-1: sticky for the session, set by writeLineNow() when the stream
     // refuses a write. Atomic because the writer thread sets it and stop()
     // (message thread) reads it. Reported in session_end.

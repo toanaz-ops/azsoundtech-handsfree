@@ -888,16 +888,17 @@ mỗi dòng một object JSON có `t` (ms từ lúc mở app) và `ev`. Giữ 30
 
 | `ev` | Khi nào | Mang gì |
 |---|---|---|
-| `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`) |
+| `session_start` | mở app, sau khi mở device | phiên bản app, OS, device, sample rate, buffer, cấu hình 8 slot (`width`, kênh, `linked`); `log_schema` (hiện **3**; log không có trường này là bản 1); `nn_model` + `nn_feature_set` của bộ phân loại chạy bóng (vắng khi không nạp được model) |
 | `mode` | ngay sau `session_start` (mode lúc mở phiên), rồi mỗi lần bấm Bypass / Auto / Soundcheck | `mode` |
 | `tuning` | đổi DETECTION toàn cục (`slot: -1`) hoặc tuning riêng của slot | `rise_ms`, `persist`, `q`, `depth_db`, `thr` |
-| `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`) |
+| `notch_set` | detector đặt notch, hoặc notch từ preset / tay | slot, làn, index, Hz, Q, depth, `origin`; với detector thêm điểm số tách trục (`p_norm`, `rise`, `novelty`, `penalty`, `asymmetry`) và `ctx`: phổ 1025 bin lúc quyết định (`now`), phổ mà trục rise đã so (`ref`, kèm `ref_age_ms`), phổ làn kia cùng vòng (`other_lane_now`); `nn_score` (lane C1b, 0..1, 3 chữ số có nghĩa) chỉ với notch detector và chỉ khi bộ phân loại có ý kiến — **vắng, không bao giờ là 0**, khi không có |
+| `candidate_features` | ứng viên suýt đạt nhưng KHÔNG đặt notch (lane C0) | scalar của ứng viên và 11 biên độ quanh đỉnh (`near`); từ lane C1b thêm `nn_score` theo cùng quy tắc với `notch_set` |
 | `notch_retune` | lane G đổi độ sâu một notch đang chạy | slot, làn, index, Hz, Q, `depth_db` (mới), `from_db` (cũ), `origin`, `reason`: `deepen` / `release` / `reclamp` / `ceiling`, `age_ms` (tính từ lúc ĐẶT, không phải từ lần retune trước) |
 | `notch_clear` | notch rời model | `reason`: `manual` / `clear_all` / `auto_release` / `width_change` / `verdict_false` / `partial_apply_unwind`, `age_ms` |
 | `verdict` | bấm GOOD / FALSE trên bảng ACTIVE NOTCHES | `verdict`, `age_ms` |
 | `preset_load` | nạp preset xong | `file` (chỉ TÊN file), `adopted` (số notch thực sự nhận), `skipped` (số notch bị bỏ: slot ngoài dải + notch làn R trên slot mono), `ceiling_applied` (bool, luôn ghi — file có mang khối `notchDefaults` và có slot Global để áp không), `q`/`depth_db` (trần vừa áp, chỉ khi `ceiling_applied` là true — đọc lại SAU clamp, cùng tên/kiểu với sự kiện `tuning`) |
 | `soundcheck_start` / `_output` / `_result` / `_apply` / `_abort` | lane M (1.3.0), khoá dispatch là **`ev`** | xem `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` §4.7. `ring_risk` là **null** khi chưa chấm được khung nào, **không phải 0.0**. `soundcheck_apply` ghi **một dòng mỗi slot**, có trường `slot`, và mang hai tín hiệu lỗi riêng `skipped_other_slot` / `skipped_bad_lane` (`skipped_live` cố tình **không** có: nó là tập con của `refused`). `soundcheck_abort.at_output` là chỉ số lượt đo **đang dở**, không phải lượt cuối đã xong. `tools/logstats.py` không cần nhánh nào cho năm `ev` này |
-| `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
+| `session_end` | đóng app | `dropped_events` (ước lượng, xem dưới), `dropped_candidates`, `nn_calls` / `nn_us_p99` / `nn_us_max` (lane C1b: số lần chấm và thời gian một lần chấm trên detector thread, micro giây; chỉ khi có bộ phân loại; p99 là cận trên theo nhóm 2^k tick, lấy slot xấu nhất), `write_failed` — `true` nghĩa là **file bị cụt** vì một lệnh ghi bị từ chối (đầy đĩa, handle mất), không phải "phiên yên tĩnh" |
 
 Cam kết: **không có audio** trong log — chỉ magnitude phổ (3 chữ số có nghĩa), không tên
 người, không gửi đi đâu. Ghi từ thread riêng (`SessionLogger`), không bao giờ từ audio
@@ -914,7 +915,7 @@ hai số lệch nhau đúng bằng thời gian tap chết, và đó là hành vi
 `FALSE` vừa ghi nhãn vừa xóa notch (đó là điều người vận hành muốn — D-2); `GOOD` chỉ ghi
 nhãn. `ref` là **đúng frame scorer đã so** (mới nhất có tuổi ≥ 0,45 × rise), không phải
 frame tra lại theo `rise_ms` (D-7). Tóm tắt một file: `python tools/logstats.py <file>`.
-Lane C (classifier) mở khi có ≥ 300 verdict từ ≥ 3 session.
+Lane C (huấn luyện model THẬT) mở khi có ≥ 300 verdict từ ≥ 3 session. Từ lane C1b app đã chạy bóng một model **chưa huấn luyện** (`nn_model: untrained-fixture-v1`): `nn_score` vô nghĩa cho tới khi model thật được huấn luyện từ log; không đọc nó như xác suất hú, và nó không chạm quyết định notch nào.
 
 **Kích thước.** Một dòng `notch_set` có `ctx` là dòng nặng nhất: trên slot stereo nó mang
 ba mảng 1025 bin (`now`, `ref`, `other_lane_now`) → **đo được 19,5–19,7 KB/dòng** (log thật
@@ -962,7 +963,8 @@ Bản 1.1.2 thêm vòng dữ liệu (lane D): nút GOOD/FALSE, log session JSONL
   NOTCHES và bộ chọn làn L/R trên analyser; preset lưu/nạp được cả `lane` lẫn
   `linked`. Còn mở: code signing (Task 31, chờ EV cert), integration testing
   với phần cứng thật (Task 32), sweep `laneAsymmetryBonus` (lane T), lane C
-  (classifier, chờ ≥ 300 verdict từ ≥ 3 session), và quyết định owner còn treo
+  (huấn luyện model thật, chờ ≥ 300 verdict từ ≥ 3 session; bản chạy bóng chưa huấn luyện
+  đã có từ lane C1b), và quyết định owner còn treo
   cho lane S: có nên chặn `riseReferenceMs` cho làn vừa quay lại sau khi slot
   widen 1→2 hay không (amendment A-9 bị rút khỏi lane D khi review — xem
   `.superpowers/sdd/2026-09-05-data-loop/progress.md`, "Task 3: CONTROLLER

@@ -607,6 +607,8 @@ private:
     juce::String  appVersion_ { "0.0.0-unset" };   // main.cpp sets the real one (D-8)
     int           lastLoadSkipped_ = 0;
 
+    // Lane C1b: id of the shadow classifier model, empty when none loaded.
+    juce::String  nnModelName_;
     juce::var sessionHeader() const;
     static juce::var notchEventToVar (const NotchController::NotchEvent& e);
     // Lane C0: JSON for one near-miss candidate; built at flush time.

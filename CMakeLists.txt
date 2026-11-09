@@ -35,6 +35,14 @@ juce_add_binary_data(HandsFreeFonts SOURCES
     ${CMAKE_SOURCE_DIR}/assets/fonts/IBMPlexMono-Medium.ttf
 )
 
+# The untrained candidate-classifier model (lane C1b), embedded so it needs no
+# installer change. Own namespace/header: HandsFreeFonts already owns BinaryData.
+juce_add_binary_data(HandsFreeModels
+    HEADER_NAME HandsFreeModelsData.h
+    NAMESPACE HandsFreeModelsData
+    SOURCES ${CMAKE_SOURCE_DIR}/models/candidate-classifier-untrained-v1.json
+)
+
 # ASIO SDK path
 set(JUCE_ASIO_SDK_PATH "${CMAKE_SOURCE_DIR}/external/asiosdk" CACHE PATH "Path to ASIO SDK")
 
@@ -200,6 +208,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/dsp/SoundcheckCandidates.h
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.cpp
     ${CMAKE_SOURCE_DIR}/src/app/NotchController.h
+    ${CMAKE_SOURCE_DIR}/src/app/EmbeddedClassifier.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/EmbeddedClassifier.h
 )
 
 target_sources(HandsFree PRIVATE
@@ -220,6 +230,7 @@ target_include_directories(HandsFree PRIVATE
 target_link_libraries(HandsFree
     PRIVATE
         HandsFreeFonts
+        HandsFreeModels
         melatonin_blur
         az_host_settings
         az_rtneural_headers

@@ -1,11 +1,14 @@
 // tests/test_notchcontroller.cpp
 #include <gtest/gtest.h>
+#include "app/EmbeddedClassifier.h"
 #include "app/NotchController.h"
 #include "dsp/PeakinessAnalyzer.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
+#include <memory>
 #include <random>
 #include <utility>
 #include <vector>
@@ -4386,3 +4389,248 @@ TEST (CandidateLog, SetEventCarriesLrRatioOnlyForStereo)
     }
 }
 
+// ===========================================================================
+// Lane C1b (shadow classifier). The classifier's opinion rides on the
+// candidate record and the detector-origin notch event and NOTHING reads it
+// for a decision. Expected level change: 0 dB.
+// ===========================================================================
+namespace
+{
+enum class ShadowVariant { None, Embedded, ForcedLow, ForcedHigh };
+
+std::unique_ptr<CandidateClassifier> makeShadowClassifier (ShadowVariant v)
+{
+    if (v == ShadowVariant::None)
+        return nullptr;
+    juce::String error;
+    if (v == ShadowVariant::Embedded)
+        return makeEmbeddedCandidateClassifier (error);
+
+    // Weights forced so the output layer saturates: sigmoid (-30) ~ 1e-13,
+    // sigmoid (+30) ~ 1. Everything upstream is the real model.
+    CandidateClassifier::Weights w;
+    if (! CandidateClassifier::parseWeights (embeddedCandidateClassifierJson(), w, error))
+        return nullptr;
+    std::fill (w.dense3W.begin(), w.dense3W.end(), 0.0f);
+    w.dense3B[0] = (v == ShadowVariant::ForcedLow) ? -30.0f : 30.0f;
+    auto c = std::make_unique<CandidateClassifier>();
+    if (! c->load (w, error))
+        return nullptr;
+    return c;
+}
+
+struct ShadowRun
+{
+    std::vector<NotchCommand> commands;
+    std::vector<NotchController::CandidateRecord> candidates;
+    std::vector<NotchController::NotchEvent> events;
+    NotchController::NnStats stats;
+    double seconds = 0.0;
+};
+
+// One fixed block sequence: two sustained near misses first (candidate
+// records), then a slow howl (places at -6) and a hard onset (places at -12).
+ShadowRun runShadowScenario (ShadowVariant v)
+{
+    ShadowRun run;
+    CandRecorder cands;
+    Recorder events;
+    Harness h;
+    h.controller.setCandidateSink (cands.sink());
+    h.controller.setEventSink (events.sink());
+    h.controller.setCandidateClassifier (makeShadowClassifier (v));
+    h.controller.setDetectionActive (true);
+
+    auto pumpOne = [&] (const std::vector<float>& hop)
+    {
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (kBlockMs);
+        h.controller.runOnce();
+    };
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpOne (quiet.hop());
+    RampTwoTone nearMiss;
+    for (int i = 0; i < 40; ++i)
+        pumpOne (nearMiss.hop());
+    for (int i = 0; i < 60; ++i)
+        pumpOne (quiet.hop());
+    RampSineSource ramp;
+    for (int i = 0; i < 150; ++i)
+        pumpOne (ramp.hop());
+    SineSource tone;
+    tone.freq = 3100.0;
+    for (int i = 0; i < 40; ++i)
+        pumpOne (tone.hop());
+    for (int i = 0; i < 60; ++i)
+        pumpOne (quiet.hop());
+    run.seconds = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+
+    NotchCommand cmd {};
+    while (h.commands.read (&cmd, 1) == 1)
+        run.commands.push_back (cmd);
+    run.candidates = cands.recs;
+    run.events = events.events;
+    run.stats = h.controller.nnStats();
+    return run;
+}
+
+bool sameEventsIgnoringScore (const std::vector<NotchController::NotchEvent>& a,
+                              const std::vector<NotchController::NotchEvent>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (a[i].kind != b[i].kind || a[i].slot != b[i].slot || a[i].lane != b[i].lane
+            || a[i].index != b[i].index || a[i].hz != b[i].hz || a[i].q != b[i].q
+            || a[i].depthDb != b[i].depthDb || a[i].origin != b[i].origin
+            || a[i].hasScore != b[i].hasScore || a[i].score != b[i].score
+            || a[i].peakiness != b[i].peakiness || a[i].riseRatio != b[i].riseRatio)
+            return false;
+    return true;
+}
+} // namespace
+
+// THE 0 dB TEST. The same block sequence with no classifier, the embedded
+// model, and weights forced to ~0 and ~1: the full command sequence (not a
+// count) and every placement event field except the score must be identical.
+TEST (ShadowClassifier, DecisionsAreIdenticalWithAndWithoutClassifier)
+{
+    const auto none = runShadowScenario (ShadowVariant::None);
+    ASSERT_GE (none.commands.size(), 2u) << "teeth: the scenario must place notches";
+    ASSERT_FALSE (none.candidates.empty()) << "teeth: the scenario must log candidates";
+
+    for (const auto v : { ShadowVariant::Embedded, ShadowVariant::ForcedLow, ShadowVariant::ForcedHigh })
+    {
+        const auto with = runShadowScenario (v);
+        EXPECT_TRUE (sameCommands (none.commands, with.commands)) << "variant " << (int) v;
+        EXPECT_TRUE (sameEventsIgnoringScore (none.events, with.events)) << "variant " << (int) v;
+        EXPECT_EQ (none.candidates.size(), with.candidates.size()) << "variant " << (int) v;
+        EXPECT_GT (with.stats.calls, 0u) << "teeth: the classifier really ran, variant " << (int) v;
+        for (const auto& c : with.candidates)
+        {
+            ASSERT_TRUE (c.hasNnScore);
+            if (v == ShadowVariant::ForcedLow)  EXPECT_LT (c.nnScore, 0.001f);
+            if (v == ShadowVariant::ForcedHigh) EXPECT_GT (c.nnScore, 0.999f);
+        }
+        // Call site B: every detector placement event carries the forced score too.
+        int placements = 0;
+        for (const auto& e : with.events)
+            if (e.kind == NotchController::NotchEvent::Kind::Set && e.hasScore
+                && e.origin == NotchController::Origin::Detector)
+            {
+                ++placements;
+                ASSERT_TRUE (e.hasNnScore) << "variant " << (int) v;
+                if (v == ShadowVariant::ForcedLow)  EXPECT_LT (e.nnScore, 0.001f);
+                if (v == ShadowVariant::ForcedHigh) EXPECT_GT (e.nnScore, 0.999f);
+            }
+        EXPECT_GT (placements, 0) << "teeth: site B ran, variant " << (int) v;
+    }
+}
+
+TEST (ShadowClassifier, NearMissAndPlacementBothCarryAScore)
+{
+    const auto run = runShadowScenario (ShadowVariant::Embedded);
+    ASSERT_FALSE (run.candidates.empty());
+    for (const auto& c : run.candidates)
+    {
+        EXPECT_TRUE (c.hasNnScore);
+        EXPECT_TRUE (std::isfinite (c.nnScore));
+        EXPECT_GE (c.nnScore, 0.0f);
+        EXPECT_LE (c.nnScore, 1.0f);
+    }
+    std::size_t sets = 0;
+    for (const auto& e : run.events)
+    {
+        if (e.kind == NotchController::NotchEvent::Kind::Set && e.hasScore
+            && e.origin == NotchController::Origin::Detector)
+        {
+            ++sets;
+            EXPECT_TRUE (e.hasNnScore);
+            EXPECT_GE (e.nnScore, 0.0f);
+            EXPECT_LE (e.nnScore, 1.0f);
+        }
+        else
+            EXPECT_FALSE (e.hasNnScore) << "only detector placements carry a score";
+    }
+    EXPECT_GT (sets, 0u);
+
+    // The timing numbers a tester's session_end will carry.
+    std::printf ("[C1b] cands=%zu sets=%zu events=%zu\n", run.candidates.size(), sets, run.events.size());
+    std::printf ("[C1b] nn_calls=%llu nn_us_p99=%.2f nn_us_max=%.2f  scenario %.3f s wall = %.1f score() calls/s\n",
+                 (unsigned long long) run.stats.calls, run.stats.usP99, run.stats.usMax, run.seconds,
+                 run.seconds > 0.0 ? (double) run.stats.calls / run.seconds : 0.0);
+    // One call per logged candidate plus ONE per placement. Harness has a single
+    // tap, so every placement is LINKED and fans out to two Set events that
+    // share one score: placements = sets / 2.
+    EXPECT_EQ (sets % 2, 0u);
+    EXPECT_EQ (run.stats.calls, (std::uint64_t) (run.candidates.size() + sets / 2));
+    EXPECT_GE (run.stats.usMax, run.stats.usP99);
+    EXPECT_GE (run.stats.usP99, 0.0);
+    EXPECT_TRUE (std::isfinite (run.stats.usMax));
+}
+
+TEST (ShadowClassifier, NoClassifierMeansNoScoreField)
+{
+    const auto run = runShadowScenario (ShadowVariant::None);
+    ASSERT_FALSE (run.candidates.empty());
+    for (const auto& c : run.candidates)
+    {
+        EXPECT_FALSE (c.hasNnScore);
+        EXPECT_EQ (c.nnScore, 0.0f);
+    }
+    for (const auto& e : run.events)
+        EXPECT_FALSE (e.hasNnScore);
+    EXPECT_EQ (run.stats.calls, 0u);
+}
+
+// A non-finite feature never becomes a score and never becomes 0: the
+// classifier declines, and a NaN block through the live detector path
+// produces no non-finite score anywhere.
+TEST (ShadowClassifier, NonFiniteFeaturesGiveNoScoreNotZero)
+{
+    juce::String error;
+    auto direct = makeEmbeddedCandidateClassifier (error);
+    ASSERT_NE (direct, nullptr) << error;
+    CandidateClassifier::RawInput in;
+    in.hz = 1000.0f; in.peakiness = 12.0f; in.nearMags.fill (0.1f);
+    ASSERT_TRUE (direct->score (in).has_value()) << "teeth: the same input is scored when finite";
+    in.riseRatio = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE (direct->score (in).has_value());
+
+    CandRecorder cands; Recorder events; Harness h;
+    h.controller.setCandidateSink (cands.sink());
+    h.controller.setEventSink (events.sink());
+    h.controller.setCandidateClassifier (makeShadowClassifier (ShadowVariant::Embedded));
+    h.controller.setDetectionActive (true);
+    warm (h);
+    auto nanHop = NoiseSource().hop();
+    for (std::size_t i = 0; i < nanHop.size(); i += 7)
+        nanHop[i] = std::numeric_limits<float>::quiet_NaN();
+    for (int i = 0; i < 20; ++i)
+    {
+        h.tap.write (nanHop.data(), nanHop.size());
+        h.clock.advance (kBlockMs);
+        h.controller.runOnce();
+    }
+    for (const auto& c : cands.recs)
+    {
+        if (c.hasNnScore) { EXPECT_TRUE (std::isfinite (c.nnScore)); }
+        else              { EXPECT_EQ (c.nnScore, 0.0f); }
+    }
+    for (const auto& e : events.events)
+    {
+        if (e.hasNnScore) { EXPECT_TRUE (std::isfinite (e.nnScore)); }
+        else              { EXPECT_EQ (e.nnScore, 0.0f); }
+    }
+}
+
+TEST (ShadowClassifier, EmbeddedModelParsesAndLoads)
+{
+    juce::String error;
+    auto c = makeEmbeddedCandidateClassifier (error);
+    ASSERT_NE (c, nullptr) << error;
+    EXPECT_TRUE (c->isLoaded());
+    EXPECT_EQ (c->modelName(), juce::String ("untrained-fixture-v1"));
+}

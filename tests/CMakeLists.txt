@@ -82,6 +82,7 @@ add_executable(HandsFreeTests
 target_link_libraries(HandsFreeTests PRIVATE
     GTest::gtest_main
     HandsFreeFonts
+    HandsFreeModels
     melatonin_blur
     az_host_settings
     az_rtneural_headers
@@ -207,6 +208,13 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-candidates.jsonl
                 --expect-notches 1 --expect-candidates 3)
+    # Lane C1b: a schema-3 log with shadow-classifier fields; the three older
+    # fixtures above double as the "schema 2 still reads the same" check.
+    add_test(NAME logstats_nn_shadow
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/session-nn-shadow.jsonl
+                --expect-notches 1 --expect-candidates 2 --expect-nn-scored 2
+                --expect-nn-model untrained-fixture-v1)
     # Lane L: the copilot's finding rules. Offline; the --ask tools are
     # covered only where the anthropic package happens to be installed.
     add_test(NAME copilot_findings
@@ -223,6 +231,8 @@ else()
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_superseded COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_superseded PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME logstats_nn_shadow COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(logstats_nn_shadow PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_candidates COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_candidates PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME copilot_findings COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")

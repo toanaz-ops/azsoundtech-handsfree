@@ -16,7 +16,7 @@ Spec C0 §6 gọi "C1 = soát + huấn luyện + lớp nạp" và "C2 = chạy b
 | Bước | Nội dung | Thay đổi nhìn thấy |
 |---|---|---|
 | **C1a** | RTNeural vào repo, lớp `CandidateClassifier`, cổng Q5 (test đếm cấp phát, so khớp tham chiếu, đầu vào hỏng). **App không tạo bộ phân loại.** | không; log không đổi |
-| **C1b** (= "C2" của spec C0) | Nối vào luồng detector ở chế độ bóng, model `synthetic-v0`, ghi `nn_score` vào log | log có thêm trường; không đổi âm thanh, không đổi quyết định notch |
+| **C1b** (= "C2" của spec C0) | Nối vào luồng detector ở chế độ bóng, model `untrained-fixture-v1`, ghi `nn_score` vào log | log có thêm trường; không đổi âm thanh, không đổi quyết định notch |
 | để sau | huấn luyện trên dữ liệu thật từ tester; đổi model giữa buổi diễn; cho mạng quyền quyết định (cần buổi nghe riêng) | |
 
 Model huấn luyện thật **không** nằm trong lane này: nó cần log `candidate_features` kèm verdict từ
@@ -134,14 +134,41 @@ Tham chiếu Python (`tools/nn/reference_forward.py`) chỉ dùng thư viện ch
   Không có ý kiến thì bỏ trường, không ghi 0.
 - `session_start`: `log_schema: 3`, `nn_model`, `nn_feature_set`. `session_end`: `nn_calls`,
   `nn_us_p99`, `nn_us_max`.
-- Model `synthetic-v0` nhúng vào binary (không thêm file vào bộ cài). Nhãn của nó là tổng hợp: score
-  **không** phải bằng chứng về nhạc thật, tên model và tài liệu phải nói rõ. `copilot.py` không đọc
-  trường này, nên con số không tới LLM.
+- Model `untrained-fixture-v1` nhúng vào binary (không thêm file vào bộ cài): chính bộ trọng số mẫu
+  **chưa huấn luyện** của C1a (Q17, bản sửa 09/11). Score của nó **vô nghĩa** về hú hay nhạc; nó chỉ
+  chứng minh đường suy luận chạy ổn trên máy tester. Tên model và tài liệu phải nói rõ. `copilot.py`
+  không đọc trường này, nên con số không tới LLM. Huấn luyện để tới khi có dữ liệu thật.
 - Test bắt buộc: chuỗi lệnh notch **giống hệt** khi có và không có bộ phân loại, kể cả khi trọng số bị
   ép cho score ~0 và ~1.
 - Ngân sách: p99 < 1 ms trong app chạy đủ 8 slot (đã ghi ở spec C0). Ước lượng chưa đo: cỡ 1 µs mỗi lần gọi.
 - Cùng PR: `docs/GIOI-THIEU.md`, `docs/KY-THUAT-CHONG-HU.md` (bảng log và hai chỗ nói lane C mở khi
   ≥ 300 verdict), spec vòng dữ liệu, release note, memory.
+
+### 5.1 Đã hiện thực (C1b, 09/11/2026) — chỗ thực tế khác bản thiết kế
+
+- Model nhúng bằng target `juce_add_binary_data` riêng `HandsFreeModels` (namespace
+  `HandsFreeModelsData`, header `HandsFreeModelsData.h`) vì `HandsFreeFonts` đã giữ `BinaryData`.
+  `src/app/EmbeddedClassifier.{h,cpp}` bọc việc nạp; file trọng số là
+  `models/candidate-classifier-untrained-v1.json` (cùng số với fixture C1a, chỉ khác `model`).
+- Điểm B chỉ chấm cho notch `Origin::Detector` (soundcheck không có `nn_score`), và **một lần chấm
+  mỗi lần đặt**: ở chế độ LINK một lần đặt phát hai event Set dùng chung một điểm.
+- Bộ đếm thời gian: mảng cố định 32 nhóm log2 của `getHighResolutionTicks()`, công bố sang atomic ở
+  cuối mỗi `runOnce()` có lần chấm mới và trong `stop()` sau khi join (spec ban đầu chỉ nói
+  "khi dừng"; công bố thêm ở cuối `runOnce` để `session_end` đóng tay khi luồng còn chạy không
+  đọc số cũ). `nn_us_p99` là cạnh trên của nhóm (chặn bởi max chính xác) của slot **xấu nhất**, không
+  phải p99 gộp.
+- `SessionLogger::setSessionEndExtraFields`: hook chung, trường chuẩn đi trước và hook không ghi
+  đè được. Khi model không nạp được: không controller nào có bộ phân loại, `session_start` vẫn
+  `log_schema: 3` nhưng **không có** `nn_model` / `nn_feature_set`, `session_end` không có `nn_*`.
+- Số đo (kịch bản `ShadowClassifier.*`, 414 block = 4,4 s đồng hồ mô phỏng): 19 lần chấm (3 ứng
+  viên + 16 lần đặt), p99 và max cỡ 1–7 µs mỗi lần trên máy dựng, tức ~4 lần chấm/giây mô phỏng.
+  Trong app thật điểm A bị chặn ≤ 1 lần/giây/controller, điểm B chỉ khi đặt notch.
+- Test: `ShadowClassifier.*` (5 test, trong `tests/test_notchcontroller.cpp`) và
+  `GuiWiring.NnScoreReachesBothLogLinesWithModelIdAndSchema3` /
+  `GuiWiring.SessionEndCarriesNnCallCountAndTiming`; ctest `logstats_nn_shadow`.
+  Test `NonFiniteFeaturesGiveNoScoreNotZero` không thể đưa NaN tới điểm B qua detector thật
+  (scorer không xác nhận trên NaN, cổng hữu hạn của C0 chặn điểm A), nên nó khẳng định
+  bộ phân loại từ chối và không có điểm nào không hữu hạn nào lọt qua khi cho tap ăn NaN.
 
 ## 6. Tài liệu và việc đi kèm C1a
 

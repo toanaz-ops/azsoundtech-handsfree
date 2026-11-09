@@ -117,6 +117,13 @@ def summarise(events: list[dict]) -> dict:
             slot = int(e.get("slot", 0))
             candidates_by_slot[slot] = candidates_by_slot.get(slot, 0) + 1
 
+    # Lane C1b (log_schema 3): lines carrying a shadow-classifier opinion. The
+    # field is absent (not 0) when there was none, and schema 2 logs have none.
+    nn_by_ev: dict[str, int] = {}
+    for e in events:
+        if "nn_score" in e:
+            nn_by_ev[e.get("ev", "?")] = nn_by_ev.get(e.get("ev", "?"), 0) + 1
+
     judged = [n for n in notches if n["verdict"] in ("good", "false")]
     false_count = sum(1 for n in judged if n["verdict"] == "false")
     return {
@@ -136,6 +143,13 @@ def summarise(events: list[dict]) -> dict:
         "candidates": sum(candidates_by_slot.values()),
         "candidates_by_slot": candidates_by_slot,
         "dropped_candidates": end.get("dropped_candidates"),
+        "nn_scored": sum(nn_by_ev.values()),
+        "nn_scored_by_ev": nn_by_ev,
+        "nn_model": header.get("nn_model"),
+        "nn_feature_set": header.get("nn_feature_set"),
+        "nn_calls": end.get("nn_calls"),
+        "nn_us_p99": end.get("nn_us_p99"),
+        "nn_us_max": end.get("nn_us_max"),
     }
 
 
@@ -183,6 +197,14 @@ def print_report(s: dict) -> None:
         print(f"candidate_features {s['candidates']}  ({per_slot})")
     if s["dropped_candidates"]:
         print(f"WARNING: {s['dropped_candidates']} candidate record(s) dropped (own queue)")
+    # Lane C1b: printed only for a schema-3 log that ran a classifier (or has
+    # any nn_score), so schema 1 / 2 logs read exactly as they always did.
+    if s["nn_model"] is not None or s["nn_scored"]:
+        by_ev = "  ".join(f"{k}: {v}" for k, v in sorted(s["nn_scored_by_ev"].items()))
+        print(f"nn model {s['nn_model'] or '?'}  feature_set {s['nn_feature_set'] if s['nn_feature_set'] is not None else '?'}"
+              f"  nn_score lines {s['nn_scored']}" + (f"  ({by_ev})" if by_ev else ""))
+        if s["nn_calls"] is not None:
+            print(f"nn calls {s['nn_calls']}  p99 {s['nn_us_p99']} us  max {s['nn_us_max']} us")
 
 
 def main(argv: list[str]) -> int:
@@ -196,6 +218,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect-soundcheck-replaced", type=int)
     ap.add_argument("--expect-superseded", type=int)
     ap.add_argument("--expect-candidates", type=int)
+    ap.add_argument("--expect-nn-scored", type=int)
+    ap.add_argument("--expect-nn-model", type=str)
     args = ap.parse_args(argv)
 
     events = load(args.file)
@@ -222,6 +246,10 @@ def main(argv: list[str]) -> int:
         failures.append(f"superseded {s['superseded']} != {args.expect_superseded}")
     if args.expect_candidates is not None and s["candidates"] != args.expect_candidates:
         failures.append(f"candidates {s['candidates']} != {args.expect_candidates}")
+    if args.expect_nn_scored is not None and s["nn_scored"] != args.expect_nn_scored:
+        failures.append(f"nn-scored {s['nn_scored']} != {args.expect_nn_scored}")
+    if args.expect_nn_model is not None and s["nn_model"] != args.expect_nn_model:
+        failures.append(f"nn-model {s['nn_model']} != {args.expect_nn_model}")
     if args.expect_recurrence_max is not None:
         recurrence_max = max((g["count"] for g in s["groups"]), default=0)
         if recurrence_max != args.expect_recurrence_max:

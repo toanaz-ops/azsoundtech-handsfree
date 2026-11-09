@@ -101,6 +101,14 @@ file mỗi lần mở app, không chứa audio; gửi file khi được hỏi. N
 log** (thư mục bị chặn), dòng trạng thái dưới đáy báo `LOG: khong ghi duoc ...` — app vẫn
 chạy bình thường, chỉ là không có file để gửi.
 
+**Mạng neuron nhỏ chạy ngầm (bản kế tiếp, lane C1b).** App có một mạng neuron rất nhỏ
+(417 tham số) chấm mỗi ứng viên hú bằng một con số 0–1, ghi vào log dưới tên `nn_score`.
+Hiện tại mô hình đó là **CHƯA HUẤN LUYỆN** (`untrained-fixture-v1`, trọng số ngẫu nhiên) nên
+con số **chưa có ý nghĩa gì**: nó chỉ chứng minh phần suy luận chạy ổn trên máy của bạn. Nó
+**không bao giờ** ảnh hưởng notch hay âm thanh (chạy ở chế độ "bóng": chỉ ghi, không
+quyết định), không hiện trên màn hình, và không có gì rời khỏi máy. Mô hình thật chỉ có
+sau khi đủ dữ liệu GOOD/FALSE từ các buổi chạy.
+
 ## Soundcheck đo chủ động — nút `ĐO` (1.3.0)
 
 Nút **`ĐO`** là nút riêng, **không phải** mode `SOUNDCHECK` 15 giây cũ (mode cũ

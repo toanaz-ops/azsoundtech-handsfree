@@ -20,6 +20,7 @@ target_include_directories(HandsFreeSnapshot PRIVATE
 # LookAndFeel and PNG writer come with juce_gui_basics/juce_graphics.
 target_link_libraries(HandsFreeSnapshot PRIVATE
     HandsFreeFonts
+    HandsFreeModels
     melatonin_blur
     az_host_settings
     az_rtneural_headers
