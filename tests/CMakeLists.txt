@@ -41,6 +41,7 @@ add_executable(HandsFreeTests
     synthetic_bootstrap_generator_test.cpp
     test_licenseviewmodel.cpp
     test_presetsfirstrun.cpp
+    test_dataroot.cpp
     test_sessionlogger.cpp
     test_soundchecksignal.cpp
     test_loopgainestimator.cpp

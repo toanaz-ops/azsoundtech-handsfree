@@ -1,4 +1,5 @@
 #include "app/PresetManager.h"
+#include "app/DataRoot.h"
 
 #include <algorithm>
 #include <cmath>
@@ -372,10 +373,7 @@ juce::File PresetManager::getPresetDirectory()
 {
     // userApplicationDataDirectory is %APPDATA% on Windows. Asked of JUCE so
     // the path stays right if the platform's convention does.
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-               .getChildFile ("AZSoundtech")
-               .getChildFile ("HandsFree")
-               .getChildFile ("presets");
+    return DataRoot::roamingRoot().getChildFile ("presets");
 }
 
 //==============================================================================

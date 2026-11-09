@@ -46,3 +46,4 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - Merge: `origin/main` là sự thật — PR + CI xanh (dán output) + verifier độc lập; không merge local vào main, `main` local chỉ `git pull --ff-only`. Quy ước đầy đủ: `docs/GIT-WORKFLOW.md`
 - Secret-scan hook: chạy tự động mỗi commit — không commit `.env`, `*.key`, token
 - Stack: C++ / JUCE / CMake / MSVC / ASIO — xem `docs/superpowers/specs/`
+- [Test profile](test-profile-2026-11-10.md) — `DEVCAVE_TEST_PROFILE` chuyển mọi đường dẫn dữ liệu người dùng sang profile cô lập (DataRoot); UI test chỉ chạy qua launcher.

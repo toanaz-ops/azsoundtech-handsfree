@@ -1,4 +1,5 @@
 #include <JuceHeader.h>
+#include "app/DataRoot.h"
 #include "app/MainComponent.h"
 #include "app/SessionLogger.h"
 #include "app/WindowFit.h"
@@ -20,12 +21,47 @@ public:
 
     bool moreThanOneInstanceAllowed() override
     {
-        return false;
+        // A test-profile instance must neither hand its launch to, nor be
+        // refused by, the owner's real running app. It is guarded by its own
+        // per-profile lock in initialise() instead.
+        return DataRoot::isTestProfile();
     }
 
     void initialise(const juce::String&) override
     {
-        mainWindow = std::make_unique<MainWindow>(getApplicationName());
+        const auto data = DataRoot::current();
+        if (! data.ok)
+        {
+            // Never fall back to real data: say why and exit.
+            juce::Logger::writeToLog(data.error);
+            juce::NativeMessageBox::showAsync(juce::MessageBoxOptions()
+                                                  .withIconType(juce::MessageBoxIconType::WarningIcon)
+                                                  .withTitle(getApplicationName())
+                                                  .withMessage(data.error),
+                                              juce::ModalCallbackFunction::create([] (int)
+                                              {
+                                                  juce::JUCEApplication::getInstance()->quit();
+                                              }));
+            setApplicationReturnValue(2);
+            return;
+        }
+
+        if (data.testProfile)
+        {
+            juce::Logger::writeToLog("TEST PROFILE active: " + data.profileDir.getFullPathName());
+            const auto key = juce::String::toHexString(data.profileDir.getFullPathName().hashCode64());
+            profileLock = std::make_unique<juce::InterProcessLock>("AZHandsFreeTestProfile_" + key);
+            if (! profileLock->enter(0))
+            {
+                juce::Logger::writeToLog("TEST PROFILE already in use by another instance; exiting.");
+                setApplicationReturnValue(3);
+                quit();
+                return;
+            }
+        }
+
+        mainWindow = std::make_unique<MainWindow>(
+            getApplicationName() + (data.testProfile ? " [TEST PROFILE]" : ""));
     }
 
     void shutdown() override
@@ -114,6 +150,7 @@ private:
     };
 
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<juce::InterProcessLock> profileLock;
 };
 
 START_JUCE_APPLICATION(HandsFreeApplication)

@@ -1,4 +1,5 @@
 #include "app/SessionLogger.h"
+#include "app/DataRoot.h"
 
 #include <algorithm>
 #include <utility>
@@ -16,10 +17,7 @@ SessionLogger::~SessionLogger()
 
 juce::File SessionLogger::defaultDirectory()
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-               .getChildFile ("AZSoundtech")
-               .getChildFile ("HandsFree")
-               .getChildFile ("logs");
+    return DataRoot::roamingRoot().getChildFile ("logs");
 }
 
 juce::var SessionLogger::makeEvent (const juce::String& name)

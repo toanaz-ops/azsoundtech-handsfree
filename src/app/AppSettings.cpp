@@ -1,4 +1,5 @@
 #include "app/AppSettings.h"
+#include "app/DataRoot.h"
 
 #include "app/SidecarRunner.h"
 
@@ -175,8 +176,5 @@ az::host::HostSettings appSettingsToHost (const AppSettings& settings)
 
 juce::File defaultAppSettingsFile()
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-        .getChildFile ("AZSoundtech")
-        .getChildFile ("HandsFree")
-        .getChildFile ("settings.json");
+    return DataRoot::roamingRoot().getChildFile ("settings.json");
 }
