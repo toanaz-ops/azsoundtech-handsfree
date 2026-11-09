@@ -214,6 +214,32 @@ mở ở chế độ Đơn giản; máy đã có preset từ bản trước mở
 
 Không đổi gì ở phần xử lý âm thanh: cùng một cấu hình thì mức ra y như 1.3.0.
 
+## Bảng COPILOT — nhận xét về buổi diễn (bản kế tiếp, lane L2a)
+
+Ở chế độ Geek, góc dưới bên trái, ngay dưới ACTIVE NOTCHES có bảng `COPILOT` với
+nút `PHÂN TÍCH`. Bấm nút, app đọc log của buổi đang chạy và liệt kê nhận xét bằng
+câu người, mỗi nhận xét kèm một lời khuyên:
+
+- một tần số hú đi hú lại;
+- notch đã chạm trần độ sâu;
+- nhiều notch chồng sát nhau;
+- notch dồn dập trong một phút;
+- tỉ lệ notch bị chấm FALSE cao;
+- nhiều notch chưa ai chấm;
+- log bị mất sự kiện.
+
+Bảng chỉ chạy khi bạn bấm, và không tự làm mới. Lời khuyên **không bao giờ** bảo
+tăng gain, tăng trần hay tắt chống hú. Bước này không dùng mạng, không cần khoá
+API và chưa có AI nào tham gia: nhận xét do luật cố định tính ra.
+
+Phần phân tích là một chương trình riêng (`copilot\HandsFreeCopilot\`, khoảng
+19 MB) do trình cài đặt chép vào cùng app. App gọi nó ở độ ưu tiên thấp và chờ
+tối đa 30 giây. Nếu nó thiếu, chậm hoặc bị phần mềm diệt virus chặn, bảng chỉ hiện
+một dòng trạng thái; âm thanh không liên quan. Cửa sổ quá thấp thì bảng tự ẩn và
+ACTIVE NOTCHES giữ nguyên như trước.
+
+Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.
+
 ## Freeware
 
 Theo quyết định chủ sở hữu **D-07** (23/08/2026): bản phát hành đầu là

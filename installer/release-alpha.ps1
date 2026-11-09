@@ -187,6 +187,16 @@ try {
         finally { Pop-Location }
     }
 
+    # ── 4b. copilot sidecar ─────────────────────────────────────────────
+    # handsfree.nsi cannot compile without build\copilot\HandsFreeCopilot, so
+    # this runs for -SkipTests too (that build still never reaches the drop
+    # folder). build_copilot.ps1 carries its own smoke gate and calls `exit 1`,
+    # so it runs as a child process: a failure surfaces as an exit code here and
+    # takes the same throw -> catch -> Restore-Version path as a red suite.
+    Step "Building the copilot sidecar (smoke gate inside)"
+    & pwsh -NoProfile -File (Join-Path $repo 'tools\copilot\build_copilot.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "copilot sidecar build or smoke gate failed (exit $LASTEXITCODE) -- nothing is published" }
+
     # ── 5. package ──────────────────────────────────────────────────────
     Step "Building the installer"
     & $makensis (Join-Path $repo 'installer\handsfree.nsi') | Select-Object -Last 2

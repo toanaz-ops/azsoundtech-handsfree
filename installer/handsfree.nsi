@@ -64,6 +64,10 @@ SetCompressor /SOLID lzma
 !define APP_EXE_SRC  "${BUILD_DIR}\HandsFree_artefacts\Release\${APP_EXE}"
 !define VCREDIST_SRC "vendor\vc_redist.x64.exe"
 !define PRESETS_SRC  "..\presets"
+; PyInstaller onedir bundle of the copilot sidecar, built by
+; tools\copilot\build_copilot.ps1 (release-alpha.ps1 runs it). Installed to
+; $INSTDIR\copilot\HandsFreeCopilot\, where the app looks for it.
+!define COPILOT_SRC_DIR "${BUILD_DIR}\copilot\HandsFreeCopilot"
 
 ; Fail at compile time, with a readable message, rather than emitting an
 ; installer that is quietly missing its payload.
@@ -74,6 +78,10 @@ SetCompressor /SOLID lzma
 !if /FileExists "${VCREDIST_SRC}"
 !else
   !error "Missing ${VCREDIST_SRC} -- run installer\fetch-deps.ps1 once to download it (~25 MB)."
+!endif
+!if /FileExists "${COPILOT_SRC_DIR}\HandsFreeCopilot.exe"
+!else
+  !error "Copilot sidecar not built. Expected: ${COPILOT_SRC_DIR}\HandsFreeCopilot.exe -- run tools\copilot\build_copilot.ps1 first."
 !endif
 !if /FileExists "${PRESETS_SRC}\Speech.json"
 !else
@@ -157,6 +165,12 @@ Section "Application" SEC_APP
 
   SetOutPath "$INSTDIR"
   File "${APP_EXE_SRC}"
+
+  ; Copilot sidecar: the whole PyInstaller onedir folder (exe + _internal\).
+  ; No /nonfatal -- a missing source directory must fail the compile.
+  SetOutPath "$INSTDIR\copilot\HandsFreeCopilot"
+  File /r "${COPILOT_SRC_DIR}\*.*"
+  SetOutPath "$INSTDIR"
 
   ; Shipped default presets. The app seeds these into %APPDATA% on first
   ; run (PresetFirstRun) and NEVER overwrites a file the user already has.
@@ -280,6 +294,11 @@ Section "Uninstall"
   app_deleted:
 
   Delete "$INSTDIR\Uninstall.exe"
+
+  ; Copilot sidecar bundle (many files under _internal\). The ONLY recursive
+  ; delete under $INSTDIR, and it names the copilot subdirectory explicitly --
+  ; never $INSTDIR itself.
+  RMDir /r "$INSTDIR\copilot"
 
   ; Shipped default presets copied in by the Application section. NOT the
   ; user's own presets/licence -- those live under %APPDATA% and are handled
