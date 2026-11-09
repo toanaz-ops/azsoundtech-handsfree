@@ -73,6 +73,11 @@ không có race.
    tap ring riêng của làn đó (8 slot × 2 làn = 16 ring) — ở mọi mode, kể cả
    Bypass — detector nghe đúng thứ người nghe được, kể cả khi notch đã cắt.
    Slot mono chỉ ghi làn 0; làn 1 của nó không có ai đọc.
+   Tap của mỗi làn lấy đúng tín hiệu sau notch CỦA LÀN ĐÓ (scratch riêng, đã kẹp
+   hữu hạn và ±1.0 như ngõ ra), không phải kênh ra chung: nhiều làn cùng một ngõ ra
+   vẫn cộng lại ở ngõ ra (đổi mức 0 dB), nhưng detector của slot này không còn
+   nghe tiếng hú của slot kia. Block lớn hơn scratch thì tap lấy kênh ra như cũ và
+   `getTapScratchFallbackCount()` tăng.
 4. Rút command queue (tối đa 256 lệnh, ngân sách dùng chung cho cả 8 queue)
    áp dụng `Set`/`Clear` vào NotchChain.
 5. Trả output cho driver. Toàn bộ bước trên: **zero allocation, zero lock**.

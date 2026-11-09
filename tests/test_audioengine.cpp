@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -2304,4 +2305,111 @@ TEST (AudioEngine, DiscardTapBacklogForOneSlotLeavesTheOthersAlone)
     std::array<float, 64> out {};
     EXPECT_EQ (engine.getTapBuffer (1, 0).read (out.data(), out.size()), 0u);
     EXPECT_EQ (engine.getTapBuffer (0, 0).read (out.data(), out.size()), out.size());
+}
+
+//==============================================================================
+// HW-174.Q2 -- each lane's detector tap carries THAT lane's post-notch signal,
+// not the shared output channel several lanes sum into.
+
+namespace
+{
+std::vector<float> drainTap (AudioEngine& engine, int slot, int lane = 0)
+{
+    auto& ring = engine.getTapBuffer (slot, lane);
+    std::vector<float> v (ring.getAvailableRead());
+    ring.read (v.data(), v.size());
+    return v;
+}
+
+float peakOf (const std::vector<float>& v)
+{
+    float m = 0.0f;
+    for (float x : v) m = std::max (m, std::abs (x));
+    return m;
+}
+
+void runTwoSlotsOneOutput (AudioEngine::Mode mode)
+{
+    AudioEngine engine;
+    engine.setMode (mode);
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+    routeMono (engine, 0, 0, 0);
+    routeMono (engine, 1, 1, 0);
+
+    RoutingDriver d (512, 2, 2);
+    d.sine (1, 1000.0, 48000.0, 0.5f);   // tone ONLY on slot 1's input
+    d (engine);
+
+    const auto tap0 = drainTap (engine, 0);
+    const auto tap1 = drainTap (engine, 1);
+
+    ASSERT_EQ (tap0.size(), (std::size_t) d.frames);
+    ASSERT_EQ (tap1.size(), (std::size_t) d.frames);
+    EXPECT_EQ (peakOf (tap0), 0.0f);                       // slot 0 hears silence
+    for (int i = 0; i < d.frames; ++i)
+    {
+        // slot 1 hears the tone; the output carries it exactly once.
+        EXPECT_FLOAT_EQ (tap1[(std::size_t) i], d.out[0][(std::size_t) i]) << i;
+        EXPECT_NEAR (tap1[(std::size_t) i], d.in[1][(std::size_t) i], 1e-3f) << i;
+    }
+    EXPECT_GT (peakOf (tap1), 0.4f);
+    EXPECT_EQ (engine.getTapScratchFallbackCount(), 0u);
+}
+} // namespace
+
+TEST (AudioEngineRouting, TwoSlotsOneOutputTapEachLaneSeparatelyInAuto)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    runTwoSlotsOneOutput (AudioEngine::Mode::Auto);
+}
+
+TEST (AudioEngineRouting, TwoSlotsOneOutputTapEachLaneSeparatelyInBypass)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    runTwoSlotsOneOutput (AudioEngine::Mode::Bypass);
+}
+
+TEST (AudioEngineRouting, SingleLanePerOutputTapIsBitIdenticalToOutputInAuto)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+    routeMono (engine, 0, 0, 1);
+
+    RoutingDriver d (512, 2, 2);
+    d.sine (0, 700.0, 48000.0, 0.5f);
+    d (engine);
+
+    const auto tap = drainTap (engine, 0);
+    ASSERT_EQ (tap.size(), (std::size_t) d.frames);
+    EXPECT_EQ (0, std::memcmp (tap.data(), d.out[1].data(), tap.size() * sizeof (float)));
+}
+
+TEST (AudioEngineRouting, BlockLargerThanTapScratchFallsBackToOutputAndCounts)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+
+    AudioEngine engine;
+    engine.setMode (AudioEngine::Mode::Auto);
+    SlotConfig off {};
+    engine.setSlotConfig (0, off);
+    routeMono (engine, 0, 0, 0);
+
+    const int frames = engine.getTapScratchCapacity() + 1;
+    RoutingDriver d (frames, 1, 1);
+    d.sine (0, 1000.0, 48000.0, 0.5f);
+    ASSERT_EQ (engine.getTapScratchFallbackCount(), 0u);
+    d (engine);
+
+    EXPECT_EQ (engine.getTapScratchFallbackCount(), 1u);
+    // Ring is smaller than the block: the pre-fix behaviour (tap `out`) means
+    // what fits is the leading part of the output, and the rest is a counted drop.
+    const auto tap = drainTap (engine, 0);
+    ASSERT_FALSE (tap.empty());
+    for (std::size_t i = 0; i < tap.size(); ++i)
+        ASSERT_EQ (tap[i], d.out[0][i]) << i;
 }
