@@ -248,5 +248,41 @@ class AskTools(unittest.TestCase):
         self.assertIn("error", json.loads(self.tools["notch_context"].call({"number": 99})))
 
 
+class CandidateFeatures(unittest.TestCase):
+    """Lane C0: candidate_features lines are counted, never mistaken for notches."""
+
+    CANDIDATES = ROOT / "tests" / "fixtures" / "session-candidates.jsonl"
+
+    def test_counted_total_and_per_slot(self):
+        s = logstats.summarise(logstats.load(self.CANDIDATES))
+        self.assertEqual(s["candidates"], 3)
+        self.assertEqual(s["candidates_by_slot"], {0: 2, 1: 1})
+        self.assertEqual(len(s["notches"]), 1)   # a candidate is not a notch
+
+    def test_old_log_summarises_as_before(self):
+        s = logstats.summarise(logstats.load(FIXTURE))
+        self.assertEqual(s["candidates"], 0)
+        self.assertEqual(s["candidates_by_slot"], {})
+        self.assertEqual(len(s["notches"]), 5)
+        self.assertEqual(s["retunes"], 2)
+
+    def test_report_line_only_when_present(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            logstats.print_report(logstats.summarise(logstats.load(self.CANDIDATES)))
+        self.assertIn("candidate_features 3", buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            logstats.print_report(logstats.summarise(logstats.load(FIXTURE)))
+        self.assertNotIn("candidate_features", buf.getvalue())
+
+    def test_findings_ignore_candidates(self):
+        events = logstats.load(self.CANDIDATES)
+        stripped = [e for e in events if e["ev"] != "candidate_features"]
+        self.assertEqual(copilot.findings(events), copilot.findings(stripped))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
