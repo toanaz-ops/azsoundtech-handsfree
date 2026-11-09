@@ -79,3 +79,10 @@ shots/
 
 # Python bytecode from tools/ and tests/ scripts
 __pycache__/
+
+# Lane C1c: REAL session logs and local pipeline outputs must never be committed
+# (the repo is public; a log carries device names and the venue spectrum).
+# Only tools/nn/data/synthetic-bootstrap-v0/ is committed.
+tools/nn/data/real/
+tools/nn/data/real-*/
+tools/nn/out/
