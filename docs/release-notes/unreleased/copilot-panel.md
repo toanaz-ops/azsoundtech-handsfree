@@ -38,5 +38,6 @@ involved.
 
 ## Known limits
 
-- The "ask AI" box is not in this build (lane L2b).
+- The "ask AI" row is a separate change, see `copilot-ask-ai.md` (lane L2b). `PHÂN TÍCH` itself
+  still uses no network and no key.
 - The panel does not refresh by itself.

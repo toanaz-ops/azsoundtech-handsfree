@@ -407,6 +407,44 @@ int main (int argc, char** argv)
         if (! shoot (app, outDir.getChildFile ("console-copilot-running.png")))
             return 1;
 
+        // LANE L2b: the "ask the AI" outcomes and the setup overlay, all STAGED.
+        // No sidecar is started, no key store or settings file is touched (the
+        // key store is pointed at a directory that does not exist, and the
+        // overlay is shown through a seam that skips reading it). The answer
+        // below is made up for the picture; it is not a model's output.
+        CopilotAnswer shownAnswer;
+        shownAnswer.kind = CopilotAnswer::Kind::answer;
+        shownAnswer.text = u ("Trong bu\xe1\xbb\x95i n\xc3\xa0y app \xc4\x91\xc3\xa3 \xc4\x91\xe1\xba\xb7t 5 notch, hai trong s\xe1\xbb\x91 \xc4\x91\xc3\xb3 c\xc3\xb9ng n\xe1\xba\xb1m \xe1\xbb\x9f 1008 Hz tr\xc3\xaan k\xc3\xaanh 01 l\xc3\xa0n R. C\xc3\xb9ng m\xe1\xbb\x99t t\xe1\xba\xa7n s\xe1\xbb\x91 b\xe1\xbb\x8b \xc4\x91\xe1\xba\xb7t notch nhi\xe1\xbb\x81u l\xe1\xba\xa7n ngh\xc4\xa9" "a l\xc3\xa0 nguy\xc3\xaan nh\xc3\xa2n v\xe1\xba\xabn c\xc3\xb2n, ch\xc6\xb0" "a ph\xe1\xba\xa3i do ch\xe1\xbb\x89nh sai. Notch \xc4\x91\xe1\xba\xa7u ti\xc3\xaan \xc4\x91\xc3\xa3 s\xc3\xa2u t\xe1\xbb\x9bi m\xe1\xbb\xa9" "c t\xe1\xbb\x91i \xc4\x91" "a cho ph\xc3\xa9p (-18 dB) n\xc3\xaan app kh\xc3\xb4ng th\xe1\xbb\x83 \xc4\x91\xc3\xa0o s\xc3\xa2u th\xc3\xaam. H\xc3\xa3y ki\xe1\xbb\x83m tra h\xc6\xb0\xe1\xbb\x9bng mic so v\xe1\xbb\x9bi loa monitor, ho\xe1\xba\xb7" "c xoay loa v\xc3\xa0i \xc4\x91\xe1\xbb\x99 r\xe1\xbb\x93i nghe l\xe1\xba\xa1i \xe1\xbb\x9f \xc3\xa2m l\xc6\xb0\xe1\xbb\xa3ng th\xe1\xba\xa5p. M\xe1\xbb\x99t notch b\xe1\xbb\x8b ch\xe1\xba\xa5m FALSE \xe1\xbb\x9f 3150 Hz c\xc3\xb3 th\xe1\xbb\x83 l\xc3\xa0 ti\xe1\xba\xbfng nh\xe1\xba\xa1" "c th\xe1\xba\xadt, n\xc3\xaan ch\xc6\xb0" "a c\xe1\xba\xa7n x\xe1\xbb\xad l\xc3\xbd.");
+        shownAnswer.provider = "anthropic";
+        shownAnswer.model = "claude-opus-5-5";
+        shownAnswer.inputTokens = 2140;
+        shownAnswer.outputTokens = 318;
+        copilot.setAnswer (shownAnswer);
+        app.resized();
+        std::cout << "console-copilot-answer: panel STAGED with a made-up answer (no model was asked)" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-answer.png")))
+            return 1;
+
+        copilot.setState (gui::CopilotPanel::State::blocked);
+        std::cout << "console-copilot-blocked: panel STAGED to the blocked state" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-blocked.png")))
+            return 1;
+
+        app.setCopilotCredentialDirectoryForTest (
+            juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("handsfree-snapshot-no-credentials"));
+        gui::CopilotSetupValues staged;
+        staged.provider = "anthropic";
+        staged.model = "claude-opus-5-5";
+        staged.consent = true;
+        auto& setup = app.getCopilotSetupPanelForTest();
+        setup.setValues (staged);
+        setup.setKeyStatus (true);   // staged: the key field itself stays EMPTY
+        app.showCopilotSetupForTest();
+        std::cout << "console-copilot-setup: overlay STAGED (key saved, consent ticked, key field empty)" << std::endl;
+        if (! shoot (app, outDir.getChildFile ("console-copilot-setup.png")))
+            return 1;
+        app.getCopilotSetupPanelForTest().onClose();
+
         copilot.setState (gui::CopilotPanel::State::idle);
     }
 

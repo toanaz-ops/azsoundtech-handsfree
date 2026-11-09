@@ -391,7 +391,46 @@ MainComponent::MainComponent()
     // The notch list is a FIXED bottom strip -- always visible.
     addAndMakeVisible (notchListPanel_);
     copilotPanel_.onAnalyse = [this] { analyseWithCopilot(); };
+    copilotPanel_.onOpenSetup = [this] { openCopilotSetup(); };
+    copilotPanel_.onAsk = [this] (juce::String question) { askCopilot (std::move (question)); };
+    copilotPanel_.onCancelAsk = [this]
+    {
+        if (copilotRunner_ != nullptr)
+            copilotRunner_->cancel();
+        copilotPanel_.setState (gui::CopilotPanel::State::cancelled);
+    };
     addChildComponent (copilotPanel_);   // shown by resized() when the column has room
+
+    // Lane L2b: the setup overlay. Hidden until CAI AI is pressed; it covers the
+    // left column only, so the mode rail on the right is never under it.
+    copilotSetupPanel_.setKeyStoreSupported (CopilotCredentialStore::isSupported());
+    copilotSetupPanel_.onClose = [this] { closeCopilotSetup(); };
+    copilotSetupPanel_.onValuesChanged = [this] (gui::CopilotSetupValues v)
+    {
+        settings_.copilotProvider = v.provider;
+        settings_.copilotModel    = v.model;
+        settings_.copilotBaseUrl  = v.baseUrl;
+        settings_.copilotConsent  = v.consent;
+        saveSettings();   // the same path the UI mode is saved through
+    };
+    copilotSetupPanel_.onProviderChanged = [this] (juce::String provider)
+    {
+        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider));
+    };
+    copilotSetupPanel_.onStoreKey = [this] (juce::String provider, juce::String key)
+    {
+        const bool stored = credentialStore().storeKey (provider, key);
+        key = {};
+        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider),
+                                         stored ? juce::String()
+                                                : juce::String::fromUTF8 ("Kh\xc3\xb4ng c\xe1\xba\xa5t \xc4\x91\xc6\xb0\xe1\xbb\xa3" "c kho\xc3\xa1."));
+    };
+    copilotSetupPanel_.onDeleteKey = [this] (juce::String provider)
+    {
+        credentialStore().deleteKey (provider);
+        copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (provider));
+    };
+    addChildComponent (copilotSetupPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
 
     // Lane D: a FALSE verdict is written to the log BEFORE the clear it
@@ -1274,8 +1313,132 @@ void MainComponent::setCopilotBackendForTest (std::unique_ptr<CopilotBackend> ba
     copilotRunner_ = std::make_unique<SidecarRunner> (std::move (backend), std::move (poster));
 }
 
+CopilotCredentialStore& MainComponent::credentialStore()
+{
+    if (copilotCredentials_ == nullptr)
+        copilotCredentials_ = copilotCredentialDirectory_ == juce::File()
+                                  ? std::make_unique<CopilotCredentialStore>()
+                                  : std::make_unique<CopilotCredentialStore> (copilotCredentialDirectory_);
+    return *copilotCredentials_;
+}
+
+void MainComponent::openCopilotSetup()
+{
+    if (uiMode_ != UiMode::Geek)
+        return;
+
+    gui::CopilotSetupValues v;
+    v.provider = settings_.copilotProvider;
+    v.model    = settings_.copilotModel;
+    v.baseUrl  = settings_.copilotBaseUrl;
+    v.consent  = settings_.copilotConsent;
+    copilotSetupPanel_.setValues (v);
+    copilotSetupPanel_.setKeyStatus (credentialStore().hasKey (v.provider));
+    if (! CopilotCredentialStore::isSupported())
+        copilotSetupPanel_.setKeyStoreSupported (false);
+
+    copilotSetupOpen_ = true;
+    layoutCopilotSetup();
+}
+
+void MainComponent::closeCopilotSetup()
+{
+    copilotSetupOpen_ = false;
+    layoutCopilotSetup();
+}
+
+// Shows the overlay over the left column when it is open, the console is in
+// Geek and the column is tall enough to hold every row; hides it otherwise.
+void MainComponent::layoutCopilotSetup()
+{
+    const bool fits = uiMode_ == UiMode::Geek && ! leftColumnBounds_.isEmpty()
+                      && leftColumnBounds_.getHeight()
+                             >= copilotSetupPanel_.preferredHeightForWidth (leftColumnBounds_.getWidth());
+
+    if (copilotSetupOpen_ && fits)
+    {
+        copilotSetupPanel_.setBounds (leftColumnBounds_);
+        copilotSetupPanel_.resized();
+        copilotSetupPanel_.setVisible (true);
+        copilotSetupPanel_.toFront (false);
+    }
+    else
+    {
+        copilotSetupPanel_.setVisible (false);
+    }
+}
+
+void MainComponent::askCopilot (juce::String question)
+{
+    using P = gui::CopilotPanel::State;
+
+    // One process at a time: while the findings run or a question is in flight,
+    // asking is ignored (the panel's own buttons are disabled too).
+    if (copilotRunner_ != nullptr && copilotRunner_->isBusy())
+    {
+        showCopilotBusy();
+        return;
+    }
+
+    const auto logFile = currentSessionLogFile();
+    if (logFile == juce::File() || ! logFile.existsAsFile())
+    {
+        copilotPanel_.setState (P::noLog);
+        return;
+    }
+
+    const auto& s = settings_;
+    const bool knownProvider = s.copilotProvider == "anthropic" || s.copilotProvider == "openai_compatible";
+    const bool usable = knownProvider && s.copilotConsent && isValidCopilotModel (s.copilotModel)
+                        && (s.copilotProvider == "anthropic"
+                                ? credentialStore().hasKey ("anthropic")
+                                : isValidCopilotBaseUrl (s.copilotBaseUrl));
+    if (! usable)
+    {
+        copilotPanel_.setState (P::needsSetup);
+        return;
+    }
+
+    if (copilotRunner_ == nullptr)
+        copilotRunner_ = std::make_unique<SidecarRunner>();
+
+    CopilotRequest request;
+    request.executable = defaultCopilotExecutable();
+    request.sessionLog = logFile;
+    request.timeoutMs  = 120000;
+    request.question   = std::move (question);
+    request.provider   = s.copilotProvider;
+    request.model      = s.copilotModel;
+    request.baseUrl    = s.copilotProvider == "openai_compatible" ? s.copilotBaseUrl : juce::String();
+
+    juce::Component::SafePointer<MainComponent> self (this);
+    if (copilotRunner_->request (std::move (request), [self] (CopilotRunResult result)
+        {
+            if (self != nullptr)
+                gui::applyCopilotAskResult (self->copilotPanel_, result);
+        }))
+        copilotPanel_.setState (P::asking);
+    else
+        showCopilotBusy();
+}
+
+void MainComponent::showCopilotBusy()
+{
+    using P = gui::CopilotPanel::State;
+    // A run that is genuinely in flight already says so; only a click refused
+    // while a cancelled run unwinds needs the one-line notice.
+    if (copilotPanel_.state() != P::running && copilotPanel_.state() != P::asking)
+        copilotPanel_.setState (P::busy);
+}
+
 void MainComponent::analyseWithCopilot()
 {
+    if (copilotRunner_ != nullptr && copilotRunner_->isBusy())
+    {
+        showCopilotBusy();
+        return;
+    }
+
     const auto logFile = currentSessionLogFile();
     if (logFile == juce::File() || ! logFile.existsAsFile())
     {
@@ -1292,13 +1455,15 @@ void MainComponent::analyseWithCopilot()
     request.sessionLog = logFile;
     request.timeoutMs  = 30000;
 
-    // False means a run is already in flight: leave the panel as it is.
+    // False means a run is still in flight or unwinding.
     if (copilotRunner_->request (std::move (request), [self] (CopilotRunResult result)
         {
             if (self != nullptr)
                 gui::applyCopilotResult (self->copilotPanel_, result);
         }))
         copilotPanel_.setState (gui::CopilotPanel::State::running);
+    else
+        showCopilotBusy();
 }
 
 juce::File MainComponent::sessionLogFileForTest() const
@@ -1667,6 +1832,8 @@ void MainComponent::setUiMode (const UiMode mode)
     const bool dumb = mode == UiMode::Dumb;
     dumbView_.setVisible (dumb);
     simpleModeButton_.setVisible (! dumb);
+    if (dumb)
+        closeCopilotSetup();
 
     if (dumb)
     {
@@ -3312,6 +3479,7 @@ void MainComponent::resized()
 
     const int notchWidth = juce::roundToInt ((float) inner.getWidth() * kNotchColumnFraction);
     auto leftColumn = inner.removeFromLeft (notchWidth);
+    leftColumnBounds_ = leftColumn;   // the setup overlay covers exactly this
 
     // The copilot panel takes the lower 50% of the left column. The notch list
     // is the answer the floor exists for and keeps at least its caption, header
@@ -3375,4 +3543,6 @@ void MainComponent::resized()
                                         slotPanel_.getPreferredWidth()),
                             slotPanel_.getPreferredHeight());
     }
+
+    layoutCopilotSetup();
 }

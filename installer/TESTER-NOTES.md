@@ -21,6 +21,14 @@ nhờ test bản cũ.
 > **1.2.0 cũng CÓ đụng đường audio**: độ sâu của một notch thay đổi theo thời
 > gian — xem mục "Mới trong 1.2.0".
 
+## Chưa đóng gói: COPILOT "hỏi AI" (lane L2b)
+
+Không đụng đường audio. Ghi chú đầy đủ: `docs/release-notes/unreleased/copilot-ask-ai.md`.
+Hai điều cần biết trước khi test: (1) **chưa có lượt gọi nhà cung cấp thật nào được kiểm**
+(chưa có khoá) — độ trễ, số token và lỗi riêng của từng nhà cung cấp là chưa biết; (2) khoá API
+được cất bằng DPAPI của Windows: chặn người dùng Windows khác và việc đọc ổ đĩa rời, **không**
+chặn phần mềm độc hại chạy dưới chính tài khoản của bạn — đừng dùng khoá có hạn mức lớn để thử. Giới hạn đã biết: vùng nhớ do app sở hữu được xoá sau khi mã hoá DPAPI, nhưng các bản sao khoá nằm thoáng qua trong `juce::String` / ô nhập `juce::TextEditor` được giải phóng mà không bị ghi đè số 0.
+
 ## Biết trước để không tưởng app hỏng
 
 1. **SmartScreen chặn lần đầu** — file chưa ký số. "More info" → "Run

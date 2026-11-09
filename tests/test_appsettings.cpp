@@ -117,6 +117,12 @@ TEST (AppSettings, CopilotInvalidValuesFallBackToDefaults)
     EXPECT_FALSE (s.copilotConsent);
 }
 
+TEST (AppSettings, CopilotDashLeadingModelFallsBackToDefault)
+{
+    const auto s = appSettingsFromHost (hostFromJson (R"({"copilot_model":"-abc"})"));
+    EXPECT_EQ (s.copilotModel, "claude-opus-5-5");
+}
+
 TEST (AppSettings, CopilotSettingsNeverCarryAKeyField)
 {
     const auto host = appSettingsToHost ({});

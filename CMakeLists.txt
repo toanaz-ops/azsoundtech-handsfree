@@ -138,6 +138,8 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/gui/ModeRail.h
     ${CMAKE_SOURCE_DIR}/src/gui/CopilotPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/CopilotPanel.h
+    ${CMAKE_SOURCE_DIR}/src/gui/CopilotSetupPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/gui/CopilotSetupPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/gui/NotchListPanel.h
     ${CMAKE_SOURCE_DIR}/src/gui/StatusBadge.cpp

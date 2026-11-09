@@ -14,7 +14,7 @@ juce::String utf8 (const char* s) { return juce::String::fromUTF8 (s); }
 TEST (CopilotAnswer, FullAnswer)
 {
     const auto a = parseCopilotAnswer (utf8 (
-        R"x({"answer": "Hạ gain kênh 2", "blocked": false, "provider": "openai_compatible", "model": "llama3",
+        R"x({"answer": "H\u1ea1 gain k\u00eanh 2", "blocked": false, "provider": "openai_compatible", "model": "llama3",
             "usage": {"input_tokens": 123, "output_tokens": 45},
             "findings": [{"code": "c1", "severity": "alert", "title": "t", "advice": "a", "evidence": {}},
                          {"code": "c2", "severity": "weird", "title": "t2", "advice": "a2"},

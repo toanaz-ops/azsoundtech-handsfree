@@ -105,11 +105,15 @@ Phần tử thiếu trường thì bỏ phần tử đó, không bỏ cả danh 
   nói về notch nên nằm cạnh danh sách notch; vùng này hiện trống. `NotchListPanel` giữ
   tối thiểu chỗ cho tiêu đề + 6 dòng; phần còn lại cho `CopilotPanel`. Cửa sổ thấp không
   đủ chỗ thì `CopilotPanel` ẩn, danh sách notch giữ nguyên như hôm nay.
-- Thành phần: tiêu đề `COPILOT`, nút `PHÂN TÍCH`, dòng trạng thái, danh sách cuộn. Mỗi
+- Thành phần: tiêu đề `COPILOT`, nút `PHÂN TÍCH` và `CÀI AI`, dòng trạng thái, danh sách cuộn,
+  và (L2b) một hàng hỏi ở đáy: ô nhập một dòng + nút `HỎI` (thành `HUỶ` khi đang hỏi). Mỗi
   phát hiện: chấm màu theo mức (`danger` / `warn` / `dim` của `az::theme`), tiêu đề, lời
   khuyên. Không viết `toUpperCase()` lên chữ Việt (bài học lane U).
 - Trạng thái của bảng: `idle` (chưa bấm) · `running` · `findings(n)` · `clean` (0 phát
-  hiện) · `noLog` · `sidecarMissing` · `timedOut` · `failed`. Mỗi trạng thái một câu
+  hiện) · `noLog` · `sidecarMissing` · `timedOut` · `failed` · và, L2b, `asking` ·
+  `answer` · `blocked` · `askFailed` · `needsSetup` · `cancelled`. Khu cuộn hiện HOẶC các dòng
+  phát hiện HOẶC một khối chữ (câu trả lời kèm dòng chân `model · N in / M out`, câu chặn cố
+  định, hoặc lý do lỗi). Mỗi trạng thái một câu
   tiếng Việt; không trạng thái nào mở hộp thoại.
 - Không tự chạy lại theo giờ. Chỉ chạy khi bấm.
 - Dumb mode không đổi: `DumbView` vẫn che toàn bộ.
@@ -134,7 +138,15 @@ Phần tử thiếu trường thì bỏ phần tử đó, không bỏ cả danh 
 
 File nguồn mới phải vào `HANDSFREE_CORE_SOURCES`, nếu không app, test và snapshot đều thiếu.
 
-## 7. L2b — "hỏi AI" (thiết kế, chưa làm)
+## 7. L2b — "hỏi AI" (đã làm ở L2b)
+
+Phía giao diện (bước 2b) đã cài: hàng hỏi + khối câu trả lời ở `gui::CopilotPanel`; lớp phủ
+`gui::CopilotSetupPanel` (Q12) phủ đúng cột trái (danh sách notch + bảng COPILOT) khi bấm
+`CÀI AI`, không phủ cột phải nên nút BYPASS vẫn bấm được; ẩn khi rời Geek hoặc khi cột quá thấp
+để chứa đủ các hàng. `MainComponent` giữ kho khoá DPAPI, nối `onValuesChanged` vào cùng đường
+lưu settings với chế độ UI (`AppSettings`: nhà cung cấp, model, địa chỉ, đồng ý — không bao giờ
+khoá), và chạy câu hỏi trên cùng `SidecarRunner` (một lượt một lúc, hạn 120 s, `HUỶ` gọi
+`cancel()`). Chưa có lượt gọi nhà cung cấp thật nào được kiểm.
 
 - **Hai bộ nối, không trộn:** `anthropic` dùng `tool_runner` của SDK chính thức như L1;
   `openai_compatible` là vòng tool viết tay qua HTTP với `urllib` (địa chỉ + model + khoá),
@@ -179,7 +191,7 @@ Tài liệu đi cùng: `docs/GIOI-THIEU.md` (hành vi nhìn thấy được), `i
 |---|---|
 | `<file>` | File log. Bắt buộc, trừ khi dùng `--store-key` / `--delete-key` / `--has-key`. |
 | `--json` | Không `--ask`: danh sách findings (không đổi). Có `--ask`: MỘT object JSON (xem dưới). |
-| `--ask QUESTION` | Hỏi mô hình. |
+| `--ask QUESTION` | Hỏi mô hình. Sidecar nhận cả dạng cách (`--ask Q`) lẫn dạng `=` (`--ask=Q`); app luôn gửi dạng `=`, MỘT phần tử argv cho mỗi cờ có giá trị, để câu hỏi bắt đầu bằng `-` (vd "-3 dB có đủ không") không bị argparse đọc thành cờ. Áp tương tự cho `--provider`, `--model`, `--base-url`, `--timeout`. |
 | `--provider {anthropic,openai_compatible}` | Mặc định `anthropic`. |
 | `--model ID` | Mặc định `claude-opus-5-5` cho `anthropic`; **bắt buộc** cho `openai_compatible`. |
 | `--base-url URL` | **Bắt buộc** cho `openai_compatible` (chỉ `http://` hoặc `https://`; ví dụ `https://api.openai.com/v1`, `http://localhost:11434/v1`); bị từ chối với `anthropic`. Sidecar gọi `POST {base-url}/chat/completions`. |
@@ -236,6 +248,7 @@ JSON như cũ.)
 - Bộ lọc an toàn chuẩn hoá (NFKC, bỏ ký tự định dạng, casefold, bỏ dấu, đ→d) rồi chặn động từ
   "tăng" + đối tượng mức (gain, âm lượng, fader, ...) trong cửa sổ 4 từ, và "+N dB"; lời phủ định
   ngay trước động từ (đừng, không (nên), do not, never, ...) thì cho qua. Nghi ngờ thì chặn.
+- Giới hạn đã biết: vùng nhớ do app sở hữu được xoá sau khi mã hoá DPAPI, nhưng các bản sao khoá nằm thoáng qua trong `juce::String` / `juce::TextEditor` được giải phóng mà không bị ghi đè số 0.
 
 ### Kho khoá
 

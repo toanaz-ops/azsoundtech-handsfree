@@ -45,6 +45,8 @@ bool isValidCopilotModel (const juce::String& model)
 {
     if (model.isEmpty() || model.length() > 128)
         return false;
+    if (! juce::CharacterFunctions::isLetterOrDigit (model[0]) || model[0] >= 0x80)
+        return false;
     return model.containsOnly ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/-");
 }
 
@@ -91,24 +93,17 @@ juce::StringArray buildCopilotArguments (const CopilotRequest& request)
     else if (request.baseUrl.isNotEmpty())
         return {};
 
-    args.add ("--ask");
-    args.add (question);
+    // Value-carrying flags are ONE argv element in "=" form: a question that
+    // starts with "-" (e.g. "-3 dB ...") must never be read as a flag.
+    args.add ("--ask=" + question);
     args.add ("--json");
     args.add ("--low-priority");
-    args.add ("--provider");
-    args.add (request.provider);
+    args.add ("--provider=" + request.provider);
     if (request.model.isNotEmpty())
-    {
-        args.add ("--model");
-        args.add (request.model);
-    }
+        args.add ("--model=" + request.model);
     if (openai)
-    {
-        args.add ("--base-url");
-        args.add (request.baseUrl);
-    }
-    args.add ("--timeout");
-    args.add ("100");
+        args.add ("--base-url=" + request.baseUrl);
+    args.add ("--timeout=100");
     return args;
 }
 

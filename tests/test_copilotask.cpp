@@ -61,6 +61,11 @@ TEST (CopilotModel, Validator)
     EXPECT_FALSE (isValidCopilotModel ("a\"b"));
     EXPECT_FALSE (isValidCopilotModel ("a;b"));
     EXPECT_FALSE (isValidCopilotModel (utf8 ("m\xc3\xb4 h\xc3\xacnh")));
+    EXPECT_FALSE (isValidCopilotModel ("-abc"));
+    EXPECT_FALSE (isValidCopilotModel ("--json"));
+    EXPECT_FALSE (isValidCopilotModel (".abc"));
+    EXPECT_FALSE (isValidCopilotModel ("/abc"));
+    EXPECT_TRUE (isValidCopilotModel ("9abc"));
 }
 
 TEST (CopilotBaseUrl, Validator)
@@ -101,14 +106,29 @@ TEST (CopilotArguments, AnthropicAsk)
     r.question = "  why \"ring\"?  ";
     const auto a = buildCopilotArguments (r);
     const juce::StringArray expected { r.executable.getFullPathName(), r.sessionLog.getFullPathName(),
-                                       "--ask", "why 'ring'?", "--json", "--low-priority",
-                                       "--provider", "anthropic", "--timeout", "100" };
+                                       "--ask=why 'ring'?", "--json", "--low-priority",
+                                       "--provider=anthropic", "--timeout=100" };
     EXPECT_EQ (a, expected);
 
     r.model = "claude-opus-5-5";
     const auto b = buildCopilotArguments (r);
     EXPECT_EQ (b.joinIntoString ("|").fromFirstOccurrenceOf ("--provider", true, false),
-               "--provider|anthropic|--model|claude-opus-5-5|--timeout|100");
+               "--provider=anthropic|--model=claude-opus-5-5|--timeout=100");
+}
+
+TEST (CopilotArguments, DashLeadingQuestionsStayOneElement)
+{
+    const char* questions[] = { "-h", "--json", "-3 dB c\xc3\xb3 \xc4\x91\xe1\xbb\xa7 kh\xc3\xb4ng" };
+    for (const char* raw : questions)
+    {
+        auto r = askRequest();
+        r.question = utf8 (raw);
+        const auto a = buildCopilotArguments (r);
+        ASSERT_EQ (a.size(), 7) << raw;
+        EXPECT_EQ (a[2], "--ask=" + utf8 (raw));
+        for (int i = 2; i < a.size(); ++i)
+            EXPECT_TRUE (a[i].startsWith ("--")) << a[i]; // no bare value element
+    }
 }
 
 TEST (CopilotArguments, OpenAiCompatibleAsk)
@@ -119,7 +139,7 @@ TEST (CopilotArguments, OpenAiCompatibleAsk)
     r.baseUrl = "http://localhost:11434/v1";
     const auto a = buildCopilotArguments (r);
     EXPECT_EQ (a.joinIntoString ("|").fromFirstOccurrenceOf ("--provider", true, false),
-               "--provider|openai_compatible|--model|llama3|--base-url|http://localhost:11434/v1|--timeout|100");
+               "--provider=openai_compatible|--model=llama3|--base-url=http://localhost:11434/v1|--timeout=100");
 }
 
 TEST (CopilotArguments, EveryInvalidAskIsEmpty)
