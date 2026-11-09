@@ -300,7 +300,7 @@ void NotchController::setWidth (int lanes)
         const std::lock_guard<std::mutex> lock (modelMutex_);
         for (int c = newWidth; c < kChannels; ++c)
             for (int i = 0; i < kSlots; ++i)
-                pushClearLocked (c, i, ClearReason::WidthChange);
+                pushClearLocked (c, i, ClearReason::WidthChange, Author::Human);
     }
     // No widening branch here (review round 1): resetting only the Detector
     // leaves CandidateScorer's rise history and baseline EMA holding
@@ -395,11 +395,21 @@ bool NotchController::setNotch (int channel, int index,
                                 double frequency, double Q, double depthDB,
                                 Origin origin)
 {
-    return setNotchImpl (channel, index, frequency, Q, depthDB, origin, nullptr);
+    // The public entry points are the message thread's: a person (or a file a
+    // person loaded) is asking. The detector goes through setNotchImpl itself.
+    return setNotchImpl (channel, index, frequency, Q, depthDB, origin, Author::Human, nullptr);
+}
+
+bool NotchController::setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
+                                               double depthDB, Author author)
+{
+    // TEST ONLY. Detector origin so the ladder treats it like a detector notch;
+    // the author is the one thing that differs.
+    return setNotchImpl (channel, index, frequency, Q, depthDB, Origin::Detector, author, nullptr);
 }
 
 bool NotchController::setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
-                                    Origin origin, const NotchEvent* scored)
+                                    Origin origin, Author author, const NotchEvent* scored)
 {
     // width gates the policy surface; internal fan-out loops never exceed it.
     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
@@ -451,6 +461,14 @@ bool NotchController::setNotchImpl (int channel, int index, double frequency, do
         n.ceilingDb        = (origin == Origin::Detector)
                                  ? std::numeric_limits<double>::quiet_NaN()
                                  : depth;
+        // Lane L3a: a notch is a NEW notch every time this runs, including a
+        // re-place after a clear and a replace of a live slot (the ladder
+        // restarts too), so it gets a new identity. Attribution only.
+        n.placedBy         = author;
+        n.lastChangedBy    = author;
+        n.nid              = nextNid_++;
+        if (nextNid_ == 0)
+            nextNid_ = 1;   // 0 means "no notch"
         outbox_.push_back (cmd);
 
         NotchEvent ev = scored != nullptr ? *scored : NotchEvent {};
@@ -458,6 +476,8 @@ bool NotchController::setNotchImpl (int channel, int index, double frequency, do
         ev.slot = slotId_; ev.lane = channel; ev.index = index;
         ev.hz = (float) frequency; ev.q = (float) Q; ev.depthDb = (float) depth;
         ev.origin = origin;
+        ev.author = author;
+        ev.nid    = n.nid;
         pushEventLocked (std::move (ev));
     }
     return true;
@@ -475,7 +495,7 @@ void NotchController::pushEventLocked (NotchEvent&& event)
     eventOutbox_.push_back (std::move (event));
 }
 
-void NotchController::pushClearLocked (int channel, int index, ClearReason reason)
+void NotchController::pushClearLocked (int channel, int index, ClearReason reason, Author author)
 {
     auto& n = model_[slotOf (channel, index)];
     if (! n.active)
@@ -490,12 +510,14 @@ void NotchController::pushClearLocked (int channel, int index, ClearReason reaso
     ev.slot = slotId_; ev.lane = channel; ev.index = index;
     ev.hz = (float) n.frequency; ev.q = (float) n.Q; ev.depthDb = (float) n.depthDB;
     ev.origin = n.origin; ev.reason = reason;
+    ev.author = author;
+    ev.nid    = n.nid;
     ev.ageMs = liveMs_ - n.lockedAtMs;
     pushEventLocked (std::move (ev));
 }
 
 bool NotchController::pushRetuneLocked (int channel, int index, double newDepthDb,
-                                        RetuneReason reason)
+                                        RetuneReason reason, Author author)
 {
     // modelMutex_ HELD (the caller's contract, see the header). Documents the
     // precondition every caller already relies on -- slotOf() below would
@@ -532,6 +554,8 @@ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthD
     ev.fromDepthDb = (float) n.depthDB;
     ev.depthDb     = (float) newDepthDb;
     ev.origin = n.origin;
+    ev.author = author;
+    ev.nid    = n.nid;
     ev.retuneReason = reason;
     // Age from PLACEMENT, like a Clear's. lockedAtMs, origin and
     // lastDetectedMs are deliberately left alone: this is the same notch, and
@@ -548,6 +572,7 @@ bool NotchController::pushRetuneLocked (int channel, int index, double newDepthD
     // rung after rung inside one 300 ms window.
     n.depthDB          = newDepthDb;
     n.stageChangedAtMs = liveMs_;
+    n.lastChangedBy    = author;   // L3a attribution; nid and placedBy stay
     return true;
 }
 
@@ -684,11 +709,16 @@ void NotchController::clearRoomMemoryLocked()
 
 void NotchController::clearNotch (int channel, int index, ClearReason reason)
 {
+    clearNotchAs (channel, index, reason, Author::Human);
+}
+
+void NotchController::clearNotchAs (int channel, int index, ClearReason reason, Author author)
+{
     // width gates the policy surface; internal fan-out loops never exceed it.
     if (channel < 0 || channel >= width_ || index < 0 || index >= kSlots)
         return;
     const std::lock_guard<std::mutex> lock (modelMutex_);
-    pushClearLocked (channel, index, reason);
+    pushClearLocked (channel, index, reason, author);
 }
 
 void NotchController::clearAll (ClearReason reason)
@@ -696,7 +726,7 @@ void NotchController::clearAll (ClearReason reason)
     const std::lock_guard<std::mutex> lock (modelMutex_);
     for (int c = 0; c < kChannels; ++c)
         for (int i = 0; i < kSlots; ++i)
-            pushClearLocked (c, i, reason);
+            pushClearLocked (c, i, reason, Author::Human);
     // CLEAR ALL is the operator saying "forget everything you think you know
     // about this room" -- leaving the memory would have the next howl come
     // back deep-notched immediately.
@@ -800,7 +830,8 @@ void NotchController::runOnce()
                     notchList[notchCount++] = { (float) n.frequency, (float) n.Q,
                                                 (float) n.depthDB, (float) n.deepestDb,
                                                 n.origin,
-                                                (std::uint8_t) c, (std::uint8_t) i };
+                                                (std::uint8_t) c, (std::uint8_t) i,
+                                                n.placedBy, n.lastChangedBy, n.nid };
                 }
         }
 
@@ -1018,7 +1049,7 @@ void NotchController::runOnce()
                         // possibly landing off-rung (Q13: the ceiling IS the
                         // last rung). Invariant 3 bounds the DEEP direction
                         // only -- shallower is never dangerous.
-                        if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling))
+                        if (pushRetuneLocked (c, i, ceiling, RetuneReason::Ceiling, Author::Detector))
                         {
                             // stageChangedAtMs is stamped inside
                             // pushRetuneLocked (M-1), next to the depth write.
@@ -1044,7 +1075,7 @@ void NotchController::runOnce()
                     // stands, so an odd Preset/Manual depth resolves to the
                     // nearest rung above it and nothing is skipped.
                     const double next = nextShallowerRungDb (n.depthDB);
-                    if (pushRetuneLocked (c, i, next, RetuneReason::Release))
+                    if (pushRetuneLocked (c, i, next, RetuneReason::Release, Author::Detector))
                     {
                         ++n.releasedSteps;
                         n.quietMs = 0.0;   // stageChangedAtMs: see pushRetuneLocked
@@ -1063,7 +1094,7 @@ void NotchController::runOnce()
                     // there, and remembering a depth from one of those would
                     // re-place it deep on the operator's next howl.
                     rememberReleaseLocked (c, n.frequency, n.deepestDb, effectiveLinked());
-                    pushClearLocked (c, i, ClearReason::AutoRelease);
+                    pushClearLocked (c, i, ClearReason::AutoRelease, Author::Detector);
                 }
             }
     }
@@ -1117,7 +1148,7 @@ bool NotchController::retuneForTest (int channel, int index, double newDepthDb,
     if (channel < 0 || channel >= kChannels || index < 0 || index >= kSlots)
         return false;
     const std::lock_guard<std::mutex> lock (modelMutex_);
-    return pushRetuneLocked (channel, index, newDepthDb, reason);
+    return pushRetuneLocked (channel, index, newDepthDb, reason, Author::Detector);
 }
 
 // Fix-round 1 (review finding "Important 1"): ceilingDbFor and the rest of
@@ -1460,7 +1491,7 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
 
     int applied = 0;
     for (int l = firstLane; l <= lastLane; ++l)
-        if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, &scored))
+        if (setNotchImpl (l, index, cand.frequencyHz, q, depthDb, origin, Author::Detector, &scored))
             ++applied;
 
     // Review finding (round 1, corrected in round 2): under LINKED, lane 0 and
@@ -1518,7 +1549,7 @@ void NotchController::placeConfirmed (int lane, const PeakinessAnalyzer::Candida
     const int wanted = lastLane - firstLane + 1;
     if (applied != wanted && applied > 0)
         for (int l = firstLane; l <= lastLane; ++l)
-            clearNotch (l, index, ClearReason::PartialApplyUnwind);
+            clearNotchAs (l, index, ClearReason::PartialApplyUnwind, Author::Detector);
 
     // One light line per detection event -- per PLACED notch, not per frame.
     // Logged outside every lock: juce::Logger is not a place to hold one.
@@ -1639,7 +1670,7 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                         // releasedSteps standing would make its next release
                         // come after 10 s instead of 30.
                         if (target == n.depthDB
-                            || pushRetuneLocked (c, i, target, RetuneReason::Reclamp))
+                            || pushRetuneLocked (c, i, target, RetuneReason::Reclamp, Author::Detector))
                         {
                             // Keep the memory and the depth in step: when the
                             // ceiling did not bind, target == deepestDb and
@@ -1698,7 +1729,7 @@ void NotchController::processSpectrumForDetection (int lane, const Detector::Spe
                             // relying on that guard alone to keep holding.
                             const double next = nextDeeperRungDb (n.depthDB, ceiling);
                             if (next < n.depthDB
-                                && pushRetuneLocked (c, i, next, RetuneReason::Deepen))
+                                && pushRetuneLocked (c, i, next, RetuneReason::Deepen, Author::Detector))
                             {
                                 // stageChangedAtMs: see pushRetuneLocked (M-1).
                                 // It is what re-arms the 300 ms gate above, so
@@ -1871,7 +1902,7 @@ void NotchController::setSampleRate (double sampleRate)
                 for (int i = 0; i < kSlots; ++i)
                     if (model_[slotOf (c, i)].active
                         && model_[slotOf (c, i)].frequency >= nyquist)
-                        pushClearLocked (c, i, ClearReason::RateChange);
+                        pushClearLocked (c, i, ClearReason::RateChange, Author::Detector);
         }
 
         clearRoomMemoryLocked();

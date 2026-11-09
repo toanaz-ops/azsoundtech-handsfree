@@ -74,8 +74,67 @@ bool isValidCopilotBaseUrl (const juce::String& url)
     return true;
 }
 
+namespace
+{
+// Shared by the ask and supervise builders so the two cannot drift: true when
+// provider / model / baseUrl are an acceptable combination.
+bool isValidProviderRequest (const CopilotRequest& request, bool& openaiOut)
+{
+    const bool openai = request.provider == "openai_compatible";
+    openaiOut = openai;
+    if (! (openai || request.provider == "anthropic"))
+        return false;
+
+    if (request.model.isNotEmpty() && ! isValidCopilotModel (request.model))
+        return false;
+
+    if (openai)
+        return request.model.isNotEmpty() && isValidCopilotBaseUrl (request.baseUrl);
+    return request.baseUrl.isEmpty();
+}
+}
+
+juce::StringArray buildCopilotSuperviseArguments (const CopilotRequest& request)
+{
+    bool openai = false;
+    if (! isValidProviderRequest (request, openai))
+        return {};
+
+    // The state path is the one free-form value: one argv element, so spaces are
+    // fine (ChildProcess quotes it), but a quote or control character is not,
+    // and neither is a trailing backslash (it would escape the closing quote).
+    const auto state = request.statePath.getFullPathName();
+    if (state.isEmpty() || state.endsWithChar ('\\'))
+        return {};
+    for (auto p = state.getCharPointer(); ! p.isEmpty(); ++p)
+    {
+        const auto c = *p;
+        if (c < 32 || c == 127 || c == '"' || (c >= 0x80 && c < 0xA0) || c == 0x2028 || c == 0x2029)
+            return {};
+    }
+
+    juce::StringArray args;
+    args.add (request.executable.getFullPathName());
+    args.add (request.sessionLog.getFullPathName());
+    args.add ("--supervise");
+    args.add ("--state=" + state);
+    args.add ("--json");
+    args.add ("--low-priority");
+    args.add ("--credentials-only");   // the sidecar must ignore API keys from the environment
+    args.add ("--provider=" + request.provider);
+    if (request.model.isNotEmpty())
+        args.add ("--model=" + request.model);
+    if (openai)
+        args.add ("--base-url=" + request.baseUrl);
+    args.add ("--timeout=50");
+    return args;
+}
+
 juce::StringArray buildCopilotArguments (const CopilotRequest& request)
 {
+    if (request.supervise)
+        return buildCopilotSuperviseArguments (request);
+
     juce::StringArray args;
     args.add (request.executable.getFullPathName());
     args.add (request.sessionLog.getFullPathName());

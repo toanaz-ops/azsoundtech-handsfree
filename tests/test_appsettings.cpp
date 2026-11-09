@@ -129,3 +129,61 @@ TEST (AppSettings, CopilotSettingsNeverCarryAKeyField)
     EXPECT_FALSE (host.product.hasProperty ("copilot_key"));
     EXPECT_FALSE (host.product.hasProperty ("copilot_api_key"));
 }
+
+// Lane L3a: the requested AI mode.
+TEST (AppSettings, AiModeDefaultsToShadowAndOldFilesLoadAsShadow)
+{
+    EXPECT_EQ (AppSettings {}.aiMode, AiMode::Shadow);
+    EXPECT_EQ (appSettingsFromHost ({}).aiMode, AiMode::Shadow);
+    // A settings file written before the key existed.
+    EXPECT_EQ (appSettingsFromHost (hostFromJson (R"({"uiMode":"geek","copilot_consent":true})")).aiMode,
+               AiMode::Shadow);
+}
+
+TEST (AppSettings, AiModeRoundTripsOffShadowSuggest)
+{
+    for (const auto m : { AiMode::Off, AiMode::Shadow, AiMode::Suggest })
+    {
+        AppSettings in;
+        in.aiMode = m;
+        EXPECT_EQ (appSettingsFromHost (appSettingsToHost (in)).aiMode, m) << aiModeToString (m);
+    }
+}
+
+TEST (AppSettings, StoredActIsDemotedToSuggestOnLoad)
+{
+    AppSettings in;
+    in.aiMode = AiMode::Act;
+    const auto host = appSettingsToHost (in);
+    EXPECT_EQ (host.product["ai_mode"].toString(), "act");   // saved as asked...
+    EXPECT_EQ (appSettingsFromHost (host).aiMode, AiMode::Suggest);   // ...never restored as Act (D2)
+}
+
+TEST (AppSettings, UnknownOrMistypedAiModeLoadsAsShadow)
+{
+    for (const char* json : { R"({"ai_mode":"turbo"})", R"({"ai_mode":""})", R"({"ai_mode":3})",
+                              R"({"ai_mode":true})", R"({"ai_mode":null})", R"({"ai_mode":"ACT"})" })
+        EXPECT_EQ (appSettingsFromHost (hostFromJson (json)).aiMode, AiMode::Shadow) << json;
+}
+
+TEST (AiMode, NamesRoundTripAndEffectiveModeIsTheLowerOfTwo)
+{
+    for (const auto m : { AiMode::Off, AiMode::Shadow, AiMode::Suggest, AiMode::Act })
+        EXPECT_EQ (aiModeFromString (aiModeToString (m)), m);
+    EXPECT_STREQ (aiModeToString (AiMode::Off), "off");
+    EXPECT_STREQ (aiModeToString (AiMode::Shadow), "shadow");
+    EXPECT_STREQ (aiModeToString (AiMode::Suggest), "suggest");
+    EXPECT_STREQ (aiModeToString (AiMode::Act), "act");
+    EXPECT_EQ (aiModeFromString ("nonsense"), AiMode::Shadow);
+
+    for (const auto a : { AiMode::Off, AiMode::Shadow, AiMode::Suggest, AiMode::Act })
+        for (const auto b : { AiMode::Off, AiMode::Shadow, AiMode::Suggest, AiMode::Act })
+        {
+            const auto e = effectiveAiMode (a, b);
+            EXPECT_EQ (e, effectiveAiMode (b, a));
+            EXPECT_LE ((int) e, (int) a);
+            EXPECT_LE ((int) e, (int) b);
+            EXPECT_TRUE (e == a || e == b);
+        }
+    EXPECT_EQ (effectiveAiMode (AiMode::Act, AiMode::Shadow), AiMode::Shadow);   // network ceiling today
+}

@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -4633,4 +4634,242 @@ TEST (ShadowClassifier, EmbeddedModelParsesAndLoads)
     ASSERT_NE (c, nullptr) << error;
     EXPECT_TRUE (c->isLoaded());
     EXPECT_EQ (c->modelName(), juce::String ("untrained-fixture-v1"));
+}
+
+// ===========================================================================
+// Lane L3a (AI drive, attribution only). Author and nid ride on the model, the
+// snapshot and the events; NOTHING reads them for a decision. Expected level
+// change: 0 dB at every output.
+// ===========================================================================
+namespace
+{
+struct AuthorRun
+{
+    std::vector<NotchCommand> commands;
+    std::vector<NotchController::NotchEvent> events;
+};
+
+// The shadow scenario's block sequence, with one extra detector-origin notch
+// staged FIRST under `staged` authorship, followed by ~43 s of quiet so the
+// release ladder walks that notch down and clears it. The only thing that
+// differs between runs is the author handed to the test seam.
+AuthorRun runAuthoredScenario (Author staged)
+{
+    AuthorRun run;
+    Recorder events;   // declared BEFORE the harness (M-5)
+    Harness h;
+    h.controller.setEventSink (events.sink());
+    h.controller.setDetectionActive (true);
+    EXPECT_TRUE (h.controller.setNotchAuthoredForTest (0, 14, 7000.0, 30.0, -12.0, staged));
+
+    auto take = [&]
+    {
+        NotchCommand c {};
+        while (h.commands.read (&c, 1) == 1)
+            run.commands.push_back (c);
+    };
+    auto pumpOne = [&] (const std::vector<float>& hop)
+    {
+        h.tap.write (hop.data(), hop.size());
+        h.clock.advance (kBlockMs);
+        h.controller.runOnce();
+        take();
+    };
+    NoiseSource quiet;
+    for (int i = 0; i < kWarmupBlocks; ++i)
+        pumpOne (quiet.hop());
+    RampTwoTone nearMiss;
+    for (int i = 0; i < 40; ++i)
+        pumpOne (nearMiss.hop());
+    for (int i = 0; i < 60; ++i)
+        pumpOne (quiet.hop());
+    RampSineSource ramp;
+    for (int i = 0; i < 150; ++i)
+        pumpOne (ramp.hop());
+    SineSource tone;
+    tone.freq = 3100.0;
+    for (int i = 0; i < 40; ++i)
+        pumpOne (tone.hop());
+    for (int i = 0; i < 4060; ++i)   // 30 s to the first release rung + 10 s to the clear, with margin
+        pumpOne (quiet.hop());
+    run.events = events.events;
+    return run;
+}
+} // namespace
+
+TEST (Authorship, DoesNotChangeCommands)
+{
+    const auto base = runAuthoredScenario (Author::Detector);
+    ASSERT_GE (base.commands.size(), 6u) << "teeth: the scenario must place, deepen and release notches";
+
+    // Teeth: the staged notch really walked its ladder (Set -12, retune to -6, Clear).
+    int stagedRetunes = 0, stagedClears = 0;
+    for (const auto& e : base.events)
+        if (e.lane == 0 && e.index == 14)
+        {
+            stagedRetunes += e.kind == Ev::Kind::Retune ? 1 : 0;
+            stagedClears  += e.kind == Ev::Kind::Clear ? 1 : 0;
+        }
+    ASSERT_GE (stagedRetunes, 1);
+    ASSERT_EQ (stagedClears, 1);
+
+    for (const auto a : { Author::Human, Author::Network, Author::Llm })
+    {
+        const auto run = runAuthoredScenario (a);
+        // The FULL command sequence, not a count.
+        EXPECT_TRUE (sameCommands (base.commands, run.commands)) << authorName (a);
+        EXPECT_TRUE (sameEventsIgnoringScore (base.events, run.events)) << authorName (a);
+        // Identity does not depend on the author either.
+        ASSERT_EQ (base.events.size(), run.events.size());
+        for (std::size_t i = 0; i < base.events.size(); ++i)
+        {
+            EXPECT_EQ (base.events[i].nid, run.events[i].nid) << authorName (a) << " event " << i;
+            if (run.events[i].lane == 0 && run.events[i].index == 14)
+            {
+                // Placement carries what was staged; everything the DETECTOR's
+                // ladder does afterwards is the detector's.
+                const auto expected = run.events[i].kind == Ev::Kind::Set ? a : Author::Detector;
+                EXPECT_EQ (run.events[i].author, expected) << authorName (a) << " event " << i;
+            }
+        }
+    }
+}
+
+TEST (Authorship, DetectorPlacementsAreDetectorAuthoredWithDistinctNids)
+{
+    const auto run = runShadowScenario (ShadowVariant::None);
+    std::set<std::uint32_t> setNids;
+    int placements = 0;
+    for (const auto& e : run.events)
+    {
+        EXPECT_EQ (e.author, Author::Detector) << "the detector is the only actor in this scenario";
+        EXPECT_NE (e.nid, 0u);
+        if (e.kind == Ev::Kind::Set)
+        {
+            ++placements;
+            EXPECT_TRUE (setNids.insert (e.nid).second) << "a nid is never reused";
+        }
+    }
+    EXPECT_GE (placements, 2);
+}
+
+TEST (Authorship, NidIsUniqueStableAcrossRetuneAndNewAfterReplace)
+{
+    Recorder r;
+    Harness h;
+    h.controller.setEventSink (r.sink());
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (h.controller.setNotch (0, 1, 2000.0, 30.0, -6.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -12.0, NotchController::RetuneReason::Deepen));
+    ASSERT_TRUE (h.controller.retuneForTest (0, 0, -18.0, NotchController::RetuneReason::Deepen));
+    h.controller.clearNotch (0, 0);
+    ASSERT_TRUE (h.controller.setNotch (0, 0, 1000.0, 30.0, -6.0, NotchController::Origin::Manual));   // same slot, same Hz
+    h.controller.clearAll();
+    h.controller.runOnce();
+
+    // Event order: Set(0,0) Set(0,1) Retune Retune Clear(0,0) Set(0,0) Clear(0,0) Clear(0,1)
+    ASSERT_EQ (r.events.size(), 8u);
+    const auto first  = r.events[0].nid;
+    const auto second = r.events[1].nid;
+    EXPECT_NE (first, 0u);
+    EXPECT_NE (second, first);
+    EXPECT_EQ (r.events[2].kind, Ev::Kind::Retune);
+    EXPECT_EQ (r.events[2].nid, first);    // stable across a deepen ...
+    EXPECT_EQ (r.events[3].nid, first);    // ... and another one
+    EXPECT_EQ (r.events[4].kind, Ev::Kind::Clear);
+    EXPECT_EQ (r.events[4].nid, first);    // the clear names the notch it removed
+    const auto replaced = r.events[5].nid;
+    EXPECT_EQ (r.events[5].kind, Ev::Kind::Set);
+    EXPECT_NE (replaced, first);           // re-placed after a clear: a NEW notch
+    EXPECT_GT (replaced, second);          // and never a recycled number
+    EXPECT_EQ (r.events[6].nid, replaced);
+    EXPECT_EQ (r.events[7].nid, second);
+
+    // Replacing a LIVE slot (the ladder restarts too) also starts a new identity.
+    Recorder r2;
+    Harness h2;
+    h2.controller.setEventSink (r2.sink());
+    ASSERT_TRUE (h2.controller.setNotch (1, 4, 1000.0, 30.0, -6.0, NotchController::Origin::Manual));
+    ASSERT_TRUE (h2.controller.setNotch (1, 4, 1200.0, 30.0, -6.0, NotchController::Origin::Manual));
+    h2.controller.runOnce();
+    ASSERT_EQ (r2.events.size(), 2u);
+    EXPECT_NE (r2.events[0].nid, r2.events[1].nid);
+}
+
+TEST (Authorship, MessageThreadCallsAreHumanAndTheTestSeamStagesTheRest)
+{
+    Recorder r;
+    Harness h;
+    h.controller.setEventSink (r.sink());
+    for (const auto o : { NotchController::Origin::Preset, NotchController::Origin::Manual,
+                          NotchController::Origin::Soundcheck, NotchController::Origin::Detector })
+        ASSERT_TRUE (h.controller.setNotch (0, (int) o, 1000.0 + 100.0 * (int) o, 30.0, -12.0, o));
+    ASSERT_EQ (h.controller.adoptPreset (onePresetNotch (8, 4000.0)), 1);   // preset adoption
+    h.controller.clearNotch (0, 0);                                         // manual clear
+    h.controller.clearNotch (0, 1, NotchController::ClearReason::VerdictFalse);
+    h.controller.clearNotch (0, 2, NotchController::ClearReason::SoundcheckReplace);
+    h.controller.clearAll();                                                // CLEAR ALL
+    ASSERT_TRUE (h.controller.setNotchAuthoredForTest (0, 9, 5000.0, 30.0, -12.0, Author::Llm));
+    ASSERT_TRUE (h.controller.setNotchAuthoredForTest (0, 10, 5500.0, 30.0, -12.0, Author::Network));
+    h.controller.runOnce();
+
+    int human = 0, llm = 0, network = 0;
+    for (const auto& e : r.events)
+    {
+        if (e.author == Author::Human)   ++human;
+        if (e.author == Author::Llm)     ++llm;
+        if (e.author == Author::Network) ++network;
+        EXPECT_NE (e.author, Author::Detector) << "nothing here is the detector's doing";
+    }
+    EXPECT_EQ (llm, 1);
+    EXPECT_EQ (network, 1);
+    EXPECT_EQ (human, (int) r.events.size() - 2);   // every other event
+}
+
+TEST (Authorship, SnapshotCarriesPlacedByLastChangedByAndNid)
+{
+    Recorder r;
+    Harness h;
+    h.controller.setEventSink (r.sink());
+    NoiseSource quiet;
+    auto pumpQuiet = [&] (int blocks)
+    {
+        for (int i = 0; i < blocks; ++i)
+            pump (h, quiet.hop());
+    };
+    ASSERT_TRUE (h.controller.setNotchAuthoredForTest (0, 3, 1500.0, 30.0, -12.0, Author::Llm));
+    ASSERT_TRUE (h.controller.setNotch (0, 4, 2500.0, 30.0, -12.0, NotchController::Origin::Manual));
+    pumpQuiet (8);
+
+    auto find = [&] (int index)
+    {
+        NotchController::SnapshotBuffer snap;
+        h.controller.copySnapshot (snap);
+        for (std::uint32_t i = 0; i < snap.notchCount; ++i)
+            if (snap.notches[i].channel == 0 && snap.notches[i].index == index)
+                return snap.notches[i];
+        ADD_FAILURE() << "notch " << index << " not in the snapshot";
+        return NotchController::SnapshotNotch {};
+    };
+
+    const auto llm = find (3);
+    EXPECT_EQ (llm.placedBy, Author::Llm);
+    EXPECT_EQ (llm.lastChangedBy, Author::Llm);
+    EXPECT_NE (llm.nid, 0u);
+    ASSERT_FALSE (r.events.empty());
+    EXPECT_EQ (llm.nid, r.events[0].nid);
+    const auto human = find (4);
+    EXPECT_EQ (human.placedBy, Author::Human);
+    EXPECT_EQ (human.lastChangedBy, Author::Human);
+    EXPECT_NE (human.nid, llm.nid);
+
+    // The detector's own ladder then changes the depth: lastChangedBy moves,
+    // placedBy and nid stay.
+    ASSERT_TRUE (h.controller.retuneForTest (0, 3, -6.0, NotchController::RetuneReason::Release));
+    pumpQuiet (2);
+    const auto after = find (3);
+    EXPECT_EQ (after.placedBy, Author::Llm);
+    EXPECT_EQ (after.lastChangedBy, Author::Detector);
+    EXPECT_EQ (after.nid, llm.nid);
+    EXPECT_FLOAT_EQ (after.depthDB, -6.0f);
 }

@@ -19,6 +19,7 @@
 // component in this app is therefore reachable from the test target.
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "app/AiAction.h"
 #include "app/AppSettings.h"
 #include "app/AudioEngine.h"
 #include "app/CopilotCredentialStore.h"
@@ -419,6 +420,20 @@ public:
         { return notchEventToVar (e); }
     static juce::var candidateToVarForTest (const NotchController::CandidateRecord& r)
         { return candidateToVar (r); }
+
+    // Lane L3a: the four AI log events (schema 4). PURE serialisers -- nothing
+    // calls them until the GUI task wires the AI panel. Numbers go through the
+    // same 3-significant-digit rounding as every other log line.
+    [[nodiscard]] static juce::var aiModeEventToVar (AiMode requested, AiMode effectiveLlm,
+                                                     AiMode effectiveNetwork);
+    [[nodiscard]] static juce::var aiCallEventToVar (const juce::String& trigger, std::uint32_t generation,
+                                                     double ms, const juce::String& status,
+                                                     const AiUsage* usage);
+    [[nodiscard]] static juce::var aiProposalEventToVar (std::uint32_t generation,
+                                                         const AiProposal& proposal);
+    [[nodiscard]] static juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
+                                                         AiProposal::Tool tool, AiDecision decision,
+                                                         std::optional<AiRefusal> refusal);
 
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is

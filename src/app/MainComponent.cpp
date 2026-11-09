@@ -1224,6 +1224,11 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("q", (double) e.q);
     o->setProperty ("depth_db", (double) e.depthDb);
     o->setProperty ("origin", originName (e.origin));
+    // Schema 4 (lane L3a): who, and which notch. Every notch line, all three
+    // kinds, before any early return below. nid is uint32 -- widen first so a
+    // value above 2^31 is not written negative.
+    o->setProperty ("author", authorName (e.author));
+    o->setProperty ("nid", (juce::int64) e.nid);
 
     if (e.kind == Ev::Kind::Retune)
     {
@@ -1315,6 +1320,73 @@ juce::var MainComponent::candidateToVar (const NotchController::CandidateRecord&
     return v;
 }
 
+//==============================================================================
+// Lane L3a: AI log events. Pure; see the declarations in MainComponent.h.
+
+juce::var MainComponent::aiModeEventToVar (AiMode requested, AiMode effectiveLlm, AiMode effectiveNetwork)
+{
+    auto v = SessionLogger::makeEvent ("ai_mode");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("mode", juce::String (aiModeToString (requested)));
+    o->setProperty ("effective_llm", juce::String (aiModeToString (effectiveLlm)));
+    o->setProperty ("effective_network", juce::String (aiModeToString (effectiveNetwork)));
+    return v;
+}
+
+juce::var MainComponent::aiCallEventToVar (const juce::String& trigger, std::uint32_t generation,
+                                           double ms, const juce::String& status, const AiUsage* usage)
+{
+    auto v = SessionLogger::makeEvent ("ai_call");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("trigger", trigger);
+    o->setProperty ("gen", (juce::int64) generation);
+    o->setProperty ("ms", roundSig3 (ms));
+    o->setProperty ("status", status);
+    if (usage != nullptr)
+    {
+        // null, not 0, for a count the provider did not report.
+        auto* u = new juce::DynamicObject();
+        u->setProperty ("input_tokens",  usage->inputTokens  ? juce::var ((juce::int64) *usage->inputTokens)  : juce::var());
+        u->setProperty ("output_tokens", usage->outputTokens ? juce::var ((juce::int64) *usage->outputTokens) : juce::var());
+        o->setProperty ("usage", juce::var (u));
+    }
+    return v;
+}
+
+juce::var MainComponent::aiProposalEventToVar (std::uint32_t generation, const AiProposal& p)
+{
+    auto v = SessionLogger::makeEvent ("ai_proposal");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("gen", (juce::int64) generation);
+    o->setProperty ("tool", juce::String (aiToolName (p.tool)));
+    if (p.tool != AiProposal::Tool::NoAction)   // no_action addresses no notch
+    {
+        o->setProperty ("nid", (juce::int64) p.nid);
+        o->setProperty ("hz", roundSig3 ((double) p.expectHz));
+    }
+    if (p.tool == AiProposal::Tool::Deepen)
+        o->setProperty ("target_db", roundSig3 ((double) p.targetDb));
+    if (p.tool == AiProposal::Tool::Hold)
+        o->setProperty ("hold_s", p.holdSeconds);
+    o->setProperty ("reason", juce::String (aiReasonName (p.reason)));
+    return v;
+}
+
+juce::var MainComponent::aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
+                                               AiProposal::Tool tool, AiDecision decision,
+                                               std::optional<AiRefusal> refusal)
+{
+    auto v = SessionLogger::makeEvent ("ai_decision");
+    auto* o = v.getDynamicObject();
+    o->setProperty ("gen", (juce::int64) generation);
+    o->setProperty ("nid", (juce::int64) nid);
+    o->setProperty ("tool", juce::String (aiToolName (tool)));
+    o->setProperty ("decision", juce::String (aiDecisionName (decision)));
+    if (refusal)
+        o->setProperty ("refusal", juce::String (aiRefusalName (*refusal)));
+    return v;
+}
+
 std::uint64_t MainComponent::droppedCandidatesTotal() const
 {
     std::uint64_t total = 0;
@@ -1330,7 +1402,9 @@ juce::var MainComponent::sessionHeader() const
     auto* o = v.getDynamicObject();
     // Lane C0: log format version. A log without this field is schema 1.
     // Schema 3 (lane C1b) adds nn_score and the nn_* header/footer fields.
-    o->setProperty ("log_schema", 3);
+    // Schema 4 (lane L3a) adds ai_mode here and author/nid on every notch line.
+    o->setProperty ("log_schema", 4);
+    o->setProperty ("ai_mode", juce::String (aiModeToString (settings_.aiMode)));
     if (nnModelName_.isNotEmpty())
     {
         o->setProperty ("nn_model", nnModelName_);
