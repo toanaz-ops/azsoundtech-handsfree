@@ -1414,16 +1414,25 @@ class Schema4FindingRules(unittest.TestCase):
 
 # --- L3a: --supervise ---------------------------------------------------------
 
+def next_rung(depth, ceiling):
+    """The app's rule: shallowest rung of {-6,-12,-18,-24} below depth and not past the ceiling."""
+    for r in (-6.0, -12.0, -18.0, -24.0):
+        if r < depth - 0.001 and r >= ceiling - 0.001:
+            return r
+    return None
+
+
 def snotch(nid, hz=1000.0, depth=-6.0, ceiling=-18.0, origin="detector", **kw) -> dict:
     n = {"nid": nid, "lane": 0, "index": nid, "hz": hz, "q": 30.0, "depth_db": depth,
-         "ceiling_db": ceiling, "origin": origin, "placed_by": "detector",
-         "last_changed_by": "detector", "age_s": 42.0, "hold_s": 0.0, "verdict": "none"}
+         "ceiling_db": ceiling, "next_rung_db": next_rung(depth, ceiling), "origin": origin,
+         "placed_by": "detector", "last_changed_by": "detector", "seen_s": 42.0, "hold_s": 0.0,
+         "verdict": "none"}
     n.update(kw)
     return n
 
 
 def make_state(**over) -> dict:
-    st = {"schema": 1, "generation": 7, "ai_mode": "suggest", "engine_mode": "auto",
+    st = {"schema": 2, "generation": 7, "ai_mode": "suggest", "engine_mode": "auto",
           "sample_rate": 48000.0, "bin_hz": 23.4375, "trigger": "recurring_bin",
           "slots": [
               {"slot": 0, "ring_risk": "low", "ring_risk_score": 0.2,
@@ -1456,7 +1465,8 @@ class StateValidation(unittest.TestCase):
     def test_top_level_rejections(self):
         self.bad(lambda s: s.update(extra=1), "unknown keys")
         self.bad(lambda s: s.pop("trigger"), "missing keys")
-        self.bad(lambda s: s.update(schema=2), "schema")
+        self.bad(lambda s: s.update(schema=1), "schema")
+        self.bad(lambda s: s.update(schema=3), "schema")
         self.bad(lambda s: s.update(schema=True), "schema")
         self.bad(lambda s: s.update(generation=-1), "generation")
         self.bad(lambda s: s.update(generation=1.5), "generation")
@@ -1497,10 +1507,19 @@ class StateValidation(unittest.TestCase):
                             ("q", (0, float("inf"), "30")),
                             ("depth_db", (1.0, -121.0, float("nan"), None, "-6")),
                             ("ceiling_db", (1.0, -121.0, float("-inf"))),
-                            ("age_s", (-1.0, float("nan"), "1")),
+                            ("seen_s", (-1.0, float("nan"), "1")),
+                            ("next_rung_db", (True, False, float("nan"), float("inf"), "-12", 0.5,
+                                              -120.5, [-12])),
                             ("hold_s", (-0.1, float("inf"), None))):
             for v in values:
                 self.bad(lambda s, k=key, v=v: n(s).update({k: v}), key)
+        self.bad(lambda s: n(s).pop("next_rung_db"), "missing keys")
+        self.bad(lambda s: n(s).pop("seen_s"), "missing keys")
+        self.bad(lambda s: n(s).update(age_s=42.0), "unknown keys")   # the old key name
+        for ok in (None, -12, -120.0, 0.0):
+            st = make_state()
+            st["slots"][0]["notches"][0]["next_rung_db"] = ok
+            copilot.validate_state(st)
         self.bad(lambda s: n(s).update(origin="ai"), "origin")
         self.bad(lambda s: n(s).update(verdict="maybe"), "verdict")
         self.bad(lambda s: n(s).update(placed_by="has space"), "placed_by")
@@ -1551,14 +1570,47 @@ class RecordingTools(unittest.TestCase):
         self.assertEqual(self.sup.actions, [{"tool": "propose_deepen", "nid": 1, "expect_hz": 1000.0,
                                              "target_db": -12.0, "reason": "recurring_at_frequency"}])
 
+    def rej_prefix(self, fn, args, code):
+        before = list(self.sup.actions)
+        self.assertTrue(fn(args).startswith("rejected: " + code), (fn(args), args))
+        self.assertEqual(self.sup.actions, before)
+
     def test_deepen_boundaries(self):
-        self.ok(self.sup.propose_deepen, deepen(nid=1, target=-18.0))          # exactly the ceiling
+        # earlier reject codes still win, in their old order
         self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-18.5), "target_beyond_ceiling")
         self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-6.0), "target_not_deeper")
         self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=-3.0), "target_not_deeper")
         self.rej(self.sup.propose_deepen, deepen(nid=3, hz=3000, target=0), "target_not_deeper")
         self.rej(self.sup.propose_deepen, deepen(nid=5, hz=500, target=-20.0), "target_beyond_ceiling")
         self.rej(self.sup.propose_deepen, deepen(nid=5, hz=500, target=-18.0), "target_not_deeper")
+
+    def test_deepen_is_one_rung_at_a_time(self):
+        # nid 1: depth -6, ceiling -18, next rung -12
+        self.rej_prefix(self.sup.propose_deepen, deepen(nid=1, target=-18.0), "not_next_rung")  # deeper, not next
+        self.rej_prefix(self.sup.propose_deepen, deepen(nid=1, target=-9.0), "not_next_rung")   # off the ladder
+        self.rej_prefix(self.sup.propose_deepen, deepen(nid=1, target=-12.01), "not_next_rung")
+        self.assertIn("-12 dB", self.sup.propose_deepen(deepen(nid=1, target=-18.0)))
+        self.ok(self.sup.propose_deepen, deepen(nid=1, target=-12.0005))      # inside 0.001 dB
+        # null next rung: no target is accepted, and the message says so
+        st = make_state(slots=[{"slot": 0, "ring_risk": "low", "ring_risk_score": None, "notches": [
+            snotch(7, 700.0, depth=-18.0, ceiling=-18.0), snotch(8, 800.0, depth=-12.0, ceiling=-24.0)]}])
+        self.assertIsNone(st["slots"][0]["notches"][0]["next_rung_db"])   # nid 7: already at its ceiling
+        self.assertEqual(st["slots"][0]["notches"][1]["next_rung_db"], -18.0)
+        st["slots"][0]["notches"][1]["next_rung_db"] = None               # nid 8 forced to null
+        sup = copilot.Supervisor(st)
+        for target in (-12.5, -18.0, -24.0):
+            msg = sup.propose_deepen(deepen(nid=8, hz=800.0, target=target))
+            self.assertTrue(msg.startswith("rejected: not_next_rung"), msg)
+            self.assertIn("cannot be deepened", msg)
+        self.assertEqual(sup.actions, [])
+
+    def test_deepen_checks_run_in_the_documented_order(self):
+        # bad_reason < bad_target_db < target_not_deeper < target_beyond_ceiling < not_next_rung
+        self.rej(self.sup.propose_deepen, deepen(nid=1, target="x", reason="nope"), "bad_reason")
+        self.rej(self.sup.propose_deepen, deepen(nid=1, target=float("nan")), "bad_target_db")
+        self.rej(self.sup.propose_deepen, deepen(nid=1, target=-5.0), "target_not_deeper")
+        self.rej(self.sup.propose_deepen, deepen(nid=1, target=-30.0), "target_beyond_ceiling")
+        self.rej_prefix(self.sup.propose_deepen, deepen(nid=1, target=-15.0), "not_next_rung")
 
     def test_deepen_rejects_every_bad_number(self):
         for bad in (float("inf"), float("-inf"), float("nan"), True, False, "-12", None, [-12], 10 ** 400):
@@ -1625,7 +1677,7 @@ class RecordingTools(unittest.TestCase):
 
     def test_duplicate_tool_and_nid_keeps_the_first(self):
         self.ok(self.sup.propose_deepen, deepen(target=-12.0))
-        self.assertEqual(self.sup.propose_deepen(deepen(target=-15.0)), "duplicate ignored")
+        self.assertEqual(self.sup.propose_deepen(deepen(target=-12.0)), "duplicate ignored")
         self.assertEqual([a["target_db"] for a in self.sup.actions], [-12.0])
         self.ok(self.sup.propose_hold, {"nid": 1, "expect_hz": 1000.0, "hold_s": 60,
                                         "reason": "show_in_progress"})           # other tool, same nid: kept
@@ -1814,6 +1866,7 @@ class SuperviseCli(CliHarness):
         rc, out, err = self.sup(srv)
         self.assertEqual(rc, 3)
         self.assertIn("tool loop exhausted", json.loads(out)["error"])
+        self.assertEqual(len(srv.requests), copilot.SUPERVISE_MAX_ITERATIONS)
         srv = self.server([("hang", 3)])
         rc, out, _ = self.sup(srv, "--timeout", "0.5")
         self.assertEqual(rc, 3)
@@ -1897,17 +1950,141 @@ class SuperviseCli(CliHarness):
         self.assertEqual(json.loads(out)["error"], err.strip())
 
 
+STATE_FIXTURE = ROOT / "tests" / "fixtures" / "ai-state-schema2.json"
+
+
+class SharedStateFixture(unittest.TestCase):
+    """The C++ serializer test must reproduce this file; the sidecar must accept it."""
+
+    def test_fixture_loads_and_has_the_agreed_shape(self):
+        st = copilot.load_state(STATE_FIXTURE)
+        self.assertEqual((st["schema"], st["generation"], st["sample_rate"]), (2, 7, 48000))
+        s0, s1 = st["slots"]
+        self.assertEqual((s0["ring_risk"], s1["ring_risk"]), ("low", "rising"))
+        self.assertEqual([(n["depth_db"], n["ceiling_db"], n["next_rung_db"]) for n in s0["notches"]],
+                         [(-6, -18, -12), (-18, -18, None), (-9.5, -24, -12)])
+        self.assertEqual([(n["depth_db"], n["ceiling_db"], n["next_rung_db"]) for n in s1["notches"]],
+                         [(-12, -24, -18)])
+        self.assertEqual(s1["notches"][0]["nid"], (1 << 24) | 1)
+        for s in st["slots"]:
+            for n in s["notches"]:
+                self.assertEqual((n["hold_s"], n["verdict"]), (0, "none"))
+                self.assertEqual(n["next_rung_db"], next_rung(n["depth_db"], n["ceiling_db"]))
+
+    def test_deepen_on_the_fixture_follows_next_rung(self):
+        sup = copilot.Supervisor(copilot.load_state(STATE_FIXTURE))
+        self.assertEqual(sup.propose_deepen(deepen(nid=3, hz=500.0, target=-12.0)), "queued")
+        self.assertTrue(sup.propose_deepen(deepen(nid=1, target=-18.0)).startswith("rejected: not_next_rung"))
+        self.assertTrue(sup.propose_deepen(deepen(nid=2, hz=2000.0, target=-24.0))
+                        .startswith("rejected: target_beyond_ceiling"))
+
+
+class SuperviseDeadline(CliHarness):
+    """The supervise loop with a fake clock and a fake provider (no network)."""
+
+    def run_loop(self, script, *extra, state_path=STATE_FIXTURE):
+        """`script`: list of (seconds the call takes on the fake clock, body)."""
+        clock = [1000.0]
+        seen_timeouts: list[float] = []
+        steps = list(script)
+
+        def fake_post(url, payload, key, timeout):
+            seen_timeouts.append(timeout)
+            if not steps:
+                raise AssertionError("more requests than scripted")
+            took, body = steps.pop(0)
+            clock[0] += took
+            return body
+
+        argv = [str(FIXTURE), "--supervise", "--state", str(state_path), "--json",
+                "--provider", "openai_compatible", "--base-url", "http://127.0.0.1:9/v1", "--model", "m",
+                *extra]
+        with mock.patch.object(copilot, "_post_json", side_effect=fake_post), \
+                mock.patch.object(copilot, "_now", side_effect=lambda: clock[0]):
+            rc, out, err = self.run_cli(argv)
+        return rc, out, err, seen_timeouts, len(steps)
+
+    NO_ACTION = '{"reason": "insufficient_data"}'
+
+    def test_stops_before_a_request_with_less_than_5s_left_and_keeps_recorded_actions(self):
+        rc, out, err, timeouts, left = self.run_loop(
+            [(6.0, tool_body("no_action", self.NO_ACTION)), (1.0, answer_body("never asked"))],
+            "--timeout", "30", "--deadline-s", "10")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(timeouts, [10.0])                # the second request was never sent
+        self.assertEqual(left, 1)
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_stop_with_nothing_recorded_is_exit_3_naming_the_deadline(self):
+        rc, out, err, timeouts, _ = self.run_loop(
+            [(6.0, tool_body("current_state", "{}")), (1.0, answer_body("never asked"))],
+            "--timeout", "30", "--deadline-s", "10")
+        self.assertEqual(rc, 3)
+        self.assertEqual(timeouts, [10.0])
+        self.assertEqual(list(json.loads(out)), ["error"])
+        self.assertIn("deadline", json.loads(out)["error"])
+        self.assertEqual(err.strip(), json.loads(out)["error"])
+
+    def test_remaining_exactly_5s_still_sends(self):
+        rc, out, err, timeouts, _ = self.run_loop(
+            [(5.0, tool_body("current_state", "{}")), (1.0, answer_body("done"))],
+            "--timeout", "30", "--deadline-s", "10")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(timeouts, [10.0, 5.0])
+
+    def test_per_request_timeout_is_min_of_timeout_and_remaining(self):
+        rc, out, err, timeouts, _ = self.run_loop(
+            [(80.0, tool_body("current_state", "{}")), (1.0, tool_body("current_state", "{}", "c2")),
+             (1.0, answer_body("done"))],
+            "--timeout", "30", "--deadline-s", "100")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(timeouts, [30.0, 20.0, 19.0])
+
+    def test_default_deadline_is_90s(self):
+        _, _, _, timeouts, _ = self.run_loop([(0.0, answer_body("done"))], "--timeout", "300")
+        self.assertEqual(timeouts, [90.0])
+
+    def test_iteration_cap_is_6_for_supervise_and_12_for_ask(self):
+        self.assertEqual((copilot.SUPERVISE_MAX_ITERATIONS, copilot.MAX_ITERATIONS), (6, 12))
+        loop = [(0.1, tool_body("current_state", "{}", f"c{i}")) for i in range(12)]
+        rc, out, _, timeouts, _ = self.run_loop(loop)
+        self.assertEqual((rc, len(timeouts)), (3, 6))
+        self.assertIn("tool loop exhausted", json.loads(out)["error"])
+        # the same cap with an action already recorded prints it as a normal finish
+        loop = [(0.1, tool_body("no_action", self.NO_ACTION))] + loop
+        rc, out, _, timeouts, _ = self.run_loop(loop)
+        self.assertEqual((rc, len(timeouts)), (0, 6))
+        self.assertEqual(json.loads(out)["actions"], [{"tool": "no_action", "reason": "insufficient_data"}])
+
+    def test_deadline_flag_validation(self):
+        st = str(STATE_FIXTURE)
+        oai = ["--provider", "openai_compatible", "--base-url", "http://127.0.0.1:9/v1", "--model", "m"]
+        base = [str(FIXTURE), "--supervise", "--state", st, "--json", *oai]
+        for bad in ("9", "601", "0", "-5", "abc", "10.5"):
+            rc, out, _ = self.run_cli([*base, "--deadline-s", bad])
+            self.assertEqual((rc, out), (copilot.EXIT_BAD_ARGS, ""), bad)
+        for argv in ([str(FIXTURE), "--ask", "q", "--deadline-s", "30", *oai],       # not supervise
+                     [str(FIXTURE), "--deadline-s", "30"],
+                     ["--has-key", "--provider", "anthropic", "--deadline-s", "30"]):
+            rc, out, _ = self.run_cli(argv)
+            self.assertEqual((rc, out), (copilot.EXIT_BAD_ARGS, ""), argv)
+        for ok in ("10", "600"):
+            rc, _, err, _, _ = self.run_loop([(0.0, answer_body("done"))], "--deadline-s", ok)
+            self.assertEqual(rc, 0, err)
+
+
 @unittest.skipUnless(HAVE_SDK, "anthropic not installed")
 class SuperviseAnthropicKwargs(unittest.TestCase):
     def test_kwargs_carry_the_supervise_tools_and_prompt(self):
         ts = copilot.build_supervise_toolset(logstats.load(FIXTURE), make_state())
         tools = copilot.make_toolset_tools(ts)
-        kw = copilot.build_anthropic_kwargs("claude-opus-5-5", tools, copilot.SUPERVISE_USER_PROMPT, ts.system)
+        kw = copilot.build_anthropic_kwargs("claude-opus-5-5", tools, copilot.SUPERVISE_USER_PROMPT, ts.system,
+                                            ts.max_iterations)
         self.assertEqual(sorted(t.name for t in kw["tools"]), sorted(copilot.SUPERVISE_TOOL_SPECS))
         self.assertEqual(kw["system"], copilot.SUPERVISE_SYSTEM_PROMPT)
         self.assertNotEqual(kw["system"], copilot.SYSTEM_PROMPT)
         self.assertEqual(kw["messages"], [{"role": "user", "content": copilot.SUPERVISE_USER_PROMPT}])
-        self.assertEqual((kw["max_iterations"], kw["max_tokens"]), (12, 16000))
+        self.assertEqual((kw["max_iterations"], kw["max_tokens"]), (6, 16000))
         self.assertEqual(kw["betas"], ["server-side-fallback-2026-07-01"])
         by_name = {t.name: t for t in kw["tools"]}
         for name in ("propose_deepen", "propose_hold", "propose_release", "no_action"):

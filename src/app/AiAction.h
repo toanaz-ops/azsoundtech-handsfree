@@ -80,6 +80,11 @@ struct AiParseResult
 [[nodiscard]] AiParseResult parseSupervisorOutput (const juce::String& stdoutText,
                                                    std::uint32_t expectedGeneration);
 
+// The ring-risk level of the slot a notch lives in. Declared here (not in
+// AiSupervisor.h) because the validator needs it; AiSupervisor.h includes this.
+// Na = the slot has no score yet (unknown), which is NOT "low".
+enum class AiRingRisk : std::uint8_t { Na, Low, Rising, Critical };
+
 // One live notch as the validator sees it: a plain copy, made by the caller
 // from a SnapshotBuffer, so this file never touches controller state.
 struct AiLiveNotch
@@ -91,12 +96,24 @@ struct AiLiveNotch
     float         ceilingDb = 0.0f;   // the RESOLVED ceiling (deepest this notch may go)
     NotchController::Origin origin = NotchController::Origin::Detector;
     float         binHz = 0.0f;       // analysis bin width at this slot's sample rate
+    // The slot's ring risk. Default Na on purpose: a caller that forgets to fill
+    // it gets a release REFUSED, never a release shown beside a ringing slot.
+    AiRingRisk    ringRisk = AiRingRisk::Na;
 };
+
+// The deepen target the validator accepts for a notch, and the one the state
+// file advertises as `next_rung_db`: ONE function, two callers. It is
+// NotchController::nextDeeperRungDb (the controller's own ladder), accepted only
+// when it is strictly deeper than the running depth (by more than 0.001 dB) and
+// not past the resolved ceiling (0.001 dB slack). nullopt = there is no legal
+// deeper step (at or past the ceiling, or a non-finite input).
+[[nodiscard]] std::optional<double> aiNextRungDb (double depthDb, double ceilingDb);
 
 enum class AiRefusal : std::uint8_t
 {
     UnknownNid, FrequencyMismatch, NotDetectorOrigin,
-    NotDeeper, BeyondCeiling, MoreThanOneRung
+    NotDeeper, BeyondCeiling, MoreThanOneRung,
+    RingRiskNotLow   // release only: the slot's ring risk is not at its lowest level
 };
 [[nodiscard]] const char* aiRefusalName (AiRefusal refusal) noexcept;
 

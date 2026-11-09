@@ -351,6 +351,54 @@ TEST (AiAction, RefusesMoreThanOneRung)
     EXPECT_FALSE (validateProposal (deepenTo (5, 1000.0f, (float) next), notches).has_value());
 }
 
+TEST (AiAction, ReleaseNeedsTheLowestRingRiskLevel)
+{
+    AiProposal rel; rel.tool = Tool::Release; rel.nid = 5; rel.expectHz = 1000.0f;
+    rel.reason = Reason::JudgedFalse;
+    auto n = live (5, 1000.0f, -6.0f, -18.0f);
+    // The default is Na: a caller that never fills the ring risk gets a refusal, not a release.
+    EXPECT_EQ (validateProposal (rel, { n }), AiRefusal::RingRiskNotLow);
+    for (const auto level : { AiRingRisk::Na, AiRingRisk::Rising, AiRingRisk::Critical })
+    {
+        n.ringRisk = level;
+        EXPECT_EQ (validateProposal (rel, { n }), AiRefusal::RingRiskNotLow) << (int) level;
+    }
+    n.ringRisk = AiRingRisk::Low;
+    EXPECT_FALSE (validateProposal (rel, { n }).has_value());
+    EXPECT_STREQ (aiRefusalName (AiRefusal::RingRiskNotLow), "ring_risk_not_low");
+
+    // Ring risk concerns only a release: deepen and hold do not read it.
+    n.ringRisk = AiRingRisk::Critical;
+    EXPECT_FALSE (validateProposal (deepenTo (5, 1000.0f, -12.0f), { n }).has_value());
+    AiProposal hold; hold.tool = Tool::Hold; hold.nid = 5; hold.expectHz = 1000.0f; hold.holdSeconds = 60;
+    EXPECT_FALSE (validateProposal (hold, { n }).has_value());
+}
+
+TEST (AiAction, NextRungIsTheValidatorsOwnFunction)
+{
+    // The state file's next_rung_db and the validator share aiNextRungDb: whatever it
+    // returns is accepted as a deepen target, and nothing else is.
+    for (const double depth : { -3.0, -6.0, -9.0, -12.0, -17.9, -18.0, -24.0 })
+        for (const double ceiling : { -6.0, -10.0, -12.0, -18.0, -24.0 })
+        {
+            const auto next = aiNextRungDb (depth, ceiling);
+            const auto n = live (5, 1000.0f, (float) depth, (float) ceiling);
+            if (next)
+                EXPECT_FALSE (validateProposal (deepenTo (5, 1000.0f, (float) *next), { n }).has_value())
+                    << depth << " / " << ceiling;
+            else
+                for (const double target : { -6.0, -12.0, -18.0, -24.0, ceiling })
+                    EXPECT_TRUE (validateProposal (deepenTo (5, 1000.0f, (float) target), { n }).has_value())
+                        << depth << " / " << ceiling << " -> " << target;
+        }
+    EXPECT_EQ (aiNextRungDb (-6.0, -24.0), std::optional<double> (-12.0));
+    EXPECT_EQ (aiNextRungDb (-6.0, -10.0), std::optional<double> (-10.0)) << "capped at an off-ladder ceiling";
+    EXPECT_FALSE (aiNextRungDb (-24.0, -24.0).has_value());
+    EXPECT_FALSE (aiNextRungDb (-6.0, std::nan ("")).has_value());
+    EXPECT_FALSE (aiNextRungDb (std::nan (""), -24.0).has_value());
+    EXPECT_FALSE (aiNextRungDb (-30.0, -24.0).has_value()) << "past the ceiling: nothing deeper";
+}
+
 // ---------------------------------------------------------------------------
 // Names (every enumerator, not a hand-picked list)
 
@@ -385,7 +433,8 @@ TEST (AiAction, NameTablesCoverEveryEnumeratorWithDistinctNames)
     }
     for (int i = 0; i <= 7; ++i)
         EXPECT_TRUE (reasons.insert (aiReasonName ((Reason) i)).second);
-    for (int i = 0; i <= 5; ++i)
+    ASSERT_EQ ((int) AiRefusal::RingRiskNotLow, 6);   // the LAST one: extend the loop below when adding another
+    for (int i = 0; i <= 6; ++i)
         EXPECT_TRUE (refusals.insert (aiRefusalName ((AiRefusal) i)).second);
     EXPECT_TRUE (decisions.count ("dismissed") && decisions.count ("expired")
                  && decisions.count ("refused") && decisions.count ("stale"));
@@ -415,7 +464,7 @@ TEST (SuperviseArguments, AnthropicExactArgv)
     const juce::StringArray expected { r.executable.getFullPathName(), r.sessionLog.getFullPathName(),
                                        "--supervise", "--state=" + r.statePath.getFullPathName(),
                                        "--json", "--low-priority", "--credentials-only",
-                                       "--provider=anthropic", "--timeout=50" };
+                                       "--provider=anthropic", "--timeout=30", "--deadline-s=90" };
     EXPECT_EQ (buildCopilotSuperviseArguments (r), expected);
     EXPECT_EQ (buildCopilotArguments (r), expected);   // a supervise request routes here
 
@@ -423,7 +472,7 @@ TEST (SuperviseArguments, AnthropicExactArgv)
     const juce::StringArray withModel { r.executable.getFullPathName(), r.sessionLog.getFullPathName(),
                                         "--supervise", "--state=" + r.statePath.getFullPathName(),
                                         "--json", "--low-priority", "--credentials-only",
-                                        "--provider=anthropic", "--model=claude-opus-5-5", "--timeout=50" };
+                                        "--provider=anthropic", "--model=claude-opus-5-5", "--timeout=30", "--deadline-s=90" };
     EXPECT_EQ (buildCopilotSuperviseArguments (r), withModel);
 }
 
@@ -437,7 +486,7 @@ TEST (SuperviseArguments, OpenAiCompatibleExactArgv)
                                        "--supervise", "--state=" + r.statePath.getFullPathName(),
                                        "--json", "--low-priority", "--credentials-only",
                                        "--provider=openai_compatible", "--model=llama3",
-                                       "--base-url=http://localhost:11434/v1", "--timeout=50" };
+                                       "--base-url=http://localhost:11434/v1", "--timeout=30", "--deadline-s=90" };
     EXPECT_EQ (buildCopilotSuperviseArguments (r), expected);
 }
 

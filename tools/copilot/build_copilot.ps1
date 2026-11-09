@@ -113,6 +113,48 @@ finally {
     $srv.Dispose()
 }
 
+# (a2) --supervise in the bundle, against the schema-2 state fixture the C++ serializer test shares.
+# The fake server's one fixed answer carries no tool call, so the run ends with the default
+# no_action: that still proves state loading, the supervise loop, --deadline-s and the JSON shape.
+$stateFixture = Join-Path $root 'tests\fixtures\ai-state-schema2.json'
+$srvPsi = [System.Diagnostics.ProcessStartInfo]::new($venvPy)
+$srvPsi.ArgumentList.Add($fakeServer)
+$srvPsi.RedirectStandardOutput = $true
+$srvPsi.UseShellExecute = $false
+$srv = [System.Diagnostics.Process]::Start($srvPsi)
+try {
+    $portTask = $srv.StandardOutput.ReadLineAsync()
+    if (-not $portTask.Wait(10000)) { Fail 'supervise gate: fake server printed no port' }
+    $port = $portTask.Result.Trim()
+    $supCred = Join-Path $out 'smoke-supervise-credentials'
+    if (Test-Path $supCred) { Remove-Item -Recurse -Force $supCred }
+    New-Item -ItemType Directory -Force $supCred | Out-Null
+    $r = Get-StdoutBytes $exe @($fixture, '--supervise', '--state', $stateFixture, '--json',
+                                '--provider', 'openai_compatible', '--base-url', "http://127.0.0.1:$port",
+                                '--model', 'smoke', '--timeout', '30', '--deadline-s', '60') `
+                         @{ HANDSFREE_COPILOT_CREDENTIALS_DIR = $supCred }
+    if ($r.Exit -ne 0) { Fail "supervise gate: frozen exe exit $($r.Exit): $($r.Err)" }
+    try { $doc = $utf8.GetString($r.Bytes) | ConvertFrom-Json } catch { Fail "supervise gate: stdout is not JSON: $($_.Exception.Message)" }
+    if ($doc.supervise -ne $true -or $doc.generation -ne 7) { Fail 'supervise gate: wrong supervise / generation fields' }
+    if (@($doc.actions).Count -lt 1) { Fail 'supervise gate: empty actions list' }
+    Write-Host "supervise gate OK: frozen exe supervised the schema-2 fixture ($(@($doc.actions).Count) action: $($doc.actions[0].tool))"
+}
+finally {
+    if (-not $srv.HasExited) { $srv.Kill() }
+    $srv.Dispose()
+}
+
+# (a3) a state file the exe must refuse: exit 2 and {"error": ...} on stdout, no model call.
+$badState = Join-Path $out 'smoke-bad-state.json'
+[System.IO.File]::WriteAllText($badState, '{"schema": 1}', $utf8)
+$r = Get-StdoutBytes $exe @($fixture, '--supervise', '--state', $badState, '--json',
+                            '--provider', 'openai_compatible', '--base-url', 'http://127.0.0.1:9',
+                            '--model', 'smoke') @{ HANDSFREE_COPILOT_CREDENTIALS_DIR = $supCred }
+if ($r.Exit -ne 2) { Fail "bad-state gate: expected exit 2, got $($r.Exit): $($r.Err)" }
+try { $doc = $utf8.GetString($r.Bytes) | ConvertFrom-Json } catch { Fail "bad-state gate: stdout is not JSON: $($_.Exception.Message)" }
+if ([string]::IsNullOrWhiteSpace($doc.error)) { Fail 'bad-state gate: no error field' }
+Write-Host 'bad-state gate OK: an invalid state file exits 2 with {"error": ...}'
+
 # (b) `import anthropic` must work INSIDE the bundle: a connection failure is expected and
 # is told apart from "SDK missing in the bundle" by the message and the absence of import errors.
 $anthCred = Join-Path $out 'smoke-anthropic-credentials'

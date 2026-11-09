@@ -52,12 +52,13 @@ constexpr AiMode kNetworkAiCeiling = AiMode::Shadow;
 [[nodiscard]] juce::var aiProposalEventToVar (std::uint32_t generation, const AiProposal& proposal);
 [[nodiscard]] juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
                                               AiProposal::Tool tool, AiDecision decision,
-                                              std::optional<AiRefusal> refusal);
+                                              std::optional<AiRefusal> refusal,
+                                              const char* reason = nullptr);
 
 //==============================================================================
 // What the supervisor reads of the world, as plain data.
 enum class AiEngineMode : std::uint8_t { Auto, Soundcheck, Bypass };
-enum class AiRingRisk : std::uint8_t { Na, Low, Rising, Critical };
+// AiRingRisk lives in AiAction.h (the validator reads it).
 
 struct AiStateNotch
 {
@@ -66,7 +67,7 @@ struct AiStateNotch
     float         hz = 0.0f, q = 0.0f, depthDb = 0.0f, ceilingDb = 0.0f;
     NotchController::Origin origin = NotchController::Origin::Detector;
     Author        placedBy = Author::Detector, lastChangedBy = Author::Detector;
-    double        ageS = 0.0;
+    double        seenS = 0.0;   // seconds since the supervisor FIRST OBSERVED this notch (not the notch's true age)
 };
 
 struct AiStateSlot
@@ -154,6 +155,12 @@ public:
         std::function<AiStateSnapshot()> readState;
         std::function<void (const juce::var&)> logSink;              // may be empty
         std::function<bool()> isAskRunning;                          // may be empty = false
+        // Spend limits that survive a restart (decision D6). Wall-clock epoch
+        // milliseconds; all three may be empty (= nothing persisted, and then
+        // nowMs is used as the wall clock). The supervisor never sees the settings object.
+        std::function<std::int64_t()> wallMs;
+        std::function<std::vector<std::int64_t>()> loadCallStarts;   // read once, at construction
+        std::function<void (const std::vector<std::int64_t>&)> saveCallStarts;   // newest kMaxPersistedCallStarts
     };
 
     // Limits (decision D6). Public so tests and the GUI read the same numbers.
@@ -166,7 +173,12 @@ public:
     static constexpr int          kRecurringCount      = 3;
     static constexpr std::int64_t kProposalLifetimeMs  = 10 * 60 * 1000;
     static constexpr std::int64_t kTickIntervalMs      = 500;   // tick() does real work at most this often
-    static constexpr int          kWatchdogMs          = 60000;
+    static constexpr int          kWatchdogMs          = 105000;
+    // The sidecar's own deadline (SidecarRunner.h) must fire first, with room for
+    // process start-up and teardown: the watchdog is only the last resort.
+    static_assert (kWatchdogMs >= kSuperviseDeadlineS * 1000 + 10000, "watchdog must outlast the sidecar deadline");
+    static constexpr int          kMaxPersistedCallStarts = 12;
+    static constexpr int          kPauseAfterFailures  = 3;
     static constexpr int          kMaxSlots            = 16;
     static constexpr int          kMaxNotchesPerSlot   = 32;
     static constexpr const char*  kStateFileName       = "supervisor-state.json";
@@ -197,6 +209,10 @@ public:
     /** Ask for a call as soon as the blocking conditions allow (trigger "manual"). */
     void requestManualCall();
 
+    /** Consent withdrawn / key deleted: cancel the call in flight (logged as
+        `cancelled`) and drop every pending trigger, so nothing starts later from one. */
+    void abortAndDropPending();
+
     /** Device restart, preset load, CLEAR ALL, engine-mode change: cancel the
         call in flight and make its result stale. */
     void invalidate();
@@ -205,7 +221,7 @@ public:
     void shutdown();
 
     // --- observability ------------------------------------------------------
-    enum class StatusKind : std::uint8_t { Idle, Disabled, NotConfigured, Pending, LastFailed, BudgetExhausted };
+    enum class StatusKind : std::uint8_t { Idle, Disabled, NotConfigured, Pending, LastFailed, BudgetExhausted, Paused };
     struct Status { StatusKind kind = StatusKind::Idle; int seconds = 0; };
 
     [[nodiscard]] Status status() const;
@@ -235,6 +251,8 @@ public:
 
     // --- test seams -----------------------------------------------------------
     void setAiProposalsForTest (std::vector<ShownProposal> proposals);
+    /** The first call waits kMinGapMs from app start (a restart must not reset the gap); a test that is not about that skips it. */
+    void skipStartupGapForTest() { appStartMs_ = env_.nowMs() - kMinGapMs; }
 
 private:
     struct InFlight { std::uint32_t generation = 0; AiTrigger trigger = AiTrigger::Manual; std::int64_t startMs = 0; };
@@ -257,7 +275,10 @@ private:
     void onResult (std::uint32_t generation, const CopilotRunResult& result);
     void failCall (const InFlight& call, const char* status, const AiUsage* usage);
     [[nodiscard]] std::uint64_t signatureOf (const AiStateSnapshot& state) const;
-    void removeProposal (std::size_t index, AiDecision decision);
+    void removeProposal (std::size_t index, AiDecision decision, const char* reason = nullptr);
+    [[nodiscard]] std::int64_t wallNow() const;
+    [[nodiscard]] bool spendLimitsAllow (std::int64_t nowMs) const;
+    void failBeforeStart (AiTrigger trigger, std::uint32_t gen, std::int64_t nowMs);
 
     Environment env_;
     AiMode requested_ = AiMode::Shadow;
@@ -276,7 +297,10 @@ private:
     bool baselineSet_ = false;
     std::int64_t lastCallMs_ = 0;
     std::uint64_t lastSignature_ = 0;
-    std::deque<std::int64_t> callStarts_;
+    std::int64_t appStartMs_ = 0;                // monotonic, at construction: the first call waits kMinGapMs from here
+    std::int64_t lastStartMs_ = -1;              // monotonic start of this process's latest call
+    std::vector<std::int64_t> callStartsWall_;   // wall-clock epoch ms, ascending, newest kMaxPersistedCallStarts
+    int consecutiveFailures_ = 0;                // automatic calls ending failed/timeout in a row
 
     std::map<PlacementKey, std::deque<std::int64_t>> placements_;
     bool pendingRecurring_ = false, pendingManual_ = false;

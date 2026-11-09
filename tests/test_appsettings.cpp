@@ -187,3 +187,20 @@ TEST (AiMode, NamesRoundTripAndEffectiveModeIsTheLowerOfTwo)
         }
     EXPECT_EQ (effectiveAiMode (AiMode::Act, AiMode::Shadow), AiMode::Shadow);   // network ceiling today
 }
+
+TEST (AppSettings, AiCallStartsRoundTripAndMalformedEntriesAreDropped)
+{
+    AppSettings s;
+    for (int i = 0; i < 20; ++i)
+        s.aiCallStartsMs.push_back (1'000'000'000'000LL + i);
+    const auto back = appSettingsFromHost (appSettingsToHost (s));
+    ASSERT_EQ (back.aiCallStartsMs.size(), 12u) << "newest 12 only";
+    EXPECT_EQ (back.aiCallStartsMs.back(), 1'000'000'000'019LL);
+    EXPECT_EQ (back.aiCallStartsMs.front(), 1'000'000'000'008LL);
+
+    const auto bad = appSettingsFromHost (hostFromJson (
+        R"({"ai_call_starts_ms":[5000, "x", null, -3, 0, true, [1], 4000]})"));
+    EXPECT_EQ (bad.aiCallStartsMs, (std::vector<std::int64_t> { 4000, 5000 })) << "sorted, malformed dropped";
+    EXPECT_TRUE (appSettingsFromHost (hostFromJson (R"({"ai_call_starts_ms":"nope"})")).aiCallStartsMs.empty());
+    EXPECT_TRUE (appSettingsFromHost ({}).aiCallStartsMs.empty());
+}

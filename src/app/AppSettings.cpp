@@ -2,6 +2,9 @@
 
 #include "app/SidecarRunner.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace
 {
     bool readChannel (const juce::var& v, int& out)
@@ -112,6 +115,18 @@ AppSettings appSettingsFromHost (const az::host::HostSettings& host)
             s.aiMode = AiMode::Suggest;
     }
 
+    // Lane L3a: call-start times. Only numbers count; anything else, and any
+    // non-positive value, is dropped. Newest kAiCallStartsKept survive.
+    if (const auto* starts = host.product["ai_call_starts_ms"].getArray())
+    {
+        for (const auto& v : *starts)
+            if ((v.isInt() || v.isInt64() || v.isDouble()) && std::isfinite ((double) v) && (double) v > 0.0)
+                s.aiCallStartsMs.push_back ((std::int64_t) (juce::int64) v);
+        std::sort (s.aiCallStartsMs.begin(), s.aiCallStartsMs.end());
+        if ((int) s.aiCallStartsMs.size() > kAiCallStartsKept)
+            s.aiCallStartsMs.erase (s.aiCallStartsMs.begin(), s.aiCallStartsMs.end() - kAiCallStartsKept);
+    }
+
     return s;
 }
 
@@ -128,6 +143,14 @@ az::host::HostSettings appSettingsToHost (const AppSettings& settings)
     product->setProperty ("copilot_base_url", settings.copilotBaseUrl);
     product->setProperty ("copilot_consent", settings.copilotConsent);
     product->setProperty ("ai_mode", juce::String (aiModeToString (settings.aiMode)));
+    {
+        juce::Array<juce::var> starts;
+        const auto first = settings.aiCallStartsMs.size() > (std::size_t) kAiCallStartsKept
+                               ? settings.aiCallStartsMs.size() - (std::size_t) kAiCallStartsKept : (std::size_t) 0;
+        for (auto i = first; i < settings.aiCallStartsMs.size(); ++i)
+            starts.add (juce::var ((juce::int64) settings.aiCallStartsMs[i]));
+        product->setProperty ("ai_call_starts_ms", starts);
+    }
 
     if (settings.hasRouting)
     {

@@ -24,6 +24,14 @@ double round2 (double v)
     return std::round (v * 100.0) / 100.0;
 }
 
+// next_rung_db is a TARGET the model echoes back and the validator compares at
+// 0.001 dB: 2 decimals could move an off-ladder ceiling by up to 0.005 dB.
+double round3 (double v)
+{
+    if (! std::isfinite (v)) return 0.0;
+    return std::round (v * 1000.0) / 1000.0;
+}
+
 const char* originText (NotchController::Origin o)
 {
     switch (o)
@@ -118,7 +126,7 @@ juce::var aiProposalEventToVar (std::uint32_t generation, const AiProposal& p)
 
 juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
                                 AiProposal::Tool tool, AiDecision decision,
-                                std::optional<AiRefusal> refusal)
+                                std::optional<AiRefusal> refusal, const char* reason)
 {
     auto v = SessionLogger::makeEvent ("ai_decision");
     auto* o = v.getDynamicObject();
@@ -129,6 +137,10 @@ juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
     o->setProperty ("decision", juce::String (aiDecisionName (decision)));
     if (refusal)
         o->setProperty ("refusal", juce::String (aiRefusalName (*refusal)));
+    // `reason` explains an `expired` decision (superseded, or the validator's
+    // refusal name when the proposal stopped validating against the live notch).
+    if (reason != nullptr)
+        o->setProperty ("reason", juce::String (reason));
     return v;
 }
 
@@ -159,7 +171,7 @@ juce::String AiSupervisor::buildStateJson (const AiStateSnapshot& state, std::ui
     const double binHz = std::isfinite (state.binHz) && state.binHz >= 0.001 ? state.binHz : sr / 2048.0;
 
     auto* root = new juce::DynamicObject();
-    root->setProperty ("schema", 1);
+    root->setProperty ("schema", 2);
     root->setProperty ("generation", (juce::int64) generation);
     // The file only ever says what the supervisor is allowed to be: suggest or act.
     root->setProperty ("ai_mode", aiMode == AiMode::Act ? "act" : "suggest");
@@ -195,7 +207,7 @@ juce::String AiSupervisor::buildStateJson (const AiStateSnapshot& state, std::ui
                 continue;
             const double hz = round2 ((double) n.hz), q = round2 ((double) n.q);
             if (! std::isfinite ((double) n.hz) || ! std::isfinite ((double) n.q) || ! std::isfinite ((double) n.depthDb)
-                || ! std::isfinite ((double) n.ceilingDb) || ! std::isfinite (n.ageS)
+                || ! std::isfinite ((double) n.ceilingDb) || ! std::isfinite (n.seenS)
                 || hz < 0.01 || hz > sr / 2.0 || q < 0.01
                 || n.lane < 0 || n.lane > 1 || n.index < 0 || n.index > 63)
                 continue;
@@ -209,10 +221,13 @@ juce::String AiSupervisor::buildStateJson (const AiStateSnapshot& state, std::ui
             no->setProperty ("q", q);
             no->setProperty ("depth_db", round2 (juce::jlimit (-120.0, 0.0, (double) n.depthDb)));
             no->setProperty ("ceiling_db", round2 (juce::jlimit (-120.0, 0.0, (double) n.ceilingDb)));
+            // The ONE legal deepen target (the validator's own function), or null.
+            const auto nextRung = aiNextRungDb ((double) n.depthDb, (double) n.ceilingDb);
+            no->setProperty ("next_rung_db", nextRung ? juce::var (round3 (*nextRung)) : juce::var());
             no->setProperty ("origin", originText (n.origin));
             no->setProperty ("placed_by", authorName (n.placedBy));
             no->setProperty ("last_changed_by", authorName (n.lastChangedBy));
-            no->setProperty ("age_s", round2 (juce::jlimit (0.0, 1.0e8, n.ageS)));
+            no->setProperty ("seen_s", round2 (juce::jlimit (0.0, 1.0e8, n.seenS)));
             no->setProperty ("hold_s", 0);   // L3a: nothing is held
             no->setProperty ("verdict", "none");
             notches.add (juce::var (no));
@@ -225,10 +240,55 @@ juce::String AiSupervisor::buildStateJson (const AiStateSnapshot& state, std::ui
 }
 
 //==============================================================================
+namespace
+{
+struct NotchWhere { int slot, lane, index; float hz; };
+
+// The notches as the validator sees them (shared by the book's re-check and the
+// result path, so the two cannot disagree about ring risk or bin width).
+std::vector<AiLiveNotch> buildLiveNotches (const AiStateSnapshot& state, double binHzHint,
+                                           std::map<std::uint32_t, NotchWhere>* where)
+{
+    std::vector<AiLiveNotch> live;
+    for (const auto& s : state.slots)
+        for (const auto& n : s.notches)
+        {
+            const auto g = AiSupervisor::globalNid (s.slot, n.nid);
+            if (g == 0)
+                continue;
+            AiLiveNotch l;
+            l.nid = g; l.lane = n.lane; l.index = n.index; l.hz = n.hz; l.depthDb = n.depthDb;
+            l.ceilingDb = n.ceilingDb; l.origin = n.origin;
+            l.binHz = (float) (state.binHz > 0.0 ? state.binHz : binHzHint);
+            l.ringRisk = s.ringRisk;
+            live.push_back (l);
+            if (where != nullptr)
+                (*where)[g] = { s.slot, n.lane, n.index, n.hz };
+        }
+    return live;
+}
+} // namespace
+
 AiSupervisor::AiSupervisor (Environment env)
     : env_ (std::move (env))
 {
     jassert (env_.nowMs != nullptr && env_.launcher != nullptr && env_.readState != nullptr);
+    appStartMs_ = env_.nowMs();
+    if (env_.loadCallStarts)
+    {
+        // Malformed entries (non-positive) are dropped; order is not trusted.
+        for (const auto v : env_.loadCallStarts())
+            if (v > 0)
+                callStartsWall_.push_back (v);
+        std::sort (callStartsWall_.begin(), callStartsWall_.end());
+        if ((int) callStartsWall_.size() > kMaxPersistedCallStarts)
+            callStartsWall_.erase (callStartsWall_.begin(), callStartsWall_.end() - kMaxPersistedCallStarts);
+    }
+}
+
+std::int64_t AiSupervisor::wallNow() const
+{
+    return env_.wallMs ? env_.wallMs() : env_.nowMs();
 }
 
 AiSupervisor::~AiSupervisor()
@@ -241,6 +301,7 @@ void AiSupervisor::setRequestedMode (AiMode mode)
     if (mode == requested_)
         return;
     requested_ = mode;
+    consecutiveFailures_ = 0;   // any AI-mode change lifts the failure pause
     log (aiModeEventToVar (requested_, effectiveLlmMode(), effectiveNetworkMode()));
     invalidate();
 
@@ -297,6 +358,13 @@ void AiSupervisor::notePlacement (int slot, int lane, double hz, std::int64_t no
         pendingRecurring_ = true;
 }
 
+void AiSupervisor::abortAndDropPending()
+{
+    pendingRecurring_ = pendingManual_ = false;
+    invalidate();   // cancels the child, logs `cancelled`, makes a late result stale
+    changed();
+}
+
 void AiSupervisor::requestManualCall()
 {
     if (effectiveLlmMode() >= AiMode::Suggest)
@@ -317,11 +385,11 @@ std::uint64_t AiSupervisor::signatureOf (const AiStateSnapshot& state) const
     return h;
 }
 
-void AiSupervisor::removeProposal (std::size_t index, AiDecision decision)
+void AiSupervisor::removeProposal (std::size_t index, AiDecision decision, const char* reason)
 {
     const auto p = proposals_[index];
     proposals_.erase (proposals_.begin() + (std::ptrdiff_t) index);
-    log (aiDecisionEventToVar (p.generation, p.proposal.nid, p.proposal.tool, decision, std::nullopt));
+    log (aiDecisionEventToVar (p.generation, p.proposal.nid, p.proposal.tool, decision, std::nullopt, reason));
 }
 
 void AiSupervisor::dismiss (std::uint32_t id)
@@ -355,6 +423,7 @@ void AiSupervisor::expireProposals (const AiStateSnapshot& state, std::int64_t n
     if (proposals_.empty())
         return;
     const double binHz = state.binHz > 0.0 ? state.binHz : binHzHint_;
+    const auto liveNotches = buildLiveNotches (state, binHzHint_, nullptr);
     bool any = false;
     for (std::size_t i = proposals_.size(); i-- > 0;)
     {
@@ -371,6 +440,15 @@ void AiSupervisor::expireProposals (const AiStateSnapshot& state, std::int64_t n
         if (gone || moved || old)
         {
             removeProposal (i, AiDecision::Expired);
+            any = true;
+            continue;
+        }
+        // Re-check against the notch and slot as they are NOW: a deepen whose
+        // rung is no longer the next one, a release beside a slot that began to
+        // ring, a notch that is no longer detector-owned.
+        if (const auto refusal = validateProposal (p.proposal, liveNotches))
+        {
+            removeProposal (i, AiDecision::Expired, aiRefusalName (*refusal));
             any = true;
         }
     }
@@ -402,6 +480,12 @@ void AiSupervisor::trackCeiling (const AiStateSnapshot& state, std::int64_t nowM
 
 std::optional<AiTrigger> AiSupervisor::pickTrigger (const AiStateSnapshot& state, std::int64_t nowMs)
 {
+    // Paused after repeated failures: only an operator's manual call may go.
+    if (consecutiveFailures_ >= kPauseAfterFailures)
+    {
+        pendingRecurring_ = false;
+        return pendingManual_ ? std::optional<AiTrigger> (AiTrigger::Manual) : std::nullopt;
+    }
     if (pendingRecurring_)
         return AiTrigger::RecurringBin;
     for (const auto& [g, since] : atCeilingSince_)
@@ -463,15 +547,36 @@ void AiSupervisor::tick()
         return;
     if (callsThisSession_ >= sessionBudget_)
         return;
-    if (callsThisSession_ > 0 && nowMs - lastCallMs_ < kMinGapMs)
-        return;
-    while (! callStarts_.empty() && nowMs - callStarts_.front() >= 3600 * 1000)
-        callStarts_.pop_front();
-    if ((int) callStarts_.size() >= kMaxCallsPerHour)
+    if (! spendLimitsAllow (nowMs))
         return;
 
     if (const auto trigger = pickTrigger (state, nowMs))
         startCall (state, *trigger, nowMs);
+}
+
+// The hourly cap and the minimum gap, both measured on the WALL clock against
+// the persisted call starts so a restart does not reset them. An entry dated in
+// the future counts as "now": setting the clock back must not free budget.
+bool AiSupervisor::spendLimitsAllow (std::int64_t nowMs) const
+{
+    // The first call waits kMinGapMs from app start; later ones from the latest start.
+    const auto anchorMs = std::max (appStartMs_, lastStartMs_);
+    if (nowMs - anchorMs < kMinGapMs)
+        return false;
+
+    const auto wall = wallNow();
+    int inLastHour = 0;
+    std::int64_t latest = 0;
+    for (const auto raw : callStartsWall_)
+    {
+        const auto at = std::min (raw, wall);   // future-dated = now
+        latest = std::max (latest, at);
+        if (wall - at < 3600 * 1000)
+            ++inLastHour;
+    }
+    if (inLastHour >= kMaxCallsPerHour)
+        return false;
+    return latest == 0 || wall - latest >= kMinGapMs;
 }
 
 void AiSupervisor::startCall (const AiStateSnapshot& state, AiTrigger trigger, std::int64_t nowMs)
@@ -496,9 +601,7 @@ void AiSupervisor::startCall (const AiStateSnapshot& state, AiTrigger trigger, s
         if (! tmp.getFile().replaceWithText (text, false, false, "\n")
             || ! tmp.overwriteTargetFileWithTemporary())
         {
-            lastFailed_ = true;
-            log (aiCallEventToVar (aiTriggerName (trigger), gen, 0.0, "failed", nullptr));
-            changed();
+            failBeforeStart (trigger, gen, nowMs);
             return;
         }
     }
@@ -512,8 +615,13 @@ void AiSupervisor::startCall (const AiStateSnapshot& state, AiTrigger trigger, s
 
     inFlight_ = InFlight { gen, trigger, nowMs };
     lastCallMs_ = nowMs;
+    lastStartMs_ = nowMs;
     lastSignature_ = signatureOf (state);
-    callStarts_.push_back (nowMs);
+    callStartsWall_.push_back (wallNow());
+    if ((int) callStartsWall_.size() > kMaxPersistedCallStarts)
+        callStartsWall_.erase (callStartsWall_.begin(), callStartsWall_.end() - kMaxPersistedCallStarts);
+    if (env_.saveCallStarts)
+        env_.saveCallStarts (callStartsWall_);
     ++callsThisSession_;
     pendingRecurring_ = false;
     pendingManual_ = false;
@@ -527,9 +635,29 @@ void AiSupervisor::startCall (const AiStateSnapshot& state, AiTrigger trigger, s
 void AiSupervisor::failCall (const InFlight& call, const char* status, const AiUsage* usage)
 {
     lastFailed_ = true;
+    // Only AUTOMATIC calls count toward the pause: an operator's manual retry is
+    // the way out of it, so it must not be able to deepen it. (cancelled never
+    // reaches here.)
+    if (call.trigger != AiTrigger::Manual)
+        ++consecutiveFailures_;
     log (aiCallEventToVar (aiTriggerName (call.trigger), call.generation,
                            (double) (now() - call.startMs), status, usage));
     changed();
+}
+
+// The state file could not be written: ONE failed call. The trigger that led to
+// it is dropped (a retry every tick would hammer a broken disk 2x a second) and
+// it counts toward the failure pause; nothing was started, so no budget is spent.
+void AiSupervisor::failBeforeStart (AiTrigger trigger, std::uint32_t gen, std::int64_t nowMs)
+{
+    pendingRecurring_ = false;
+    pendingManual_ = false;
+    if (trigger == AiTrigger::AtCeiling)
+        for (const auto& [g, since] : atCeilingSince_)
+            if (nowMs - since >= kAtCeilingMs)
+                ceilingTriggered_.insert (g);   // same as a started call: do not re-pick it every tick
+    lastCallMs_ = nowMs;                        // and a heartbeat must not re-fire at once either
+    failCall (InFlight { gen, trigger, nowMs }, "failed", nullptr);
 }
 
 void AiSupervisor::onResult (std::uint32_t generation, const CopilotRunResult& result)
@@ -557,27 +685,14 @@ void AiSupervisor::onResult (std::uint32_t generation, const CopilotRunResult& r
         return failCall (call, "failed", nullptr);
 
     lastFailed_ = false;
+    consecutiveFailures_ = 0;   // a success lifts the failure pause
     log (aiCallEventToVar (aiTriggerName (call.trigger), call.generation,
                            (double) (now() - call.startMs), "ok", &parsed.usage));
 
     // Validate against the notches as they are NOW, not as the state file had them.
     const auto state = env_.readState();
-    std::vector<AiLiveNotch> live;
-    struct Where { int slot, lane, index; float hz; };
-    std::map<std::uint32_t, Where> where;
-    for (const auto& s : state.slots)
-        for (const auto& n : s.notches)
-        {
-            const auto g = globalNid (s.slot, n.nid);
-            if (g == 0)
-                continue;
-            AiLiveNotch l;
-            l.nid = g; l.lane = n.lane; l.index = n.index; l.hz = n.hz; l.depthDb = n.depthDb;
-            l.ceilingDb = n.ceilingDb; l.origin = n.origin;
-            l.binHz = (float) (state.binHz > 0.0 ? state.binHz : binHzHint_);
-            live.push_back (l);
-            where[g] = { s.slot, n.lane, n.index, n.hz };
-        }
+    std::map<std::uint32_t, NotchWhere> where;
+    const auto live = buildLiveNotches (state, binHzHint_, &where);
 
     const auto nowMs = now();
     for (const auto& p : parsed.proposals)
@@ -597,11 +712,11 @@ void AiSupervisor::onResult (std::uint32_t generation, const CopilotRunResult& r
         if (w == where.end())
             continue;   // validateProposal found it live; unreachable in practice
 
-        // A newer proposal for the same (tool, notch) replaces the old one.
-        proposals_.erase (std::remove_if (proposals_.begin(), proposals_.end(),
-                                          [&p] (const ShownProposal& e)
-                                          { return e.proposal.tool == p.tool && e.proposal.nid == p.nid; }),
-                          proposals_.end());
+        // A newer proposal for the same (tool, notch) replaces the old one; the
+        // old one is logged as expired (superseded) so the log never loses it.
+        for (std::size_t i = proposals_.size(); i-- > 0;)
+            if (proposals_[i].proposal.tool == p.tool && proposals_[i].proposal.nid == p.nid)
+                removeProposal (i, AiDecision::Expired, "superseded");
 
         ShownProposal sp;
         sp.id = nextProposalId_++;
@@ -627,6 +742,8 @@ AiSupervisor::Status AiSupervisor::status() const
         return { StatusKind::NotConfigured, 0 };
     if (callsThisSession_ >= sessionBudget_)
         return { StatusKind::BudgetExhausted, 0 };
+    if (consecutiveFailures_ >= kPauseAfterFailures)
+        return { StatusKind::Paused, 0 };
     if (lastFailed_)
         return { StatusKind::LastFailed, 0 };
     return { StatusKind::Idle, 0 };
@@ -647,6 +764,8 @@ juce::String AiSupervisor::statusText() const
             return viText ("AI \xc2\xb7 \xc4\x91" "ang x\xc3\xa9t ") + juce::String (s.seconds) + " s";
         case StatusKind::LastFailed:
             return viText ("AI \xc2\xb7 l\xe1\xba\xa7n x\xc3\xa9t g\xe1\xba\xa7n nh\xe1\xba\xa5t l\xe1\xbb\x97i");
+        case StatusKind::Paused:
+            return viText ("AI \xc2\xb7 t\xe1\xba\xa1m d\xe1\xbb\xabng sau 3 l\xe1\xbb\x97i li\xc3\xaan ti\xe1\xba\xbfp");
         case StatusKind::BudgetExhausted:
             return viText ("AI \xc2\xb7 h\xe1\xba\xbft l\xc6\xb0\xe1\xbb\xa3t phi\xc3\xaan n\xc3\xa0y");
     }

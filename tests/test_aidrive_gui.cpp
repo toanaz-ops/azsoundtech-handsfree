@@ -22,8 +22,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -655,4 +657,163 @@ TEST (AiDriveChart, MainComponentFeedsGhostsFromTheSupervisorForTheDisplayedSlot
 
     app.aiSupervisor().dismissAll();
     EXPECT_EQ (view.ghostCountForTest(), 0u);
+}
+
+//==============================================================================
+// The contract test: a VALID supervise result delivered to a REAL MainComponent
+// puts proposals on screen and changes no notch. It has teeth: a negative
+// control in the same test makes one real manual change and shows the very same
+// comparison catches it.
+namespace
+{
+class ScriptedLauncher : public AiLauncher
+{
+public:
+    std::vector<CopilotRequest> requests;
+    std::function<void (CopilotRunResult)> pending;
+    bool busy = false;
+
+    bool start (CopilotRequest r, std::function<void (CopilotRunResult)> onDone) override
+    {
+        requests.push_back (std::move (r));
+        pending = std::move (onDone);
+        busy = true;
+        return true;
+    }
+    void cancel() override { busy = false; }
+    [[nodiscard]] bool isBusy() const override { return busy; }
+    void deliver (CopilotRunResult r)
+    {
+        busy = false;
+        auto cb = pending;
+        ASSERT_TRUE (cb != nullptr);
+        cb (std::move (r));
+    }
+};
+
+// Everything that identifies a notch, per slot, plus the number of notch
+// commands waiting in the engine's queue and the events waiting in the controller.
+std::vector<juce::String> freezeNotches (MainComponent& app)
+{
+    std::vector<juce::String> out;
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+    {
+        auto* c = app.getNotchControllerForTest (slot);
+        if (c == nullptr)
+            continue;
+        auto snap = std::make_unique<NotchController::SnapshotBuffer>();
+        c->copySnapshot (*snap);
+        for (std::uint32_t i = 0; i < snap->notchCount && i < snap->notches.size(); ++i)
+        {
+            const auto& n = snap->notches[i];
+            out.push_back ("slot " + juce::String (slot) + " hz " + juce::String (n.frequency, 4) + " q " + juce::String (n.Q, 4)
+                           + " depth " + juce::String (n.depthDB, 4) + " deepest " + juce::String (n.deepestDb, 4)
+                           + " origin " + juce::String ((int) n.origin) + " placed " + juce::String ((int) n.placedBy)
+                           + " changed " + juce::String ((int) n.lastChangedBy) + " nid " + juce::String ((int) n.nid)
+                           + " lane " + juce::String ((int) n.channel) + " index " + juce::String ((int) n.index));
+        }
+        out.push_back ("slot " + juce::String (slot) + " commands "
+                       + juce::String ((int) app.getAudioEngine().getCommandQueue (slot).getAvailableRead())
+                       + " events " + juce::String (c->pendingEventsForTest()));
+    }
+    return out;
+}
+
+void publishSnapshot (MainComponent& app, NotchController& controller, int blocks = 8)
+{
+    controller.setSampleRate (48000.0);
+    LockFreeRingBuffer<float>& tap = app.getAudioEngine().getTapBuffer (0, 0);
+    std::vector<float> hop ((std::size_t) Detector::kHopSize, 0.1f);
+    for (int i = 0; i < blocks; ++i)
+    {
+        tap.write (hop.data(), hop.size());
+        controller.runOnce();
+    }
+}
+} // namespace
+
+TEST (AiDriveContract, AValidSuperviseResultShowsProposalsAndChangesNoNotch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+
+    // A session log that is NOT in the real log directory (the supervisor's state
+    // file goes next to it), and an AI path that never touches a process or a key.
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                         .getChildFile ("aidrive-contract-" + juce::String (juce::Random::getSystemRandom().nextInt64()));
+    ASSERT_TRUE (dir.createDirectory());
+    const auto logFile = dir.getChildFile ("session.jsonl");
+    ASSERT_TRUE (logFile.replaceWithText ("{}\n"));
+
+    auto owned = std::make_unique<ScriptedLauncher>();
+    auto* launcher = owned.get();
+    app.setAiLauncherForTest (std::move (owned));
+    app.setAiUsableForTest (true);
+    app.setAiLogFileForTest (logFile);
+    app.setAiMode (AiMode::Suggest);
+    app.aiSupervisor().skipStartupGapForTest();
+    app.requestMode (AudioEngine::Mode::Auto);   // the supervisor only calls while the engine is in Auto
+
+    auto* controller = app.getNotchControllerForTest (0);
+    ASSERT_NE (controller, nullptr);
+    ASSERT_TRUE (controller->setNotch (0, 0, 1000.0, 30.0, -6.0, NotchController::Origin::Detector));
+    ASSERT_TRUE (controller->setNotch (0, 1, 2000.0, 30.0, -6.0, NotchController::Origin::Detector));
+    controller->setRingRiskOverrideForTest (std::make_pair (true, 0.0f));   // a quiet slot: a release may be shown
+    publishSnapshot (app, *controller);
+
+    const auto before = freezeNotches (app);
+    ASSERT_GE (before.size(), 2u);
+
+    // A trigger fires and the supervisor calls the (fake) launcher through the real tick.
+    app.aiSupervisor().requestManualCall();
+    app.tickAiForTest();
+    ASSERT_EQ (launcher->requests.size(), 1u) << "the supervisor did not start a call: check slot enabled / configured";
+    ASSERT_TRUE (launcher->requests[0].supervise);
+
+    // What the model is told: read the state file the call wrote.
+    const auto doc = juce::JSON::parse (launcher->requests[0].statePath);
+    ASSERT_TRUE (doc.isObject());
+    EXPECT_EQ ((int) doc["schema"], 2);
+    const auto* slots = doc["slots"].getArray();
+    ASSERT_NE (slots, nullptr);
+    ASSERT_GE (slots->size(), 1);
+    const auto* notches = (*slots)[0]["notches"].getArray();
+    ASSERT_NE (notches, nullptr);
+    ASSERT_EQ (notches->size(), 2);
+    const auto nidA = (juce::int64) (*notches)[0]["nid"];
+    const auto nidB = (juce::int64) (*notches)[1]["nid"];
+    const auto nextRung = (double) (*notches)[0]["next_rung_db"];
+    EXPECT_LT (nextRung, -6.0) << "the file names the rung the validator will accept";
+
+    // A VALID result: deepen to exactly that rung, hold the other notch, release it as well.
+    const auto actions = juce::String ("{\"tool\": \"propose_deepen\", \"nid\": ") + juce::String (nidA)
+                         + ", \"expect_hz\": 1000, \"target_db\": " + juce::String (nextRung, 3)
+                         + ", \"reason\": \"recurring_at_frequency\"},"
+                         + "{\"tool\": \"propose_hold\", \"nid\": " + juce::String (nidB)
+                         + ", \"expect_hz\": 2000, \"hold_s\": 120, \"reason\": \"show_in_progress\"},"
+                         + "{\"tool\": \"propose_release\", \"nid\": " + juce::String (nidB)
+                         + ", \"expect_hz\": 2000, \"reason\": \"stale_no_recurrence\"}";
+    CopilotRunResult result;
+    result.status = CopilotRunResult::Status::ok;
+    result.exitCode = 0;
+    result.stdoutText = "{\"supervise\": true, \"generation\": " + juce::String ((int) app.aiSupervisor().generation())
+                        + ", \"actions\": [" + actions + "], \"usage\": {\"input_tokens\": 10, \"output_tokens\": 5}}";
+    launcher->deliver (result);   // the supervisor's real onResult path (no message loop in the headless suite)
+
+    // (a) the proposals are shown ...
+    const auto& shown = app.aiSupervisor().proposals();
+    ASSERT_EQ (shown.size(), 3u);
+    EXPECT_EQ (shown[0].proposal.tool, AiProposal::Tool::Deepen);
+    EXPECT_FLOAT_EQ (shown[0].proposal.targetDb, (float) nextRung);
+    EXPECT_EQ (app.getCopilotPanelForTest().getProposalRowCountForTest(), 3);
+
+    // (b) ... and not one notch, command or event differs from before.
+    EXPECT_EQ (freezeNotches (app), before) << "a proposal must never change a notch";
+
+    // Negative control: one REAL manual change, and the same comparison sees it.
+    ASSERT_TRUE (controller->setNotch (0, 2, 3000.0, 30.0, -9.0, NotchController::Origin::Manual));
+    publishSnapshot (app, *controller, 2);
+    EXPECT_NE (freezeNotches (app), before) << "the comparison has no teeth: a real change went unnoticed";
+
+    dir.deleteRecursively();
 }

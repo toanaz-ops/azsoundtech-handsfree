@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -313,16 +314,8 @@ MainComponent::MainComponent()
     sessionLogger_.setDroppedCandidatesProvider ([this] { return droppedCandidatesTotal(); });
 
     // Lane L3a: the supervisor, on its OWN SidecarRunner (never the ask box's).
-    {
-        AiSupervisor::Environment env;
-        env.nowMs = [] { return (std::int64_t) juce::Time::getMillisecondCounterHiRes(); };
-        env.launcher = std::make_unique<SidecarAiLauncher>();
-        env.readState = [this] { return readAiState(); };
-        env.logSink = [this] (const juce::var& v) { if (sessionLogger_.isActive()) sessionLogger_.log (v); };
-        env.isAskRunning = [this] { return copilotRunner_ != nullptr && copilotRunner_->isBusy(); };
-        aiSupervisor_ = std::make_unique<AiSupervisor> (std::move (env));
-        setAiModeFromSettings();
-    }
+    aiSupervisor_ = makeAiSupervisor (std::make_unique<SidecarAiLauncher>());
+    setAiModeFromSettings();
 
     // Lane C1b (shadow): the candidate classifier. Loaded HERE and nowhere
     // else, with every detector thread still stopped -- the same precondition
@@ -503,6 +496,7 @@ MainComponent::MainComponent()
     {
         settings_.copilotConsent = false;
         saveSettings();
+        stopAiAfterCredentialChange();
     };
     copilotSetupPanel_.onProviderChanged = [this] (juce::String)
     {
@@ -531,6 +525,7 @@ MainComponent::MainComponent()
     {
         credentialStore().deleteKey (provider);
         refreshCopilotKeyStatus();
+        stopAiAfterCredentialChange();
     };
     addChildComponent (copilotSetupPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
@@ -1087,7 +1082,11 @@ MainComponent::MainComponent()
         // card now open is NOT the remembered one -- which is exactly a
         // mismatch: every slot comes off (the old routing must not run on a
         // card nobody confirmed) and the memory is kept for the next start.
+        // The AI call-start times are NOT wizard state: keep the live list so a
+        // CANCEL cannot hand the supervisor back spent budget.
+        const auto aiCallStarts = settings_.aiCallStartsMs;
         settings_ = wizardSnapshot_;
+        settings_.aiCallStartsMs = aiCallStarts;
 
         if (! wizardChangedDevice_)
         {
@@ -1650,6 +1649,53 @@ bool MainComponent::copilotUsable()
                    : isValidCopilotBaseUrl (s.copilotBaseUrl));
 }
 
+std::unique_ptr<AiSupervisor> MainComponent::makeAiSupervisor (std::unique_ptr<AiLauncher> launcher)
+{
+    AiSupervisor::Environment env;
+    env.nowMs = [] { return (std::int64_t) juce::Time::getMillisecondCounterHiRes(); };
+    env.launcher = std::move (launcher);
+    env.readState = [this] { return readAiState(); };
+    env.logSink = [this] (const juce::var& v) { if (sessionLogger_.isActive()) sessionLogger_.log (v); };
+    env.isAskRunning = [this] { return copilotRunner_ != nullptr && copilotRunner_->isBusy(); };
+    // Spend limits survive a restart: the call-start times live in the settings
+    // file (wall-clock epoch ms); the supervisor never sees the settings object.
+    env.wallMs = [] { return (std::int64_t) juce::Time::currentTimeMillis(); };
+    env.loadCallStarts = [this] { return settings_.aiCallStartsMs; };
+    env.saveCallStarts = [this] (const std::vector<std::int64_t>& starts)
+    {
+        settings_.aiCallStartsMs = starts;
+        saveSettings();
+    };
+    return std::make_unique<AiSupervisor> (std::move (env));
+}
+
+// Consent withdrawn or a key deleted: the AI must stop NOW, not at the next
+// 5 s usability re-check. Cancels a call in flight, drops pending triggers and
+// forgets the cached "usable" answer so the very next tick re-reads it.
+void MainComponent::stopAiAfterCredentialChange()
+{
+    aiUsableCheckedMs_ = -1;
+    aiUsableCached_ = false;
+    if (aiSupervisor_ != nullptr)
+        aiSupervisor_->abortAndDropPending();
+}
+
+void MainComponent::setAiLauncherForTest (std::unique_ptr<AiLauncher> launcher)
+{
+    aiSupervisor_->onChanged = nullptr;
+    aiSupervisor_->shutdown();
+    aiSupervisor_ = makeAiSupervisor (std::move (launcher));
+    aiSupervisor_->onChanged = [this] { refreshAiViews(); };
+    setAiModeFromSettings();
+}
+
+void MainComponent::setAiUsableForTest (bool usable)
+{
+    // A check time far in the future keeps readAiState() from re-asking the DPAPI store.
+    aiUsableCached_ = usable;
+    aiUsableCheckedMs_ = std::numeric_limits<std::int64_t>::max() / 2;
+}
+
 void MainComponent::applyAiMode (AiMode mode)
 {
     // Off really means no AI runs: the shadow classifier is gated off too. The
@@ -1749,7 +1795,7 @@ AiStateSnapshot MainComponent::readAiState()
     }
     out.measuring = soundcheckLock_ == SoundcheckLock::Measuring || soundcheckConfirmPending_;
 
-    const auto logFile = currentSessionLogFile();
+    const auto logFile = aiLogFileOverrideForTest_ != juce::File() ? aiLogFileOverrideForTest_ : currentSessionLogFile();
     const auto checkNowMs = (std::int64_t) juce::Time::getMillisecondCounterHiRes();
     if (aiUsableCheckedMs_ < 0 || checkNowMs - aiUsableCheckedMs_ >= 5000)
     {
@@ -1814,7 +1860,7 @@ AiStateSnapshot MainComponent::readAiState()
             const auto it = aiNotchFirstSeenMs_.find (g);
             const auto first = it != aiNotchFirstSeenMs_.end() ? it->second : nowMs;
             seen[g] = first;
-            a.ageS = (double) (nowMs - first) / 1000.0;
+            a.seenS = (double) (nowMs - first) / 1000.0;
             s.notches.push_back (a);
         }
         out.slots.push_back (std::move (s));
@@ -3582,23 +3628,25 @@ void MainComponent::refreshStatus()
     }
 }
 
+void MainComponent::tickAi()
+{
+    // Lane L3a: placements the detector threads queued, then the supervisor's
+    // own decision. Message thread; changes no notch.
+    std::vector<PendingPlacement> placements;
+    {
+        const std::lock_guard<std::mutex> lock (placementMutex_);
+        placements.swap (pendingPlacements_);
+    }
+    for (const auto& p : placements)
+        aiSupervisor_->notePlacement (p.slot, p.lane, p.hz, p.atMs);
+    aiSupervisor_->tick();
+    refreshAiViews();   // the pending line counts seconds; ghosts follow the live depth
+}
+
 void MainComponent::timerCallback()
 {
     refreshStatus();
-
-    // Lane L3a: placements the detector threads queued, then the supervisor's
-    // own decision. Message thread; changes no notch.
-    {
-        std::vector<PendingPlacement> placements;
-        {
-            const std::lock_guard<std::mutex> lock (placementMutex_);
-            placements.swap (pendingPlacements_);
-        }
-        for (const auto& p : placements)
-            aiSupervisor_->notePlacement (p.slot, p.lane, p.hz, p.atMs);
-        aiSupervisor_->tick();
-        refreshAiViews();   // the pending line counts seconds; ghosts follow the live depth
-    }
+    tickAi();
 
     // LANE U (spec 3.2 step 6): the restored routing is checked against the
     // device's channels at the FIRST tick that has any -- the counts read 0

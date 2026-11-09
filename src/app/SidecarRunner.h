@@ -36,6 +36,13 @@
 #include <memory>
 #include <mutex>
 
+// Supervision deadlines (lane L3a). ONE place: buildCopilotSuperviseArguments
+// builds --timeout / --deadline-s from these and AiSupervisor's watchdog is
+// checked against them. The sidecar gives up on a single provider request after
+// kSuperviseRequestTimeoutS and on the whole call after kSuperviseDeadlineS.
+constexpr int kSuperviseRequestTimeoutS = 30;
+constexpr int kSuperviseDeadlineS = 90;
+
 struct CopilotRequest
 {
     juce::File executable;

@@ -126,7 +126,8 @@ juce::StringArray buildCopilotSuperviseArguments (const CopilotRequest& request)
         args.add ("--model=" + request.model);
     if (openai)
         args.add ("--base-url=" + request.baseUrl);
-    args.add ("--timeout=50");
+    args.add ("--timeout=" + juce::String (kSuperviseRequestTimeoutS));
+    args.add ("--deadline-s=" + juce::String (kSuperviseDeadlineS));
     return args;
 }
 

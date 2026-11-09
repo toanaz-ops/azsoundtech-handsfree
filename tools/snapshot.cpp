@@ -412,14 +412,19 @@ int main (int argc, char** argv)
         controller->clearNotch (0, 5);
         settle();
 
-        // --- console-ai-suggest: mode GOI Y, three proposals (deepen, release,
-        // hold) with their ghosts on the chart and their rows in the panel.
+        // --- console-ai-suggest: mode GOI Y, proposals (deepen, hold) with their
+        // ghosts on the chart and their rows in the panel. NO release: the RING
+        // RISK chip above is staged to Critical, and the validator refuses a
+        // release beside a slot that is not at its lowest ring risk.
         app.setAiMode (AiMode::Suggest);
 
         // The proposals are about DETECTOR-origin notches (the manual ones above
         // are not the model's to touch) and are ones the validator would accept:
         // the deepen goes to the controller's own next rung under the live
-        // ceiling, the release and hold address live detector notches.
+        // ceiling, the hold addresses a live detector notch. Every staged proposal
+        // is run through validateProposal against the live notches AND the slot's
+        // ring risk as the chip shows it (Critical), so this picture cannot show
+        // something the app itself would refuse.
         controller->setNotchAuthoredForTest (0, 6, 3150.0, 30.0,  -9.0, Author::Detector);
         controller->setNotchAuthoredForTest (0, 7,  780.0, 30.0, -12.0, Author::Detector);
         controller->setNotchAuthoredForTest (1, 8, 5200.0, 30.0, -12.0, Author::Detector);
@@ -442,19 +447,61 @@ int main (int argc, char** argv)
             sp.proposal.reason = reason;
             return sp;
         };
-        std::vector<ShownProposal> proposals;
         const auto ceilingDb = controller->getNotchDepthDb();
+        const auto liveNotches = [&]
+        {
+            auto snap = std::make_unique<NotchController::SnapshotBuffer>();
+            controller->copySnapshot (*snap);
+            std::vector<AiLiveNotch> live;
+            for (std::uint32_t i = 0; i < snap->notchCount; ++i)
+            {
+                const auto& n = snap->notches[i];
+                AiLiveNotch l;
+                l.nid = AiSupervisor::globalNid (0, n.nid);
+                l.lane = n.channel; l.index = n.index; l.hz = n.frequency; l.depthDb = n.depthDB;
+                l.ceilingDb = n.origin == NotchController::Origin::Detector ? (float) ceilingDb : n.deepestDb;
+                l.origin = n.origin;
+                l.binHz = (float) (snap->sampleRate / 2048.0);
+                l.ringRisk = AiRingRisk::Critical;   // what the staged chip on console-live shows
+                live.push_back (l);
+            }
+            return live;
+        }();
+        // Staged proposals are accepted only if the app's own validator accepts them.
+        const auto stage = [&] (std::vector<ShownProposal>& into, const ShownProposal& sp) -> bool
+        {
+            if (const auto refusal = validateProposal (sp.proposal, liveNotches))
+            {
+                std::cerr << "snapshot: staged AI proposal REFUSED by validateProposal: "
+                          << aiToolName (sp.proposal.tool) << " -> " << aiRefusalName (*refusal) << std::endl;
+                return false;
+            }
+            into.push_back (sp);
+            return true;
+        };
+        std::vector<ShownProposal> proposals;
         const auto nextRung = (float) NotchController::nextDeeperRungDb (-9.0, ceilingDb);
-        proposals.push_back (makeProposal (1, 0, 6, 3150.0, AiProposal::Tool::Deepen,
-                                           AiProposal::Reason::RecurringAtFrequency, nextRung, 0));
-        proposals.push_back (makeProposal (2, 0, 7,  780.0, AiProposal::Tool::Release,
-                                           AiProposal::Reason::JudgedFalse, 0.0f, 0));
-        proposals.push_back (makeProposal (3, 1, 8, 5200.0, AiProposal::Tool::Hold,
-                                           AiProposal::Reason::ShowInProgress, 0.0f, 120));
+        if (! stage (proposals, makeProposal (1, 0, 6, 3150.0, AiProposal::Tool::Deepen,
+                                              AiProposal::Reason::RecurringAtFrequency, nextRung, 0))
+            || ! stage (proposals, makeProposal (3, 1, 8, 5200.0, AiProposal::Tool::Hold,
+                                                 AiProposal::Reason::ShowInProgress, 0.0f, 120)))
+            return 1;
+
+        // The release that used to sit here is refused beside a Critical slot:
+        // prove it, so a regression of the guard fails this tool, not a reviewer's eye.
+        {
+            std::vector<ShownProposal> none;
+            if (stage (none, makeProposal (2, 0, 7, 780.0, AiProposal::Tool::Release,
+                                           AiProposal::Reason::JudgedFalse, 0.0f, 0)))
+            {
+                std::cerr << "snapshot: a release was ACCEPTED beside a Critical ring-risk slot" << std::endl;
+                return 1;
+            }
+        }
         app.aiSupervisor().setAiProposalsForTest (std::move (proposals));
         app.resized();
-        std::cout << "console-ai-suggest: mode GOI Y, three proposals STAGED "
-                     "(no model was asked)" << std::endl;
+        std::cout << "console-ai-suggest: mode GOI Y, two proposals (deepen, hold) STAGED; the release candidate "
+                     "was refused by the validator (slot ring risk Critical). No model was asked." << std::endl;
         if (! shoot (app, outDir.getChildFile ("console-ai-suggest.png")))
             return 1;
 

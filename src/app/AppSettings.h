@@ -14,8 +14,13 @@
 #include "az/host/HostSettings.h"
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 enum class UiMode { Dumb, Geek };
+
+// How many AI call-start times are persisted (matches AiSupervisor::kMaxPersistedCallStarts).
+constexpr int kAiCallStartsKept = 12;
 
 struct AppSettings
 {
@@ -44,6 +49,11 @@ struct AppSettings
     // restored from disk: appSettingsFromHost demotes a stored Act to Suggest,
     // so acting is opted into per session (decision D2).
     AiMode aiMode = AiMode::Shadow;
+
+    // Lane L3a spend limits: wall-clock epoch milliseconds of the supervisor's
+    // latest call starts (newest 12, ascending). Persisted so a restart cannot
+    // reset the hourly cap or the minimum gap. Not a secret, not user-edited.
+    std::vector<std::int64_t> aiCallStartsMs;
 };
 
 // Lenient by design, unlike PresetManager: settings are the app's own scratch

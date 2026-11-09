@@ -58,6 +58,7 @@ import os
 import re
 import socket
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -278,6 +279,20 @@ BLOCKED_MESSAGE = ("Câu trả lời của mô hình đã bị chặn vì nó kh
 
 class AskError(Exception):
     """An --ask failure (exit 3). The message is already safe to print."""
+
+
+class LoopStopped(AskError):
+    """The tool loop stopped before the model finished: the supervise deadline
+    or the iteration cap. `supervise` still prints the actions already recorded."""
+
+    def __init__(self, message: str, usage: dict | None = None):
+        super().__init__(message)
+        self.usage = usage or {"input_tokens": None, "output_tokens": None}
+
+
+def _now() -> float:
+    """The monotonic clock of the supervise deadline (tests replace it)."""
+    return time.monotonic()
 
 
 # --- credentials (Windows DPAPI, per Windows user) ---------------------------
@@ -658,12 +673,25 @@ class ToolSet:
     recorded calls are the whole output, any text is discarded anyway)."""
 
     def __init__(self, system: str, specs: dict, funcs: dict, allow_empty_reply: bool = False,
-                 supervisor: "Supervisor | None" = None):
+                 supervisor: "Supervisor | None" = None, max_iterations: int = MAX_ITERATIONS,
+                 deadline_at: float | None = None):
         self.system = system
         self.specs = specs
         self.funcs = funcs
         self.allow_empty_reply = allow_empty_reply
         self.supervisor = supervisor
+        self.max_iterations = max_iterations
+        self.deadline_at = deadline_at      # absolute _now() time; None = no deadline
+
+    def request_timeout(self, timeout: float) -> float:
+        """The timeout for the next provider request: `timeout`, shrunk to the
+        time left. Raises LoopStopped when less than SUPERVISE_MIN_REMAINING_S is left."""
+        if self.deadline_at is None:
+            return timeout
+        remaining = self.deadline_at - _now()
+        if remaining < SUPERVISE_MIN_REMAINING_S:
+            raise LoopStopped("deadline: the supervise time budget is spent")
+        return min(timeout, remaining)
 
 
 def make_toolset_tools(ts: ToolSet) -> list:
@@ -688,7 +716,14 @@ SUPERVISE_MAX_ACTIONS = 8
 SUPERVISE_MAX_SLOTS = 16
 SUPERVISE_MAX_NOTCHES = 32
 MAX_STATE_BYTES = 1024 * 1024
-STATE_SCHEMA = 1
+STATE_SCHEMA = 2
+# --supervise runs under a wall-clock deadline. The app passes --timeout=30
+# --deadline-s=90 and kills the process at 105 s.
+SUPERVISE_MAX_ITERATIONS = 6
+SUPERVISE_DEADLINE_DEFAULT_S = 90
+SUPERVISE_DEADLINE_MIN_S, SUPERVISE_DEADLINE_MAX_S = 10, 600
+SUPERVISE_MIN_REMAINING_S = 5.0       # no new provider request with less than this left
+RUNG_TOLERANCE_DB = 0.001
 HOLD_S_MIN, HOLD_S_MAX = 30, 600
 
 AI_MODES = ("suggest", "act")
@@ -797,8 +832,8 @@ def validate_state(doc: object) -> dict:
             raise StateError(f"state: notches must be a list of at most {SUPERVISE_MAX_NOTCHES}")
         for n in notches:
             n = _state_keys(n, ("nid", "lane", "index", "hz", "q", "depth_db", "ceiling_db",
-                                "origin", "placed_by", "last_changed_by", "age_s", "hold_s",
-                                "verdict"), "a notch")
+                                "next_rung_db", "origin", "placed_by", "last_changed_by", "seen_s",
+                                "hold_s", "verdict"), "a notch")
             nid = _state_int(n, "nid", 0, 2 ** 32 - 1, "notch")
             if nid in seen_nids:
                 raise StateError("state: a notch id is repeated")
@@ -809,11 +844,13 @@ def validate_state(doc: object) -> dict:
             _state_num(n, "q", 1e-3, 1e4, "notch")
             _state_num(n, "depth_db", -120.0, 0.0, "notch")
             _state_num(n, "ceiling_db", -120.0, 0.0, "notch")
+            if n["next_rung_db"] is not None:
+                _state_num(n, "next_rung_db", -120.0, 0.0, "notch")
             _state_enum(n, "origin", ORIGINS, "notch")
             for k in ("placed_by", "last_changed_by"):
                 if not isinstance(n[k], str) or not _AUTHOR_RE.match(n[k]):
                     raise StateError(f"state: notch.{k} must be a short identifier string")
-            _state_num(n, "age_s", 0.0, 1e8, "notch")
+            _state_num(n, "seen_s", 0.0, 1e8, "notch")
             _state_num(n, "hold_s", 0.0, 1e8, "notch")
             _state_enum(n, "verdict", VERDICTS, "notch")
     return doc
@@ -848,8 +885,11 @@ wholesale, never write advice or explanations: only tool calls count.
 - Address a notch by its nid and its expect_hz (its frequency in Hz, from current_state). Only notches \
 whose origin is "detector" can be proposed on.
 - propose_deepen: only for a frequency that keeps coming back (see the log) or a notch whose slot still \
-shows rising or critical ring risk at its depth. target_db must be deeper than its depth_db and not \
-deeper than its ceiling_db.
+shows rising or critical ring risk at its depth. Depth changes go one rung at a time: target_db must \
+equal the notch's next_rung_db from current_state (never deeper, never a value of your own choosing). \
+When next_rung_db is null the notch cannot be deepened: do not propose it.
+- seen_s is the number of seconds since the supervisor first observed the notch. It is NOT the age of \
+the notch: the notch itself may be much older.
 - propose_hold: keep a notch that is still needed from being released for hold_s seconds (30 to 600).
 - propose_release: only for a notch you have evidence is false (a FALSE verdict in the log, or long \
 silence at that frequency with no recurrence). NEVER when the slot's ring_risk is "rising" or "critical".
@@ -872,13 +912,15 @@ SUPERVISE_TOOL_SPECS: dict[str, dict] = {
     **TOOL_SPECS,
     "current_state": {
         "description": "The app's state right now: modes, bin width, and per slot the ring risk and "
-                       "every notch (nid, hz, q, depth, ceiling, origin, who placed / changed it, "
-                       "age, hold, verdict).",
+                       "every notch (nid, hz, q, depth, ceiling, next_rung_db = the only depth propose_deepen "
+                       "may target or null, origin, who placed / changed it, seen_s = seconds since the "
+                       "supervisor first observed the notch, NOT the notch's true age, hold, verdict).",
         "parameters": _NO_ARGS},
     "propose_deepen": {
         "raw": True,
-        "description": "Propose making a detector-origin notch deeper. target_db must be deeper than "
-                       "its depth_db and not deeper than its ceiling_db.",
+        "description": "Propose making a detector-origin notch deeper, one rung at a time. target_db "
+                       "must equal that notch's next_rung_db from current_state; when next_rung_db is "
+                       "null the notch cannot be deepened.",
         "parameters": _supervise_args_schema({
             "nid": _NID_SCHEMA, "expect_hz": _HZ_SCHEMA,
             "target_db": {"type": "number", "description": "target depth in dB (negative)"},
@@ -968,6 +1010,11 @@ class Supervisor:
             return self._reject("target_not_deeper")
         if float(target) < float(notch["ceiling_db"]):
             return self._reject("target_beyond_ceiling")
+        rung = notch["next_rung_db"]
+        if rung is None or abs(float(target) - float(rung)) > RUNG_TOLERANCE_DB:
+            allowed = ("none: this notch cannot be deepened" if rung is None
+                       else f"target_db must be {float(rung):g} dB")
+            return self._reject(f"not_next_rung ({allowed})")
         return self._record({"tool": "propose_deepen", "nid": args["nid"],
                              "expect_hz": float(args["expect_hz"]), "target_db": float(target),
                              "reason": args["reason"]}, args["nid"])
@@ -1017,7 +1064,8 @@ def build_supervise_toolset(events: list[dict], state: dict) -> ToolSet:
                   "propose_hold": sup.propose_hold, "propose_release": sup.propose_release,
                   "no_action": sup.no_action})
     return ToolSet(SUPERVISE_SYSTEM_PROMPT, SUPERVISE_TOOL_SPECS, funcs,
-                   allow_empty_reply=True, supervisor=sup)
+                   allow_empty_reply=True, supervisor=sup,
+                   max_iterations=SUPERVISE_MAX_ITERATIONS)
 
 
 # --- safety filter -----------------------------------------------------------
@@ -1742,7 +1790,8 @@ def violates_safety(text: str) -> bool:
 # --- anthropic adapter -------------------------------------------------------
 
 def build_anthropic_kwargs(model: str, tools: list, question: str,
-                           system: str = SYSTEM_PROMPT) -> dict:
+                           system: str = SYSTEM_PROMPT,
+                           max_iterations: int = MAX_ITERATIONS) -> dict:
     """The exact keyword arguments handed to `tool_runner` (pure; sends nothing)."""
     kwargs: dict = {
         "model": model,
@@ -1751,7 +1800,7 @@ def build_anthropic_kwargs(model: str, tools: list, question: str,
         "output_config": {"effort": "medium"},
         "system": system,
         "tools": tools,
-        "max_iterations": MAX_ITERATIONS,
+        "max_iterations": max_iterations,
         "messages": [{"role": "user", "content": question}],
     }
     if model in FALLBACK_MODELS:
@@ -1800,7 +1849,15 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
             os.environ.pop(name, None)
         if not key:
             raise AskError(_NO_CREDENTIALS_MESSAGE)
+    last = None
+    inp: list = []
+    outp: list = []
+    deadline_hit = False
     try:
+        if toolset is not None:
+            # Raises LoopStopped when the budget is already spent. The SDK client's
+            # timeout is fixed per client, so the first request gets the shrunk value.
+            timeout = toolset.request_timeout(timeout)
         if credentials_only:
             client = anthropic.Anthropic(api_key=key, timeout=timeout,
                                          base_url=ANTHROPIC_API_BASE_URL)
@@ -1811,16 +1868,18 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
             kwargs = build_anthropic_kwargs(model, make_tools(events), question)
         else:
             kwargs = build_anthropic_kwargs(model, make_toolset_tools(toolset), question,
-                                            toolset.system)
+                                            toolset.system, toolset.max_iterations)
         runner = client.beta.messages.tool_runner(**kwargs)
-        last = None
-        inp: list = []
-        outp: list = []
         for message in runner:
             last = message
             u = getattr(message, "usage", None)
             inp.append(getattr(u, "input_tokens", None))
             outp.append(getattr(u, "output_tokens", None))
+            if toolset is not None and toolset.deadline_at is not None \
+                    and getattr(message, "stop_reason", None) == "tool_use" \
+                    and toolset.deadline_at - _now() < SUPERVISE_MIN_REMAINING_S:
+                deadline_hit = True     # do not let the runner start another request
+                break
     except (anthropic.AuthenticationError, TypeError):
         # TypeError: the SDK raises it, not an API error, when it finds no
         # credential source at all (no key, no token, no `ant` profile).
@@ -1835,10 +1894,14 @@ def run_anthropic(events: list[dict], question: str, model: str, timeout: float,
     if last.stop_reason == "refusal":
         raise AskError("Claude từ chối trả lời câu này.")
     allow_empty = toolset is not None and toolset.allow_empty_reply
+    usage = {"input_tokens": _sum_usage(inp), "output_tokens": _sum_usage(outp)}
+    if deadline_hit:
+        raise LoopStopped("deadline: hết thời gian cho lượt giám sát.", usage)
     if allow_empty and last.stop_reason == "tool_use":
         # The runner stopped at its iteration cap with a tool call still pending.
-        raise AskError(f"tool loop exhausted: mô hình gọi công cụ quá {MAX_ITERATIONS} lượt "
-                       "mà chưa kết thúc.")
+        cap = toolset.max_iterations if toolset is not None else MAX_ITERATIONS
+        raise LoopStopped(f"tool loop exhausted: mô hình gọi công cụ quá {cap} lượt "
+                          "mà chưa kết thúc.", usage)
     answer = "".join(b.text for b in last.content if b.type == "text")
     if not answer.strip() and not allow_empty:
         raise AskError("Claude không trả lời.")
@@ -1957,9 +2020,16 @@ def run_openai_compatible(events: list[dict], question: str, model: str, base_ur
                             {"role": "user", "content": question}]
     tokens_in: list = []
     tokens_out: list = []
-    for _ in range(MAX_ITERATIONS):
+    cap = MAX_ITERATIONS if toolset is None else toolset.max_iterations
+    for _ in range(cap):
+        try:
+            req_timeout = timeout if toolset is None else toolset.request_timeout(timeout)
+        except LoopStopped as stop:
+            stop.usage = {"input_tokens": _sum_usage(tokens_in),
+                          "output_tokens": _sum_usage(tokens_out)}
+            raise
         doc = _post_json(url, {"model": model, "messages": messages, "tools": tools,
-                               "tool_choice": "auto"}, key, timeout)
+                               "tool_choice": "auto"}, key, req_timeout)
         usage = doc.get("usage") if isinstance(doc.get("usage"), dict) else {}
         tokens_in.append(usage.get("prompt_tokens"))
         tokens_out.append(usage.get("completion_tokens"))
@@ -1988,7 +2058,11 @@ def run_openai_compatible(events: list[dict], question: str, model: str, base_ur
             raise AskError("Mô hình không trả lời.")
         return {"answer": answer, "usage": {"input_tokens": _sum_usage(tokens_in),
                                             "output_tokens": _sum_usage(tokens_out)}}
-    raise AskError("tool loop exhausted: mô hình gọi công cụ quá 12 lượt mà chưa trả lời.")
+    exhausted = f"tool loop exhausted: mô hình gọi công cụ quá {cap} lượt mà chưa trả lời."
+    if toolset is None:
+        raise AskError(exhausted)
+    raise LoopStopped(exhausted, {"input_tokens": _sum_usage(tokens_in),
+                                  "output_tokens": _sum_usage(tokens_out)})
 
 
 # --- argument validation -----------------------------------------------------
@@ -2037,16 +2111,26 @@ def ask(events: list[dict], question: str, provider: str, model: str,
 
 
 def supervise(events: list[dict], state: dict, provider: str, model: str,
-              base_url: str | None, timeout: float, credentials_only: bool = False) -> dict:
+              base_url: str | None, timeout: float, credentials_only: bool = False,
+              deadline_s: float = SUPERVISE_DEADLINE_DEFAULT_S) -> dict:
     """One supervisor turn. Returns the stdout object; raises AskError. The
-    model's own text is dropped here: only what the recording tools queued leaves."""
+    model's own text is dropped here: only what the recording tools queued leaves.
+    The loop runs under a monotonic deadline of `deadline_s`; when it stops early
+    (deadline or iteration cap) the actions already recorded are still returned,
+    and with none recorded the stop is an error (exit 3)."""
     ts = build_supervise_toolset(events, state)
-    if provider == "anthropic":
-        res = run_anthropic(events, SUPERVISE_USER_PROMPT, model, timeout, credentials_only, ts)
-    else:
-        res = run_openai_compatible(events, SUPERVISE_USER_PROMPT, model, base_url or "",
-                                    resolve_key("openai_compatible", base_url, credentials_only),
-                                    timeout, ts)
+    ts.deadline_at = _now() + deadline_s
+    try:
+        if provider == "anthropic":
+            res = run_anthropic(events, SUPERVISE_USER_PROMPT, model, timeout, credentials_only, ts)
+        else:
+            res = run_openai_compatible(events, SUPERVISE_USER_PROMPT, model, base_url or "",
+                                        resolve_key("openai_compatible", base_url, credentials_only),
+                                        timeout, ts)
+    except LoopStopped as stop:
+        if not ts.supervisor.actions:
+            raise
+        res = {"usage": stop.usage}
     return {"supervise": True, "generation": state["generation"],
             "actions": ts.supervisor.result_actions(), "provider": provider, "model": model,
             "usage": res["usage"]}
@@ -2150,8 +2234,12 @@ def _main(argv: list[str]) -> int:
                     help="machine mode: the model may only call recording tools over --state "
                          "(needs --json); stdout is one JSON object")
     ap.add_argument("--state", type=Path, metavar="PATH",
-                    help="with --supervise: the app's state file (UTF-8 JSON, schema 1)")
+                    help="with --supervise: the app's state file (UTF-8 JSON, schema 2)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S, metavar="SECONDS")
+    ap.add_argument("--deadline-s", type=int, default=None, metavar="SECONDS",
+                    help=f"with --supervise: wall-clock budget of the whole run, "
+                         f"{SUPERVISE_DEADLINE_MIN_S}..{SUPERVISE_DEADLINE_MAX_S} "
+                         f"(default {SUPERVISE_DEADLINE_DEFAULT_S})")
     ap.add_argument("--store-key", action="store_true",
                     help="read an API key from stdin and store it (DPAPI)")
     ap.add_argument("--delete-key", action="store_true")
@@ -2175,6 +2263,8 @@ def _main(argv: list[str]) -> int:
             ap.error("--credentials-only only applies with --ask or --supervise")
         if args.state is not None:
             ap.error("--state only applies with --supervise")
+        if args.deadline_s is not None:
+            ap.error("--deadline-s only applies with --supervise")
         if (args.store_key or args.has_key) and args.provider == "openai_compatible":
             if not args.base_url:
                 ap.error("--base-url is required to store or check an openai_compatible key")
@@ -2193,8 +2283,13 @@ def _main(argv: list[str]) -> int:
             ap.error("--supervise needs --state=<path>")
         if not args.json:
             ap.error("--supervise needs --json")
+        if args.deadline_s is not None and not (
+                SUPERVISE_DEADLINE_MIN_S <= args.deadline_s <= SUPERVISE_DEADLINE_MAX_S):
+            ap.error(f"--deadline-s must be in {SUPERVISE_DEADLINE_MIN_S}..{SUPERVISE_DEADLINE_MAX_S}")
     elif args.state is not None:
         ap.error("--state only applies with --supervise")
+    elif args.deadline_s is not None:
+        ap.error("--deadline-s only applies with --supervise")
     if args.ask is not None or args.supervise:
         if args.provider == "anthropic" and not model:
             model = DEFAULT_ANTHROPIC_MODEL
@@ -2230,7 +2325,9 @@ def _main(argv: list[str]) -> int:
             return _emit_error(args, str(exc), EXIT_BAD_STATE)
         try:
             result = supervise(events, state, args.provider, model, args.base_url, args.timeout,
-                               args.credentials_only)
+                               args.credentials_only,
+                               SUPERVISE_DEADLINE_DEFAULT_S if args.deadline_s is None
+                               else args.deadline_s)
         except AskError as exc:
             return _emit_error(args, str(exc))
         except Exception as exc:  # noqa: BLE001 -- last resort; type name only, never the message

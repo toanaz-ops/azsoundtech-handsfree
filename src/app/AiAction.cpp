@@ -209,6 +209,7 @@ const char* aiRefusalName (AiRefusal refusal) noexcept
         case AiRefusal::NotDeeper:         return "not_deeper";
         case AiRefusal::BeyondCeiling:     return "beyond_ceiling";
         case AiRefusal::MoreThanOneRung:   return "more_than_one_rung";
+        case AiRefusal::RingRiskNotLow:    return "ring_risk_not_low";
     }
     return "unknown_nid";
 }
@@ -291,6 +292,18 @@ AiParseResult parseSupervisorOutput (const juce::String& stdoutText, std::uint32
     return r;
 }
 
+std::optional<double> aiNextRungDb (double depthDb, double ceilingDb)
+{
+    if (! std::isfinite (depthDb) || ! std::isfinite (ceilingDb))
+        return std::nullopt;   // nextDeeperRungDb asserts on a NaN ceiling
+    // The controller's function returns currentDb at the ceiling and something
+    // SHALLOWER past it (its header says callers must compare): do that here.
+    const double next = NotchController::nextDeeperRungDb (depthDb, ceilingDb);
+    if (! (next < depthDb - kDepthEpsilonDb) || next < ceilingDb - kDepthEpsilonDb)
+        return std::nullopt;
+    return next;
+}
+
 std::optional<AiRefusal> validateProposal (const AiProposal& proposal,
                                            const std::vector<AiLiveNotch>& liveNotches)
 {
@@ -323,12 +336,20 @@ std::optional<AiRefusal> validateProposal (const AiProposal& proposal,
         // The only legal target is the controller's own next rung (which is the
         // ceiling when the ceiling comes first). Read from the controller, not
         // copied: a change to the ladder must change this too.
-        const double next = NotchController::nextDeeperRungDb (notch->depthDb, notch->ceilingDb);
-        if (std::fabs (proposal.targetDb - next) > kDepthEpsilonDb)
+        const auto next = aiNextRungDb (notch->depthDb, notch->ceilingDb);
+        if (! next || std::fabs (proposal.targetDb - *next) > kDepthEpsilonDb)
             return AiRefusal::MoreThanOneRung;
     }
 
-    // L3b: ring-risk freeze, release rate limits and "one AI release in flight
-    // per slot" are refused here, once something can actually be applied.
+    if (proposal.tool == Tool::Release)
+    {
+        // Enum compared to enum: AiRingRisk::Low is the only level that allows a
+        // release. Na (no score yet) is refused too -- unknown is not low.
+        if (notch->ringRisk != AiRingRisk::Low)
+            return AiRefusal::RingRiskNotLow;
+    }
+
+    // L3b: release rate limits and "one AI release in flight per slot" are
+    // refused here, once something can actually be applied.
     return std::nullopt;
 }

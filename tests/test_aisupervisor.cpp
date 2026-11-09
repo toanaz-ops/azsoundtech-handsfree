@@ -89,7 +89,7 @@ AiStateNotch notchAt (std::uint32_t nid, double hz, double depth = -6.0, double 
     AiStateNotch n;
     n.nid = nid; n.index = index; n.hz = (float) hz; n.q = 30.0f;
     n.depthDb = (float) depth; n.ceilingDb = (float) ceiling;
-    n.ageS = 12.0;
+    n.seenS = 12.0;
     return n;
 }
 
@@ -105,9 +105,17 @@ struct Rig
     bool asking = false;
     int changedCount = 0;
     juce::File dir;
+    std::vector<std::int64_t> persisted;   // what the supervisor asked to be saved (wall-clock epoch ms)
+    int saves = 0;
+    bool failWrites = false;               // make the state-file write fail (a directory sits on its path)
 
-    explicit Rig (AiMode mode = AiMode::Suggest)
+    // `skipStartupGap`: the first call normally waits 120 s from app start; most
+    // tests are not about that and skip it. `startMs` doubles as the wall clock.
+    explicit Rig (AiMode mode = AiMode::Suggest, bool skipStartupGap = true,
+                  std::vector<std::int64_t> initialStarts = {}, std::int64_t startMs = 5'000'000)
     {
+        ms = startMs;
+        persisted = initialStarts;
         dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
                   .getChildFile ("aisup-" + juce::String (juce::Random::getSystemRandom().nextInt64()));
         dir.createDirectory();
@@ -134,7 +142,12 @@ struct Rig
         env.readState = [this] { return state; };
         env.logSink = [this] (const juce::var& v) { logs.push_back (v); };
         env.isAskRunning = [this] { return asking; };
+        env.wallMs = [this] { return ms; };
+        env.loadCallStarts = [initialStarts] { return initialStarts; };
+        env.saveCallStarts = [this] (const std::vector<std::int64_t>& v) { persisted = v; ++saves; };
         sup = std::make_unique<AiSupervisor> (std::move (env));
+        if (skipStartupGap)
+            sup->skipStartupGapForTest();
         sup->onChanged = [this] { ++changedCount; };
         sup->setRequestedMode (mode);
         logs.clear();
@@ -359,6 +372,230 @@ TEST (AiSupervisorLimits, ALauncherThatRefusesCostsNoBudget)
     EXPECT_EQ (r.calls(), 1) << "the pending trigger survived the refusal";
 }
 
+TEST (AiSupervisorLimits, TheFirstCallWaitsOneHundredTwentySecondsFromAppStart)
+{
+    Rig r (AiMode::Suggest, false);
+    r.sup->requestManualCall();
+    r.step (60 * kSec);
+    EXPECT_EQ (r.calls(), 0) << "60 s after start";
+    r.step (59 * kSec);
+    EXPECT_EQ (r.calls(), 0) << "119 s after start";
+    r.step (2 * kSec);
+    EXPECT_EQ (r.calls(), 1) << "past 120 s the pending trigger fires";
+}
+
+TEST (AiSupervisorLimits, TheHourlyBudgetSurvivesARestart)
+{
+    Rig first;
+    for (int i = 0; i < 12; ++i)
+    {
+        first.sup->requestManualCall();
+        first.step (121 * kSec);
+        ASSERT_EQ (first.calls(), i + 1) << "call " << i;
+        first.finishOk();
+    }
+    ASSERT_EQ (first.persisted.size(), 12u);
+    EXPECT_EQ (first.saves, 12) << "written when each call starts";
+
+    // A second supervisor, built from the persisted values only, a minute later.
+    Rig second (AiMode::Suggest, true, first.persisted, first.ms + 60 * kSec);
+    second.sup->requestManualCall();
+    second.step (5 * kSec);
+    second.step (200 * kSec);
+    EXPECT_EQ (second.calls(), 0) << "the 13th call inside the hour is refused after a restart";
+    EXPECT_EQ (second.saves, 0);
+
+    // The oldest entry leaves the window: one call is allowed again.
+    second.ms = first.persisted.front() + 3600 * kSec + kSec;
+    second.step (kSec);
+    EXPECT_EQ (second.calls(), 1);
+}
+
+TEST (AiSupervisorLimits, TheMinimumGapAlsoCountsFromThePersistedLastStart)
+{
+    Rig a (AiMode::Suggest, true, { 5'000'000 - 30 * kSec });   // the previous run's call, 30 s ago
+    a.sup->requestManualCall();
+    a.step (60 * kSec);
+    EXPECT_EQ (a.calls(), 0) << "only 90 s since the persisted start";
+    a.step (31 * kSec);
+    EXPECT_EQ (a.calls(), 1);
+}
+
+TEST (AiSupervisorLimits, FutureDatedAndMalformedPersistedEntries)
+{
+    // 12 entries dated in the FUTURE (the clock was set back): they count as "now".
+    std::vector<std::int64_t> future;
+    for (int i = 0; i < 12; ++i)
+        future.push_back (5'000'000 + 7 * 24 * 3600 * kSec + i);
+    Rig f (AiMode::Suggest, true, future);
+    f.sup->requestManualCall();
+    f.step (500 * kSec);
+    EXPECT_EQ (f.calls(), 0) << "future-dated entries must not free budget";
+    f.step (3601 * kSec);
+    EXPECT_EQ (f.calls(), 0) << "still counted as 'now' while the clock is behind them";
+
+    // Malformed entries (zero, negative) are dropped, not counted.
+    Rig m (AiMode::Suggest, true, { 0, -5, -1000000 });
+    m.startManual();
+    EXPECT_EQ (m.calls(), 1);
+    ASSERT_EQ (m.persisted.size(), 1u) << "only the real start is kept";
+}
+
+TEST (AiSupervisorLimits, OnlyTheNewestTwelveStartsArePersisted)
+{
+    std::vector<std::int64_t> old;
+    for (int i = 0; i < 20; ++i)
+        old.push_back (1000 + i);   // ancient: outside the hour
+    Rig r (AiMode::Suggest, true, old);
+    r.startManual();
+    ASSERT_EQ (r.calls(), 1);
+    ASSERT_EQ (r.persisted.size(), 12u);
+    EXPECT_EQ (r.persisted.back(), r.ms);
+}
+
+TEST (AiSupervisorLimits, ThreeFailuresInARowPauseAutomaticCallsAndASuccessResumes)
+{
+    Rig r;
+    CopilotRunResult bad; bad.status = CopilotRunResult::Status::sidecarMissing;
+    CopilotRunResult slow; slow.status = CopilotRunResult::Status::timedOut;
+
+    // Three AUTOMATIC calls (recurring_bin) that fail / time out.
+    const CopilotRunResult results[3] = { bad, slow, bad };
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int k = 0; k < 3; ++k)
+            r.sup->notePlacement (0, 0, 1000.0, r.ms);
+        r.step (121 * kSec);
+        ASSERT_EQ (r.calls(), i + 1) << "automatic call " << i;
+        r.launcher->deliver (results[i]);
+    }
+    EXPECT_EQ (r.sup->status().kind, AiSupervisor::StatusKind::Paused);
+    EXPECT_EQ (r.sup->statusText(), juce::String::fromUTF8 ("AI \xc2\xb7 t\xe1\xba\xa1m d\xe1\xbb\xabng sau 3 l\xe1\xbb\x97i li\xc3\xaan ti\xe1\xba\xbfp"));
+
+    // Paused: automatic triggers do not start a call...
+    for (int k = 0; k < 3; ++k)
+        r.sup->notePlacement (0, 0, 1000.0, r.ms);
+    r.step (300 * kSec);
+    EXPECT_EQ (r.calls(), 3);
+    // ...an operator's manual call still does, and its success resumes.
+    r.sup->requestManualCall();
+    r.step (kSec);
+    ASSERT_EQ (r.calls(), 4);
+    r.finishOk();
+    EXPECT_NE (r.sup->status().kind, AiSupervisor::StatusKind::Paused);
+    for (int k = 0; k < 3; ++k)
+        r.sup->notePlacement (0, 0, 1000.0, r.ms);
+    r.step (121 * kSec);
+    EXPECT_EQ (r.calls(), 5) << "automatic calls are back";
+}
+
+TEST (AiSupervisorLimits, ACancelledCallDoesNotCountAndAModeChangeLiftsThePause)
+{
+    Rig r;
+    CopilotRunResult bad; bad.status = CopilotRunResult::Status::sidecarMissing;
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int k = 0; k < 3; ++k)
+            r.sup->notePlacement (0, 0, 1000.0, r.ms);
+        r.step (121 * kSec);
+        ASSERT_EQ (r.calls(), i + 1);
+        r.launcher->deliver (bad);
+    }
+    ASSERT_EQ (r.sup->status().kind, AiSupervisor::StatusKind::Paused);
+    r.sup->setRequestedMode (AiMode::Shadow);
+    r.sup->setRequestedMode (AiMode::Suggest);
+    EXPECT_NE (r.sup->status().kind, AiSupervisor::StatusKind::Paused);
+
+    // cancelled is not a failure: three invalidated calls leave no pause.
+    Rig c;
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int k = 0; k < 3; ++k)
+            c.sup->notePlacement (0, 0, 1000.0, c.ms);
+        c.step (121 * kSec);
+        ASSERT_EQ (c.calls(), i + 1);
+        c.sup->invalidate();
+    }
+    EXPECT_NE (c.sup->status().kind, AiSupervisor::StatusKind::Paused);
+}
+
+TEST (AiSupervisorLimits, AFailedStateFileWriteIsOneFailedCallNotARetryLoop)
+{
+    Rig r;
+    // The state file's path is occupied by a non-empty directory: the replace fails.
+    const auto target = r.state.request.sessionLog.getParentDirectory().getChildFile (AiSupervisor::kStateFileName);
+    ASSERT_TRUE (target.createDirectory());
+    ASSERT_TRUE (target.getChildFile ("keep").replaceWithText ("x"));
+
+    r.sup->requestManualCall();
+    for (int i = 0; i < 20; ++i)
+        r.step (kSec);
+    EXPECT_EQ (r.calls(), 0);
+    EXPECT_EQ (r.events ("ai_call").size(), 1u) << "one ai_call failed line, not one per tick";
+    EXPECT_EQ (r.events ("ai_call")[0]["status"].toString(), "failed");
+    EXPECT_EQ (r.sup->callsThisSession(), 0) << "nothing started: no budget spent";
+    EXPECT_EQ (r.saves, 0);
+    EXPECT_EQ (r.sup->status().kind, AiSupervisor::StatusKind::LastFailed);
+
+    // Recover: the pending trigger was dropped, so nothing fires until asked again.
+    target.deleteRecursively();
+    r.step (10 * kSec);
+    EXPECT_EQ (r.calls(), 0);
+    r.sup->requestManualCall();
+    r.step (kSec);
+    EXPECT_EQ (r.calls(), 1);
+}
+
+TEST (AiSupervisorLimits, ThreeAutomaticWriteFailuresPause)
+{
+    Rig r;
+    const auto target = r.state.request.sessionLog.getParentDirectory().getChildFile (AiSupervisor::kStateFileName);
+    ASSERT_TRUE (target.createDirectory());
+    ASSERT_TRUE (target.getChildFile ("keep").replaceWithText ("x"));
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int k = 0; k < 3; ++k)
+            r.sup->notePlacement (0, 0, 1000.0, r.ms);
+        r.step (kSec);
+    }
+    EXPECT_EQ (r.events ("ai_call").size(), 3u);
+    EXPECT_EQ (r.sup->status().kind, AiSupervisor::StatusKind::Paused);
+}
+
+//==============================================================================
+// Consent withdrawn / key deleted.
+
+TEST (AiSupervisorConsent, WithdrawingStopsTheCallInFlightAndDropsPendingTriggers)
+{
+    Rig r;
+    r.startManual();
+    ASSERT_EQ (r.calls(), 1);
+    EXPECT_TRUE (r.launcher->busy);
+    const int cancelsBefore = r.launcher->cancels;
+
+    r.sup->requestManualCall();                       // a trigger waiting behind the call in flight
+    for (int k = 0; k < 3; ++k)
+        r.sup->notePlacement (0, 0, 1000.0, r.ms);    // and a recurring one
+    r.logs.clear();
+
+    // What MainComponent does on withdraw: abort + the next readState says "not configured".
+    r.sup->abortAndDropPending();
+    r.state.configured = false;
+
+    EXPECT_GT (r.launcher->cancels, cancelsBefore) << "the child is cancelled";
+    ASSERT_TRUE (r.hasCallStatus ("cancelled"));
+
+    // The late result of the cancelled call is stale: nothing is applied or shown.
+    r.launcher->deliver (okResult (output (r.sup->generation() - 1, deepen (5, 1000.0, -12.0))));
+    EXPECT_TRUE (r.sup->proposals().empty());
+
+    // Even if the key / consent came back, the dropped triggers must not fire.
+    r.state.configured = true;
+    for (int i = 0; i < 10; ++i)
+        r.step (130 * kSec);
+    EXPECT_EQ (r.calls(), 1) << "no new call started from a pending trigger";
+}
+
 //==============================================================================
 // Blockers. None drops the pending trigger: it fires once the way is clear.
 
@@ -453,7 +690,7 @@ TEST (AiSupervisorState, FileHasExactlyTheDocumentedShape)
     EXPECT_TRUE (keysOf (doc) == (std::set<juce::String> { "schema", "generation", "ai_mode", "engine_mode", "sample_rate",
                                                            "bin_hz", "trigger", "slots" }));
     EXPECT_TRUE (doc["schema"].isInt());
-    EXPECT_EQ ((int) doc["schema"], 1);
+    EXPECT_EQ ((int) doc["schema"], 2);
     EXPECT_EQ ((juce::int64) doc["generation"], (juce::int64) r.sup->generation());
     EXPECT_EQ (doc["ai_mode"].toString(), "suggest");
     EXPECT_EQ (doc["engine_mode"].toString(), "auto");
@@ -475,18 +712,20 @@ TEST (AiSupervisorState, FileHasExactlyTheDocumentedShape)
     ASSERT_NE (notches, nullptr);
     ASSERT_EQ (notches->size(), 2);
     const auto& n = (*notches)[0];
-    EXPECT_TRUE (keysOf (n) == (std::set<juce::String> { "nid", "lane", "index", "hz", "q", "depth_db", "ceiling_db", "origin",
-                                                         "placed_by", "last_changed_by", "age_s", "hold_s", "verdict" }));
+    EXPECT_TRUE (keysOf (n) == (std::set<juce::String> { "nid", "lane", "index", "hz", "q", "depth_db", "ceiling_db", "next_rung_db", "origin",
+                                                         "placed_by", "last_changed_by", "seen_s", "hold_s", "verdict" }));
     EXPECT_TRUE (n["nid"].isInt() || n["nid"].isInt64());
     EXPECT_EQ ((int) n["nid"], 5);
     EXPECT_DOUBLE_EQ ((double) n["hz"], 1000.0);
     EXPECT_DOUBLE_EQ ((double) n["depth_db"], -6.0);
     EXPECT_DOUBLE_EQ ((double) n["ceiling_db"], -18.0);
+    EXPECT_DOUBLE_EQ ((double) n["next_rung_db"], -12.0) << "the one legal deepen target";
     EXPECT_EQ (n["origin"].toString(), "detector");
     EXPECT_EQ (n["placed_by"].toString(), "detector");
     EXPECT_EQ ((int) n["hold_s"], 0);
     EXPECT_EQ (n["verdict"].toString(), "none");
     const auto& m = (*notches)[1];
+    EXPECT_TRUE (m["next_rung_db"].isVoid()) << "at its ceiling: null";
     EXPECT_EQ (m["origin"].toString(), "preset");
     EXPECT_EQ (m["placed_by"].toString(), "human");
     EXPECT_EQ (m["last_changed_by"].toString(), "llm");
@@ -498,6 +737,83 @@ TEST (AiSupervisorState, FileHasExactlyTheDocumentedShape)
     EXPECT_NE ((juce::int64) other["nid"], (juce::int64) n["nid"]);
 }
 
+namespace
+{
+// Structural JSON equality with numbers compared as numbers (1000 == 1000.0):
+// the fixture is hand-written, the writer emits what juce prints.
+bool sameJson (const juce::var& a, const juce::var& b, juce::String& why, const juce::String& path = "$")
+{
+    const auto isNum = [] (const juce::var& v) { return v.isInt() || v.isInt64() || v.isDouble(); };
+    if (isNum (a) && isNum (b))
+    {
+        if (std::abs ((double) a - (double) b) <= 1.0e-9) return true;
+        why = path + ": " + a.toString() + " != " + b.toString();
+        return false;
+    }
+    if (a.isVoid() && b.isVoid()) return true;
+    if (a.isString() && b.isString()) { if (a.toString() == b.toString()) return true; why = path + ": " + a.toString() + " != " + b.toString(); return false; }
+    if (a.isBool() && b.isBool()) { if ((bool) a == (bool) b) return true; why = path + ": bool"; return false; }
+    if (const auto* x = a.getArray())
+    {
+        const auto* y = b.getArray();
+        if (y == nullptr || x->size() != y->size()) { why = path + ": array size"; return false; }
+        for (int i = 0; i < x->size(); ++i)
+            if (! sameJson ((*x)[i], (*y)[i], why, path + "[" + juce::String (i) + "]"))
+                return false;
+        return true;
+    }
+    if (const auto* x = a.getDynamicObject())
+    {
+        const auto* y = b.getDynamicObject();
+        if (y == nullptr) { why = path + ": not an object"; return false; }
+        if (x->getProperties().size() != y->getProperties().size()) { why = path + ": key set differs"; return false; }
+        for (const auto& p : x->getProperties())
+        {
+            if (! y->hasProperty (p.name)) { why = path + "." + p.name.toString() + " missing"; return false; }
+            if (! sameJson (p.value, y->getProperty (p.name), why, path + "." + p.name.toString()))
+                return false;
+        }
+        return true;
+    }
+    why = path + ": type differs";
+    return false;
+}
+} // namespace
+
+// The state file as the Python agent's fixture documents it (schema 2:
+// seen_s, next_rung_db). Equality is on PARSED trees, not text.
+TEST (AiSupervisorState, ProductionWriterReproducesTheSchemaTwoFixture)
+{
+    const auto fixtureFile = juce::File (__FILE__).getParentDirectory().getChildFile ("fixtures/ai-state-schema2.json");
+    ASSERT_TRUE (fixtureFile.existsAsFile());
+    const auto fixture = juce::JSON::parse (fixtureFile.loadFileAsString());
+    ASSERT_TRUE (fixture.isObject());
+
+    const auto at = [] (std::uint32_t nid, int lane, int index, double hz, double depth, double ceiling)
+    {
+        AiStateNotch n;
+        n.nid = nid; n.lane = lane; n.index = index; n.hz = (float) hz; n.q = 30.0f;
+        n.depthDb = (float) depth; n.ceilingDb = (float) ceiling; n.seenS = 42.0;
+        return n;
+    };
+    AiStateSnapshot st;
+    st.sampleRate = 48000.0;
+    st.binHz = 48000.0 / 2048.0;
+    AiStateSlot s0;
+    s0.slot = 0; s0.ringRisk = AiRingRisk::Low; s0.hasRingRiskScore = true; s0.ringRiskScore = 0.2f;
+    s0.notches = { at (1, 0, 0, 1000.0, -6.0, -18.0), at (2, 0, 1, 2000.0, -18.0, -18.0), at (3, 1, 0, 500.0, -9.5, -24.0) };
+    AiStateSlot s1;
+    s1.slot = 1; s1.ringRisk = AiRingRisk::Rising; s1.hasRingRiskScore = true; s1.ringRiskScore = 0.65f;
+    s1.notches = { at (1, 0, 0, 3000.0, -12.0, -24.0) };
+    st.slots = { s0, s1 };
+
+    const auto text = AiSupervisor::buildStateJson (st, 7, AiMode::Suggest, AiTrigger::RecurringBin);
+    const auto produced = juce::JSON::parse (text);
+    juce::String why;
+    EXPECT_TRUE (sameJson (produced, fixture, why)) << why;
+    EXPECT_TRUE (sameJson (fixture, produced, why)) << why;
+}
+
 TEST (AiSupervisorState, NonFiniteOrOutOfRangeValuesNeverReachTheFile)
 {
     Rig r;
@@ -507,7 +823,7 @@ TEST (AiSupervisorState, NonFiniteOrOutOfRangeValuesNeverReachTheFile)
     auto b = bad (11); b.q = std::numeric_limits<float>::infinity();                   ns.push_back (b);
     auto c = bad (12); c.hz = 30000.0f;                                                ns.push_back (c);   // above Nyquist
     auto d = bad (13); d.depthDb = -500.0f;                                            ns.push_back (d);   // clamped, kept
-    auto e = bad (14); e.ageS = std::numeric_limits<double>::quiet_NaN();             ns.push_back (e);
+    auto e = bad (14); e.seenS = std::numeric_limits<double>::quiet_NaN();             ns.push_back (e);
     auto f = bad (0);                                                                  ns.push_back (f);   // nid 0 = none
     r.state.slots[0].hasRingRiskScore = true;
     r.state.slots[0].ringRiskScore = std::numeric_limits<float>::infinity();
@@ -584,7 +900,8 @@ TEST (AiSupervisorState, TheFileIsReplacedAtomicallyAndLeavesNoTemporary)
 
     const auto& req = r.launcher->requests[0];
     EXPECT_TRUE (req.supervise);
-    EXPECT_EQ (req.timeoutMs, 60000);
+    EXPECT_EQ (req.timeoutMs, AiSupervisor::kWatchdogMs);
+    EXPECT_EQ (req.timeoutMs, 105000);
 }
 
 //==============================================================================
@@ -595,6 +912,7 @@ TEST (AiSupervisorResult, ProposalsAreCollectedLoggedAndNeverApplied)
     Rig r;
     r.state.slots[0].notches.push_back (notchAt (6, 2000.0, -6.0, -18.0, 1));
     r.state.slots[0].notches.push_back (notchAt (7, 3000.0, -6.0, -18.0, 2));
+    r.state.slots[0].ringRisk = AiRingRisk::Low;   // a release is only shown beside a quiet slot
     r.startManual();
     r.finishOk (deepen (5, 1000.0, -12.0) + "," + hold (6, 2000.0) + "," + release (7, 3000.0) + ","
                 + "{\"tool\": \"no_action\", \"reason\": \"nothing_to_do\"}");
@@ -650,6 +968,13 @@ TEST (AiSupervisorResult, ANewResultForTheSameToolAndNotchReplacesTheOldProposal
     ASSERT_EQ (r.sup->proposals().size(), 2u) << "deepen replaced, hold added";
     for (const auto& p : r.sup->proposals())
         EXPECT_NE (p.id, firstId);
+
+    // The replaced proposal is not lost from the log: expired, reason superseded.
+    bool sawSuperseded = false;
+    for (const auto& d : r.events ("ai_decision"))
+        sawSuperseded = sawSuperseded || (d["decision"].toString() == "expired" && d["reason"].toString() == "superseded"
+                                          && d["tool"].toString() == "propose_deepen");
+    EXPECT_TRUE (sawSuperseded);
 }
 
 TEST (AiSupervisorResult, FailuresSetLastFailedAndChangeNothingElse)
@@ -770,6 +1095,62 @@ TEST (AiSupervisorBook, ProposalsExpireWhenTheirNotchGoesMovesOrAges)
         EXPECT_TRUE (r.sup->proposals().empty());
         EXPECT_EQ (r.events ("ai_decision").back()["decision"].toString(), "expired");
     }
+}
+
+TEST (AiSupervisorBook, ReleaseIsRefusedUnlessTheSlotRingRiskIsLow)
+{
+    for (const auto level : { AiRingRisk::Na, AiRingRisk::Rising, AiRingRisk::Critical })
+    {
+        Rig r;
+        r.state.slots[0].ringRisk = level;
+        r.startManual();
+        r.finishOk (release (5, 1000.0));
+        EXPECT_TRUE (r.sup->proposals().empty()) << (int) level;
+        const auto d = r.events ("ai_decision");
+        ASSERT_EQ (d.size(), 1u) << (int) level;
+        EXPECT_EQ (d[0]["decision"].toString(), "refused");
+        EXPECT_EQ (d[0]["refusal"].toString(), "ring_risk_not_low");
+    }
+    Rig ok;
+    ok.state.slots[0].ringRisk = AiRingRisk::Low;
+    ok.startManual();
+    ok.finishOk (release (5, 1000.0));
+    EXPECT_EQ (ok.sup->proposals().size(), 1u);
+}
+
+TEST (AiSupervisorBook, AShownReleaseGoesWhenTheSlotStartsToRingAndIsLogged)
+{
+    Rig r;
+    r.state.slots[0].ringRisk = AiRingRisk::Low;
+    r.startManual();
+    r.finishOk (release (5, 1000.0) + "," + hold (5, 1000.0));
+    ASSERT_EQ (r.sup->proposals().size(), 2u);
+
+    r.state.slots[0].ringRisk = AiRingRisk::Rising;
+    r.step (kSec);
+    ASSERT_EQ (r.sup->proposals().size(), 1u) << "only the hold stays";
+    EXPECT_EQ (r.sup->proposals()[0].proposal.tool, AiProposal::Tool::Hold);
+    const auto d = r.events ("ai_decision");
+    ASSERT_EQ (d.size(), 1u);
+    EXPECT_EQ (d[0]["decision"].toString(), "expired");
+    EXPECT_EQ (d[0]["tool"].toString(), "propose_release");
+    EXPECT_EQ (d[0]["reason"].toString(), "ring_risk_not_low");
+}
+
+TEST (AiSupervisorBook, AShownDeepenGoesWhenTheDetectorDeepensTheNotch)
+{
+    Rig r;
+    r.startManual();
+    r.finishOk (deepen (5, 1000.0, -12.0));
+    ASSERT_EQ (r.sup->proposals().size(), 1u);
+
+    r.state.slots[0].notches[0].depthDb = -12.0f;   // the detector got there first
+    r.step (kSec);
+    EXPECT_TRUE (r.sup->proposals().empty());
+    const auto d = r.events ("ai_decision");
+    ASSERT_EQ (d.size(), 1u);
+    EXPECT_EQ (d[0]["decision"].toString(), "expired");
+    EXPECT_EQ (d[0]["reason"].toString(), "not_deeper");
 }
 
 TEST (AiSupervisorBook, DismissAndDismissAllRemoveAndLog)
@@ -910,6 +1291,7 @@ AiStateSnapshot stateOf (const CtrlRig& c)
     st.binHz = kSr / 2048.0;
     AiStateSlot s;
     s.slot = 0;
+    s.ringRisk = AiRingRisk::Low;   // a quiet slot: a release is allowed to be shown
     for (std::uint32_t i = 0; i < snap.notchCount; ++i)
     {
         const auto& n = snap.notches[i];
@@ -1114,7 +1496,8 @@ TEST (AiMode, TheSupervisorNeverTouchesNotchControllerApi)
 {
     // Structural guard for the 0 dB claim: the supervisor translation units
     // name no mutating NotchController entry point.
-    const auto root = juce::File (__FILE__).getParentDirectory().getParentDirectory().getChildFile ("src/app");
+    const auto srcRoot = juce::File (__FILE__).getParentDirectory().getParentDirectory().getChildFile ("src");
+    const auto root = srcRoot.getChildFile ("app");
     for (const auto* name : { "AiSupervisor.cpp", "AiSupervisor.h" })
     {
         const auto text = root.getChildFile (name).loadFileAsString();
@@ -1122,5 +1505,18 @@ TEST (AiMode, TheSupervisorNeverTouchesNotchControllerApi)
         for (const auto* banned : { ".setNotch", "->setNotch", "clearNotch", "clearAll", "retuneNotch", "holdNotch",
                                     "requestRelease", "adoptPreset", "NotchController&", "NotchController*" })
             EXPECT_FALSE (text.contains (banned)) << name << " mentions " << banned;
+    }
+
+    // Second layer: the panel that SHOWS proposals (and the proposal / validator
+    // files) must not mention the controller's mutating API either. CopilotPanel
+    // may not even name the controller.
+    for (const auto* rel : { "gui/CopilotPanel.cpp", "gui/CopilotPanel.h", "app/AiAction.cpp", "app/AiAction.h" })
+    {
+        const auto text = srcRoot.getChildFile (rel).loadFileAsString();
+        ASSERT_TRUE (text.isNotEmpty()) << rel;
+        for (const auto* banned : { ".setNotch", "->setNotch", "clearNotch", "clearAll", "retuneNotch", "holdNotch",
+                                    "requestRelease", "adoptPreset", "setNotchAuthored", "pushRetune", "pushClear",
+                                    "NotchController&", "NotchController*" })
+            EXPECT_FALSE (text.contains (banned)) << rel << " mentions " << banned;
     }
 }
