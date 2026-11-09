@@ -45,6 +45,8 @@ public:
     void open();
     // Hides it and turns the meter off. Does NOT call onCancel.
     void close();
+    // Same as pressing CANCEL: closes, then calls onCancel.
+    void cancel();
     [[nodiscard]] bool isOpen() const { return isVisible(); }
 
     // Re-reads the device lists and channel counts -- after a restart.

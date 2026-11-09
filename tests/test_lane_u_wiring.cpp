@@ -515,6 +515,23 @@ TEST (LaneUWizard, CancelWritesNoRouting)
     EXPECT_EQ (after.inputChannels[0], before.inputChannels[0]);
 }
 
+TEST (LaneUWizard, PublicCancelClosesAndNotifiesLikeTheButton)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent mc;
+    mc.openSetupWizard();
+    ASSERT_TRUE (mc.getSetupWizardForTest().isOpen());
+
+    int cancels = 0;
+    auto& w = mc.getSetupWizardForTest();
+    const auto original = w.onCancel;
+    w.onCancel = [&] { ++cancels; if (original) original(); };
+    w.cancel();
+
+    EXPECT_FALSE (w.isOpen());
+    EXPECT_EQ (cancels, 1);
+}
+
 TEST (LaneUWizard, LeavingForGeekCancelsTheWizard)
 {
     const juce::ScopedJuceInitialiser_GUI juceInit;

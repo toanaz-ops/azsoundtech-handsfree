@@ -638,6 +638,15 @@ MainComponent::MainComponent()
         // 48 kHz and nothing else ever retargets it, so on a 44.1 or 96 kHz
         // device every bin mapped to the wrong frequency and the chain --
         // which DOES follow the device -- notched beside the howl.
+        //
+        // Review 2026-11-09 LOW-6: on a driver restart this hook runs one
+        // message-loop turn after the callback resumed, with every consumer
+        // joined, so the 8192-sample rings may already be full. Whatever sits
+        // there is a gap-spanning backlog; its overflow would show up as false
+        // splice-drop counts. The caller is the only consumer right now, so it
+        // drains it (an ordinary SPSC read, no clear()) and rebases the counts.
+        engine_.discardTapBacklog();
+
         const double rate = engine_.getCurrentSampleRateHz();
         for (int i = 0; i < kMaxSlots; ++i)
         {
@@ -1265,6 +1274,32 @@ int MainComponent::lastLoadSkippedNotchesForTest() const
     return lastLoadSkipped_;
 }
 
+void MainComponent::startWorkersIfEngineRunning()
+{
+    if (! engine_.isRunning())
+        return;
+
+    // A controller the restart hooks already launched (checkRestoredDevice ->
+    // changeSlotConfig) has had its rate and width set; setWidth()/
+    // setSampleRate() are only legal while the thread is stopped (review
+    // 2026-11-09 LOW-2), so a running one is left alone.
+    const double rate = engine_.getCurrentSampleRateHz();
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto& controller = *notchControllers_[(std::size_t) i];
+        if (controller.isRunning())
+            continue;
+        controller.setSampleRate (rate);
+        controller.setWidth (engine_.getSlotConfig (i).width);
+        controller.start();
+    }
+
+    // The lane M poll thread follows the DEVICE, exactly as the detectors do:
+    // arm() refuses outright while the engine is not running, so there is
+    // nothing for it to poll before this point. start() is idempotent.
+    soundcheck_.start();
+}
+
 void MainComponent::startAudio()
 {
     // Task 16: prefer ASIO, but do NOT require it. The plan said "filter to
@@ -1299,22 +1334,10 @@ void MainComponent::startAudio()
     if (settingsFile_ != juce::File() && saved.type.isNotEmpty())
         checkRestoredDevice (engine_.getCurrentDeviceType(), engine_.getCurrentDeviceName());
 
-    // The device is open: the detectors can start pumping. start() is a no-op
-    // if the thread already runs. Rate and width first, for the same reason
-    // as the after-restart hook: setWidth() needs the thread stopped.
-    const double rate = engine_.getCurrentSampleRateHz();
-    for (int i = 0; i < kMaxSlots; ++i)
-    {
-        auto& controller = *notchControllers_[(std::size_t) i];
-        controller.setSampleRate (rate);
-        controller.setWidth (engine_.getSlotConfig (i).width);
-        controller.start();
-    }
-
-    // The lane M poll thread follows the DEVICE, exactly as the detectors do:
-    // arm() refuses outright while the engine is not running, so there is
-    // nothing for it to poll before this point. start() is idempotent.
-    soundcheck_.start();
+    // The device is open: the detectors can start pumping -- but only if it
+    // really opened (review 2026-11-09 item (a)): with no device nothing feeds
+    // the taps and eight spinning threads are pure idle CPU.
+    startWorkersIfEngineRunning();
 
     // LANE U (spec 3.2 step 5): the saved rate and buffer, each a device
     // restart, so each goes through the SAME 6.5 hooks DevicePanel's own
@@ -1597,7 +1620,7 @@ void MainComponent::setUiMode (const UiMode mode)
 
     // The wizard belongs to Dumb; leaving for Geek is a cancel.
     if (mode == UiMode::Geek && setupWizard_.isOpen())
-        setupWizard_.getCancelButtonForTest().onClick();
+        setupWizard_.cancel();
 
     const bool dumb = mode == UiMode::Dumb;
     dumbView_.setVisible (dumb);
