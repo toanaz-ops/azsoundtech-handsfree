@@ -3355,3 +3355,197 @@ TEST (GuiWiring, WorkersStartOnlyWhenTheEngineIsRunning)
         app.getNotchControllerForTest (s)->stop (1000);
     app.getAudioEngine().setRunningForTest (false);
 }
+
+//==============================================================================
+// Review 2026-11-09 MEDIUM-3 / owner HW-174.Q3 = A: editing ONE slot's routing
+// stops, resets and restarts ONLY that slot's detector. The other seven keep
+// running with their room memory and ring-risk history. A device change still
+// resets all eight (A-R4).
+
+namespace
+{
+SlotConfig slotEditMono (int in, int out)
+{
+    SlotConfig c;
+    c.enabled = true;
+    c.width   = 1;
+    c.inputChannels[0]  = in;
+    c.outputChannels[0] = out;
+    return c;
+}
+
+void slotEditStopAll (MainComponent& app)
+{
+    for (int s = 0; s < kMaxSlots; ++s)
+        app.getNotchControllerForTest (s)->stop (1000);
+    app.getAudioEngine().setRunningForTest (false);
+}
+}
+
+TEST (SlotEdit, EditingOneSlotLeavesTheOtherDetectorsRunningWithTheirMemory)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.changeSlotConfig (1, slotEditMono (1, 1));
+
+    app.getAudioEngine().setRunningForTest (true);
+    app.startWorkersIfEngineRunningForTest();
+    for (int s = 0; s < kMaxSlots; ++s)
+        ASSERT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << s;
+
+    for (int s : { 0, 1, 5 })
+        app.getNotchControllerForTest (s)->rememberReleaseForTest (0, 1000.0, -12.0);
+
+    app.changeSlotConfig (1, slotEditMono (0, 1));
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << "slot " << s;
+
+    // The edited slot was reset (setWidth clears its room memory) ...
+    EXPECT_EQ (app.getNotchControllerForTest (1)->memoryEntryCountForTest (0), 0);
+    // ... every other slot kept its own.
+    EXPECT_EQ (app.getNotchControllerForTest (0)->memoryEntryCountForTest (0), 1);
+    EXPECT_EQ (app.getNotchControllerForTest (5)->memoryEntryCountForTest (0), 1);
+
+    slotEditStopAll (app);
+}
+
+TEST (SlotEdit, OnlyTheEditedSlotsRingRiskGoesUnavailable)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.changeSlotConfig (1, slotEditMono (1, 1));
+
+    // Controllers stopped, driven by hand like the lane R tests.
+    for (int s : { 0, 1 })
+    {
+        auto* c = app.getNotchControllerForTest (s);
+        c->setDetectionActive (true);
+        std::mt19937 rng { 99u };
+        ringRiskPump (app, s, ringRiskQuietHop (rng));
+        juce::Thread::sleep (260);
+        double phase = 0.0;
+        for (int i = 0; i < 4; ++i)
+            ringRiskPump (app, s, ringRiskToneHop (phase));
+        NotchController::SnapshotBuffer snap {};
+        c->copySnapshot (snap);
+        ASSERT_TRUE (snap.ringRiskValid) << "precondition, slot " << s;
+    }
+
+    app.changeSlotConfig (1, slotEditMono (0, 1));
+
+    // Make sure nothing is running, then score one more frame per slot.
+    for (int s : { 0, 1 })
+        app.getNotchControllerForTest (s)->stop (1000);
+
+    for (int s : { 0, 1 })
+    {
+        double phase = 0.0;
+        ringRiskPump (app, s, ringRiskToneHop (phase));
+    }
+
+    NotchController::SnapshotBuffer s0 {}, s1 {};
+    app.getNotchControllerForTest (0)->copySnapshot (s0);
+    app.getNotchControllerForTest (1)->copySnapshot (s1);
+    EXPECT_TRUE  (s0.ringRiskValid) << "slot 0 must keep its history";
+    EXPECT_FALSE (s1.ringRiskValid) << "slot 1 was reset by its own edit";
+}
+
+TEST (SlotEdit, ADeviceRestartStillResetsAndRelaunchesAllEight)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.getAudioEngine().setRunningForTest (true);
+    app.startWorkersIfEngineRunningForTest();
+
+    for (int s : { 0, 3, 7 })
+        app.getNotchControllerForTest (s)->rememberReleaseForTest (0, 1000.0, -12.0);
+
+    auto& panel = app.getDevicePanelForTest();
+    panel.onBeforeRestart();
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_FALSE (app.getNotchControllerForTest (s)->isRunning()) << s;
+    panel.onAfterRestart();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+    {
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << s;
+        EXPECT_EQ (app.getNotchControllerForTest (s)->memoryEntryCountForTest (0), 0) << s;
+    }
+
+    slotEditStopAll (app);
+}
+
+namespace {
+// Drives the real engine hooks of a driver reset, capturing the queued relaunch.
+struct DriverResetHarness
+{
+    explicit DriverResetHarness (MainComponent& a) : app (a)
+    {
+        app.deferToMessageLoop = [this] (std::function<void()> fn) { queued.push_back (std::move (fn)); };
+        app.getAudioEngine().setRunningForTest (true);
+        app.startWorkersIfEngineRunningForTest();
+    }
+    void resetDriver()
+    {
+        app.getAudioEngine().onDeviceStopping();
+        app.getAudioEngine().onDeviceStarted();
+    }
+    void runQueued()
+    {
+        auto pending = std::move (queued);
+        queued.clear();
+        for (auto& fn : pending)
+            fn();
+    }
+    MainComponent& app;
+    std::vector<std::function<void()>> queued;
+};
+}
+
+TEST (SlotEdit, ADriverResetRelaunchesAllEightWhenNoEditIntervenes)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    DriverResetHarness h (app);
+
+    h.resetDriver();
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_FALSE (app.getNotchControllerForTest (s)->isRunning()) << s;
+    ASSERT_EQ (h.queued.size(), 1u);
+    h.runQueued();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << s;
+
+    slotEditStopAll (app);
+}
+
+TEST (SlotEdit, ASlotEditBetweenDriverResetAndRelaunchDoesNotPreemptTheRelaunch)
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    DriverResetHarness h (app);
+
+    h.resetDriver();
+    app.changeSlotConfig (1, slotEditMono (1, 1));   // runs before the queued relaunch
+    h.runQueued();
+
+    for (int s = 0; s < kMaxSlots; ++s)
+        EXPECT_TRUE (app.getNotchControllerForTest (s)->isRunning()) << "slot " << s;
+
+    slotEditStopAll (app);
+}
+
+TEST (SlotEdit, AnEditTearsDownAStaleSoundcheckStrip)
+{
+    // A results/applied strip was computed against the old routing; a slot
+    // edit puts the lock back like any restart does (no run is measuring).
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    MainComponent app;
+    app.setSoundcheckLockForTest (MainComponent::SoundcheckLock::Pending);
+
+    app.changeSlotConfig (1, slotEditMono (1, 1));
+
+    EXPECT_EQ (app.soundcheckLockForTest(), MainComponent::SoundcheckLock::None);
+}

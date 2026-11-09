@@ -2293,6 +2293,20 @@ TEST (AudioEngineTapBacklog, DiscardDrainsEveryRing)
     EXPECT_EQ (engine.getTapDropCount (0, 0), 0u);
 }
 
+TEST (AudioEngine, DiscardTapBacklogForOneSlotLeavesTheOthersAlone)
+{
+    AudioEngine engine;
+    const std::array<float, 64> block {};
+    for (int slot : { 0, 1 })
+        engine.getTapBuffer (slot, 0).write (block.data(), block.size());
+
+    engine.discardTapBacklog (1);
+
+    std::array<float, 64> out {};
+    EXPECT_EQ (engine.getTapBuffer (1, 0).read (out.data(), out.size()), 0u);
+    EXPECT_EQ (engine.getTapBuffer (0, 0).read (out.data(), out.size()), out.size());
+}
+
 //==============================================================================
 // HW-174.Q2 -- each lane's detector tap carries THAT lane's post-notch signal,
 // not the shared output channel several lanes sum into.

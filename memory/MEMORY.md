@@ -32,6 +32,7 @@ Index các bài học/quyết định của dự án. Mỗi note: `memory/<topic
 - [De-feedback landscape](defeedback-landscape-2026-10-20.md) — thứ gì cho GBF cao hơn notch đều đổi tiếng; notch đặt ở tâm bin chỉ cắt −3,9 dB ở 300 Hz khi lệch nửa bin (P1); thêm PHPR và độ đều tốc độ tăng vào detector; rta-tool là AGPL; proxy chặn web ngoài GitHub.
 - [Parallel sessions duplicate PRs](parallel-sessions-duplicate-prs-2026-10-21.md) — hai phiên cùng audit một `main`, ra 6 cặp PR trùng nhau; "tự quyết" không có nghĩa là tự sinh việc; nhận việc bằng GitHub Issue + label `claimed`; release note dạng mảnh rời; merge chuỗi PR thì tích hợp local trước (`GIT-WORKFLOW.md` §5b).
 - [Sub-bin notch frequency](subbin-notch-frequency-2026-10-20.md) — "Q 30 rộng hơn một bin" chỉ đúng từ ~1 kHz; ở 300 Hz notch đặt ở tâm bin chỉ cắt −3,9 dB; nội suy parabol log-biên độ (Hann) sai số ≤ 0,016 bin; kẹp ±0,45 bin để `lround(hz/binWidth)` giữ đúng bin.
+- [Slot edit restarts only that slot](slot-edit-restarts-only-that-slot-2026-11-09.md) — setSlotConfig là atomic nên sửa slot không cần restart; chỉ stop/reset/start controller của slot đó, xả ring riêng slot (không xả 16 ring khi 7 consumer còn chạy); save chuyển ra cuối mỗi batch (đếm bằng `settingsWriteCountForTest`); đang đo soundcheck thì bỏ `applyModeGating`; LOW-5: không có đường lock JUCE từ thread detector, không đổi code.
 
 ## Conventions (tóm tắt)
 

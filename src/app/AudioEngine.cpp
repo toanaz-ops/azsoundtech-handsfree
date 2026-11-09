@@ -339,22 +339,27 @@ LockFreeRingBuffer<float>& AudioEngine::getTapBuffer (int slot, int lane)
 
 void AudioEngine::discardTapBacklog()
 {
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+        discardTapBacklog (slot);
+}
+
+void AudioEngine::discardTapBacklog (int slot)
+{
+    if (slot < 0 || slot >= kMaxSlots)
+        return;
+
     std::array<float, 512> scratch {};
-    for (auto& slotTaps : tapBuffers_)
+    for (auto& tap : tapBuffers_[(std::size_t) slot])
     {
-        for (auto& tap : slotTaps)
+        // Bounded: a live producer must not be able to keep us here.
+        for (std::size_t n = tap.getCapacity() / scratch.size() + 1;
+             n > 0 && tap.read (scratch.data(), scratch.size()) > 0; --n)
         {
-            // Bounded: a live producer must not be able to keep us here.
-            for (std::size_t n = tap.getCapacity() / scratch.size() + 1;
-                 n > 0 && tap.read (scratch.data(), scratch.size()) > 0; --n)
-            {
-            }
         }
     }
 
-    for (auto& slotCounts : tapDropCounts_)
-        for (auto& count : slotCounts)
-            count.store (0, std::memory_order_relaxed);
+    for (auto& count : tapDropCounts_[(std::size_t) slot])
+        count.store (0, std::memory_order_relaxed);
 }
 
 std::uint64_t AudioEngine::getTapDropCount() const
