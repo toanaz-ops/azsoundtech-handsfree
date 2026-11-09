@@ -924,6 +924,8 @@ với ~300 lần đặt notch rơi vào khoảng **6–14 MB** tùy LINK. `keepF
 
 ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
 
+**1.4.1: đã đóng gói alpha 2026-11-09 từ `main` `7408f73`, gate ctest 847/847 — detector nghe riêng từng làn (PR #43) và sửa một slot chỉ đặt lại slot đó (PR #44); 0 dB ở mọi ngõ ra. Chi tiết: `docs/release-notes/1.4.1-alpha.md`.**
+
 **1.4.0 (lane U + sửa lỗi review/audit 20/10–09/11/2026): đã đóng gói alpha 2026-11-09 từ `main` `2628cdf`, gate ctest 833/833; chưa nghe thử trên rig (owner quyết định đóng gói trước). Chi tiết: `docs/release-notes/1.4.0-alpha.md`.**
 
 **1.3.0 (lane M — soundcheck đo chủ động): đã hiện thực trên nhánh `feat/lane-m-active-soundcheck` (`a6be099..17f5225`, 34 commit, 11 task SDD + fix rounds, suite **712/712**); đã merge và đóng gói alpha 2026-09-17 (`AZSoundtech-Handsfree-Setup-1.3.0.exe`, gate 714/714). Đoạn dưới là trạng thái lúc viết, trước khi phát hành.** Release bị chặn tới khi owner duyệt **9 mục cũ** (spec header: mức phát −20 dBFS, im cả kênh ngõ ra ~72 s, đề xuất-hay-tự-đặt, bộ tự hủy, nút `ĐO` riêng, bất đối xứng preset, `kResultsTimeoutMs`, `ClearReason::SoundcheckReplace`, `SnapshotNotch::origin`) cộng **6 mục điều phối tự chốt trong lúc triển khai** (sổ quyết định Q18–Q23) và **một lần nghe trên rig thật** — đường `ÁP DỤNG` không tới được trong headless, nên lần `ÁP DỤNG` thật đầu tiên trong đời tính năng này sẽ xảy ra trên một dàn thật, ở âm lượng thấp. Chi tiết: §3.7 bên trên, spec `docs/superpowers/specs/2026-09-15-active-soundcheck-design.md` (rev 5, §9 ghi mọi sai lệch khi triển khai).

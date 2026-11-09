@@ -80,4 +80,7 @@ Still open: (a) eight detector threads start unconditionally after `engine_.star
 | LOW-8 TSan CI job + duplicate block in `tests/CMakeLists.txt` | fixed | PR #41 (`linux-tsan`, nightly + dispatch); first run 833/833 green, no race reported (run 42589473992) |
 | Default window larger than small screens (UI test) | fixed | PR #36 (`fc94dc9`) |
 | UI-test #3 version string 1.3.0 | fixed | owner chose HW-188 A ("không chờ nghe thử"); 1.4.0 packaged from main 2628cdf with `release-alpha.ps1 -Part minor -Keep 0` (833/833 gate, exe reports 1.4.0); bump in PR `release/1.4.0` |
-| MEDIUM-3, LOW-5, LOW-9, item (b), UI-test #2/#4 | not touched — owner decisions (HW-174.Q3) / needs an ASIO driver |
+| MEDIUM-3 slot edit restarts all 8 + LOW-5 | fixed after owner HW-174.Q3 = A | PR #44 (`7408f73`): only the edited slot's controller restarts, batches save once; LOW-5 needed no code (no detector path takes a JUCE device lock; `stop()` joins only running threads); TSan 847/847 |
+| HW-174.Q2 detector hears the summed output (audit 2026-10-21) | fixed after owner HW-174.Q2 = A | PR #43 (`6ac8425`): per-lane post-notch tap, 0 dB at outputs |
+| Shipped | | 1.4.1-alpha (`main` `7408f73`, gate 847/847) |
+| LOW-9, item (b), UI-test #2/#4 | not touched | owner decision / needs an ASIO driver |
