@@ -601,7 +601,7 @@ _TWO_WORD_VERBS = frozenset({("mo", "to"), ("mo", "lon")})
 _AMOUNT_VERBS = frozenset({"cong", "them", "add"})   # "cong 3 dB", "them 3 dB"
 _PARTICLES = frozenset({"up", "len"})
 _OBJECTS = frozenset({"gain", "gains", "volume", "volumes", "fader", "faders", "level", "levels",
-                      "muc", "trim", "preamp", "master", "output", "mic", "mics", "tran",
+                      "muc", "trim", "preamp", "master", "output", "mic", "mics", "micro", "microphone", "tran",
                       "ceiling", "monitor", "send", "db"})
 _OBJECT_PAIRS = frozenset({("am", "luong"), ("do", "loi")})
 

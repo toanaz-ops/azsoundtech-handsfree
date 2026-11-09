@@ -1,5 +1,7 @@
 #include "app/AppSettings.h"
 
+#include "app/SidecarRunner.h"
+
 namespace
 {
     bool readChannel (const juce::var& v, int& out)
@@ -82,6 +84,23 @@ AppSettings appSettingsFromHost (const az::host::HostSettings& host)
             s.slots[(std::size_t) i] = i < slots->size() ? readSlot ((*slots)[i]) : SlotConfig {};
     }
 
+    // Lenient: anything missing or invalid keeps the default (a base URL that
+    // fails validation becomes empty, never a half-trusted string).
+    const auto provider = host.product["copilot_provider"].toString();
+    if (provider == "anthropic" || provider == "openai_compatible")
+        s.copilotProvider = provider;
+
+    const auto model = host.product["copilot_model"].toString();
+    if (isValidCopilotModel (model))
+        s.copilotModel = model;
+
+    const auto baseUrl = host.product["copilot_base_url"].toString();
+    if (isValidCopilotBaseUrl (baseUrl))
+        s.copilotBaseUrl = baseUrl;
+
+    const auto consent = host.product["copilot_consent"];
+    s.copilotConsent = consent.isBool() && (bool) consent;
+
     return s;
 }
 
@@ -92,6 +111,11 @@ az::host::HostSettings appSettingsToHost (const AppSettings& settings)
 
     auto product = std::make_unique<juce::DynamicObject>();
     product->setProperty ("uiMode", uiModeName (settings.uiMode));
+
+    product->setProperty ("copilot_provider", settings.copilotProvider);
+    product->setProperty ("copilot_model", settings.copilotModel);
+    product->setProperty ("copilot_base_url", settings.copilotBaseUrl);
+    product->setProperty ("copilot_consent", settings.copilotConsent);
 
     if (settings.hasRouting)
     {

@@ -89,6 +89,10 @@ set(HANDSFREE_CORE_SOURCES
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/AppSettings.h
     ${CMAKE_SOURCE_DIR}/src/app/AudioEngine.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotAnswer.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotAnswer.h
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotCredentialStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/CopilotCredentialStore.h
     ${CMAKE_SOURCE_DIR}/src/app/CopilotFindings.cpp
     ${CMAKE_SOURCE_DIR}/src/app/CopilotFindings.h
     ${CMAKE_SOURCE_DIR}/src/app/SidecarRunner.cpp
@@ -196,6 +200,11 @@ target_link_libraries(HandsFree
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+# CopilotCredentialStore calls CryptProtectData / CryptUnprotectData.
+if(WIN32)
+    target_link_libraries(HandsFree PRIVATE crypt32)
+endif()
 
 # Compile definitions
 target_compile_definitions(HandsFree

@@ -920,7 +920,7 @@ class SafetyTable(unittest.TestCase):
              "boost the mic", "+3 dB", "nâng gain", "increase the gain", "tăng​gain",
              "tăng​ gain", "cộng 3 dB", "thêm 3 dB", "turn the gain up", "vặn volume lên",
              "mở to mic", "bring up the level", "crank the master", "fader up", "gain lên",
-             "không giảm gain, tăng gain", "Không, tăng gain", "Hãy tăng gain monitor",
+             "không giảm gain, tăng gain", "Không, tăng gain", "Hãy tăng gain monitor", "hãy mở to micro lên", "tăng micro lên",
              "TĂNG ĐỘ LỢI lên", "tắt chống hú đi", "Có thể tăng trần lên -24",
              "You should Raise the Gain", "increase gain on ch 3", "Turn off feedback suppression",
              "disable feedback now", "raise the ceiling to -24 dB", "tăng 3 dB cho kênh này",
@@ -930,7 +930,7 @@ class SafetyTable(unittest.TestCase):
              "đừng tăng âm lượng", "không tăng gain", "hạ fader xuống", "notch sâu -6 dB",
              "cắt 3 dB ở 2,5 kHz", "đừng tăng trần", "Đừng tắt chống hú", "never turn off feedback",
              "NEVER Disable Feedback", "you should not raise the ceiling", "Don't raise the gain",
-             "Hạ gain monitor 3 dB và thử ở âm lượng nhỏ.", "chớ tăng gain", "không nên tăng âm lượng")
+             "Hạ gain monitor 3 dB và thử ở âm lượng nhỏ.", "chớ tăng gain", "không nên tăng âm lượng", "đặt micro xa loa hơn", "giảm gain micro")
 
     def test_blocked(self):
         for t in self.BLOCK:

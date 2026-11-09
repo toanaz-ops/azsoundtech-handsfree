@@ -29,6 +29,12 @@ target_link_libraries(HandsFreeSnapshot PRIVATE
     juce::juce_recommended_config_flags
 )
 
+# HandsFreeSnapshot compiles HANDSFREE_CORE_SOURCES, which now includes
+# CopilotCredentialStore (CryptProtectData / CryptUnprotectData).
+if(WIN32)
+    target_link_libraries(HandsFreeSnapshot PRIVATE crypt32)
+endif()
+
 if(MSVC)
     target_compile_definitions(HandsFreeSnapshot PRIVATE
         _CRT_SECURE_NO_WARNINGS
