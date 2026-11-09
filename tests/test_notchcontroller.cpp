@@ -3994,3 +3994,19 @@ TEST (NotchControllerRateChange, NotchesAtOrAboveTheNewNyquistAreCleared)
     EXPECT_FALSE (h.controller.activeForTest (1, 0));
     EXPECT_TRUE  (h.controller.activeForTest (0, 1));
 }
+
+// RED IF the room-memory merge goes back to an exact-Hz compare: sub-bin
+// estimates differ per episode, so one howl would fill the ring with duplicates.
+TEST (NotchControllerRateChange, RoomMemoryMergesByBinNotByExactHz)
+{
+    Harness h;
+    // 48 kHz / 2048 = 23.44 Hz per bin: 1000.0, 1003.3 and 1008.0 are bin 43.
+    h.controller.rememberReleaseForTest (0, 1000.0, -12.0);
+    h.controller.rememberReleaseForTest (0, 1003.3, -24.0);
+    h.controller.rememberReleaseForTest (0, 1008.0, -18.0);
+    EXPECT_EQ (h.controller.memoryEntryCountForTest (0), 1);
+
+    // One bin away is a different howl.
+    h.controller.rememberReleaseForTest (0, 1031.0, -12.0);
+    EXPECT_EQ (h.controller.memoryEntryCountForTest (0), 2);
+}

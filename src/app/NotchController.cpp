@@ -383,13 +383,24 @@ void NotchController::rememberReleaseLocked (int lane, double frequencyHz,
         // walks past it and evicts a live neighbour instead, so a room that
         // howls at a few bins repeatedly ends up with a memory that holds far
         // fewer than the sixteen the header promises.
+        //
+        // "Same frequency" means the SAME BIN (review 2026-11-09 LOW-4), as the
+        // lookup does: sub-bin estimates differ from episode to episode, so an
+        // exact Hz compare let one howl fill the 16-entry ring with duplicates.
+        const double binWidthHz = lanes_[0].detector.getSampleRate()
+                                  / (double) Detector::kFftSize;
+        const bool   haveBins   = binWidthHz > 0.0;
+        const long   newBin     = haveBins ? std::lround (frequencyHz / binWidthHz) : 0;
         int target = -1, firstFree = -1;
         for (int k = 0; k < kMemoryEntriesPerLane; ++k)
         {
             auto& slot = bank[(std::size_t) k];
             if (slot.used)
             {
-                if (slot.frequencyHz == frequencyHz)
+                const bool same = haveBins
+                    ? std::lround (slot.frequencyHz / binWidthHz) == newBin
+                    : slot.frequencyHz == frequencyHz;
+                if (same)
                 {
                     target = k;
                     break;
