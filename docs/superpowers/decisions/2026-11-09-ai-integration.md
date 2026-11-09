@@ -370,3 +370,42 @@ cần owner xem lại khi có lứa log thật đầu tiên: 30 dòng/nhãn và 
 
 **Chọn: 1.** Cổng từ chối mọi báo cáo có `source` khác `real` (sửa lại Q17: model tổng hợp chỉ sống
 trong `tools/nn/`, app vẫn chạy `untrained-fixture-v1`).
+
+## Sau Fable review phase AI (L2a, L2b, C0) — Q26–Q28 (điều phối chốt tạm 09/11/2026, owner chưa duyệt)
+
+Luật owner 09/11/2026: Fable review toàn bộ diff trước khi đóng phase lớn. Review `b6321e6..5d47b9e` (đã phát
+hành trong 1.5.0) ra 2 mục High, 3 mục Medium ở L2b; C0 và phần tiến trình của L2a không có lỗi. Ghi chú
+tester trong thư mục phát hành đã được đính chính ngay trong đêm.
+
+### Q26 — Bộ lọc câu trả lời bỏ lọt 27/32 câu nguy hiểm viết tay: sửa theo hướng nào?
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Mở rộng bộ lọc (tắt/gỡ bảo vệ, so sánh "to hơn", đặt giá trị, phủ định tu từ, ngôn ngữ khác, chữ giãn/đồng dạng) + một dòng cảnh báo cố định dưới MỌI câu trả lời AI + sửa lời trong tài liệu** | chặn được các lớp đã biết; người dùng luôn thấy đây là lời khuyên chưa kiểm chứng | vẫn là bộ lọc cụm từ, không phải bảo đảm; chặn nhầm nhiều hơn |
+| 2 | Chỉ thêm dòng cảnh báo, giữ bộ lọc | ít mã | lời khuyên nguy hiểm vẫn hiện nguyên văn |
+| 3 | Dùng một lượt LLM thứ hai để chấm câu trả lời | bắt được cách nói lạ | tốn thêm lượt gọi, chậm gấp đôi, và chính nó cũng không phải bảo đảm |
+| 4 | Tắt hẳn ô hỏi AI tới khi có cách chặn chắc chắn | không rủi ro | mất tính năng owner đã chọn ở Q2 |
+
+**Chọn: 1.** Giữ nguyên tắc Q13 (không chắc thì chặn). Tài liệu không được viết "bị thay bằng thông báo cố định"
+như một cam kết nữa.
+
+### Q27 — Khoá nào được gửi đi, và gửi tới đâu?
+
+Review: khoá trong biến môi trường `OPENAI_API_KEY` được gửi dù giao diện báo "Chưa có khoá"; khoá đã lưu đi
+theo bất kỳ địa chỉ nào người dùng đổi sang; proxy HTTP nhận được khoá khi địa chỉ là `http://localhost`.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **App chỉ dùng khoá đã lưu (bỏ biến môi trường khi chạy từ app); khoá đã lưu gắn với máy chủ của nó, đổi địa chỉ phải nhập lại khoá; địa chỉ nội bộ không đi qua proxy; địa chỉ có `user:pass@` bị từ chối** | thứ giao diện hiển thị khớp với thứ được gửi; khoá không tới nhầm nhà cung cấp | người đổi địa chỉ phải nhập lại khoá; file khoá của 1.5.0 cho "Tương thích OpenAI" phải lưu lại một lần |
+| 2 | Giữ biến môi trường nhưng hiện nó trong trạng thái khoá | tiện cho người đã có biến sẵn | khoá vẫn có thể tới nhầm nhà cung cấp |
+
+**Chọn: 1.** Dòng lệnh dành cho nhà phát triển (chạy `copilot.py` tay) vẫn đọc biến môi trường.
+
+### Q28 — Gỡ cài đặt và file khoá
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Lời nhắc gỡ cài nêu rõ file khoá API và hỏi có xoá không (mặc định giữ, như preset)** | người dùng biết còn một file khoá đã mã hoá | trình gỡ chạy quyền cao có thể trỏ nhầm `%APPDATA%` của người khác: lời nhắc phải nói rõ đường dẫn |
+| 2 | Luôn xoá file khoá khi gỡ | sạch | gỡ để cài lại thì mất khoá; cùng rủi ro trỏ nhầm hồ sơ |
+
+**Chọn: 1.**
