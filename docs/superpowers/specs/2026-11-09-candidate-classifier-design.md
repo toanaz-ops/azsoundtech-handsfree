@@ -246,7 +246,7 @@ gì về hiệu quả ngoài hiện trường.
 ### 8.5 Đã hiện thực (C1c, 09/11/2026) — chỗ thực tế khác bản thiết kế
 
 Công cụ: `tools/nn/{dataset,train_mlp,evaluate,gate,check_embedded_models,slim_log}.py`, hướng dẫn chạy ở
-`tools/nn/README.md`. Test: `tests/test_nn_pipeline.py` (ctest `nn_pipeline`, 59 ca; các ca cần numpy tự bỏ
+`tools/nn/README.md`. Test: `tests/test_nn_pipeline.py` (ctest `nn_pipeline`; các ca cần numpy tự bỏ
 khi thiếu), `nn_embedded_model_gate`, và `CandidateClassifierLoad.ExportedTrainedModelLoadsAndMatchesPythonReference`
 (C++ nạp file do `train_mlp.py` xuất qua `parseWeights` + RTNeural, sai số 8,9e-8 so với tham chiếu Python).
 
@@ -261,6 +261,7 @@ khi thiếu), `nn_embedded_model_gate`, và `CandidateClassifierLoad.ExportedTra
   **7,8e-4**, trung bình 2,6e-4; sau khi làm tròn điểm Python về 3 chữ số, 554/576 trùng hẳn và còn lại lệch đúng một đơn vị
   chữ số thứ ba. Mô hình chưa huấn luyện có độ nhạy thấp nên đây là cận dưới; một model đã huấn luyện dốc hơn thì lệch có thể lớn hơn
   — đo lại khi có model thật.
+- **Đặc trưng lưu ở 10 chữ số có nghĩa** trong dataset: `log2` / `log10` lấy từ libm của nền tảng (glibc khác CRT Windows ở bit cuối), mà `dataset_sha256` được ghim trong báo cáo và test phải giống nhau trên mọi máy.
 - **Chia tập:** thứ tự `sha256("hf-c1c-split-v1:" + session_id)`, 25 % đầu (ít nhất 1) là tập giữ lại; `train_mlp.py` chia tiếp tập huấn luyện
   làm fit / kiểm định bằng cùng cách (muối `/val`). Cần ≥ 2 session.
 - **Cổng:** thêm một điều kiện chặt hơn Q24: tập giữ lại cần ≥ 10 dòng **mỗi nhãn** (không chỉ "đủ cả hai nhãn": 59 so với 1 không nói gì).

@@ -1,5 +1,5 @@
 {
- "dataset_sha256": "07fb752d62ab0dc6b3aba1cddf5c1e98d75adf3508959fc07e281e188ba39bbf",
+ "dataset_sha256": "65b632a79198dde3d4b8c7e99012420c08f9623bb203d0f059f96c2d55c63f9c",
  "heldout": {
   "auc_baseline": 0.2881590319792567,
   "auc_model": 0.9721694036300778,
@@ -12,7 +12,7 @@
   "retention_achieved": 0.9550561797752809,
   "retention_target": 0.95,
   "rows": 154,
-  "threshold": 0.4879207853338083
+  "threshold": 0.48792078428010704
  },
  "inference": "tools/nn/reference_forward.py (same arithmetic as CandidateClassifier.cpp)",
  "report_version": 1,
@@ -62,8 +62,8 @@
   "retention_achieved": 0.95,
   "retention_target": 0.95,
   "rows": 422,
-  "threshold": 0.3620941109263605
+  "threshold": 0.3620941106179704
  },
  "weights_model": "synthetic-bootstrap-v0",
- "weights_sha256": "9c4f030f82c8d119c3c18583076502d8576a14893e0f00d53bca15489416d8d6"
+ "weights_sha256": "35cc3ca1e65fe4c98024389520404a3d32142cdb4ea45ba7e6cda39b47eca341"
 }

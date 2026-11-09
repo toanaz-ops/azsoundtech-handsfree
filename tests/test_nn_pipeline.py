@@ -98,7 +98,8 @@ class DatasetFromFixture(TempDirCase):
     def test_features_come_from_the_shared_reference_code(self):
         ds.build_dataset([os.path.join(FIX, "session-nn-dataset.jsonl")], self.tmp)
         for r in ds.read_rows(os.path.join(self.tmp, "dataset.jsonl")):
-            self.assertEqual(r["features"], ref.raw_features(r["raw"]))
+            for a, b in zip(r["features"], ref.raw_features(r["raw"])):
+                self.assertAlmostEqual(a, b, delta=1e-9 * max(1.0, abs(b)))
             self.assertEqual(len(r["features"]), 16)
 
     def test_same_input_same_bytes(self):

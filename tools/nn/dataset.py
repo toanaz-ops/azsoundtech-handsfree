@@ -207,7 +207,10 @@ def _finish_row(inp):
         return None, "non_finite"
     if not all(math.isfinite(v) for v in f):
         return None, "non_finite"
-    return f, None
+    # Stored at 10 significant digits: log2 / log10 come from the platform libm,
+    # which may differ in the last bit between glibc and the Windows CRT, and the
+    # dataset sha256 must not depend on that. (The app holds float32 anyway.)
+    return [float("%.10g" % v) for v in f], None
 
 
 # ---------------------------------------------------------------------------
