@@ -186,3 +186,58 @@ Tham chiếu Python (`tools/nn/reference_forward.py`) chỉ dùng thư viện ch
   trên nhánh trước khi merge nếu được.
 - Bản cài chưa kèm file ghi công bên thứ ba; BSD-3 của RTNeural đòi có khi mã vào binary (Q22, chờ owner).
 - Lệch huấn luyện / chạy thật: log làm tròn 3 chữ số, app dùng float đầy đủ. Chưa đo.
+
+## 8. C1c — đường huấn luyện, đánh giá và cổng (thêm 09/11/2026)
+
+Owner (qua phiên điều phối, 09/11): đưa lane C1 qua mức "model chưa huấn luyện chạy bóng" — làm đường
+huấn luyện, bộ đánh giá có tập giữ lại và một test cổng; thiếu log thật thì khởi động bằng fixture
+hoặc một tập tổng hợp có ghi rõ; giữ bộ phân loại ở chế độ bóng tới khi cổng đạt. Các ngả rẽ: Q23–Q25.
+
+> **Mức ra thay đổi dự kiến: 0 dB.** C1c không đổi mã app: chỉ thêm công cụ offline dưới `tools/nn/`,
+> test, và tài liệu. Model nhúng trong app vẫn là `untrained-fixture-v1`.
+
+Hiện trạng dữ liệu (đo 09/11/2026 trên máy build): 9 file log ở `%APPDATA%`, đều `log_schema` 1,
+không có notch, không có verdict. **Chưa có một nhãn thật nào.**
+
+### 8.1 Dữ liệu và nhãn
+
+- Đầu vào: các file `session-*.jsonl` (schema 2 và 3). Một dòng dữ liệu = một lần đặt notch gốc
+  detector (`notch_set`) **có verdict** của soundman: TRUE → nhãn 1 (hú thật), FALSE → nhãn 0 (đặt oan).
+  Cách nối verdict vào notch dùng lại đúng luật của `tools/logstats.py` (kể cả notch bị thay thế).
+- Dòng `candidate_features` (suýt đạt, không ai chấm) **không có nhãn**: không dùng để huấn luyện,
+  chỉ đếm và dùng để xem phân bố score.
+- 16 đặc trưng tính từ dòng log bằng **cùng một mã** với bản tham chiếu `reference_forward.py`
+  (một nguồn sự thật cho bảng đặc trưng ở phía Python; test so với `rawFeatures` của C++).
+- Mỗi dòng mang `session_id` và `source` (`real` hoặc `synthetic`). Log thật không được commit vào
+  repo (repo công khai); chỉ fixture và tập tổng hợp được commit.
+
+### 8.2 Huấn luyện
+
+`tools/nn/train_mlp.py`, chỉ cần numpy, chạy offline (không nằm trong `ctest`): MLP 16-16-8-1 đúng
+kiến trúc của app, chuẩn hoá đầu vào thành `input_offset` / `input_scale`, seed cố định, dừng sớm
+theo tập kiểm định, xuất đúng định dạng JSON mà `CandidateClassifier::parseWeights` đọc, kèm tên model
+và băm của tập dữ liệu.
+
+### 8.3 Đánh giá và cổng
+
+- Chia tập **theo session** (không để cùng một buổi diễn nằm ở cả hai phía).
+- Số đo: ROC-AUC của mạng; ROC-AUC của `score` hiện tại trên cùng tập (mốc so sánh); ở ngưỡng giữ được
+  ≥ 95 % hú thật: tỉ lệ đặt oan bị bắt. Suy luận lúc đánh giá dùng bản tham chiếu thư viện chuẩn, tức
+  cùng phép tính với app.
+- **Cổng** (`tools/nn/gate.py`, đóng theo mặc định). Một model chỉ được nhúng vào app khi báo cáo đánh
+  giá của nó thoả **tất cả**: dữ liệu `real`; ≥ 300 notch có verdict từ ≥ 3 session; tập giữ lại có
+  ≥ 60 dòng và đủ cả hai nhãn; AUC ≥ 0,80 **và** ≥ AUC của `score` + 0,05; giữ ≥ 95 % hú thật thì bắt
+  được ≥ 30 % đặt oan. Các ngưỡng là chốt tạm (Q24).
+- Test cổng trong `ctest`: model nhúng trong app hoặc mang tên `untrained-*`, hoặc phải có báo cáo
+  đánh giá đạt cổng nằm cạnh, băm trọng số khớp. Tập tổng hợp **không bao giờ** qua được cổng.
+- Qua cổng mới chỉ là "được nhúng để chạy bóng với score có nghĩa". Cho mạng quyền quyết định notch
+  vẫn là bước riêng, cần buổi nghe và owner chốt.
+
+### 8.4 Tập tổng hợp để khởi động
+
+Để đường ống chạy được từ đầu tới cuối khi chưa có log thật: một bộ sinh có ghi rõ cách làm, tạo log
+đúng định dạng session (kèm dòng verdict làm nhãn) từ tín hiệu tổng hợp — hú = sin tăng dần; không
+phải hú = nốt có hài, có bao biên độ và rung. Model huấn luyện từ đó tên `synthetic-bootstrap-v0`,
+nằm dưới `tools/nn/`, **không nhúng vào app**. `memory/peakiness-sweep-2048-2026-09-04.md` đã ghi nguồn
+tổng hợp không đại diện cho nhạc thật: số đo trên tập này chỉ chứng minh đường ống chạy, không nói
+gì về hiệu quả ngoài hiện trường.
