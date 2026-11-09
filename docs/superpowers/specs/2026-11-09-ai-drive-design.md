@@ -130,7 +130,7 @@ Timer (message thread) → ghi `supervisor-state.json` vào thư mục log → m
 → parse `{"actions":[...],"usage":...}` → kiểm → GỢI Ý: sổ đề xuất (dấu mờ + dòng); TỰ LÁI: áp dụng + ghi sổ.
 
 - Chỉ gọi theo sự kiện: detector đặt notch ở một bin đã có ≥ 3 lần đặt trong 10 phút; một notch chạm trần
-  ≥ 30 s; nhịp 10 phút nếu có gì đổi. Cách nhau ≥ 120 s, ≤ 12 lượt/giờ, 40 lượt/buổi (chỉnh được).
+  ≥ 30 s; nhịp 10 phút nếu có gì đổi. Cách nhau ≥ 120 s, ≤ 12 lượt/giờ (lưu qua restart), 40 lượt/tiến trình; hằng số, chưa chỉnh được trong app (D14).
 - Chi phí ước 1,2–3,6 USD/giờ ở mức trần. **Chưa đo**: chưa có lượt gọi nhà cung cấp thật nào.
 - Watchdog 60 s, `--timeout=50`. Đang có lượt hỏi của người thì lùi nhịp giám sát.
 - Huỷ khi: BYPASS, chế độ AI dưới GỢI Ý, restart thiết bị, đóng app. Kết quả thế hệ cũ bị bỏ.

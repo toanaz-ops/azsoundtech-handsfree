@@ -935,6 +935,72 @@ nhúng trong app (đúng các file CMake nhúng) không phải `untrained-*` mà
 luyện, nên không gì ở đây đổi âm thanh (0 dB). Qua cổng cũng chỉ là "được nhúng để chạy bóng với score có nghĩa", chưa phải quyền quyết
 định notch. Tập tổng hợp để thử đường ống không bao giờ qua cổng. Hướng dẫn chạy: `tools/nn/README.md`; thiết kế: spec lane C1 §8.
 
+### 7.2 Log schema 4, tác giả notch và AI giám sát (lane L3a — 0 dB)
+
+Thiết kế đầy đủ: [`superpowers/specs/2026-11-09-ai-drive-design.md`](superpowers/specs/2026-11-09-ai-drive-design.md).
+
+**Tác giả không phải Origin.** `Origin` (Detector / Preset / Manual / Soundcheck) quyết định *chính sách* của một
+notch: trần nào, có leo thang không, có tự nhả không. `Author` (Detector / Human / Network / Llm) chỉ *ghi công*.
+Mỗi notch trong model mang `placedBy`, `lastChangedBy` và `nid` (số định danh cấp một lần, không tái dùng trong
+một lần chạy; notch đặt lại sau khi bị xoá nhận số mới). Không quyết định nào của detector đọc các trường này,
+và `NotchCommand` xuống audio thread không đổi. Quy tắc gán: detector đặt / đào sâu / thang nhả / tự xoá →
+`detector`; nạp preset, ÁP DỤNG của soundcheck, chấm FALSE, CLEAR ALL và mọi lời gọi từ message thread →
+`human`. `network` và `llm` chưa được sinh ra ở pha này.
+
+**Schema 4.** `session_start` có `log_schema: 4` và `ai_mode`. Mọi dòng `notch_set` / `notch_retune` /
+`notch_clear` có `author` và `nid`. Bốn sự kiện mới:
+
+| Sự kiện | Khi nào | Trường |
+|---|---|---|
+| `ai_mode` | đổi nấc công tắc AI | `mode`, `effective_llm`, `effective_network` |
+| `ai_call` | kết thúc một lượt AI giám sát | `trigger`, `gen`, `ms`, `status` (`ok` / `failed` / `timeout` / `stale` / `cancelled`), `usage` |
+| `ai_proposal` | một đề xuất qua được kiểm | `gen`, `slot`, `nid`, `tool`, `hz`, `target_db` / `hold_s`, `reason` |
+| `ai_decision` | đề xuất bị từ chối, bị bỏ, hết hạn, hoặc cũ | `gen`, `slot`, `nid`, `tool`, `decision`, `refusal` (khi bị từ chối), `reason` (khi hết hạn vì không còn đúng hoặc bị thay thế) |
+
+`tools/logstats.py`, các luật của `copilot.py` và `tools/nn/dataset.py` chỉ tính thứ detector tự làm: dòng có
+`author` khác `detector` bị loại khỏi các luật đếm notch và khỏi tập huấn luyện (đếm riêng). Log schema 1–3 đọc
+y như trước.
+
+**Chế độ.** `AiMode { off, shadow, suggest, act }` lưu trong settings; `act` đã lưu bị hạ về `suggest` mỗi lần
+mở app. Mỗi tay lái bị kẹp ở trần của nó: ở pha này LLM tối đa `suggest`, mạng nơ-ron tối đa `shadow`. `off`
+dừng cả việc chấm điểm bóng (`NotchController::setShadowScoringEnabled`, một atomic chỉ chặn lời gọi chấm điểm
+và các trường `nn_*` trong log).
+
+**AI giám sát (`AiSupervisor`).** Chạy trên message thread, không có lời gọi nào vào `NotchController` làm đổi
+notch (một test dò mã nguồn và một test trên `MainComponent` thật — đưa kết quả hợp lệ qua đúng đường nhận rồi
+so toàn bộ snapshot notch trước/sau — giữ điều đó). Nó ghi `supervisor-state.json` (schema 2: notch đang sống
+kèm `nid`, độ sâu, trần, `next_rung_db` — bậc duy nhất được phép đào tới (bậc kế của thang, hoặc chính trần
+nếu trần nằm giữa hai bậc; do cùng một hàm với bộ kiểm C++ tính), `null` nếu không còn —, origin, tác
+giả, `seen_s` — số giây kể từ khi bộ giám sát thấy notch lần đầu, không phải tuổi notch; nguy cơ hú từng
+slot), chạy tiến trình phụ ở chế độ `--supervise` trên một
+`SidecarRunner` riêng, và nhận về **một đối tượng JSON gồm các lệnh có kiểu** — `propose_deepen`,
+`propose_hold`, `propose_release`, `no_action`, mỗi lệnh kèm lý do dạng enum. Lời văn của model bị bỏ trước khi
+ra khỏi tiến trình phụ, nên bộ lọc cụm từ của ô hỏi AI không tham gia đường này. Phía C++ là ranh giới tin cậy:
+bộ đọc từ chối cả đầu ra nếu sai dạng, sai thế hệ hoặc quá 8 lệnh, và từ chối từng lệnh có số không hữu hạn,
+sai kiểu, ngoài miền hoặc thừa trường; bộ kiểm từ chối lệnh nhắm `nid` không còn sống, lệch tần số quá một bin,
+notch không phải do detector đặt, đào sâu mà không sâu hơn / vượt trần / không đúng bậc kế tiếp, và **nhả khi
+nguy cơ hú của slot không ở mức thấp nhất** (`ring_risk_not_low`). Tiến trình phụ kiểm cùng luật bậc thang
+(`not_next_rung`) nên model được báo ngay thay vì bị từ chối sau khi lượt gọi đã tốn tiền. Mỗi tick, mọi đề
+xuất đang hiện được kiểm lại với trạng thái hiện tại; cái nào không còn qua thì bị gỡ và ghi `ai_decision`
+`expired` kèm lý do (đề xuất bị cái mới thay thế: lý do `superseded`).
+
+Nhịp gọi: theo sự kiện (một bin có ≥ 3 lần đặt trong 10 phút; một notch ở trần ≥ 30 s; nhịp 10 phút nếu bảng
+notch đổi), cách nhau ≥ 120 s tính từ lượt trước hoặc từ lúc mở app, ≤ 12 lượt/giờ, ≤ 40 lượt mỗi tiến trình.
+Thời điểm bắt đầu các lượt gọi được lưu trong settings (`ai_call_starts_ms`, giờ đồng hồ) nên trần theo giờ
+sống qua restart; mốc nằm ở tương lai được tính như "vừa xong" (chỉnh lùi đồng hồ không trả lại ngân sách). Ba
+lượt tự động hỏng liên tiếp (`failed` / `timeout`, kể cả không ghi được file trạng thái) thì tạm dừng tới khi
+có lượt thành công hoặc đổi nấc AI. Không gọi khi BYPASS, SOUNDCHECK, đang đo lane M, chưa đồng ý, chưa có
+khoá, hoặc ô hỏi đang chạy (hoãn, không bỏ). Bộ đếm thế hệ tăng — và lượt đang chạy bị huỷ — khi restart
+thiết bị, nạp preset, CLEAR ALL, đổi mode engine, đổi nấc AI, **rút đồng ý hoặc xoá khoá** (hai đường sau còn
+xoá cả trigger đang chờ và bộ nhớ đệm 5 s của "dùng được").
+
+Hạn giờ, một chỗ định nghĩa: mỗi request HTTP 30 s (`--timeout=30`), cả lượt 90 s (`--deadline-s=90`; vòng
+công cụ tối đa 6 lượt; hết hạn thì tiến trình phụ trả các lệnh đã ghi được, không có lệnh nào thì báo lỗi),
+app kill tiến trình ở 105 s (`kWatchdogMs`, `static_assert` ≥ hạn + 10 s).
+
+**Ở pha L3a, đề xuất chỉ được hiển thị và bỏ.** Việc áp dụng (L3b: người bấm; L3c: AI tự làm) cần các entry
+point mới trong `NotchController` và sổ hoàn tác, chưa có trong bản này.
+
 ## 8. Trạng thái & kiểm chứng (07/09/2026, v1.2.0 — đã hiện thực, qua gate ctest 547/547, đã đóng gói alpha)
 
 **1.4.1: đã đóng gói alpha 2026-11-09 từ `main` `7408f73`, gate ctest 847/847 — detector nghe riêng từng làn (PR #43) và sửa một slot chỉ đặt lại slot đó (PR #44); 0 dB ở mọi ngõ ra. Chi tiết: `docs/release-notes/1.4.1-alpha.md`.**
