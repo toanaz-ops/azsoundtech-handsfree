@@ -987,9 +987,14 @@ xuất đang hiện được kiểm lại với trạng thái hiện tại; cái
 Nhịp gọi: theo sự kiện (một bin có ≥ 3 lần đặt trong 10 phút; một notch ở trần ≥ 30 s; nhịp 10 phút nếu bảng
 notch đổi), cách nhau ≥ 120 s tính từ lượt trước hoặc từ lúc mở app, ≤ 12 lượt/giờ, ≤ 40 lượt mỗi tiến trình.
 Thời điểm bắt đầu các lượt gọi được lưu trong settings (`ai_call_starts_ms`, giờ đồng hồ) nên trần theo giờ
-sống qua restart; mốc nằm ở tương lai được tính như "vừa xong" (chỉnh lùi đồng hồ không trả lại ngân sách). Ba
-lượt tự động hỏng liên tiếp (`failed` / `timeout`, kể cả không ghi được file trạng thái) thì tạm dừng tới khi
-có lượt thành công hoặc đổi nấc AI. Không gọi khi BYPASS, SOUNDCHECK, đang đo lane M, chưa đồng ý, chưa có
+sống qua restart (nạp lại khi `enableSettings()` — lúc dựng `MainComponent` settings chưa có, một test trên
+`MainComponent` thật giữ đường này); mốc tới 60 s trong tương lai được tính như "vừa xong", xa hơn thì bỏ (một
+mốc xa tương lai không được phép khoá AI mãi; đổi lại, chỉnh lùi đồng hồ có thể trả lại ngân sách). Ba lượt tự
+động hỏng liên tiếp (`failed` / `timeout`, kể cả không ghi được file trạng thái) thì tạm dừng tới khi đổi nấc
+AI (chưa có nút gọi tay trong app). Khi engine không ở AUTO (BYPASS, SOUNDCHECK, đang đo) đề xuất đang hiện
+được **đóng băng**: không kiểm lại, không hết hạn (thời gian đóng băng không tính vào tuổi đề xuất), chỉ mất khi
+người bấm `BỎ` hoặc khi rút đồng ý / xoá khoá; về AUTO thì kiểm lại như thường; mức nguy cơ hú đưa vào
+bộ kiểm được giữ 750 ms như chip RING RISK để một frame lẻ không làm đề xuất chớp tắt. Không gọi khi BYPASS, SOUNDCHECK, đang đo lane M, chưa đồng ý, chưa có
 khoá, hoặc ô hỏi đang chạy (hoãn, không bỏ). Bộ đếm thế hệ tăng — và lượt đang chạy bị huỷ — khi restart
 thiết bị, nạp preset, CLEAR ALL, đổi mode engine, đổi nấc AI, **rút đồng ý hoặc xoá khoá** (hai đường sau còn
 xoá cả trigger đang chờ và bộ nhớ đệm 5 s của "dùng được").
