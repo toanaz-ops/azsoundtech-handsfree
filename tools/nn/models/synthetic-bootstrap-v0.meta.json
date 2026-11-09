@@ -15,30 +15,30 @@
  },
  "split": {
   "fit_sessions": [
-   "session-synthetic-v0-s0",
-   "session-synthetic-v0-s1",
-   "session-synthetic-v0-s2",
-   "session-synthetic-v0-s3"
+   "s2e50cd5d332bccbe",
+   "s6ad69354ee8f2b2f",
+   "sd9265c8e83e8e882",
+   "sfb8dd2b67657cef5"
   ],
   "validation_sessions": [
-   "session-synthetic-v0-s4",
-   "session-synthetic-v0-s5"
+   "sb5b048bfebf6b698",
+   "sf787990b2fa4c92b"
   ],
   "heldout_sessions_untouched": [
-   "session-synthetic-v0-s6",
-   "session-synthetic-v0-s7"
+   "s04145824dbfd8fd9",
+   "sfd1b67dcc2245a0d"
   ]
  },
  "rows": {
-  "fit": 295,
-  "validation": 127
+  "fit": 296,
+  "validation": 134
  },
  "weights_clipped": 0,
- "epochs_run": 77,
- "best_epoch": 37,
- "best_val_loss": 0.20530564262285478,
+ "epochs_run": 79,
+ "best_epoch": 39,
+ "best_val_loss": 0.19347805729939244,
  "stopped_early": true,
- "final_train_loss": 0.12444159510537471,
- "dataset_sha256": "65b632a79198dde3d4b8c7e99012420c08f9623bb203d0f059f96c2d55c63f9c",
- "weights_sha256": "35cc3ca1e65fe4c98024389520404a3d32142cdb4ea45ba7e6cda39b47eca341"
+ "final_train_loss": 0.13470661138304588,
+ "dataset_sha256": "1a100a33392c5a420c562936464ee59c56c5523f5d60c69e103cf7a599f80a13",
+ "weights_sha256": "34cd11726a19db5f3c5bea9402c766267d2a4885c68f942d2a19d105bd2a596e"
 }

@@ -34,14 +34,17 @@ import sys
 # ---------------------------------------------------------------------------
 # THE thresholds. One place. Decision Q24 of
 # docs/superpowers/decisions/2026-11-09-ai-integration.md fixed them
-# provisionally (09/11/2026, amended the same day); changing one is an owner
-# decision, not an edit made to get a model through. evaluate.py imports
-# RETENTION from here.
+# provisionally (09/11/2026, amended the same day and again after the whole-phase
+# review: "Sua 09/11/2026 (sau Fable review)", owner has NOT approved either
+# amendment yet); changing one is an owner decision, not an edit made to get a
+# model through. evaluate.py imports RETENTION from here.
 THRESHOLDS = {
     "min_rows": 300,                   # labelled detector notches, all sessions
-    "min_sessions": 3,
+    "min_sessions": 6,                 # was 3: with 3 the split is fit 1 / validation 1 / held-out 1
+    "min_heldout_sessions": 2,         # one held-out session is one room: no spread to speak of
     "min_heldout_rows": 60,
-    "min_heldout_per_label": 10,       # stricter than Q24's "both labels": 59 vs 1 says nothing
+    "min_heldout_per_label": 30,       # was 10: at 10 per label the AUC standard error is ~0.09
+    "ci_lower_over_baseline": 0.0,     # lower end of the model's 95 % AUC interval >= baseline AUC + this
     "min_auc": 0.80,
     "auc_margin_over_baseline": 0.05,  # model AUC >= heuristic score AUC + this (fails closed at the float edge)
     "retention": 0.95,                 # the operating point: keep >= this fraction of real howls ...
@@ -129,6 +132,10 @@ def check(report, weights_path, manifest=None, meta=None, thresholds=THRESHOLDS)
     sessions = _number(report, fails, "sessions_total", count=True)
     if sessions is not None and sessions < t["min_sessions"]:
         fails.append("only %d sessions (need >= %d)" % (sessions, t["min_sessions"]))
+    held_sessions = _number(report, fails, "heldout", "sessions", count=True)
+    if held_sessions is not None and held_sessions < t["min_heldout_sessions"]:
+        fails.append("held-out covers only %d session%s (need >= %d)"
+                     % (held_sessions, "" if held_sessions == 1 else "s", t["min_heldout_sessions"]))
 
     # 3. held-out set
     held = _number(report, fails, "heldout", "rows", count=True)
@@ -151,6 +158,11 @@ def check(report, weights_path, manifest=None, meta=None, thresholds=THRESHOLDS)
     if auc is not None and base is not None and auc < base + t["auc_margin_over_baseline"]:
         fails.append("model AUC %.4f is not >= baseline score AUC %.4f + %.2f"
                      % (auc, base, t["auc_margin_over_baseline"]))
+
+    ci_low = _number(report, fails, "heldout", "auc_model_ci95_low", unit=True)
+    if ci_low is not None and base is not None and ci_low < base + t["ci_lower_over_baseline"]:
+        fails.append("lower end of the model's 95%% AUC interval %.4f is below the baseline score AUC %.4f "
+                     "(the margin is inside the noise)" % (ci_low, base + t["ci_lower_over_baseline"]))
 
     # 5. the operating point: optimistic in-sample pair, then the honest pair
     ret = _number(report, fails, "heldout", "retention_target", unit=True)

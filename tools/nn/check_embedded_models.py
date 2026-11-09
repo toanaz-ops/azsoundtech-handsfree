@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ctest gate: every model the app embeds is either a placeholder or gated.
 
-Standard library only. For every weights JSON directly under the models
-directory (default: <repo>/models, the folder juce_add_binary_data embeds):
+Standard library only. For every embedded weights JSON (see the modes below; default
+directory <repo>/models):
 
   * it is a PINNED placeholder (PLACEHOLDERS: id and weights sha256) -> allowed
     (its score means nothing, and the logs say so); any other "untrained-*" fails, or
@@ -13,7 +13,14 @@ directory (default: <repo>/models, the folder juce_add_binary_data embeds):
 Anything else fails. The synthetic bootstrap model can never be embedded: its
 report is `synthetic`, which the gate rejects (spec 8.4, decision Q25).
 
-    python tools/nn/check_embedded_models.py [--models-dir DIR]
+    python tools/nn/check_embedded_models.py [--models-dir DIR] [--model-file F ...]
+
+Two modes. Under ctest, CMake passes `--model-file` once per entry of the single
+list variable HANDSFREE_EMBEDDED_MODELS (root CMakeLists.txt), the same list it
+gives juce_add_binary_data: exactly the files compiled into the app are checked,
+and any other weights JSON under --models-dir fails the gate (folder and embed
+list must not drift). Without `--model-file` (by hand, no CMake) every weights
+JSON directly under --models-dir is checked.
 """
 from __future__ import annotations
 
@@ -37,48 +44,81 @@ PLACEHOLDERS = {
 }
 
 
-def check_models_dir(models_dir):
-    """Returns a list of problems (empty = every embedded model is allowed)."""
+SIBLING_SUFFIXES = (".eval-report.json", ".manifest.json", ".meta.json", ".parity.json")
+
+
+def _is_model_name(name):
+    return name.endswith(".json") and not name.endswith(SIBLING_SUFFIXES)
+
+
+def check_model_file(path):
+    """Returns a list of problems for ONE model file the app embeds (its siblings
+    <stem>.eval-report.json / .manifest.json / .meta.json live next to it)."""
     problems = []
-    skip = (".eval-report.json", ".manifest.json", ".meta.json", ".parity.json")
+    n = os.path.basename(path)
+    directory = os.path.dirname(path)
     try:
-        names = sorted(n for n in os.listdir(models_dir)
-                       if n.endswith(".json") and not n.endswith(skip))
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return ["%s: unreadable (%s)" % (n, exc)]
+    model_id = doc.get("model") if isinstance(doc, dict) else None
+    if not isinstance(model_id, str) or not model_id:
+        return ["%s: no model id" % n]
+    if model_id.startswith(PLACEHOLDER_PREFIX):
+        pinned = PLACEHOLDERS.get(model_id)
+        if pinned is None:
+            problems.append("%s: '%s' is not a known placeholder (allowlist in check_embedded_models.py)"
+                            % (n, model_id))
+        elif gate.sha256_file(path) != pinned:
+            problems.append("%s: placeholder '%s' has different weights than the pinned file"
+                            % (n, model_id))
+        return problems
+    stem = n[:-5]
+    sibling = {k: os.path.join(directory, stem + suffix) for k, suffix in
+               (("report", ".eval-report.json"), ("manifest", ".manifest.json"), ("meta", ".meta.json"))}
+    missing = [os.path.basename(v) for v in sibling.values() if not os.path.isfile(v)]
+    if missing:
+        return ["%s: model '%s' is not a pinned placeholder and lacks %s"
+                % (n, model_id, ", ".join(missing))]
+    for f in gate.check_files(sibling["report"], path, sibling["manifest"], sibling["meta"]):
+        problems.append("%s: gate: %s" % (n, f))
+    return problems
+
+
+def _same(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def check_models_dir(models_dir, model_files=None):
+    """Returns a list of problems (empty = every embedded model is allowed).
+
+    model_files None: the CLI-without-CMake mode, every weights JSON directly
+    under models_dir is checked. model_files given (what CMake passes: the very
+    paths it hands to juce_add_binary_data): exactly those files are checked, AND
+    any weights JSON under models_dir that is not in the list is a problem, so the
+    folder and the embed list cannot drift apart."""
+    try:
+        names = sorted(n for n in os.listdir(models_dir) if _is_model_name(n))
     except OSError as exc:
         return ["cannot list %s (%s)" % (models_dir, exc)]
-    if not names:
-        return ["no model JSON under %s (the app embeds at least the placeholder)" % models_dir]
-    for n in names:
-        path = os.path.join(models_dir, n)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                doc = json.load(fh)
-        except (OSError, ValueError) as exc:
-            problems.append("%s: unreadable (%s)" % (n, exc))
+    in_dir = [os.path.join(models_dir, n) for n in names]
+    problems = []
+    if model_files is None:
+        targets = in_dir
+    else:
+        targets = list(model_files)
+        for path in in_dir:
+            if not any(_same(path, m) for m in targets):
+                problems.append("%s: lies under %s but is not in the list CMake embeds (HANDSFREE_EMBEDDED_MODELS)"
+                                % (os.path.basename(path), os.path.normpath(models_dir)))
+    if not targets:
+        return problems + ["no model JSON to check (the app embeds at least the placeholder)"]
+    for path in targets:
+        if not os.path.isfile(path):
+            problems.append("%s: embedded model file does not exist" % path)
             continue
-        model_id = doc.get("model") if isinstance(doc, dict) else None
-        if not isinstance(model_id, str) or not model_id:
-            problems.append("%s: no model id" % n)
-            continue
-        if model_id.startswith(PLACEHOLDER_PREFIX):
-            pinned = PLACEHOLDERS.get(model_id)
-            if pinned is None:
-                problems.append("%s: '%s' is not a known placeholder (allowlist in check_embedded_models.py)"
-                                % (n, model_id))
-            elif gate.sha256_file(path) != pinned:
-                problems.append("%s: placeholder '%s' has different weights than the pinned file"
-                                % (n, model_id))
-            continue
-        stem = n[:-5]
-        sibling = {k: os.path.join(models_dir, stem + suffix) for k, suffix in
-                   (("report", ".eval-report.json"), ("manifest", ".manifest.json"), ("meta", ".meta.json"))}
-        missing = [os.path.basename(v) for v in sibling.values() if not os.path.isfile(v)]
-        if missing:
-            problems.append("%s: model '%s' is not a pinned placeholder and lacks %s"
-                            % (n, model_id, ", ".join(missing)))
-            continue
-        for f in gate.check_files(sibling["report"], path, sibling["manifest"], sibling["meta"]):
-            problems.append("%s: gate: %s" % (n, f))
+        problems += check_model_file(path)
     return problems
 
 
@@ -86,14 +126,17 @@ def main(argv):
     default = os.path.join(HERE, "..", "..", "models")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models-dir", default=default)
+    ap.add_argument("--model-file", action="append", default=None,
+                    help="an embedded model file (repeatable); CMake passes HANDSFREE_EMBEDDED_MODELS here")
     args = ap.parse_args(argv)
-    problems = check_models_dir(args.models_dir)
+    problems = check_models_dir(args.models_dir, args.model_file)
     if problems:
         print("EMBEDDED MODEL GATE FAILED:")
         for p in problems:
             print("  - " + p)
         return 1
-    print("embedded model gate OK (%s)" % os.path.normpath(args.models_dir))
+    print("embedded model gate OK (%s)" % (", ".join(os.path.normpath(m) for m in args.model_file)
+                                           if args.model_file else os.path.normpath(args.models_dir)))
     return 0
 
 

@@ -37,10 +37,18 @@ juce_add_binary_data(HandsFreeFonts SOURCES
 
 # The untrained candidate-classifier model (lane C1b), embedded so it needs no
 # installer change. Own namespace/header: HandsFreeFonts already owns BinaryData.
+#
+# THE list of model files the app embeds, in ONE variable: tests/CMakeLists.txt
+# passes exactly these paths to tools/nn/check_embedded_models.py (ctest
+# nn_embedded_model_gate), so the gate checks what is compiled in, not a folder.
+# That script also fails when a weights JSON under models/ is not in this list.
+set(HANDSFREE_EMBEDDED_MODELS
+    ${CMAKE_SOURCE_DIR}/models/candidate-classifier-untrained-v1.json
+)
 juce_add_binary_data(HandsFreeModels
     HEADER_NAME HandsFreeModelsData.h
     NAMESPACE HandsFreeModelsData
-    SOURCES ${CMAKE_SOURCE_DIR}/models/candidate-classifier-untrained-v1.json
+    SOURCES ${HANDSFREE_EMBEDDED_MODELS}
 )
 
 # ASIO SDK path

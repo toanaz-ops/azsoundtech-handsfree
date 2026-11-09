@@ -35,6 +35,33 @@ Two lines of train/serve skew exist and are measured, not hidden:
 spectrum of ctx.now[0]. Real logs never have it. tools/nn/slim_log.py writes it
 when it shrinks a synthetic log to a window around the peak.
 
+Provenance (`source` of a session). A session is `real` only on POSITIVE evidence
+from fields the app itself writes into session_start (MainComponent::sessionHeader):
+  * no synthetic marker of any kind: no `source` other than absent / "app", no
+    `generator` key, no string value at the top level that contains "synthetic"
+    (app_version / device / os of the committed synthetic logs);
+  * `app_version` is three dot-separated integers, X.Y.Z (JUCE_APPLICATION_VERSION_STRING, e.g. 1.5.1);
+  * `log_schema` is an integer >= 2 (the app has written it since lane C0);
+  * exactly one session_start line.
+A session_start with a synthetic marker is `synthetic`; everything else (no header,
+a header lacking the evidence, a foreign `source`) is `unknown`. The gate accepts
+only `real`. This is still self-declared by the file (see gate.py).
+
+Session identity is CONTENT: "s" + the first 16 hex digits of sha256 of the
+normalised file (each line stripped, empty lines dropped, joined by LF). Renaming
+a file changes nothing, a copy delivered twice ("a.jsonl", "a (1).jsonl") is
+dropped as `identical_content` and counted in the manifest, and the train / held-out
+split (which keys on this id) does not re-roll when a file is renamed.
+
+Linked stereo placement: one placement writes TWO notch_set lines (lane 0 and
+lane 1) from one shared `scored` event (NotchController::placeConfirmed), so they
+carry the same slot, index, hz, confirmed_lane and every score field, and the same
+ctx. Only `t` and `lane` differ. They are written under one lock, so they are
+consecutive notch_set lines. The builder merges such a pair into ONE row; the
+verdicts of the two lanes are combined (one verdict -> used; the same on both ->
+used; GOOD on one and FALSE on the other -> the placement is dropped as
+`conflicting_verdicts`).
+
 The verdict join is tools/logstats.py's own (logstats.summarise), imported, not
 re-derived: the n-th notch_set line is the n-th entry of summarise()["notches"].
 """
@@ -45,6 +72,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +84,8 @@ import reference_forward as ref  # noqa: E402
 
 LABEL_OF_VERDICT = {"good": 1, "false": 0}   # logstats' verdict vocabulary
 SOURCES = ("real", "synthetic")
+APP_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+MIN_LOG_SCHEMA = 2
 SPLIT_HELDOUT_FRACTION = 0.25
 SPLIT_SALT = "hf-c1c-split-v1"
 
@@ -85,9 +115,41 @@ def load_events(path):
     return events, bad
 
 
-def session_id_of(path):
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return stem[:-6] if stem.endswith(".jsonl") else stem
+def content_session_id(path):
+    """Session identity from CONTENT, not from the file name: "s" + 16 hex digits
+    of sha256 over the lines of the file, each stripped, empty ones dropped,
+    each followed by LF (so CRLF vs LF, a trailing newline or a rename change nothing)."""
+    h = hashlib.sha256()
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                h.update(line.encode("utf-8"))
+                h.update(b"\n")
+    return "s" + h.hexdigest()[:16]
+
+
+def classify_provenance(events):
+    """Returns "real", "synthetic" or "unknown" for one parsed log (see the
+    module doc for the rule). Fail closed: real needs positive evidence."""
+    starts = [e for e in events if isinstance(e, dict) and e.get("ev") == "session_start"]
+    if not starts:
+        return "unknown"
+    h = starts[0]
+    if (h.get("source") == "synthetic" or "generator" in h
+            or any(isinstance(v, str) and "synthetic" in v.lower() for v in h.values())):
+        return "synthetic"
+    if len(starts) != 1:
+        return "unknown"
+    if h.get("source", "app") != "app":
+        return "unknown"
+    ver = h.get("app_version")
+    schema = h.get("log_schema")
+    if not isinstance(ver, str) or not APP_VERSION_RE.match(ver):
+        return "unknown"
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema < MIN_LOG_SCHEMA:
+        return "unknown"
+    return "real"
 
 
 def _fin(v):
@@ -216,17 +278,40 @@ def _finish_row(inp):
 # ---------------------------------------------------------------------------
 # one session
 
+# Every field NotchController::placeConfirmed shares between the lane-0 and lane-1
+# Set events of one linked placement (the `scored` event). `t` and `lane` differ.
+PLACEMENT_KEYS = ("slot", "index", "hz", "q", "depth_db", "origin", "confirmed_lane", "score",
+                  "peakiness", "p_norm", "rise", "novelty", "penalty", "asymmetry",
+                  "persist_needed", "thr", "rise_ratio", "lr_ratio", "nn_score")
+
+
+def _placement_key(e):
+    ctx = e.get("ctx")
+    now = ctx.get("now") if isinstance(ctx, dict) else None
+    return tuple(json.dumps(e.get(k), sort_keys=True) for k in PLACEMENT_KEYS) + (json.dumps(now),)
+
+
+def _placements(notch_events, notches):
+    """Groups the notch_set lines of ONE linked placement. Returns a list of
+    groups, each a list of (event, notch record). A line joins the previous group
+    only when it is on a different lane than every line already in it and every
+    PLACEMENT_KEYS field and ctx.now are identical; otherwise it starts a group."""
+    groups, last_key = [], None
+    for e, n in zip(notch_events, notches):
+        key = _placement_key(e)
+        if groups and key == last_key and e.get("lane") not in [g[0].get("lane") for g in groups[-1]]:
+            groups[-1].append((e, n))
+        else:
+            groups.append([(e, n)])
+        last_key = key
+    return groups
+
+
 def build_session(events, session_id):
     """Returns (rows, candidate_rows, stats) for one parsed log."""
     summary = logstats.summarise(events)
     header = summary["header"]
-    # A log with no session_start line has no provenance at all: "unknown" (the
-    # gate rejects it). An existing session_start without a `source` field is what
-    # the app writes: real.
-    has_header = any(e.get("ev") == "session_start" for e in events)
-    source = header.get("source", "real") if has_header else "unknown"
-    if source not in SOURCES:
-        source = "unknown"          # never let a typo pass as "real" (the gate needs every row real)
+    source = classify_provenance(events)
     notch_events = [e for e in events if e.get("ev") == "notch_set"]
     notches = summary["notches"]
     if len(notch_events) != len(notches):          # logstats contract: one record per notch_set
@@ -237,14 +322,20 @@ def build_session(events, session_id):
     def drop(reason):
         drops[reason] = drops.get(reason, 0) + 1
 
-    for e, n in zip(notch_events, notches):
+    groups = _placements(notch_events, notches)
+    for group in groups:
+        e, n = group[0]
         if n["origin"] != "detector":
             drop("origin_" + str(n["origin"]))
             continue
-        if n["verdict"] is None:
+        verdicts = {m["verdict"] for _, m in group if m["verdict"] is not None}
+        if not verdicts:
             drop("no_verdict")
             continue
-        label = LABEL_OF_VERDICT.get(n["verdict"])
+        if len(verdicts) > 1:
+            drop("conflicting_verdicts")
+            continue
+        label = LABEL_OF_VERDICT.get(next(iter(verdicts)))
         if label is None:
             drop("unknown_verdict")
             continue
@@ -288,6 +379,7 @@ def build_session(events, session_id):
         "log_schema": header.get("log_schema", 1),
         "nn_model": header.get("nn_model"),
         "notch_sets": len(notch_events),
+        "placements": len(groups),
         "rows": len(rows),
         "label1": sum(1 for r in rows if r["label"] == 1),
         "label0": sum(1 for r in rows if r["label"] == 0),
@@ -322,16 +414,19 @@ def sha256_file(path):
 def build_dataset(paths, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     all_rows, all_cands, sessions = [], [], []
-    seen = set()
+    seen = {}
     bad_total = 0
+    duplicates = {}
     for p in sorted(paths):
-        sid = session_id_of(p)
+        sid = content_session_id(p)
         if sid in seen:
-            raise ValueError("two logs share the session id %r; rename one" % sid)
-        seen.add(sid)
+            duplicates["identical_content"] = duplicates.get("identical_content", 0) + 1
+            continue
+        seen[sid] = os.path.basename(p)
         events, bad = load_events(p)
         rows, cands, stats = build_session(events, sid)
         stats["unparsable_lines"] = bad
+        stats["file"] = os.path.basename(p)
         bad_total += bad
         all_rows += rows
         all_cands += cands
@@ -358,6 +453,7 @@ def build_dataset(paths, out_dir):
         "sources": _count_by(all_rows, "source"),
         "candidates": len(all_cands),
         "unparsable_lines": bad_total,
+        "duplicate_sessions": dict(sorted(duplicates.items())),
         "dropped": dict(sorted(drops.items())),
         "sessions": sessions,
     }
@@ -402,7 +498,7 @@ def split_sessions(session_ids, heldout_fraction=SPLIT_HELDOUT_FRACTION, salt=SP
 
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("logs", nargs="+", help="session-*.jsonl files")
+    ap.add_argument("logs", nargs="+", help="session-*.jsonl files (identity is by content, not by name)")
     ap.add_argument("--out", required=True, help="output directory (created)")
     args = ap.parse_args(argv)
     m = build_dataset(args.logs, args.out)
@@ -411,6 +507,8 @@ def main(argv):
     print("sources %s" % m["sources"])
     if m["dropped"]:
         print("dropped %s" % m["dropped"])
+    if m["duplicate_sessions"]:
+        print("duplicate logs skipped %s" % m["duplicate_sessions"])
     print("dataset_sha256 %s" % m["dataset_sha256"])
     return 0
 

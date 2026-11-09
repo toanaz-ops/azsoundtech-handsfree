@@ -232,14 +232,22 @@ if(Python3_Interpreter_FOUND)
     # gate on every model the app embeds.
     add_test(NAME nn_pipeline
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tests/test_nn_pipeline.py)
+    # The files the app embeds, from the one list in the root CMakeLists.txt.
+    set(_nn_model_args)
+    foreach(_model IN LISTS HANDSFREE_EMBEDDED_MODELS)
+        list(APPEND _nn_model_args --model-file ${_model})
+    endforeach()
     add_test(NAME nn_embedded_model_gate
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_SOURCE_DIR}/tools/nn/check_embedded_models.py
-                --models-dir ${CMAKE_SOURCE_DIR}/models)
+                --models-dir ${CMAKE_SOURCE_DIR}/models ${_nn_model_args})
 else()
     add_test(NAME nn_pipeline COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(nn_pipeline PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
-    add_test(NAME nn_embedded_model_gate COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
-    set_tests_properties(nn_embedded_model_gate PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    # NOT a skip: this is the release gate on the models compiled into the app.
+    # A machine without Python must not report green and ship with it disabled.
+    add_test(NAME nn_embedded_model_gate
+        COMMAND ${CMAKE_COMMAND} -E echo "FAIL: python3 not found - the embedded-model gate (tools/nn/check_embedded_models.py) cannot run; install Python 3 or do not release from this machine")
+    set_tests_properties(nn_embedded_model_gate PROPERTIES FAIL_REGULAR_EXPRESSION "FAIL:")
     add_test(NAME logstats_fixture COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_superseded COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
