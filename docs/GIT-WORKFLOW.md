@@ -109,7 +109,7 @@ gh pr checks <n> --watch
 
 Dán output xanh vào PR hoặc vào báo cáo. **CI xanh không thay thế `ctest -R <suite>` hẹp local
 cho vùng vừa sửa** (CI không có ASIO, xem §6); full ctest là việc của CI và `release-alpha.ps1`. Nếu lệnh in *"no checks reported"*, đừng đợi
-tiếp: PR đang xung đột và GitHub không dựng được merge ref, xem §6 bẫy thứ hai.
+tiếp: PR đang xung đột và GitHub không dựng được merge ref, xem §6 bẫy thứ hai — trừ PR chỉ sửa tài liệu (`**/*.md`, `docs/**`, `memory/**` …): CI bị bỏ qua bởi paths-ignore và đó là bình thường.
 
 > Trunk-based (rule 5) becomes allowed after this PR merges: CI now runs on push main.
 
