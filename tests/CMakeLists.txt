@@ -46,6 +46,7 @@ add_executable(HandsFreeTests
     test_soundcheck_candidates.cpp
     test_soundcheckcontroller.cpp
     test_hostsettings.cpp
+    test_windowfit.cpp
     test_appsettings.cpp
     test_dumbstatus.cpp
     test_lane_u_wiring.cpp
