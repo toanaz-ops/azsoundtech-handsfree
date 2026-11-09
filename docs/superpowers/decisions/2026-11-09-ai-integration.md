@@ -4,7 +4,8 @@ Mỗi mục là một ngả rẽ. Ghi đủ: câu hỏi, các phương án (kèm
 dùng), và lựa chọn.
 
 **Trạng thái:** **Q1–Q6 owner đã chốt 09/11/2026** (trả lời trực tiếp trong
-phiên). Q7–Q10 do điều phối chốt tạm, owner chưa duyệt. **Q11 chờ owner.**
+phiên). Q7–Q10, Q12–Q14 do điều phối chốt tạm, owner chưa duyệt. **Q11 owner đã chốt
+09/11/2026 (phương án 1)**; ba PR lane AI đã merge `main` cùng ngày (Q15).
 Spec: [`../specs/2026-11-09-copilot-panel-design.md`](../specs/2026-11-09-copilot-panel-design.md) (lane L2),
 [`../specs/2026-11-09-candidate-feature-log-design.md`](../specs/2026-11-09-candidate-feature-log-design.md) (lane C0).
 Nghiên cứu nền: [`../../research/2026-11-09-ai-integration-llm-and-realtime.md`](../../research/2026-11-09-ai-integration-llm-and-realtime.md).
@@ -154,7 +155,7 @@ build khi chưa có gì cho nó chạy.
 
 **Chọn: 1 (điều phối chốt tạm, 09/11/2026).**
 
-## Q11 — Bản alpha kế tiếp mang những gì? **CHỜ OWNER**
+## Q11 — Bản alpha kế tiếp mang những gì? **OWNER ĐÃ CHỐT: 1**
 
 `main` đang ở version 1.3.0; `docs/release-notes/1.4.0-alpha.md` ghi "chưa đóng gói".
 Bản alpha kế tiếp vì vậy sẽ là bản **đầu tiên** mang lane U cùng bốn bản vá audio path
@@ -170,7 +171,23 @@ lệnh notch sống qua lúc mở thiết bị, các lỗi mức thấp của en
 
 Phát hành là thao tác tới tay người khác và tới loa PA; điều phối không tự chạy.
 
-**Chọn:** chờ owner. Khuyên 1.
+**Chọn: 1 (owner, 09/11/2026).** Owner trả lời ở phiên khác ("handsfree, không chờ nghe
+thử", thẻ HW-188 = A theo handoff chung); 1.4.0 đã đóng gói từ `main` `2628cdf` trước khi
+lane AI merge, sau đó 1.4.1. Cả hai bản đều **không** gồm lane AI.
+
+## Q15 — Merge ba PR lane AI (#37, #38, #40) khi nào?
+
+Hỏi sau khi cả ba đã gộp `main` và tích hợp với nhau local (439 test hẹp C++ + 102 test
+Python xanh trên cây gộp đủ). Lúc hỏi repo còn phiên khác đang sống.
+
+| # | Phương án | Được | Mất |
+|---|---|---|---|
+| 1 | **Merge khi CI xanh** | lane AI vào `main`, hết xếp chồng, hết xung đột lặp lại | bản alpha kế tiếp sẽ mang lane AI |
+| 2 | Chưa merge | `main` giữ nguyên | mỗi lần `main` đổi lại phải gộp ba nhánh |
+
+**Chọn: 1 (owner, 09/11/2026).** Nguyên văn: "Merge khi CI xanh", rồi "Sau không hỏi câu
+này nữa, cứ merge thoải mái." CI `windows` xanh trên cả ba head (12m0s, 15m2s, 15m53s);
+merge `66aa063` (#37), `2d189d6` (#38), `8f048a7` (#40). Chưa đóng gói bản nào mang lane AI.
 
 ## Q12 — Ô "hỏi AI" và phần cài đặt nằm ở đâu?
 
