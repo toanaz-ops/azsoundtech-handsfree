@@ -1,8 +1,8 @@
 # Ghi chú cho team test — AZ Soundtech Hands-free v1.3.0
 
 Ngày build: 2026-09-16 · suite test 712/712 xanh (`17f5225`, nhánh
-`feat/lane-m-active-soundcheck`) · installer: **Bản cài: `AZSoundtech-Handsfree-Setup-1.3.0.exe` · SHA-256 `C844186E2FBDD76EB345F50EDFD4E3FDC4A1025607C741F76B68321E05D05158` · 26 884 355 B (25,6 MB) · 2026-09-17 · gate 714/714.
-tới khi owner duyệt** (xem cuối mục "Mới trong 1.3.0")
+`feat/lane-m-active-soundcheck`) · installer `AZSoundtech-Handsfree-Setup-1.3.0.exe` (SHA-256 và dung lượng ở dòng dưới)
+· gate 714/714 ngày 2026-09-17.
 
 SHA-256 của Setup 1.3.0: **C844186E2FBDD76EB345F50EDFD4E3FDC4A1025607C741F76B68321E05D05158** · dung lượng: **26 884 355 B (25,6 MB)**
 
