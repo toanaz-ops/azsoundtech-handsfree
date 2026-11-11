@@ -62,6 +62,9 @@ add_executable(HandsFreeTests
     test_copilotpanel.cpp
     test_copilotsetup.cpp
     test_candidateclassifier.cpp
+    test_aiaction.cpp
+    test_aisupervisor.cpp
+    test_aidrive_gui.cpp
     # Lane A research code (not in the app, see tools/CMakeLists.txt AfcSim).
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcCanceller.cpp
     ${CMAKE_SOURCE_DIR}/tools/afc/AfcSupervisor.cpp
@@ -204,6 +207,12 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
                 ${CMAKE_SOURCE_DIR}/tests/fixtures/session-superseded.jsonl
                 --expect-notches 2 --expect-superseded 1)
+    # Lane L3a: a schema-4 log -- placements by author and the four ai_* events.
+    add_test(NAME logstats_schema4_authors
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/logstats.py
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/session-schema4-authors.jsonl
+                --expect-notches 4 --expect-ai-events 5
+                --expect-authors detector=1,human=1,network=1,llm=1)
     # Lane C0: candidate_features lines are counted (total and per slot); the
     # old fixtures above carry none and must keep summarising as before.
     add_test(NAME logstats_candidates
@@ -253,6 +262,8 @@ else()
     set_tests_properties(logstats_fixture PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_superseded COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_superseded PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
+    add_test(NAME logstats_schema4_authors COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
+    set_tests_properties(logstats_schema4_authors PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_nn_shadow COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")
     set_tests_properties(logstats_nn_shadow PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP:")
     add_test(NAME logstats_candidates COMMAND ${CMAKE_COMMAND} -E echo "SKIP: python3 not found")

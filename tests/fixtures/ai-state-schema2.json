@@ -1,0 +1,49 @@
+{
+  "schema": 2,
+  "generation": 7,
+  "ai_mode": "suggest",
+  "engine_mode": "auto",
+  "sample_rate": 48000,
+  "bin_hz": 23.44,
+  "trigger": "recurring_bin",
+  "slots": [
+    {
+      "slot": 0,
+      "ring_risk": "low",
+      "ring_risk_score": 0.2,
+      "notches": [
+        {
+          "nid": 1, "lane": 0, "index": 0, "hz": 1000, "q": 30,
+          "depth_db": -6, "ceiling_db": -18, "next_rung_db": -12,
+          "origin": "detector", "placed_by": "detector", "last_changed_by": "detector",
+          "seen_s": 42, "hold_s": 0, "verdict": "none"
+        },
+        {
+          "nid": 2, "lane": 0, "index": 1, "hz": 2000, "q": 30,
+          "depth_db": -18, "ceiling_db": -18, "next_rung_db": null,
+          "origin": "detector", "placed_by": "detector", "last_changed_by": "detector",
+          "seen_s": 42, "hold_s": 0, "verdict": "none"
+        },
+        {
+          "nid": 3, "lane": 1, "index": 0, "hz": 500, "q": 30,
+          "depth_db": -9.5, "ceiling_db": -24, "next_rung_db": -12,
+          "origin": "detector", "placed_by": "detector", "last_changed_by": "detector",
+          "seen_s": 42, "hold_s": 0, "verdict": "none"
+        }
+      ]
+    },
+    {
+      "slot": 1,
+      "ring_risk": "rising",
+      "ring_risk_score": 0.65,
+      "notches": [
+        {
+          "nid": 16777217, "lane": 0, "index": 0, "hz": 3000, "q": 30,
+          "depth_db": -12, "ceiling_db": -24, "next_rung_db": -18,
+          "origin": "detector", "placed_by": "detector", "last_changed_by": "detector",
+          "seen_s": 42, "hold_s": 0, "verdict": "none"
+        }
+      ]
+    }
+  ]
+}

@@ -35,6 +35,12 @@ using gui_test::paintHeadless;
 namespace
 {
 
+// The narrowest frame the column-budget test asks for. The real narrowest is
+// the notch column of a minimum-width window (1200 px x 0.44, about 515 px), so
+// this stays conservative; it moved from 440 to 448 when lane L3a added the 30 px
+// BY column (the HELD column lost that much room, "127m ago" still fits).
+constexpr float kNarrowestFrame = 448.0f;
+
 // Controllable clock: returns ms, advanced by hand.
 struct FakeClock
 {
@@ -390,7 +396,7 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     EXPECT_LE (headerWidthOf ("FREQ"),  gui::NotchListPanel::kColFreqW);
     EXPECT_LE (headerWidthOf ("DEPTH"), gui::NotchListPanel::kColDepthW);
     EXPECT_LE (headerWidthOf ("Q"),     gui::NotchListPanel::kColQW);
-    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (440.0f));
+    EXPECT_LE (headerWidthOf ("HELD"),  gui::NotchListPanel::statusWidthFor (kNarrowestFrame));
 
     // FREQ: detection runs to Nyquist (24 kHz at 48 kHz sample rate, 48 kHz
     // at 96 kHz), so a two-digit-kHz reading is reachable, not just the
@@ -421,7 +427,7 @@ TEST (NotchListPanel, EveryColumnFitsItsWidestCellAtTheNarrowestPanel)
     // change that widens the string fails this test too.
     const auto widestAge = gui::NotchListPanel::formatAgeMs (127.0 * 60.0 * 1000.0);
     ASSERT_EQ (widestAge.toStdString(), "127m ago");   // sanity: this IS the 8-char case
-    const float statusWNarrowest = gui::NotchListPanel::statusWidthFor (440.0f);
+    const float statusWNarrowest = gui::NotchListPanel::statusWidthFor (kNarrowestFrame);
     EXPECT_LE (widthOf (widestAge) + kInset, statusWNarrowest);
 }
 

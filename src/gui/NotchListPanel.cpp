@@ -105,6 +105,7 @@ void NotchListPanel::refreshFromSnapshot()
         row.freq   = formatFrequency (notch.frequency);
         row.depth  = formatDepthDb (notch.depthDB);
         row.q      = formatQ (notch.Q);
+        row.by     = formatAuthor (notch.placedBy, notch.lastChangedBy);
         row.status = formatAgeMs (juce::jmax (0.0, ageMs));
         row.ageMs  = juce::jmax (0.0, ageMs);
         row.key    = key;
@@ -231,6 +232,25 @@ juce::String NotchListPanel::formatQ (const float q)
     return juce::String (q, 1);
 }
 
+juce::String NotchListPanel::formatAuthor (const Author placedBy, const Author lastChangedBy)
+{
+    const auto letter = [] (const Author a) -> char
+    {
+        switch (a)
+        {
+            case Author::Detector: return 'D';
+            case Author::Human:    return 'H';
+            case Author::Network:  return 'N';
+            case Author::Llm:      return 'A';   // not "L": it reads as Left beside the lane R
+        }
+        return 'D';
+    };
+    juce::String out = juce::String::charToString ((juce::juce_wchar) letter (placedBy));
+    if (lastChangedBy != placedBy)
+        out += ">" + juce::String::charToString ((juce::juce_wchar) letter (lastChangedBy));
+    return out;
+}
+
 juce::String NotchListPanel::formatAgeMs (const double ageMs)
 {
     if (ageMs < 60000.0)
@@ -320,7 +340,7 @@ void NotchListPanel::layoutButtons()
 
     const float frameWidth  = (float) getWidth();
     const float frameBottom = (float) getHeight();
-    const float x5 = kLeftPad + kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW
+    const float x5 = kLeftPad + kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW + kColByW
                     + statusWidthFor (frameWidth);
 
     for (std::size_t i = 0; i < rows_.size(); ++i)
@@ -354,7 +374,7 @@ float NotchListPanel::statusWidthFor (const float frameWidth)
     // plus BOTH margins come off the frame, and STATUS/HELD gets whatever
     // remains. Position-independent -- callers pass the panel's WIDTH, not
     // its bounds, so paint() and the test share one formula.
-    const float fixedColumnsWidth = kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW + kColVerdictW;
+    const float fixedColumnsWidth = kColIdW + kColLaneW + kColFreqW + kColDepthW + kColQW + kColByW + kColVerdictW;
     return juce::jmax (0.0f, frameWidth - (2.0f * kLeftPad) - fixedColumnsWidth);
 }
 
@@ -415,7 +435,8 @@ void NotchListPanel::paint (juce::Graphics& g)
     const float x1 = x0 + kColIdW + kColLaneW;
     const float x2 = x1 + kColFreqW;
     const float x3 = x2 + kColDepthW;
-    const float x4 = x3 + kColQW;
+    const float xBy = x3 + kColQW;
+    const float x4 = xBy + kColByW;
     const float statusW = statusWidthFor (frame.getWidth());
     const float x5 = x4 + statusW;
 
@@ -427,6 +448,7 @@ void NotchListPanel::paint (juce::Graphics& g)
     g.drawText ("FREQ",  (int) x1, header.getY(), (int) kColFreqW,  header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("DEPTH", (int) x2, header.getY(), (int) kColDepthW, header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("Q",     (int) x3, header.getY(), (int) kColQW,     header.getHeight(), juce::Justification::centredLeft);
+    g.drawText ("BY",    (int) xBy, header.getY(), (int) kColByW,   header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("HELD",  (int) x4, header.getY(), (int) statusW,    header.getHeight(), juce::Justification::centredLeft);
     g.drawText ("VERDICT", (int) x5, header.getY(), (int) kColVerdictW, header.getHeight(), juce::Justification::centredLeft);
 
@@ -494,6 +516,12 @@ void NotchListPanel::paint (juce::Graphics& g)
         g.setColour (dim);
         g.drawText (row.q, x3, rowTop, kColQW - 4.0f, (float) kRowHeight,
                     juce::Justification::centredLeft);
+        // BY: the default author (the detector) stays quiet; any other author
+        // reads in the primary colour. Letters, not colour -- no new hue.
+        g.setColour (row.by == "D" ? dim : text);
+        g.drawText (row.by, xBy, rowTop, kColByW - 4.0f, (float) kRowHeight,
+                    juce::Justification::centredLeft);
+        g.setColour (dim);
         g.drawText (row.status, x4, rowTop, statusW - 4.0f, (float) kRowHeight,
                     juce::Justification::centredLeft);
 

@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -286,6 +289,18 @@ MainComponent::MainComponent()
             // logger was about to drop regardless.
             if (sessionLogger_.isActive())
                 sessionLogger_.log (notchEventToVar (e));
+
+            // Lane L3a: a detector placement feeds the supervisor's recurrence
+            // history -- but the supervisor is message-thread only, so the
+            // event waits here until the GUI timer drains it. Bounded.
+            if (e.kind == NotchController::NotchEvent::Kind::Set
+                && e.origin == NotchController::Origin::Detector)
+            {
+                const std::lock_guard<std::mutex> lock (placementMutex_);
+                if (pendingPlacements_.size() < 256)
+                    pendingPlacements_.push_back ({ e.slot, e.lane, (double) e.hz,
+                                                    (std::int64_t) juce::Time::getMillisecondCounterHiRes() });
+            }
         });
 
     // Lane C0: near-miss candidates arrive on their own sink (and queue), so
@@ -297,6 +312,10 @@ MainComponent::MainComponent()
                 sessionLogger_.log (candidateToVar (r));
         });
     sessionLogger_.setDroppedCandidatesProvider ([this] { return droppedCandidatesTotal(); });
+
+    // Lane L3a: the supervisor, on its OWN SidecarRunner (never the ask box's).
+    aiSupervisor_ = makeAiSupervisor (std::make_unique<SidecarAiLauncher>());
+    setAiModeFromSettings();
 
     // Lane C1b (shadow): the candidate classifier. Loaded HERE and nowhere
     // else, with every detector thread still stopped -- the same precondition
@@ -451,6 +470,14 @@ MainComponent::MainComponent()
             copilotRunner_->cancel();
         copilotPanel_.setState (gui::CopilotPanel::State::cancelled);
     };
+    // Lane L3a: the AI mode switch, the supervisor chip and the proposals. The
+    // panel only displays; every action lands on the mode setting or on the
+    // supervisor's dismiss() -- none of them touches a notch.
+    copilotPanel_.onAiModeSelected = [this] (AiMode mode) { setAiMode (mode); };
+    copilotPanel_.onDismissProposal = [this] (std::uint32_t id) { aiSupervisor_->dismiss (id); };
+    copilotPanel_.onDismissAllProposals = [this] { aiSupervisor_->dismissAll(); };
+    aiSupervisor_->onChanged = [this] { refreshAiViews(); };
+    refreshAiViews();
     addChildComponent (copilotPanel_);   // shown by resized() when the column has room
 
     // Lane L2b: the setup overlay. Hidden until CAI AI is pressed; it covers the
@@ -469,6 +496,7 @@ MainComponent::MainComponent()
     {
         settings_.copilotConsent = false;
         saveSettings();
+        stopAiAfterCredentialChange();
     };
     copilotSetupPanel_.onProviderChanged = [this] (juce::String)
     {
@@ -497,6 +525,7 @@ MainComponent::MainComponent()
     {
         credentialStore().deleteKey (provider);
         refreshCopilotKeyStatus();
+        stopAiAfterCredentialChange();
     };
     addChildComponent (copilotSetupPanel_);
     // statusBar_ / modeBar_ stay alive but hidden: see MainComponent.h.
@@ -531,6 +560,7 @@ MainComponent::MainComponent()
     // slots the engine has enabled hold live notches.
     modeRail_.onClearAllConfirmed = [this]
     {
+        aiSupervisor_->invalidate();   // L3a: a call in flight described the chain CLEAR ALL is about to wipe
         for (int i = 0; i < kMaxSlots; ++i)
             if (engine_.getSlotConfig (i).enabled)
                 notchControllers_[(std::size_t) i]->clearAll();
@@ -683,6 +713,8 @@ MainComponent::MainComponent()
     // DevicePanel instance; re-parenting it into the drawer changed nothing.
     devicePanel_.onBeforeRestart = [this]
     {
+        aiSupervisor_->invalidate();   // L3a: device restart makes an in-flight answer stale
+
         // LANE M FIRST (F15) -- the shared abort, see abortSoundcheckForRestart().
         abortSoundcheckForRestart();
 
@@ -1050,7 +1082,11 @@ MainComponent::MainComponent()
         // card now open is NOT the remembered one -- which is exactly a
         // mismatch: every slot comes off (the old routing must not run on a
         // card nobody confirmed) and the memory is kept for the next start.
+        // The AI call-start times are NOT wizard state: keep the live list so a
+        // CANCEL cannot hand the supervisor back spent budget.
+        const auto aiCallStarts = settings_.aiCallStartsMs;
         settings_ = wizardSnapshot_;
+        settings_.aiCallStartsMs = aiCallStarts;
 
         if (! wizardChangedDevice_)
         {
@@ -1132,6 +1168,11 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();
+    if (aiSupervisor_ != nullptr)
+    {
+        aiSupervisor_->onChanged = nullptr;   // the views it refreshes are about to go
+        aiSupervisor_->shutdown();   // cancels a supervision call; its runner joins with the member
+    }
     if (copilotRunner_ != nullptr)
         copilotRunner_->cancel();   // end a child process now; the member dtor joins the worker
 
@@ -1224,6 +1265,11 @@ juce::var MainComponent::notchEventToVar (const NotchController::NotchEvent& e)
     o->setProperty ("q", (double) e.q);
     o->setProperty ("depth_db", (double) e.depthDb);
     o->setProperty ("origin", originName (e.origin));
+    // Schema 4 (lane L3a): who, and which notch. Every notch line, all three
+    // kinds, before any early return below. nid is uint32 -- widen first so a
+    // value above 2^31 is not written negative.
+    o->setProperty ("author", authorName (e.author));
+    o->setProperty ("nid", (juce::int64) e.nid);
 
     if (e.kind == Ev::Kind::Retune)
     {
@@ -1315,6 +1361,32 @@ juce::var MainComponent::candidateToVar (const NotchController::CandidateRecord&
     return v;
 }
 
+//==============================================================================
+// Lane L3a: AI log events. Pure; see the declarations in MainComponent.h.
+
+juce::var MainComponent::aiModeEventToVar (AiMode requested, AiMode effectiveLlm, AiMode effectiveNetwork)
+{
+    return ::aiModeEventToVar (requested, effectiveLlm, effectiveNetwork);
+}
+
+juce::var MainComponent::aiCallEventToVar (const juce::String& trigger, std::uint32_t generation,
+                                           double ms, const juce::String& status, const AiUsage* usage)
+{
+    return ::aiCallEventToVar (trigger, generation, ms, status, usage);
+}
+
+juce::var MainComponent::aiProposalEventToVar (std::uint32_t generation, const AiProposal& p)
+{
+    return ::aiProposalEventToVar (generation, p);
+}
+
+juce::var MainComponent::aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
+                                               AiProposal::Tool tool, AiDecision decision,
+                                               std::optional<AiRefusal> refusal)
+{
+    return ::aiDecisionEventToVar (generation, nid, tool, decision, refusal);
+}
+
 std::uint64_t MainComponent::droppedCandidatesTotal() const
 {
     std::uint64_t total = 0;
@@ -1330,7 +1402,9 @@ juce::var MainComponent::sessionHeader() const
     auto* o = v.getDynamicObject();
     // Lane C0: log format version. A log without this field is schema 1.
     // Schema 3 (lane C1b) adds nn_score and the nn_* header/footer fields.
-    o->setProperty ("log_schema", 3);
+    // Schema 4 (lane L3a) adds ai_mode here and author/nid on every notch line.
+    o->setProperty ("log_schema", 4);
+    o->setProperty ("ai_mode", juce::String (aiModeToString (settings_.aiMode)));
     if (nnModelName_.isNotEmpty())
     {
         o->setProperty ("nn_model", nnModelName_);
@@ -1492,12 +1566,7 @@ void MainComponent::askCopilot (juce::String question)
     }
 
     const auto& s = settings_;
-    const bool knownProvider = s.copilotProvider == "anthropic" || s.copilotProvider == "openai_compatible";
-    const bool usable = knownProvider && s.copilotConsent && isValidCopilotModel (s.copilotModel)
-                        && (s.copilotProvider == "anthropic"
-                                ? credentialStore().hasKey ("anthropic")
-                                : isValidCopilotBaseUrl (s.copilotBaseUrl));
-    if (! usable)
+    if (! copilotUsable())
     {
         copilotPanel_.setState (P::needsSetup);
         return;
@@ -1568,6 +1637,258 @@ void MainComponent::analyseWithCopilot()
         copilotPanel_.setState (gui::CopilotPanel::State::running);
     else
         showCopilotBusy();
+}
+
+bool MainComponent::copilotUsable()
+{
+    const auto& s = settings_;
+    const bool knownProvider = s.copilotProvider == "anthropic" || s.copilotProvider == "openai_compatible";
+    return knownProvider && s.copilotConsent && isValidCopilotModel (s.copilotModel)
+           && (s.copilotProvider == "anthropic"
+                   ? credentialStore().hasKey ("anthropic")
+                   : isValidCopilotBaseUrl (s.copilotBaseUrl));
+}
+
+std::unique_ptr<AiSupervisor> MainComponent::makeAiSupervisor (std::unique_ptr<AiLauncher> launcher)
+{
+    AiSupervisor::Environment env;
+    env.nowMs = [] { return (std::int64_t) juce::Time::getMillisecondCounterHiRes(); };
+    env.launcher = std::move (launcher);
+    env.readState = [this] { return readAiState (juce::Time::getMillisecondCounterHiRes()); };
+    env.logSink = [this] (const juce::var& v) { if (sessionLogger_.isActive()) sessionLogger_.log (v); };
+    env.isAskRunning = [this] { return copilotRunner_ != nullptr && copilotRunner_->isBusy(); };
+    // Spend limits survive a restart: the call-start times live in the settings
+    // file (wall-clock epoch ms); the supervisor never sees the settings object.
+    env.wallMs = [] { return (std::int64_t) juce::Time::currentTimeMillis(); };
+    env.loadCallStarts = [this] { return settings_.aiCallStartsMs; };
+    env.saveCallStarts = [this] (const std::vector<std::int64_t>& starts)
+    {
+        settings_.aiCallStartsMs = starts;
+        saveSettings();
+    };
+    return std::make_unique<AiSupervisor> (std::move (env));
+}
+
+// Consent withdrawn or a key deleted: the AI must stop NOW, not at the next
+// 5 s usability re-check. Cancels a call in flight, drops pending triggers and
+// forgets the cached "usable" answer so the very next tick re-reads it.
+void MainComponent::stopAiAfterCredentialChange()
+{
+    aiUsableCheckedMs_ = -1;
+    aiUsableCached_ = false;
+    if (aiSupervisor_ != nullptr)
+        aiSupervisor_->abortAndDropPending();
+}
+
+void MainComponent::setAiLauncherForTest (std::unique_ptr<AiLauncher> launcher)
+{
+    aiSupervisor_->onChanged = nullptr;
+    aiSupervisor_->shutdown();
+    aiSupervisor_ = makeAiSupervisor (std::move (launcher));
+    aiSupervisor_->onChanged = [this] { refreshAiViews(); };
+    setAiModeFromSettings();
+}
+
+void MainComponent::setAiUsableForTest (bool usable)
+{
+    // A check time far in the future keeps readAiState() from re-asking the DPAPI store.
+    aiUsableCached_ = usable;
+    aiUsableCheckedMs_ = std::numeric_limits<std::int64_t>::max() / 2;
+}
+
+void MainComponent::applyAiMode (AiMode mode)
+{
+    // Off really means no AI runs: the shadow classifier is gated off too. The
+    // flag only gates the classifier call and its nn_* log fields; no placement
+    // or ladder decision reads it.
+    for (auto& controller : notchControllers_)
+        controller->setShadowScoringEnabled (mode != AiMode::Off);
+}
+
+void MainComponent::setAiMode (AiMode mode)
+{
+    settings_.aiMode = mode;
+    applyAiMode (mode);
+    aiSupervisor_->setRequestedMode (mode);   // logs ai_mode, invalidates an in-flight call
+    saveSettings();
+    refreshAiViews();
+}
+
+void MainComponent::refreshAiViews()
+{
+    if (aiSupervisor_ == nullptr)
+        return;
+
+    const auto& supervisor = *aiSupervisor_;
+    const auto& proposals = supervisor.proposals();
+
+    copilotPanel_.setAiMode (settings_.aiMode);
+    // Nothing to say while idle with no proposals, and nothing while the
+    // supervisor is Disabled (mode below GOI Y): the explainer already says what
+    // runs, and "AI tat" under "the network scores" would contradict it.
+    const auto kind = supervisor.status().kind;
+    copilotPanel_.setSupervisorStatus ((kind == AiSupervisor::StatusKind::Idle && proposals.empty())
+                                               || kind == AiSupervisor::StatusKind::Disabled
+                                           ? juce::String()
+                                           : supervisor.statusText());
+    copilotPanel_.setProposals (proposals);
+
+    // Ghosts on the chart: the proposals of the DISPLAYED slot, at the depth the
+    // notch stands at now (read from the controller's snapshot, as the chart does).
+    std::vector<gui::SpectrumView::ProposalGhost> ghosts;
+    bool any = false;
+    for (const auto& p : proposals)
+        any = any || p.slot == displayedSlot_;
+
+    if (any && juce::isPositiveAndBelow (displayedSlot_, (int) notchControllers_.size()))
+    {
+        auto snap = std::make_unique<NotchController::SnapshotBuffer>();
+        notchControllers_[(std::size_t) displayedSlot_]->copySnapshot (*snap);
+
+        for (const auto& p : proposals)
+        {
+            if (p.slot != displayedSlot_)
+                continue;
+
+            for (std::uint32_t i = 0; i < snap->notchCount && i < snap->notches.size(); ++i)
+            {
+                const auto& n = snap->notches[i];
+                if (n.nid == 0 || n.nid != AiSupervisor::localNidOf (p.proposal.nid))
+                    continue;
+
+                gui::SpectrumView::ProposalGhost g;
+                g.hz = n.frequency;
+                g.lane = n.channel;
+                g.currentDb = n.depthDB;
+                switch (p.proposal.tool)
+                {
+                    case AiProposal::Tool::Deepen:
+                        g.kind = gui::SpectrumView::ProposalGhost::Kind::Deepen;
+                        g.targetDb = p.proposal.targetDb;
+                        break;
+                    case AiProposal::Tool::Hold:    g.kind = gui::SpectrumView::ProposalGhost::Kind::Hold; break;
+                    case AiProposal::Tool::Release: g.kind = gui::SpectrumView::ProposalGhost::Kind::Release; break;
+                    case AiProposal::Tool::NoAction: continue;
+                }
+                ghosts.push_back (g);
+                break;
+            }
+        }
+    }
+    spectrumView_.setProposalGhosts (std::move (ghosts));
+}
+
+void MainComponent::setAiModeFromSettings()
+{
+    applyAiMode (settings_.aiMode);
+    aiSupervisor_->setRequestedMode (settings_.aiMode);
+}
+
+AiRingRisk MainComponent::heldAiRingRisk (gui::SpectrumView::RingRiskHysteresis& hold, bool valid,
+                                          float score, float threshold, double nowMs)
+{
+    using View = gui::SpectrumView;
+    View::RingRisk raw = View::RingRisk::Low;
+    if (! valid)
+        raw = View::RingRisk::Unavailable;
+    else if (score >= threshold)
+        raw = View::RingRisk::Critical;
+    else if (score >= NotchController::kRiskFreezeFraction * threshold)
+        raw = View::RingRisk::Rising;
+    switch (hold.apply (raw, nowMs))
+    {
+        case View::RingRisk::Unavailable: return AiRingRisk::Na;
+        case View::RingRisk::Low:         return AiRingRisk::Low;
+        case View::RingRisk::Rising:      return AiRingRisk::Rising;
+        case View::RingRisk::Critical:    return AiRingRisk::Critical;
+    }
+    return AiRingRisk::Na;
+}
+
+AiStateSnapshot MainComponent::readAiState (double riskNowMs)
+{
+    AiStateSnapshot out;
+    switch (engine_.getMode())
+    {
+        case AudioEngine::Mode::Bypass:     out.engineMode = AiEngineMode::Bypass; break;
+        case AudioEngine::Mode::Soundcheck: out.engineMode = AiEngineMode::Soundcheck; break;
+        case AudioEngine::Mode::Auto:       out.engineMode = AiEngineMode::Auto; break;
+    }
+    out.measuring = soundcheckLock_ == SoundcheckLock::Measuring || soundcheckConfirmPending_;
+
+    const auto logFile = aiLogFileOverrideForTest_ != juce::File() ? aiLogFileOverrideForTest_ : currentSessionLogFile();
+    const auto checkNowMs = (std::int64_t) juce::Time::getMillisecondCounterHiRes();
+    if (aiUsableCheckedMs_ < 0 || checkNowMs - aiUsableCheckedMs_ >= 5000)
+    {
+        aiUsableCached_ = copilotUsable();   // DPAPI decrypt: not on every tick
+        aiUsableCheckedMs_ = checkNowMs;
+    }
+    out.configured = logFile != juce::File() && logFile.existsAsFile() && aiUsableCached_;
+
+    out.request.executable = defaultCopilotExecutable();
+    out.request.sessionLog = logFile;
+    out.request.provider   = settings_.copilotProvider;
+    out.request.model      = settings_.copilotModel;
+    out.request.baseUrl    = settings_.copilotProvider == "openai_compatible" ? settings_.copilotBaseUrl
+                                                                              : juce::String();
+
+    const auto nowMs = (std::int64_t) juce::Time::getMillisecondCounterHiRes();
+    std::map<std::uint32_t, std::int64_t> seen;
+
+    for (int slot = 0; slot < kMaxSlots; ++slot)
+    {
+        if (! engine_.getSlotConfig (slot).enabled)
+            continue;
+
+        NotchController::SnapshotBuffer snap {};
+        const auto& controller = *notchControllers_[(std::size_t) slot];
+        controller.copySnapshot (snap);
+        if (snap.sampleRate > 0.0)
+        {
+            out.sampleRate = snap.sampleRate;
+            out.binHz = snap.sampleRate / (double) (2 * (Detector::kNumBins - 1));
+        }
+
+        AiStateSlot s;
+        s.slot = slot;
+        s.hasRingRiskScore = snap.ringRiskValid;
+        s.ringRiskScore = snap.ringRiskScore;
+        // The level goes through the SAME 750 ms hold as the RING RISK chip
+        // (RingRiskHysteresis, kHoldMs): a supervisor tick samples every 500 ms,
+        // and the level must agree with the chip. RingRiskHysteresis steps UP
+        // immediately and only delays the step DOWN, so the hold stops a level
+        // flapping back down; a single Critical frame still expires a release
+        // (conservative, intended). "No score" (Unavailable) passes straight
+        // through, so Na stays Na.
+        s.ringRisk = heldAiRingRisk (aiRiskHold_[(std::size_t) slot], snap.ringRiskValid,
+                                     snap.ringRiskScore, snap.ringRiskThreshold, riskNowMs);
+
+        const float sliderCeiling = (float) controller.getNotchDepthDb();
+        for (std::uint32_t i = 0; i < snap.notchCount && i < snap.notches.size(); ++i)
+        {
+            const auto& n = snap.notches[i];
+            if (n.nid == 0)
+                continue;
+            AiStateNotch a;
+            a.nid = n.nid; a.lane = n.channel; a.index = n.index;
+            a.hz = n.frequency; a.q = n.Q; a.depthDb = n.depthDB;
+            // A Detector notch obeys the LIVE slider; the others keep the depth they were set at.
+            a.ceilingDb = n.origin == NotchController::Origin::Detector ? sliderCeiling : n.deepestDb;
+            a.origin = n.origin; a.placedBy = n.placedBy; a.lastChangedBy = n.lastChangedBy;
+
+            // Age as the supervisor has seen it: the snapshot carries none, and
+            // NotchController is out of scope for this phase.
+            const auto g = AiSupervisor::globalNid (slot, n.nid);
+            const auto it = aiNotchFirstSeenMs_.find (g);
+            const auto first = it != aiNotchFirstSeenMs_.end() ? it->second : nowMs;
+            seen[g] = first;
+            a.seenS = (double) (nowMs - first) / 1000.0;
+            s.notches.push_back (a);
+        }
+        out.slots.push_back (std::move (s));
+    }
+    aiNotchFirstSeenMs_ = std::move (seen);
+    return out;
 }
 
 juce::File MainComponent::sessionLogFileForTest() const
@@ -1720,6 +2041,16 @@ void MainComponent::enableSettings (const juce::File& file)
     }
 
     setUiMode (settings_.uiMode);
+
+    // The supervisor was built (in the constructor) before settings_ held the
+    // saved call starts: merge them in now so the hourly cap survives a restart.
+    if (aiSupervisor_ != nullptr)
+        aiSupervisor_->reloadPersistedState();
+
+    // Lane L3a: the saved AI mode. enableSettings() runs BEFORE
+    // startSessionLog() (src/main.cpp), so session_start's `ai_mode` already
+    // reads the loaded value; this pushes it to the supervisor and controllers.
+    setAiModeFromSettings();
 }
 
 void MainComponent::checkRestoredDevice (const juce::String& openType, const juce::String& openName)
@@ -2026,6 +2357,7 @@ void MainComponent::requestMode (AudioEngine::Mode mode)
     // exist yet.
     engine_.setMode (mode);
     modeBar_.setDisplayedMode (engine_.getMode());
+    aiSupervisor_->invalidate();   // L3a: an engine-mode change makes an in-flight answer stale
 
     {
         auto v = SessionLogger::makeEvent ("mode");
@@ -2936,6 +3268,8 @@ bool MainComponent::loadPreset (const juce::File& file)
         return false;
     }
 
+    aiSupervisor_->invalidate();   // L3a: a preset load replaces the notches an in-flight call described
+
     // Channel counts come from the OPEN device. With no device yet the engine
     // reports zero, but the loader needs real numbers to clamp each slot's
     // channel mapping against -- stereo is what a default interface implies,
@@ -3264,6 +3598,7 @@ void MainComponent::setDisplayedSlot (const int slotIndex)
     spectrumView_.setController (controller);
     notchListPanel_.setController (controller);
     notchListPanel_.setDisplayedSlot (slotIndex);
+    refreshAiViews();   // lane L3a: the ghosts belong to the slot on display
 
     slotTabs_.setSelected (slotIndex);
 
@@ -3320,9 +3655,25 @@ void MainComponent::refreshStatus()
     }
 }
 
+void MainComponent::tickAi()
+{
+    // Lane L3a: placements the detector threads queued, then the supervisor's
+    // own decision. Message thread; changes no notch.
+    std::vector<PendingPlacement> placements;
+    {
+        const std::lock_guard<std::mutex> lock (placementMutex_);
+        placements.swap (pendingPlacements_);
+    }
+    for (const auto& p : placements)
+        aiSupervisor_->notePlacement (p.slot, p.lane, p.hz, p.atMs);
+    aiSupervisor_->tick();
+    refreshAiViews();   // the pending line counts seconds; ghosts follow the live depth
+}
+
 void MainComponent::timerCallback()
 {
     refreshStatus();
+    tickAi();
 
     // LANE U (spec 3.2 step 6): the restored routing is checked against the
     // device's channels at the FIRST tick that has any -- the counts read 0

@@ -33,6 +33,10 @@ constexpr float kWedgeMaxLength    = 46.0f;  // -24 dB, the deepest the DSP allo
 constexpr float kFlagHeight        = 13.0f;
 constexpr float kFlagPad           = 5.0f;
 constexpr float kFlagDigitWidth    = 6.0f;   // one mono digit at 10 px
+constexpr float kPipSize           = 6.0f;   // lane L3a: authored-notch pip at the wedge apex
+constexpr float kPipKeyline        = 1.5f;
+constexpr float kGhostStroke       = 1.25f;  // lane L3a: a proposal is an outline, never a fill
+constexpr float kGhostRingRadius   = 4.5f;   // >= the apex pip (6 px square)
 constexpr float kStemAlphaSettled  = 0.22f;  // an old stem is nearly a whisper
 constexpr float kStemAlphaFresh    = 0.60f;
 constexpr float kGlowRadius        = 16.0f;
@@ -1544,12 +1548,9 @@ void SpectrumView::paint (juce::Graphics& g)
         // Fixed width, not measured: the label is always two monospaced
         // digits, so measuring it every frame for every notch would buy an
         // identical number at the cost of a text layout per marker.
-        juce::String label = juce::String ((int) i + 1).paddedLeft ('0', 2);
-        if (notch.channel == 1)
-            label += "R";   // the same "which lane" cue the dashed stem gives
+        const juce::String label = flagLabelFor (notch, (int) i);
         g.setFont (monoFont (10.0f));
-        const float flagW = 2.0f * kFlagDigitWidth + 2.0f * kFlagPad
-                           + (notch.channel == 1 ? kFlagDigitWidth : 0.0f);
+        const float flagW = (float) label.length() * kFlagDigitWidth + 2.0f * kFlagPad;
 
         if (x - flagW * 0.5f > lastFlagRight)
         {
@@ -1564,6 +1565,110 @@ void SpectrumView::paint (juce::Graphics& g)
 
             lastFlagRight = flag.getRight() + 2.0f;
         }
+
+        // Lane L3a: the apex pip. Drawn whether or not the flag was, so the
+        // authorship mark survives a skipped flag. Same colour as the wedge
+        // (age is age, whoever the author), keylined so it reads on the trace.
+        if (authorMarkLetter (notch) != '\0')
+        {
+            const auto pip = juce::Rectangle<float> (kPipSize, kPipSize).withCentre ({ x, apexY });
+            g.setColour (background.withAlpha (0.85f));
+            g.fillRect (pip.expanded (kPipKeyline));
+            g.setColour (colour);
+            g.fillRect (pip);
+        }
+    }
+
+    paintProposalGhosts (g, plot);
+}
+
+//==============================================================================
+// Lane L3a
+juce::String SpectrumView::flagLabelFor (const NotchController::SnapshotNotch& notch, const int orderIndex)
+{
+    juce::String label = juce::String (orderIndex + 1).paddedLeft ('0', 2);
+    if (notch.channel == 1)
+        label += "R";   // the same "which lane" cue the dashed stem gives
+    if (const char letter = authorMarkLetter (notch); letter != '\0')
+        label += juce::String::charToString ((juce::juce_wchar) letter);
+    return label;
+}
+
+void SpectrumView::setProposalGhosts (std::vector<ProposalGhost> ghosts)
+{
+    if (ghosts == ghosts_)
+        return;
+    ghosts_ = std::move (ghosts);
+    repaint();
+}
+
+// A proposal is a GHOST: outline only, the secondary colour, no stem (a dashed
+// stem already means lane R), and a hollow flag reading "+A". It sits at the
+// frequency of the notch it is about and never competes with the real marker.
+void SpectrumView::paintProposalGhosts (juce::Graphics& g, const juce::Rectangle<float>& plot)
+{
+    using namespace az::theme;
+
+    const float top = plot.getY() + kFlagHeight;
+    const auto apexFor = [&] (const float depthDb)
+    {
+        const float depth = juce::jlimit (0.0f, kMarkerDepthSpanDb, -depthDb);
+        const float length = kWedgeMinLength + (kWedgeMaxLength - kWedgeMinLength) * (depth / kMarkerDepthSpanDb);
+        return juce::jmin (plot.getBottom(), top + length);
+    };
+
+    g.setFont (monoFont (10.0f));
+    for (const auto& ghost : ghosts_)
+    {
+        if (! (ghost.hz >= lowHz_ && ghost.hz <= highHz_))
+            continue;
+
+        const float x = xForHz (ghost.hz, plot);
+        const float currentApex = apexFor (ghost.currentDb);
+        float bottom = currentApex;
+
+        g.setColour (dim);
+        if (ghost.kind == ProposalGhost::Kind::Deepen && std::isfinite (ghost.targetDb))
+        {
+            const float targetApex = apexFor (ghost.targetDb);
+            markerPath_.clear();
+            markerPath_.startNewSubPath (x - kMarkerHalfWidth, top);
+            markerPath_.lineTo (x + kMarkerHalfWidth, top);
+            markerPath_.lineTo (x, targetApex);
+            markerPath_.closeSubPath();
+            g.strokePath (markerPath_, juce::PathStrokeType (kGhostStroke));
+
+            // A short tick where the notch stands now: the ghost reads as "from here to there".
+            g.drawLine (x - kMarkerHalfWidth - 2.0f, currentApex, x + kMarkerHalfWidth + 2.0f, currentApex, kGhostStroke);
+            bottom = juce::jmax (currentApex, targetApex);
+        }
+        else
+        {
+            // Hold / release: a hollow ring just under the notch's apex.
+            const float cy = currentApex + kGhostRingRadius + 3.0f;
+            g.drawEllipse (x - kGhostRingRadius, cy - kGhostRingRadius,
+                           2.0f * kGhostRingRadius, 2.0f * kGhostRingRadius, 1.5f);
+            bottom = cy + kGhostRingRadius;
+        }
+
+        // The hollow flag: same 10 px mono face and 13 px box as the real numbered
+        // flags, BESIDE the marker (right of it; left when that would leave the
+        // plot), centred on the ghost's lowest point so it covers neither the real
+        // wedge tip nor its own marker.
+        const auto label = ghostFlagLabel();
+        const float flagW = (float) label.length() * kFlagDigitWidth + 2.0f * kFlagPad;
+        float fx = x + kMarkerHalfWidth + kGhostRingRadius + 4.0f;
+        if (fx + flagW > plot.getRight())
+            fx = x - kMarkerHalfWidth - kGhostRingRadius - 4.0f - flagW;
+        const juce::Rectangle<float> flag (fx,
+                                           juce::jlimit (plot.getY(), plot.getBottom() - kFlagHeight,
+                                                         bottom - kFlagHeight * 0.5f),
+                                           flagW, kFlagHeight);
+        g.setColour (background.withAlpha (0.85f));
+        g.fillRect (flag);
+        g.setColour (dim);
+        g.drawRect (flag, kGhostStroke);
+        g.drawText (label, flag, juce::Justification::centred, false);
     }
 }
 

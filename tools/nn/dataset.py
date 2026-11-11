@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Session logs (schema 2 and 3) -> classifier dataset (lane C1c, spec section 8.1).
+"""Session logs (schema 2, 3 and 4) -> classifier dataset (lane C1c, spec section 8.1).
 
 Standard library only.
 
     python tools/nn/dataset.py --out OUT_DIR log1.jsonl log2.jsonl ...
 
 Writes OUT_DIR/dataset.jsonl (one row per detector-origin notch_set that has a
-verdict), OUT_DIR/candidates.jsonl (candidate_features lines: UNLABELLED, never
+verdict; log schema 4: only when its `author` is absent or "detector" -- placements
+authored by network / llm / human are counted in `skipped_other_author`, never rows),OUT_DIR/candidates.jsonl (candidate_features lines: UNLABELLED, never
 used for training) and OUT_DIR/manifest.json (counts, drop reasons, sha256).
 
 How a row is rebuilt (every field of CandidateClassifier::RawInput):
@@ -282,7 +283,17 @@ def _finish_row(inp):
 # Set events of one linked placement (the `scored` event). `t` and `lane` differ.
 PLACEMENT_KEYS = ("slot", "index", "hz", "q", "depth_db", "origin", "confirmed_lane", "score",
                   "peakiness", "p_norm", "rise", "novelty", "penalty", "asymmetry",
-                  "persist_needed", "thr", "rise_ratio", "lr_ratio", "nn_score")
+                  "persist_needed", "thr", "rise_ratio", "lr_ratio", "nn_score", "author")
+# (`nid` is deliberately NOT a placement key: the two lanes of one linked placement
+# are two notches with two ids. `author` is constant (null) on schema 1-3 logs, so
+# the grouping of an old log is unchanged.)
+
+
+def _detector_authored(e):
+    """True for a notch_set line the detector wrote by itself: `author` absent
+    (schema 1-3) or exactly "detector" (schema 4)."""
+    a = e.get("author")
+    return a is None or a == "detector"
 
 
 def _placement_key(e):
@@ -318,6 +329,7 @@ def build_session(events, session_id):
         raise RuntimeError("logstats.summarise no longer returns one notch per notch_set")
 
     drops, rows = {}, []
+    skipped_other_author = 0
 
     def drop(reason):
         drops[reason] = drops.get(reason, 0) + 1
@@ -338,6 +350,15 @@ def build_session(events, session_id):
         label = LABEL_OF_VERDICT.get(next(iter(verdicts)))
         if label is None:
             drop("unknown_verdict")
+            continue
+        # Log schema 4: a row describes what the DETECTOR did by itself. A
+        # placement whose line names another author (network, llm, human) is
+        # not a detector decision and must not become a training label. A
+        # missing `author` is a schema 1-3 detector-origin line: kept. Counted
+        # apart from `dropped` so the reason is not lost among the other drops;
+        # only placements that would otherwise be rows are counted.
+        if any(not _detector_authored(ge) for ge, _ in group):
+            skipped_other_author += 1
             continue
         inp, why = raw_input_from_notch_set(e)
         if why:
@@ -384,6 +405,7 @@ def build_session(events, session_id):
         "label1": sum(1 for r in rows if r["label"] == 1),
         "label0": sum(1 for r in rows if r["label"] == 0),
         "dropped": dict(sorted(drops.items())),
+        "skipped_other_author": skipped_other_author,
         "candidates": len(cand_rows),
         "candidates_dropped": dict(sorted(cand_drops.items())),
     }
@@ -455,6 +477,7 @@ def build_dataset(paths, out_dir):
         "unparsable_lines": bad_total,
         "duplicate_sessions": dict(sorted(duplicates.items())),
         "dropped": dict(sorted(drops.items())),
+        "skipped_other_author": sum(s["skipped_other_author"] for s in sessions),
         "sessions": sessions,
     }
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8", newline="\n") as fh:
@@ -507,6 +530,8 @@ def main(argv):
     print("sources %s" % m["sources"])
     if m["dropped"]:
         print("dropped %s" % m["dropped"])
+    if m["skipped_other_author"]:
+        print("skipped (placement authored by network / llm / human) %d" % m["skipped_other_author"])
     if m["duplicate_sessions"]:
         print("duplicate logs skipped %s" % m["duplicate_sessions"])
     print("dataset_sha256 %s" % m["dataset_sha256"])

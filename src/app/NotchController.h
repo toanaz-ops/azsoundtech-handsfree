@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "app/AiMode.h"
 #include "app/CandidateClassifier.h"
 #include "app/PresetManager.h"
 #include "app/SlotConfig.h"
@@ -283,6 +284,11 @@ public:
         ClearReason reason = ClearReason::Manual;           // Clear
         RetuneReason retuneReason = RetuneReason::Deepen;   // Retune
         float        fromDepthDb  = 0.0f;                   // Retune: the depth it left
+        // Lane L3a: attribution only -- NOTHING reads these for a decision.
+        // Set: who placed it. Retune: who changed the depth. Clear: who
+        // cleared it. `nid` is the notch's identity (ModelNotch::nid), 0 = none.
+        Author         author = Author::Detector;
+        std::uint32_t  nid    = 0;
         // Set: the RAW rise ratio the placement policy read (B-5). `rise`
         // below is rNorm, which SATURATES at rise 1.5 -- so it cannot tell a
         // 1.6 from a 40, and a test cannot use it to prove that a ramped
@@ -385,8 +391,22 @@ public:
     // stopped, or the caller IS the thread driving runOnce().
     std::optional<float> shadowScoreForTest (const CandidateClassifier::RawInput& in)
         { return classifier_ != nullptr ? shadowScore (in) : std::nullopt; }
+    // Lane L3a: false = the shadow classifier is never asked (AI mode Off), so
+    // no nn_score is produced or logged. Thread-safe, relaxed, default true.
+    // Never read by any placement / ladder / release decision.
+    void setShadowScoringEnabled (bool enabled) noexcept { shadowScoringEnabled_.store (enabled, std::memory_order_relaxed); }
+    bool shadowScoringEnabled() const noexcept { return shadowScoringEnabled_.load (std::memory_order_relaxed); }
     bool modelMutexIsFreeForTest();                  // try_lock + unlock
     void failNextSetNotchOnLaneForTest (int lane);   // -1 = off
+    // Lane L3a, TEST ONLY: places a Detector-origin notch tagged with `author`,
+    // so a test can stage Network / Llm notches (this phase never produces
+    // them) and prove that no decision depends on the tag.
+    bool setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
+                                  double depthDB, Author author);
+    // Same seam with the two attributions apart (a notch the detector placed and
+    // someone else last changed, e.g. D>A). Emits exactly what the one above emits.
+    bool setNotchAuthoredForTest (int channel, int index, double frequency, double Q,
+                                  double depthDB, Author placedBy, Author lastChangedBy);
 
     // TEST ACCESSORS ONLY (lane G). The ladder lives entirely under
     // modelMutex_ and is otherwise observable only through emitted commands,
@@ -517,6 +537,12 @@ public:
         Origin origin = Origin::Detector;
         std::uint8_t channel = 0;
         std::uint8_t index   = 0;
+        // Lane L3a: who placed it / last changed it, and its identity. Appended
+        // LAST so positional initialisers of the fields above stay valid.
+        // Display and log only -- no decision reads them.
+        Author        placedBy      = Author::Detector;
+        Author        lastChangedBy = Author::Detector;
+        std::uint32_t nid           = 0;
     };
 
     struct SnapshotBuffer
@@ -606,14 +632,27 @@ private:
         // file set explicitly (Q8). Detector: NaN, meaning "follow the live
         // slider", resolved by ceilingDbFor().
         double ceilingDb        = 0.0;
+
+        // --- lane L3a attribution (spec 3). NOT policy: no branch in this
+        // file reads these to decide anything. Origin decides policy.
+        // `nid` is assigned by setNotchImpl from nextNid_ (never reused for the
+        // life of the controller, 0 == no notch), and survives retunes.
+        Author        placedBy      = Author::Detector;
+        Author        lastChangedBy = Author::Detector;
+        std::uint32_t nid           = 0;
     };
 
     static constexpr int slotOf (int channel, int index) { return channel * kSlots + index; }
 
     void flushOutbox();
+    // `author` is attribution only (lane L3a): the public setNotch is the
+    // message-thread caller (Human); placeConfirmed is the detector (Detector).
     bool setNotchImpl (int channel, int index, double frequency, double Q, double depthDB,
-                       Origin origin, const NotchEvent* scored);
-    void pushClearLocked (int channel, int index, ClearReason reason);
+                       Origin origin, Author author, const NotchEvent* scored);
+    // Same as clearNotch but names who is clearing (the detector's own
+    // partial-apply unwind is not a human action).
+    void clearNotchAs (int channel, int index, ClearReason reason, Author author);
+    void pushClearLocked (int channel, int index, ClearReason reason, Author author);
     // modelMutex_ HELD. Re-sends `index` as a Set at a new depth, keeping the
     // notch's stored frequency, Q, lockedAtMs, origin and lastDetectedMs.
     // Applies the same five predicates setNotchImpl does plus the -24 floor,
@@ -625,7 +664,8 @@ private:
     // modelMutex_, which is NOT recursive: calling setNotch/setNotchImpl from
     // either would deadlock, and setNotchImpl would also stamp a fresh
     // lockedAtMs, destroying lane D's age label (B-1).
-    bool pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason);
+    bool pushRetuneLocked (int channel, int index, double newDepthDb, RetuneReason reason,
+                           Author author);
 
     // --- "Room memory" (spec 4.6, Q3/Q6/Q10) ------------------------------
     // What a bin needed LAST time, so a howl that comes back inside
@@ -796,6 +836,10 @@ private:
 
     mutable std::mutex modelMutex_;               // guards model_ and outbox_ (mutable: liveMsForTest() is const)
     std::array<ModelNotch, kTotalSlots> model_;
+    // Lane L3a: the next notch identity. Under modelMutex_ with model_; only
+    // ever incremented (never reset by clearAll/setWidth), so a nid is not
+    // reused for the life of the controller. Wrap at 2^32 is ~4e9 placements.
+    std::uint32_t nextNid_ = 1;
     std::vector<NotchCommand> outbox_;
     // Detector-thread only: flushOutbox() swaps it with outbox_ so neither
     // buffer is reallocated per flush. Both are reserved to kOutboxReserve.
@@ -846,6 +890,9 @@ private:
     std::atomic<std::uint64_t> nnPubCalls_ { 0 }, nnPubMaxTicks_ { 0 };
     // Read-only: scores one candidate and times the call. nullopt = no opinion.
     std::optional<float> shadowScore (const CandidateClassifier::RawInput& in);
+    // Lane L3a: AI mode Off. Gates ONLY the two shadowScore call sites (and so
+    // the nn_* log fields). Relaxed: no decision reads it.
+    std::atomic<bool> shadowScoringEnabled_ { true };
     void publishNnStats();
     std::atomic<int> failSetNotchLaneForTest_ { -1 };
     // Lane G seam (M-6): forces {frameScoreValid_, frameMaxScore_} for the

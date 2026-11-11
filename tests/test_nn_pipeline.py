@@ -122,6 +122,51 @@ class DatasetFromFixture(TempDirCase):
         self.assertIn("no_ctx", m["dropped"])
 
 
+class DatasetSchema4Authors(TempDirCase):
+    """Log schema 4: a row is what the detector did by itself (author absent or
+    "detector"); placements authored by network / llm / human are counted apart."""
+
+    FIXTURE = os.path.join(FIX, "session-schema4-authors.jsonl")
+
+    def test_only_detector_authored_placements_become_rows(self):
+        m = ds.build_dataset([self.FIXTURE], self.tmp)
+        rows = ds.read_rows(os.path.join(self.tmp, "dataset.jsonl"))
+        # nid 1 (detector, good) is the only row; nid 2 (network, good) and nid 3
+        # (llm, false) are skipped for their author; nid 4 is a manual-origin notch.
+        self.assertEqual([(r["label"], round(r["raw"]["hz"], 1)) for r in rows], [(1, 1007.8)])
+        self.assertEqual(m["skipped_other_author"], 2)
+        self.assertEqual(m["sessions"][0]["skipped_other_author"], 2)
+        self.assertEqual(m["dropped"], {"origin_manual": 1})
+        self.assertEqual(m["sources"], {"synthetic": 1})
+
+    def test_the_skip_count_is_not_a_drop_reason_and_old_logs_report_zero(self):
+        m = ds.build_dataset([os.path.join(FIX, "session-nn-dataset.jsonl")], self.tmp)
+        self.assertEqual(m["skipped_other_author"], 0)
+        self.assertEqual(m["dropped"], {"no_ctx": 1, "no_verdict": 1, "non_finite": 1, "origin_preset": 1})
+
+    def test_unlabelled_other_author_placement_is_not_counted_as_skipped_row(self):
+        events, _ = ds.load_events(self.FIXTURE)
+        events = [e for e in events if not (e.get("ev") == "verdict" and e.get("index") in (1, 2))]
+        rows, _, stats = ds.build_session(events, "sx")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(stats["skipped_other_author"], 0)
+        self.assertEqual(stats["dropped"], {"no_verdict": 2, "origin_manual": 1})
+
+    def test_cli_prints_the_skip_line(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ds.main(["--out", self.tmp, self.FIXTURE]), 0)
+        self.assertIn("skipped (placement authored by network / llm / human) 2", out.getvalue())
+
+    def test_committed_synthetic_dataset_hash_is_untouched(self):
+        # The synthetic bootstrap logs carry no `author`: rebuilding them with the
+        # schema-4 aware builder must give the byte-identical dataset.
+        logs = sorted(os.path.join(SYN_LOGS, f) for f in os.listdir(SYN_LOGS) if f.endswith(".jsonl"))
+        self.assertTrue(logs)
+        m = ds.build_dataset(logs, self.tmp)
+        self.assertEqual(m["dataset_sha256"], read_json(SYN_MANIFEST)["dataset_sha256"])
+        self.assertEqual(m["skipped_other_author"], 0)
+
+
 class VerdictJoinEqualsLogstats(TempDirCase):
     def labelled_by_logstats(self, path):
         events, _ = ds.load_events(path)

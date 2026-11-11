@@ -19,6 +19,11 @@
 // component in this app is therefore reachable from the test target.
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <map>
+#include <mutex>
+
+#include "app/AiAction.h"
+#include "app/AiSupervisor.h"
 #include "app/AppSettings.h"
 #include "app/AudioEngine.h"
 #include "app/CopilotCredentialStore.h"
@@ -420,6 +425,44 @@ public:
     static juce::var candidateToVarForTest (const NotchController::CandidateRecord& r)
         { return candidateToVar (r); }
 
+    // Lane L3a: the four AI log events (schema 4). PURE serialisers; these
+    // wrappers delegate to the functions in AiSupervisor.cpp, which is what the
+    // supervisor logs with. Numbers go through the same 3-significant-digit
+    // rounding as every other log line.
+    [[nodiscard]] static juce::var aiModeEventToVar (AiMode requested, AiMode effectiveLlm,
+                                                     AiMode effectiveNetwork);
+    [[nodiscard]] static juce::var aiCallEventToVar (const juce::String& trigger, std::uint32_t generation,
+                                                     double ms, const juce::String& status,
+                                                     const AiUsage* usage);
+    [[nodiscard]] static juce::var aiProposalEventToVar (std::uint32_t generation,
+                                                         const AiProposal& proposal);
+    [[nodiscard]] static juce::var aiDecisionEventToVar (std::uint32_t generation, std::uint32_t nid,
+                                                         AiProposal::Tool tool, AiDecision decision,
+                                                         std::optional<AiRefusal> refusal);
+
+    // Lane L3a: the AI mode and the headless supervisor. setAiMode stores the
+    // REQUESTED mode, saves settings, gates shadow scoring on every controller
+    // (Off = no AI runs at all) and tells the supervisor. It never touches a
+    // notch: this phase changes the audio by exactly 0 dB. The proposal rows
+    // read aiSupervisor() and call dismiss()/dismissAll() on the non-const one.
+    void setAiMode (AiMode mode);
+    [[nodiscard]] AiMode aiMode() const noexcept { return settings_.aiMode; }
+    [[nodiscard]] AiSupervisor& aiSupervisor() noexcept { return *aiSupervisor_; }
+    [[nodiscard]] const AiSupervisor& aiSupervisor() const noexcept { return *aiSupervisor_; }
+
+    // TEST SEAMS for the AI contract test (tests/test_aidrive_gui.cpp). The
+    // headless suite pumps no message loop and holds no key: these put a fake
+    // launcher behind the supervisor, make the ask flow's "usable" predicate
+    // true without touching the DPAPI store, give the supervisor a session log
+    // that is NOT in the real log directory, and run one AI tick.
+    void setAiLauncherForTest (std::unique_ptr<AiLauncher> launcher);
+    void setAiUsableForTest (bool usable);
+    void setAiLogFileForTest (juce::File file) { aiLogFileOverrideForTest_ = std::move (file); }
+    void tickAiForTest() { tickAi(); }
+    /** The band the supervisor reads for a slot: the raw band through the chip's 750 ms hold (time is a parameter). */
+    [[nodiscard]] static AiRingRisk heldAiRingRisk (gui::SpectrumView::RingRiskHysteresis& hold, bool valid,
+                                                    float score, float threshold, double nowMs);
+
     // LANE S -- LINK/INDEP flows from here. SlotPanel's per-slot control
     // (Task 7) calls setSlotLinked; the runtime source of truth is
     // slotLinked_, not the controller's own atomic, so a query never has to
@@ -727,6 +770,32 @@ private:
     void askCopilot (juce::String question);
 
     std::unique_ptr<SidecarRunner> copilotRunner_;
+
+    // Lane L3a. Declared AFTER sessionLogger_, the controllers and the engine
+    // (its environment lambdas read all three) and shut down explicitly in the
+    // destructor before any of them die. The supervisor is message-thread
+    // only: detector-thread placements wait in pendingPlacements_ until the
+    // GUI timer drains them.
+    std::unique_ptr<AiSupervisor> aiSupervisor_;
+    struct PendingPlacement { int slot, lane; double hz; std::int64_t atMs; };
+    std::mutex placementMutex_;
+    std::vector<PendingPlacement> pendingPlacements_;
+    std::int64_t aiUsableCheckedMs_ = -1;   // copilotUsable() decrypts the key: re-check at most every 5 s
+    bool aiUsableCached_ = false;
+    std::map<std::uint32_t, std::int64_t> aiNotchFirstSeenMs_;   // global nid -> first read (for age_s)
+    juce::File aiLogFileOverrideForTest_;   // empty = the real session log
+    [[nodiscard]] std::unique_ptr<AiSupervisor> makeAiSupervisor (std::unique_ptr<AiLauncher> launcher);
+    void stopAiAfterCredentialChange();
+    void tickAi();
+    [[nodiscard]] AiStateSnapshot readAiState (double riskNowMs);
+    std::array<gui::SpectrumView::RingRiskHysteresis, kMaxSlots> aiRiskHold_;   // per slot, for readAiState()
+    [[nodiscard]] bool copilotUsable();   // the ask flow's predicate: consent + provider + model + key / base URL
+    void applyAiMode (AiMode mode);
+    void setAiModeFromSettings();
+    // Lane L3a: pushes the mode, the supervisor chip, the proposal rows and the
+    // chart ghosts for the displayed slot into the GUI. Display only: it reads
+    // the supervisor and a snapshot and changes no notch.
+    void refreshAiViews();
     void analyseWithCopilot();
     void showCopilotBusy();
 

@@ -18,6 +18,13 @@
 // Stale results: every request() and cancel() bumps a generation counter. A
 // result is delivered only if its generation is still current and the runner is
 // still alive, so onDone is never called after destruction.
+//
+// Supervision (lane L3a): the AI supervisor uses a SECOND SidecarRunner
+// instance, never the one the ask-the-AI panel owns. A runner serves one
+// request at a time and cancel() is per instance, so sharing one would let a
+// supervision tick refuse (or cancel) a person's question and the other way
+// round. A request with `supervise` set builds its argv with
+// buildCopilotSuperviseArguments(); the ask and findings paths are unchanged.
 
 #pragma once
 
@@ -28,6 +35,13 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+
+// Supervision deadlines (lane L3a). ONE place: buildCopilotSuperviseArguments
+// builds --timeout / --deadline-s from these and AiSupervisor's watchdog is
+// checked against them. The sidecar gives up on a single provider request after
+// kSuperviseRequestTimeoutS and on the whole call after kSuperviseDeadlineS.
+constexpr int kSuperviseRequestTimeoutS = 30;
+constexpr int kSuperviseDeadlineS = 90;
 
 struct CopilotRequest
 {
@@ -41,6 +55,12 @@ struct CopilotRequest
     juce::String provider; // "anthropic" | "openai_compatible"
     juce::String model;
     juce::String baseUrl;  // openai_compatible only
+
+    // Supervision mode (lane L3a). Takes precedence over `question`. `provider`,
+    // `model` and `baseUrl` follow the ask rules; `statePath` is the
+    // supervisor-state file the sidecar reads.
+    bool supervise = false;
+    juce::File statePath;
 };
 
 /** Exit code of a run that was refused before any process started because the
@@ -68,6 +88,14 @@ bool isValidCopilotBaseUrl (const juce::String& url);
     model, openai_compatible without a valid model and base URL, a base URL
     given for anthropic). */
 juce::StringArray buildCopilotArguments (const CopilotRequest& request);
+
+/** The supervise argv (executable first): `<exe> <log> --supervise --state=<statePath>
+    --json --low-priority --credentials-only --provider=<p> [--model=<m>]
+    [--base-url=<u>] --timeout=50`. Same provider / model / base-URL validation as
+    the ask builder; EMPTY when it fails, when `statePath` is empty, or when the
+    path holds a quote or control character. buildCopilotArguments() calls this
+    for a request with `supervise` set. */
+juce::StringArray buildCopilotSuperviseArguments (const CopilotRequest& request);
 
 struct CopilotRunResult
 {

@@ -296,6 +296,44 @@ Windows."). Chưa có lượt gọi nhà cung cấp thật nào được kiểm 
 
 Không đổi gì ở phần xử lý âm thanh: mức ra không đổi.
 
+## AI và notch — chế độ, đề xuất, ai làm gì (bản kế tiếp, lane L3a)
+
+Ở Geek mode, đầu bảng `COPILOT` có một công tắc bốn nấc cho AI:
+
+| Nấc | AI làm gì | Âm thanh |
+|---|---|---|
+| `TẮT` | Không chạy. Detector làm việc như thường. | không đổi |
+| `BÓNG` (mặc định) | Mạng nơ-ron chấm điểm từng ứng viên và ghi vào log. | không đổi |
+| `GỢI Ý` | Thêm: AI (LLM, dùng khoá của bạn) tự xem buổi diễn khi có sự kiện và **đề xuất**. | không đổi |
+| `TỰ LÁI` | AI tự áp dụng. **Chưa có ở bản này** — nấc bị khoá, cạnh công tắc ghi `TỰ LÁI: bản sau`. | — |
+
+**Bản này không để AI đụng vào notch.** Mọi đề xuất chỉ để xem (nhãn `ĐỀ XUẤT chỉ xem ở bản này`); nút
+`ÁP DỤNG` bị khoá, chỉ có `BỎ` và `BỎ HẾT`. Mức ra không đổi ở bất kỳ nấc nào.
+
+**`GỢI Ý` gọi AI khi nào.** Không theo đồng hồ mà theo sự kiện: một tần số vừa bị đặt notch lần thứ ba trong
+10 phút, một notch nằm ở trần độ sâu từ 30 giây, hoặc 10 phút đã trôi qua và bảng notch có thay đổi. Cách
+nhau ít nhất 2 phút (lượt đầu cũng chờ 2 phút sau khi mở app), **tối đa 12 lượt mỗi giờ và 40 lượt mỗi lần
+mở app**; giới hạn theo giờ được ghi lại nên đóng mở app không làm nó đầy lại. Mỗi lượt chạy tối đa 90 giây
+và tốn token của khoá bạn đã lưu (chưa đo được chi phí thật: chưa có lượt gọi nhà cung cấp thật nào được
+kiểm). Ba lượt hỏng liên tiếp thì AI tự tạm dừng, tới khi bạn đổi nấc công tắc. Không gọi khi đang BYPASS,
+đang SOUNDCHECK, chưa đồng ý gửi dữ liệu, hoặc chưa có khoá; **tắt công tắc đồng ý hay xoá khoá thì lượt đang
+chạy bị huỷ ngay và các đề xuất đang hiện bị gỡ hết**. Dòng trạng thái ở đầu bảng cho biết AI đang xét, vừa hỏng hay đang tạm dừng; AI hỏng kiểu
+gì thì detector vẫn chạy y như cũ. Các giới hạn này chưa chỉnh được trong app.
+
+**Đề xuất trông thế nào.** AI chỉ được chọn trong bốn loại, không viết lời tự do: đào sâu một notch có sẵn
+(đúng một bậc kế tiếp của thang −6 / −12 / −18 / −24 dB, trong trần), giữ một notch lâu hơn, nhả một notch nó
+cho là nhầm, hoặc không làm gì. Mỗi đề xuất hiện thành một dòng dưới nhãn `ĐỀ XUẤT` và một **dấu rỗng** trên
+biểu đồ (vòng và vạch chỉ có viền, cờ `+A` cạnh marker). AI chỉ đề xuất cho notch do detector đặt. Đề xuất
+tự biến mất khi không còn đúng nữa: notch đã đổi, hoặc — với đề xuất nhả — slot đó bắt đầu có nguy cơ hú
+(`RING RISK` trên mức thấp nhất). Đề xuất nhả không bao giờ hiện cạnh một slot đang rung.
+
+**Ai đã làm gì với notch này.** Bảng `ACTIVE NOTCHES` có cột `BY`: `D` detector, `H` người, `N` mạng nơ-ron,
+`A` AI (LLM); `D>A` nghĩa là detector đặt, AI chỉnh sau. Trên biểu đồ, notch do AI hoặc mạng nơ-ron chỉnh có
+thêm chữ `A` / `N` trên cờ và một ô vuông nhỏ ở đỉnh nêm. Ở bản này bạn chỉ thấy `D` và `H`, vì chưa có gì
+cho AI áp dụng. `H` gồm cả notch đến từ preset và từ `ÁP DỤNG` của soundcheck (đều do người khởi động), và
+lần xoá do nạp preset hay restart thiết bị cũng ghi là `human`. File log ghi tác giả cho từng thao tác
+(`author`).
+
 ## Freeware
 
 Theo quyết định chủ sở hữu **D-07** (23/08/2026): bản phát hành đầu là

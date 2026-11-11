@@ -48,6 +48,8 @@
 #include "gui/RtaProcessing.h"
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <cstddef>
 #include <functional>
 #include <cstdint>
@@ -193,6 +195,62 @@ public:
     [[nodiscard]] NotchController::SnapshotNotch snapshotNotchForTest (std::size_t index) const
     {
         return snapshot_.notches[index];
+    }
+
+    // Lane L3a ---------------------------------------------------------------
+    // AUTHORSHIP. A notch that the network or the LLM placed or last changed
+    // keeps its age-ramp colour (age is age, whoever the author) and gains the
+    // letter N / A on its flag plus a small keylined square at the apex of its
+    // wedge, so the mark survives when the flag is skipped for overlap.
+    // Detector and human notches draw exactly as before. Display only.
+    //   NUL = no mark, 'N' = network, 'A' = LLM. (Not "L": it reads as Left
+    //   beside the lane suffix R.) lastChangedBy wins over placedBy.
+    [[nodiscard]] static char authorMarkLetter (Author placedBy, Author lastChangedBy) noexcept
+    {
+        if (lastChangedBy == Author::Llm || lastChangedBy == Author::Network)
+            return lastChangedBy == Author::Llm ? 'A' : 'N';
+        if (placedBy == Author::Llm || placedBy == Author::Network)
+            return placedBy == Author::Llm ? 'A' : 'N';
+        return '\0';
+    }
+    [[nodiscard]] static char authorMarkLetter (const NotchController::SnapshotNotch& notch) noexcept
+    {
+        return authorMarkLetter (notch.placedBy, notch.lastChangedBy);
+    }
+
+    // A PROPOSAL, drawn as a ghost: an outline-only wedge in the secondary
+    // colour, no stem, a hollow flag "+A". Never the accent, never the settled
+    // ice, no new hue. `targetDb` is NaN unless kind == Deepen.
+    struct ProposalGhost
+    {
+        enum class Kind : std::uint8_t { Deepen, Hold, Release };
+        Kind  kind = Kind::Deepen;
+        float hz = 0.0f;
+        int   lane = 0;
+        float currentDb = 0.0f;
+        float targetDb = std::numeric_limits<float>::quiet_NaN();
+
+        bool operator== (const ProposalGhost& o) const noexcept
+        {
+            return kind == o.kind && hz == o.hz && lane == o.lane && currentDb == o.currentDb
+                   && (targetDb == o.targetDb || (std::isnan (targetDb) && std::isnan (o.targetDb)));
+        }
+    };
+
+    /** Replaces the ghosts. Repaints only when the list actually changed. */
+    void setProposalGhosts (std::vector<ProposalGhost> ghosts);
+    [[nodiscard]] static juce::String ghostFlagLabel() { return "+A"; }
+
+    [[nodiscard]] std::size_t ghostCountForTest() const { return ghosts_.size(); }
+    [[nodiscard]] ProposalGhost ghostForTest (std::size_t index) const { return ghosts_[index]; }
+    [[nodiscard]] char authorMarkLetterForTest (std::size_t index) const
+    {
+        return authorMarkLetter (snapshot_.notches[index]);
+    }
+    // The flag text paint() prints for a snapshot notch ("03", "03R", "03A", "03RA").
+    [[nodiscard]] juce::String flagLabelForTest (std::size_t index) const
+    {
+        return flagLabelFor (snapshot_.notches[index], (int) index);
     }
 
     // Which lane's magnitudes rebuildGeometry() reads: 0 = L, 1 = R. Clamped
@@ -495,6 +553,13 @@ private:
     // Rebuilds the normalised polyline from snapshot_. Message thread only.
     void rebuildGeometry();
 
+    // The flag text of one notch: its 1-based order, the lane suffix R, then the
+    // author letter (N / A). One definition, shared by paint() and the tests.
+    [[nodiscard]] static juce::String flagLabelFor (const NotchController::SnapshotNotch& notch, int orderIndex);
+
+    // Lane L3a: the proposal ghosts, drawn after the real markers.
+    void paintProposalGhosts (juce::Graphics& g, const juce::Rectangle<float>& plot);
+
     // NOTCH AGE, GUI-side (controller ruling R-2: SnapshotBuffer is not
     // extended). Same ledger shape NotchListPanel keeps, and deliberately the
     // same identity key: a stem in the plot and a row in the table must agree
@@ -585,6 +650,7 @@ private:
     // into memory this object already owns. That is the no-allocation
     // guarantee the paint path is held to.
     juce::Path markerPath_;
+    std::vector<ProposalGhost> ghosts_;
     juce::Path tracePath_;
     juce::Path fillPath_;
     // Lane-1 (R) notch stems are dashed instead of solid, so a stereo trace

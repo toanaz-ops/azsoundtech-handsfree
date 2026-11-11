@@ -9,12 +9,18 @@
 
 #include <juce_core/juce_core.h>
 
+#include "app/AiMode.h"
 #include "app/SlotConfig.h"
 #include "az/host/HostSettings.h"
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 enum class UiMode { Dumb, Geek };
+
+// How many AI call-start times are persisted (matches AiSupervisor::kMaxPersistedCallStarts).
+constexpr int kAiCallStartsKept = 12;   // AiSupervisor.h static_asserts it equals kMaxPersistedCallStarts
 
 struct AppSettings
 {
@@ -37,6 +43,17 @@ struct AppSettings
     juce::String copilotModel = "claude-opus-5-5";
     juce::String copilotBaseUrl;                // only meaningful for openai_compatible
     bool copilotConsent = false;
+
+    // Lane L3a: the REQUESTED AI mode (each actor is clamped by its own
+    // ceiling, see effectiveAiMode). Shadow = today's behaviour. Act is never
+    // restored from disk: appSettingsFromHost demotes a stored Act to Suggest,
+    // so acting is opted into per session (decision D2).
+    AiMode aiMode = AiMode::Shadow;
+
+    // Lane L3a spend limits: wall-clock epoch milliseconds of the supervisor's
+    // latest call starts (newest 12, ascending). Persisted so a restart cannot
+    // reset the hourly cap or the minimum gap. Not a secret, not user-edited.
+    std::vector<std::int64_t> aiCallStartsMs;
 };
 
 // Lenient by design, unlike PresetManager: settings are the app's own scratch

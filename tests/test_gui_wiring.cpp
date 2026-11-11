@@ -1629,7 +1629,7 @@ TEST (GuiWiring, CandidateFeaturesReachTheLogWithSchemaAndDropCount)
     app.stopSessionLog();
     const auto events = parsedLines (file);
     ASSERT_GE (events.size(), 3u);
-    EXPECT_EQ ((int) events.front()["log_schema"], 3);
+    EXPECT_EQ ((int) events.front()["log_schema"], 4);   // L3a: schema 4
     EXPECT_EQ (events.back()["ev"].toString(), "session_end");
     EXPECT_EQ ((int) events.back()["dropped_candidates"], 3);
 
@@ -3660,7 +3660,7 @@ TEST (GuiWiring, NnScoreReachesBothLogLinesWithModelIdAndSchema3)
     app.stopSessionLog();
     const auto events = parsedLines (file);
     ASSERT_GE (events.size(), 3u);
-    EXPECT_EQ ((int) events.front()["log_schema"], 3);
+    EXPECT_EQ ((int) events.front()["log_schema"], 4);   // L3a: schema 4
     EXPECT_EQ (events.front()["nn_model"].toString(), "untrained-fixture-v1");
     EXPECT_EQ ((int) events.front()["nn_feature_set"], 1);
 
