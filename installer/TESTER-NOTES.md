@@ -1,9 +1,12 @@
-# Ghi chú cho team test — AZ Soundtech Hands-free v1.5.1
+# Ghi chú cho team test — AZ Soundtech Hands-free v1.6.0
 
-Ngày build: 2026-11-10 (`main` `aee13f0`) · gate ctest đạt (980 test đăng ký) · installer
-`AZSoundtech-Handsfree-Setup-1.5.1.exe`.
+Ngày build: 2026-11-12 (`main` `758fd80`) · gate ctest đạt (1102 test đăng ký) · installer
+`AZSoundtech-Handsfree-Setup-1.6.0.exe`.
 
-SHA-256 của Setup 1.5.1: **93C25753C2CECFAF83EF9AFE9DD2D98CB23844A5C90FD0D435CD6C470A26CD26** · dung lượng: **42 214 075 B (40,3 MB)**.
+SHA-256 của Setup 1.6.0: **EF4DC8ECD07F2B5DC819B06D42103DB3E4526E9F7423BB445E94677A32CE5FF5** · dung lượng: **42 283 543 B (40,3 MB)**.
+
+Bản 1.5.1 (build 2026-11-10, `main` `aee13f0`, gate đạt / 980 test đăng ký, 42 214 075 B / 40,3 MB) SHA-256
+`93C25753C2CECFAF83EF9AFE9DD2D98CB23844A5C90FD0D435CD6C470A26CD26`
 
 Bản 1.5.0 (build 2026-11-09, `main` `5d47b9e`, gate 951/951, 42 137 569 B / 40,2 MB) SHA-256
 `BA205503520E3890FC24B737E7A01334DF8C67511DABF348D9590A65CB0C16BE` — **đừng dùng ô hỏi AI của bản này, cài 1.5.1**
@@ -22,9 +25,13 @@ Bản 1.2.0 (đã đóng gói 2026-09-07 21:46, gate 547/547, 26 848 726 byte /
 25,6 MB) SHA-256
 `F701FFFCF563835EE9BE7D6ECAB623AC46EA0597ADC02B17ACFB3A00389C83F3`
 
-Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.5.1** (đóng gói không dọn bản cũ) —
+Thư mục này hiện giữ **mọi bản từ 1.1.3 đến 1.6.0** (đóng gói không dọn bản cũ) —
 cài bản số cao nhất trừ khi được nhờ test bản cũ.
 
+> **1.6.0: 0 dB ở mọi ngõ ra, ở mọi nấc của công tắc mới.** Bảng `COPILOT` có công tắc `TẮT` / `BÓNG` / `GỢI Ý`
+> / `TỰ LÁI` (khoá). Ở `GỢI Ý` app **tự gọi AI bằng khoá của bạn và tốn tiền dù bạn không bấm gì**; đề xuất chỉ
+> để xem, không nút áp dụng, AI chưa đụng được notch nào. Mặc định `BÓNG` = hành vi 1.5.1. Xem "Mới trong 1.6.0".
+>
 > **1.5.1: 0 dB ở mọi ngõ ra — bản sửa cho ô hỏi AI của 1.5.0. Đang dùng 1.5.0 thì cài bản này.**
 > Soát lại sau khi phát hành 1.5.0 thấy bốn lỗi ở ô hỏi AI: bộ lọc câu trả lời bỏ lọt phần lớn lời khuyên nguy
 > hiểm, khoá trong biến môi trường bị gửi dù màn hình báo "Chưa có khoá", khoá gửi tới `http://localhost` có thể
@@ -48,6 +55,29 @@ cài bản số cao nhất trừ khi được nhờ test bản cũ.
 >
 > **1.2.0 cũng CÓ đụng đường audio**: độ sâu của một notch thay đổi theo thời
 > gian — xem mục "Mới trong 1.2.0".
+
+## Mới trong 1.6.0 (so với 1.5.1) — 0 dB ở mọi ngõ ra
+
+Chi tiết: `docs/release-notes/1.6.0-alpha.md`. Không đụng đường audio; không có đường mã nào để AI đặt, chỉnh,
+giữ hay nhả notch ở bản này.
+
+1. **Công tắc AI** ở đầu bảng `COPILOT` (Geek mode): `TẮT` / `BÓNG` / `GỢI Ý` / `TỰ LÁI` (`TỰ LÁI` bị khoá, ghi
+   `TỰ LÁI: bản sau`). Mặc định `BÓNG`. Kiểm: đổi nấc, dòng giải thích đổi theo; đóng mở app, nấc được nhớ.
+2. **`GỢI Ý` tự gọi AI bằng khoá đã lưu trong `CÀI AI`** khi có sự kiện (một tần số bị đặt notch ba lần, notch
+   chạm trần, hoặc mỗi 10 phút). **Tốn tiền của khoá bạn dù bạn không bấm gì** — không muốn thì để `BÓNG`.
+   Giới hạn: cách nhau ≥ 2 phút (lượt đầu chờ 2 phút sau khi mở app), ≤ 12 lượt/giờ, ≤ 40 lượt mỗi lần mở app,
+   mỗi lượt ≤ 90 giây. Ba lượt hỏng liên tiếp → dòng `AI · tạm dừng sau 3 lỗi liên tiếp`; đổi nấc để thử lại.
+3. **Đề xuất chỉ để xem:** hiện dưới nhãn `ĐỀ XUẤT chỉ xem ở bản này`, thành dấu rỗng `+A` trên biểu đồ; chỉ
+   có `BỎ` / `BỎ HẾT`. Tự biến mất khi không còn đúng; đứng yên khi BYPASS / SOUNDCHECK. **Việc cần bạn giúp
+   nhất:** ở `GỢI Ý` có khoá, chạy tới khi có đề xuất — mất bao lâu, đề xuất có hợp lý không; **gửi lại file log
+   và ảnh chụp màn hình**. Chưa ai gọi nhà cung cấp AI thật từ máy build.
+4. **Rút mạng giữa chừng ở `GỢI Ý`:** chống hú phải chạy y như cũ; bảng chỉ báo một dòng lỗi. Tắt công tắc đồng ý
+   trong `CÀI AI`: lượt đang chạy bị huỷ, đề xuất đang hiện bị gỡ, không còn lượt gọi nào sau đó.
+5. **Cột `BY` trong `ACTIVE NOTCHES`:** `D` detector, `H` người (gồm preset và `ÁP DỤNG` của soundcheck). Kiểm:
+   cột có làm lệch các cột khác không, ở cả slot mono và stereo.
+6. `TẮT` cũng dừng mạng nơ-ron chấm điểm. Log lên `log_schema: 4` (thêm `author`, `nid`, sự kiện `ai_*`).
+7. Ở cỡ cửa sổ nhỏ nhất bảng `COPILOT` có thể không đủ chỗ cho danh sách đề xuất (dấu `+A` vẫn hiện) — báo lại
+   nếu gặp.
 
 ## Mới trong 1.5.1 (so với 1.5.0) — 0 dB ở mọi ngõ ra
 
